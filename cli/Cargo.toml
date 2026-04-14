@@ -16,5 +16,6 @@ clap_complete = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tiktoken-rs = { workspace = true }
 tokio = { workspace = true }
 toml = { workspace = true }

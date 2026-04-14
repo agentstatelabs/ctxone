@@ -184,8 +184,36 @@ uses 4 because:
 3. Both sent and flat use the same estimator, so the *ratio* is accurate
    even if the absolute numbers are rough
 
-If you need exact counts, run the response string through your model's
-tokenizer on the client side.
+If you need exact counts, run `ctx recall --exact`. The CLI re-tokenizes
+the response locally using tiktoken's cl100k_base encoding (GPT-3.5 /
+GPT-4 family) and prints both the fast estimate and the exact count
+side by side:
+
+```
+0 pinned + 2 topic matches, 34 tokens sent (flat would be ~451, 13.0x savings)
+  exact (cl100k_base): 75 sent, 553 flat, 7.4x savings
+```
+
+The exact numbers are often **smaller than the 4-char estimate** because
+BPE tokenizers compress common words and punctuation efficiently. The
+ratio is therefore usually *more conservative* under `--exact`, which
+is the right direction — you never want to inflate savings claims.
+
+You can also tokenize arbitrary text directly:
+
+```bash
+$ ctx tokens "The quick brown fox jumps over the lazy dog"
+43 chars
+9 tokens (cl100k_base, exact)
+10 tokens (4-char estimate)
+
+$ echo "any text from stdin" | ctx tokens -
+```
+
+**Caveat:** cl100k_base is OpenAI's tokenizer. Claude, Gemini, and Grok
+use different proprietary tokenizers, so the exact counts won't match
+those models byte-for-byte. The ratio is still meaningful as a
+consistent reference point.
 
 ## Why not vector similarity?
 

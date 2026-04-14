@@ -220,6 +220,18 @@ enum Commands {
         /// Token budget
         #[arg(short, long, default_value_t = 1500)]
         budget: usize,
+        /// Re-tokenize the response locally with tiktoken (cl100k_base) and
+        /// show exact token counts next to the fast 4-char estimate.
+        /// Also re-tokenizes the full graph for an exact flat baseline.
+        #[arg(long)]
+        exact: bool,
+    },
+    /// Count the exact tokens in a piece of text (tiktoken cl100k_base).
+    /// Reads from stdin if no argument is given.
+    Tokens {
+        /// Text to tokenize. Use "-" or omit to read from stdin.
+        #[arg(default_value = "-")]
+        text: String,
     },
     /// Load full context for a project
     Context {
@@ -421,6 +433,24 @@ fn emit<F: FnOnce(&Value)>(format: OutputFormat, value: &Value, text_fn: F) {
     }
 }
 
+/// Count the exact number of tokens in a string using tiktoken-rs's
+/// cl100k_base encoding (GPT-3.5 / GPT-4 family). Lazily initialised;
+/// the first call pays a small setup cost.
+///
+/// Note: Claude, Gemini, and Grok use different proprietary tokenizers.
+/// cl100k_base is a widely-shared reference point and the same encoding
+/// the token_savings docs reference.
+fn count_tokens_cl100k(text: &str) -> usize {
+    // BPE instances are cheap to clone once constructed. Cache per-thread.
+    thread_local! {
+        static BPE: std::cell::OnceCell<tiktoken_rs::CoreBPE> = const { std::cell::OnceCell::new() };
+    }
+    BPE.with(|cell| {
+        let bpe = cell.get_or_init(|| tiktoken_rs::cl100k_base().expect("cl100k_base encoding"));
+        bpe.encode_with_special_tokens(text).len()
+    })
+}
+
 /// Map an HTTP error response to a sysexits-style exit code and print a diagnostic.
 async fn http_error_exit(resp: reqwest::Response, context: &str) -> ! {
     let status = resp.status();
@@ -511,7 +541,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             });
         }
-        Commands::Recall { topic, budget } => {
+        Commands::Recall {
+            topic,
+            budget,
+            exact,
+        } => {
             let url = format!(
                 "{}/api/memory/recall?topic={}&budget={}&ref={}",
                 cli.server,
@@ -526,7 +560,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if !resp.status().is_success() {
                 http_error_exit(resp, "recall failed").await;
             }
-            let parsed: Value = resp.json().await?;
+            let mut parsed: Value = resp.json().await?;
+
+            // If --exact was requested, re-tokenize the response body and
+            // fetch the full graph to compute an exact flat baseline. Inject
+            // the exact counts into the parsed JSON so emit() renders both
+            // in whatever format the user wants.
+            if exact {
+                // Exact sent: tokenize the serialized results we already have
+                let results_text = parsed
+                    .get("results")
+                    .map(|r| serde_json::to_string(r).unwrap_or_default())
+                    .unwrap_or_default();
+                let exact_sent = count_tokens_cl100k(&results_text);
+
+                // Exact flat: fetch the full graph and tokenize it
+                let flat_url = format!(
+                    "{}/api/state/{}?path=/",
+                    cli.server,
+                    urlencoding(&cli.branch)
+                );
+                let exact_flat = match reqwest::get(&flat_url).await {
+                    Ok(r) if r.status().is_success() => {
+                        let body = r.text().await.unwrap_or_default();
+                        count_tokens_cl100k(&body)
+                    }
+                    _ => 0,
+                };
+
+                let exact_ratio = if exact_sent > 0 {
+                    exact_flat as f64 / exact_sent as f64
+                } else {
+                    0.0
+                };
+
+                if let Some(obj) = parsed.as_object_mut() {
+                    obj.insert(
+                        "ctx_tokens_sent_exact".to_string(),
+                        serde_json::json!(exact_sent),
+                    );
+                    obj.insert(
+                        "ctx_tokens_estimated_flat_exact".to_string(),
+                        serde_json::json!(exact_flat),
+                    );
+                    obj.insert(
+                        "ctx_savings_ratio_exact".to_string(),
+                        serde_json::json!(exact_ratio),
+                    );
+                    obj.insert("tokenizer".to_string(), serde_json::json!("cl100k_base"));
+                }
+            }
+
             emit(cli.format, &parsed, |v| {
                 let empty_vec = vec![];
                 let results = v
@@ -581,6 +665,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "\n{} pinned + {} topic matches, {} tokens sent (flat would be ~{}, {:.1}x savings)",
                     pinned_count, topic_matches, sent, flat, ratio
                 );
+
+                // Exact counts if requested
+                if let (Some(exact_sent), Some(exact_flat), Some(exact_ratio)) = (
+                    v.get("ctx_tokens_sent_exact").and_then(|x| x.as_u64()),
+                    v.get("ctx_tokens_estimated_flat_exact")
+                        .and_then(|x| x.as_u64()),
+                    v.get("ctx_savings_ratio_exact").and_then(|x| x.as_f64()),
+                ) {
+                    println!(
+                        "  exact (cl100k_base): {} sent, {} flat, {:.1}x savings",
+                        exact_sent, exact_flat, exact_ratio
+                    );
+                }
             });
         }
         Commands::Context { project } => {
@@ -1197,6 +1294,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Config { action } => {
             handle_config(action, cli.format)?;
+        }
+        Commands::Tokens { text } => {
+            let content = if text == "-" {
+                use std::io::Read;
+                let mut buf = String::new();
+                if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
+                    eprintln!("Failed to read stdin: {}", e);
+                    std::process::exit(EX_IOERR);
+                }
+                buf
+            } else {
+                text
+            };
+
+            let exact = count_tokens_cl100k(&content);
+            let estimate = content.len() / 4;
+
+            let out = serde_json::json!({
+                "chars": content.len(),
+                "tokens_exact": exact,
+                "tokens_estimate_4char": estimate,
+                "tokenizer": "cl100k_base",
+            });
+
+            emit(cli.format, &out, |_| {
+                println!("{} chars", content.len());
+                println!("{} tokens (cl100k_base, exact)", exact);
+                println!("{} tokens (4-char estimate)", estimate);
+            });
         }
         Commands::Init {
             global,
@@ -2427,6 +2553,38 @@ mod tests {
 
         let cli = Cli::from_raw(raw, &config);
         assert_eq!(cli.server, "http://flag:3001");
+    }
+
+    // -------- count_tokens_cl100k --------
+
+    #[test]
+    fn count_tokens_empty_string() {
+        assert_eq!(count_tokens_cl100k(""), 0);
+    }
+
+    #[test]
+    fn count_tokens_single_word() {
+        // "hello" is a single token in cl100k
+        assert_eq!(count_tokens_cl100k("hello"), 1);
+    }
+
+    #[test]
+    fn count_tokens_short_sentence() {
+        // "The quick brown fox jumps over the lazy dog" — 9 tokens in cl100k
+        // (widely-quoted reference value)
+        assert_eq!(
+            count_tokens_cl100k("The quick brown fox jumps over the lazy dog"),
+            9
+        );
+    }
+
+    #[test]
+    fn count_tokens_multiple_calls_consistent() {
+        // Guards against thread-local state corruption across calls
+        let a = count_tokens_cl100k("CtxOne memory layer");
+        let b = count_tokens_cl100k("CtxOne memory layer");
+        assert_eq!(a, b);
+        assert!(a > 0);
     }
 
     // -------- merge_codex_ctxone_toml --------

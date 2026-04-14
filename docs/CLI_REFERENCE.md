@@ -88,6 +88,25 @@ ARGS:
 
 OPTIONS:
   -b, --budget <N>  Max token budget for the response  [default: 1500]
+      --exact       Re-tokenize response + full graph locally with
+                    tiktoken (cl100k_base) and show exact counts
+                    alongside the fast 4-char estimate
+```
+
+### `ctx tokens [text]`
+
+Count exact tokens in a piece of text using tiktoken's cl100k_base
+encoding (GPT-3.5 / GPT-4 family). Reads from stdin if no argument
+or `-` is given. Shows both the exact count and the 4-char estimate
+for comparison.
+
+```bash
+ctx tokens "The quick brown fox jumps over the lazy dog"
+# 43 chars
+# 9 tokens (cl100k_base, exact)
+# 10 tokens (4-char estimate)
+
+echo "any text" | ctx tokens -
 ```
 
 ### `ctx prime <file>`
