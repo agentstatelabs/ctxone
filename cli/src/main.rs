@@ -90,60 +90,98 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tags,
         } => {
             let mut body = serde_json::json!({
-                "path": format!("/memory/facts/{}", uuid_v4()),
-                "value": fact,
-                "intent_category": "Observe",
-                "intent_description": format!("Remember: {}", &fact[..fact.len().min(60)]),
-                "confidence": importance_to_confidence(&importance),
+                "fact": fact,
+                "importance": importance,
             });
+            if let Some(ctx) = context {
+                body["context"] = serde_json::json!(ctx);
+            }
             if let Some(tags) = tags {
                 body["tags"] = serde_json::json!(tags);
             }
-            if let Some(ctx) = &context {
-                body["path"] = serde_json::json!(format!("/memory/{}/{}", ctx, uuid_v4()));
-            }
 
             let resp = reqwest::Client::new()
-                .post(format!("{}/api/state/main/set", cli.server))
+                .post(format!("{}/api/memory/remember", cli.server))
                 .json(&body)
                 .send()
                 .await?;
 
             if resp.status().is_success() {
-                let text = resp.text().await?;
+                let parsed: serde_json::Value = resp.json().await?;
                 println!("Remembered: {}", fact);
-                println!("{}", text);
+                if let Some(path) = parsed.get("path").and_then(|v| v.as_str()) {
+                    println!("  path: {}", path);
+                }
+                if let Some(id) = parsed.get("commit_id").and_then(|v| v.as_str()) {
+                    println!("  commit: {}", id);
+                }
             } else {
-                eprintln!("Error: {}", resp.status());
+                eprintln!("Error: {} — {}", resp.status(), resp.text().await?);
             }
         }
-        Commands::Recall { topic, budget: _ } => {
+        Commands::Recall { topic, budget } => {
             let resp = reqwest::get(format!(
-                "{}/api/state/main/search?query={}&max_results=20",
+                "{}/api/memory/recall?topic={}&budget={}",
                 cli.server,
-                urlencoding(&topic)
+                urlencoding(&topic),
+                budget,
             ))
             .await?;
 
             if resp.status().is_success() {
-                let text = resp.text().await?;
-                println!("{}", text);
+                let parsed: serde_json::Value = resp.json().await?;
+                let empty_vec = vec![];
+                let results = parsed
+                    .get("results")
+                    .and_then(|v| v.as_array())
+                    .unwrap_or(&empty_vec);
+                if results.is_empty() {
+                    println!("No memories found for '{}'", topic);
+                } else {
+                    for r in results {
+                        let path = r.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                        let value = r.get("value").and_then(|v| v.as_str()).unwrap_or("");
+                        println!("{}", value);
+                        println!("  ({})", path);
+                    }
+                    let sent = parsed
+                        .get("ctx_tokens_sent")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let flat = parsed
+                        .get("ctx_tokens_estimated_flat")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let ratio = parsed
+                        .get("ctx_savings_ratio")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    println!(
+                        "\n{} tokens sent (flat would be ~{}, {:.1}x savings)",
+                        sent, flat, ratio
+                    );
+                }
             } else {
-                eprintln!("Error: {}", resp.status());
+                eprintln!("Error: {} — {}", resp.status(), resp.text().await?);
             }
         }
         Commands::Context { project } => {
             let resp = reqwest::get(format!(
-                "{}/api/state/main?path=/memory/projects/{}",
-                cli.server, project
+                "{}/api/memory/context/{}",
+                cli.server,
+                urlencoding(&project)
             ))
             .await?;
 
             if resp.status().is_success() {
-                let text = resp.text().await?;
-                println!("{}", text);
+                let parsed: serde_json::Value = resp.json().await?;
+                if let Some(ctx) = parsed.get("context") {
+                    println!("{}", serde_json::to_string_pretty(ctx).unwrap_or_default());
+                } else {
+                    println!("No context found for '{}'", project);
+                }
             } else {
-                eprintln!("Error: {}", resp.status());
+                eprintln!("Error: {} — {}", resp.status(), resp.text().await?);
             }
         }
         Commands::Status => {
@@ -151,13 +189,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             match reqwest::get(format!("{}/api/health", cli.server)).await {
                 Ok(resp) if resp.status().is_success() => {
                     println!("connected ({})", cli.server);
-                    // Also fetch stats
-                    if let Ok(stats) = reqwest::get(format!("{}/api/stats/main", cli.server)).await
-                    {
-                        if stats.status().is_success() {
-                            if let Ok(text) = stats.text().await {
-                                println!("\n{}", text);
-                            }
+
+                    if let Ok(r) = reqwest::get(format!("{}/api/stats/tokens", cli.server)).await {
+                        if let Ok(parsed) = r.json::<serde_json::Value>().await {
+                            let used = parsed
+                                .get("session_tokens_used")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            let saved = parsed
+                                .get("session_tokens_saved")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            let ratio = parsed
+                                .get("cumulative_ratio")
+                                .and_then(|v| v.as_f64())
+                                .unwrap_or(0.0);
+                            println!(
+                                "Session: {} tokens used, {} saved ({:.1}x)",
+                                used, saved, ratio
+                            );
                         }
                     }
                 }
@@ -168,11 +218,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Stats => {
             match reqwest::get(format!("{}/api/stats/tokens", cli.server)).await {
                 Ok(resp) if resp.status().is_success() => {
-                    if let Ok(text) = resp.text().await {
-                        println!("{}", text);
-                    }
+                    let parsed: serde_json::Value = resp.json().await?;
+                    let used = parsed
+                        .get("session_tokens_used")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let saved = parsed
+                        .get("session_tokens_saved")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let graph_tokens = parsed
+                        .get("total_graph_size_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let ratio = parsed
+                        .get("cumulative_ratio")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+
+                    println!("CtxOne Token Savings");
+                    println!("  graph size:   {} tokens", graph_tokens);
+                    println!("  tokens sent:  {}", used);
+                    println!("  tokens saved: {}", saved);
+                    println!("  savings:      {:.1}x", ratio);
                 }
-                Ok(_) => println!("Token stats not available yet."),
+                Ok(_) => println!("Token stats not available."),
                 Err(_) => eprintln!("Hub unreachable ({})", cli.server),
             }
         }
@@ -209,23 +279,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
-}
-
-fn importance_to_confidence(importance: &str) -> f64 {
-    match importance {
-        "high" => 0.95,
-        "medium" => 0.7,
-        "low" => 0.4,
-        _ => 0.7,
-    }
-}
-
-fn uuid_v4() -> String {
-    // Simple timestamp-based ID for now
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap();
-    format!("{:x}", now.as_nanos())
 }
 
 fn urlencoding(s: &str) -> String {
