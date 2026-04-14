@@ -1,28 +1,95 @@
-# Context Anxiety — AgentStateGraph Memory Product
+# CtxOne
 
-This directory contains the design, strategy, and implementation plans for the
-AgentStateGraph agent memory layer — the product that eliminates "context anxiety."
+Persistent, searchable, accountable memory for AI agents. Eliminate context anxiety.
 
-## The Problem (in one paragraph)
+## Components
 
-You have 4 AI sessions open, each with different context. You can't close any of
-them because the knowledge is trapped. You start a new session and spend 10 minutes
-re-explaining everything. Sometimes the new session is great. Sometimes it struggles
-with things the old session handled easily. You have no idea why. Meanwhile, every
-message costs more tokens because the entire conversation history rides along — most
-of it irrelevant to the current question. More context makes the session "smarter"
-but it's self-defeating because you're burning tokens and slowing down responses.
+| Component | Directory | Description |
+|-----------|-----------|-------------|
+| **CtxOne Hub** | `server/` | MCP server — the memory interface for AI tools |
+| **CtxOne Engine** | `engine/` | Core memory + graph layer (AgentStateGraph) |
+| **CtxOne Lens** | `web/` | Web UI for browsing agent memory |
+| **ctx** | `cli/` | CLI for interacting with agent memory |
 
-## The Solution
+## Quick Start
 
-AgentStateGraph as a persistent, searchable, accountable memory layer for AI agents.
-Every session commits what it learns. Every new session queries for what's relevant.
-60x token reduction. Consistent session quality. Transparent agent state.
+### Install (curl)
 
-## Files
+```bash
+curl -sSL https://ctxone.dev/install.sh | sh
+```
 
-- `VISION.md` — The complete product vision
-- `USE_CASES.md` — All identified use cases for AgentStateGraph beyond infrastructure ops
-- `CONTEXT_ANXIETY.md` — The coined term, marketing language, and pitch angles
-- `TOKEN_ECONOMICS.md` — The math on token savings and enterprise ROI
-- `MEMORY_MCP_DESIGN.md` — Technical design for the agentstategraph-memory MCP server
+### Install (Docker)
+
+```bash
+docker compose up -d
+```
+
+### Install (from source)
+
+```bash
+git clone --recursive https://github.com/ctxone/ctxone.git
+cd ctxone
+cargo build --workspace --release
+cd web && npm install && npm run build
+```
+
+## Setup
+
+```bash
+# Auto-detect and configure your AI tools
+ctx init
+
+# Or target a specific tool
+ctx init --tool claude
+ctx init --tool cursor
+```
+
+## Usage
+
+```bash
+# Store a fact
+ctx remember "We use BSL-1.1 for all projects" --importance high --context licensing
+
+# Retrieve relevant memories
+ctx recall "licensing decisions"
+
+# Load full project context
+ctx context myproject
+
+# Check Hub status and token savings
+ctx status
+ctx stats
+```
+
+## Token Savings
+
+CtxOne tracks token usage in real-time. Every response includes how many tokens were
+sent vs how many would have been sent with flat memory loading — making the savings
+measurable and provable.
+
+## Architecture
+
+```
+ctxone/
+├── cli/           # ctx CLI (Rust)
+├── server/        # CtxOne Hub — MCP server (Rust)
+├── engine/        # AgentStateGraph core (git submodule)
+├── web/           # CtxOne Lens — web UI (SvelteKit)
+├── docs/          # Product strategy and design docs
+├── install.sh
+├── Dockerfile
+└── docker-compose.yml
+```
+
+## Documentation
+
+- [Product Vision](docs/VISION.md)
+- [Context Anxiety](docs/CONTEXT_ANXIETY.md) — the problem we solve
+- [Token Economics](docs/TOKEN_ECONOMICS.md) — the math behind 60x savings
+- [Use Cases](docs/USE_CASES.md)
+- [Memory MCP Design](docs/MEMORY_MCP_DESIGN.md) — technical design
+
+## License
+
+BSL-1.1

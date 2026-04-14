@@ -1,0 +1,7 @@
+/target
+/web/node_modules
+/web/.svelte-kit
+/web/build
+*.db
+.env
+.DS_Store
