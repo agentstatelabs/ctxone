@@ -51,6 +51,7 @@ pub fn router(repo: Arc<Repository>, session: Arc<SessionStats>) -> Router {
         .route("/api/branches", get(list_branches).post(create_branch))
         // Memory endpoints (high-level)
         .route("/api/memory/remember", post(remember))
+        .route("/api/memory/forget", post(forget))
         .route("/api/memory/recall", get(recall))
         .route("/api/memory/context/{project}", get(context))
         .route("/api/memory/prime", post(prime))
@@ -321,6 +322,42 @@ async fn remember(
         "status": "ok",
         "ref": req.ref_name,
         "path": path,
+        "commit_id": format!("{}", commit_id.short()),
+    })))
+}
+
+#[derive(Deserialize)]
+struct ForgetRequest {
+    /// Exact path to forget (e.g., /memory/licensing/abc).
+    path: String,
+    /// Why this is being forgotten. Shows up in blame.
+    #[serde(default = "default_forget_reason")]
+    reason: String,
+    #[serde(default = "default_ref", rename = "ref")]
+    ref_name: String,
+}
+
+fn default_forget_reason() -> String {
+    "forgotten by user".to_string()
+}
+
+async fn forget(
+    State(s): State<HubState>,
+    Json(req): Json<ForgetRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let opts = CommitOptions::new("ctxone", IntentCategory::Rollback, &req.reason);
+
+    let commit_id = s
+        .repo
+        .delete(&req.ref_name, &req.path, opts)
+        .map_err(internal_error)?;
+
+    s.session.mark_dirty();
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "ref": req.ref_name,
+        "path": req.path,
         "commit_id": format!("{}", commit_id.short()),
     })))
 }

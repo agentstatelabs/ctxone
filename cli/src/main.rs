@@ -111,6 +111,14 @@ enum Commands {
         #[arg(long)]
         source: Option<String>,
     },
+    /// Forget (delete) a memory at a specific path
+    Forget {
+        /// Path to forget (get it from ctx search or ctx ls)
+        path: String,
+        /// Reason, shows up in blame (default: "forgotten by user")
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// Search the graph for a literal substring. Unlike recall, this is not
     /// LLM-oriented — it returns full matching paths and values, no budget.
     Search {
@@ -692,6 +700,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if pin {
                     println!("These facts will be included in every recall response.");
                 }
+            });
+        }
+        Commands::Forget { path, reason } => {
+            let mut body = serde_json::json!({
+                "path": path.clone(),
+                "ref": cli.branch,
+            });
+            if let Some(r) = reason {
+                body["reason"] = serde_json::json!(r);
+            }
+
+            let resp = match reqwest::Client::new()
+                .post(format!("{}/api/memory/forget", cli.server))
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(&cli.server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "forget failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(cli.format, &parsed, |v| {
+                let id = v.get("commit_id").and_then(|x| x.as_str()).unwrap_or("");
+                println!("Forgot: {}", path);
+                println!("  commit: {}", id);
             });
         }
         Commands::Search { query, max } => {
