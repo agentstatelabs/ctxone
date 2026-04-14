@@ -48,7 +48,7 @@ pub fn router(repo: Arc<Repository>, session: Arc<SessionStats>) -> Router {
         .route("/api/state/{ref_name}/search", get(search_values))
         .route("/api/log/{ref_name}", get(get_log))
         .route("/api/blame/{ref_name}", get(blame))
-        .route("/api/branches", get(list_branches))
+        .route("/api/branches", get(list_branches).post(create_branch))
         // Memory endpoints (high-level)
         .route("/api/memory/remember", post(remember))
         .route("/api/memory/recall", get(recall))
@@ -100,7 +100,7 @@ struct TokenStatsResponse {
 }
 
 async fn token_stats(State(s): State<HubState>) -> impl IntoResponse {
-    ensure_flat_size(&s.repo, &s.session);
+    ensure_flat_size(&s.repo, &s.session, "main");
     let used = s.session.tokens_sent.load(Ordering::Relaxed);
     let saved = s.session.tokens_saved.load(Ordering::Relaxed);
     let graph_chars = s.session.total_graph_size_chars.load(Ordering::Relaxed);
@@ -245,6 +245,29 @@ async fn list_branches(
     Ok(Json(out))
 }
 
+#[derive(Deserialize)]
+struct CreateBranchRequest {
+    name: String,
+    #[serde(default = "default_ref")]
+    from: String,
+}
+
+async fn create_branch(
+    State(s): State<HubState>,
+    Json(req): Json<CreateBranchRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let id = s
+        .repo
+        .branch(&req.name, &req.from)
+        .map_err(internal_error)?;
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "name": req.name,
+        "from": req.from,
+        "commit_id": format!("{}", id.short()),
+    })))
+}
+
 // -- Memory endpoints --
 
 #[derive(Deserialize)]
@@ -254,10 +277,16 @@ struct RememberRequest {
     importance: String,
     context: Option<String>,
     tags: Option<Vec<String>>,
+    #[serde(default = "default_ref", rename = "ref")]
+    ref_name: String,
 }
 
 fn default_importance() -> String {
     "medium".to_string()
+}
+
+fn default_ref() -> String {
+    "main".to_string()
 }
 
 async fn remember(
@@ -283,13 +312,14 @@ async fn remember(
     let value = serde_json::Value::String(req.fact.clone());
     let commit_id = s
         .repo
-        .set_json("main", &path, &value, opts)
+        .set_json(&req.ref_name, &path, &value, opts)
         .map_err(internal_error)?;
 
     s.session.mark_dirty();
 
     Ok(Json(serde_json::json!({
         "status": "ok",
+        "ref": req.ref_name,
         "path": path,
         "commit_id": format!("{}", commit_id.short()),
     })))
@@ -299,6 +329,8 @@ async fn remember(
 struct RecallQuery {
     topic: String,
     budget: Option<usize>,
+    #[serde(default = "default_ref", rename = "ref")]
+    ref_name: String,
 }
 
 async fn recall(
@@ -306,22 +338,36 @@ async fn recall(
     Query(q): Query<RecallQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let budget = q.budget.unwrap_or(1500);
-    Ok(Json(run_recall(&s.repo, &s.session, &q.topic, budget)))
+    Ok(Json(run_recall(
+        &s.repo,
+        &s.session,
+        &q.topic,
+        budget,
+        &q.ref_name,
+    )))
+}
+
+#[derive(Deserialize)]
+struct ContextQuery {
+    #[serde(default = "default_ref", rename = "ref")]
+    ref_name: String,
 }
 
 async fn context(
     State(s): State<HubState>,
     Path(project): Path<String>,
+    Query(q): Query<ContextQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let path = format!("/memory/projects/{}", project);
-    match s.repo.get_json("main", &path) {
+    match s.repo.get_json(&q.ref_name, &path) {
         Ok(value) => {
-            ensure_flat_size(&s.repo, &s.session);
+            ensure_flat_size(&s.repo, &s.session, &q.ref_name);
             let flat_size = s.session.total_graph_size_chars.load(Ordering::Relaxed) as usize;
             let sent = serde_json::to_string(&value).unwrap_or_default().len();
             s.session.record(sent, flat_size);
             Ok(Json(serde_json::json!({
                 "project": project,
+                "ref": q.ref_name,
                 "context": value,
                 "ctx_tokens_sent": sent / 4,
                 "ctx_tokens_estimated_flat": flat_size / 4,
@@ -465,6 +511,9 @@ struct PrimeRequest {
     pinned: bool,
     /// Parsed markdown sections.
     sections: Vec<PrimeSection>,
+    /// Branch to write to (default: "main").
+    #[serde(default = "default_ref", rename = "ref")]
+    ref_name: String,
 }
 
 async fn prime(
@@ -477,9 +526,16 @@ async fn prime(
         .map(|s| (s.title, s.body))
         .collect();
 
-    run_prime(&s.repo, &s.session, &req.source, req.pinned, &sections)
-        .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))
+    run_prime(
+        &s.repo,
+        &s.session,
+        &req.source,
+        req.pinned,
+        &sections,
+        &req.ref_name,
+    )
+    .map(Json)
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))
 }
 
 async fn list_pinned(

@@ -9,6 +9,10 @@ struct Cli {
     #[arg(long, default_value = "http://localhost:3001", global = true)]
     server: String,
 
+    /// Branch / ref to read from and write to
+    #[arg(long, default_value = "main", global = true)]
+    branch: String,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -105,6 +109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut body = serde_json::json!({
                 "fact": fact,
                 "importance": importance,
+                "ref": cli.branch,
             });
             if let Some(ctx) = context {
                 body["context"] = serde_json::json!(ctx);
@@ -134,10 +139,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Recall { topic, budget } => {
             let resp = reqwest::get(format!(
-                "{}/api/memory/recall?topic={}&budget={}",
+                "{}/api/memory/recall?topic={}&budget={}&ref={}",
                 cli.server,
                 urlencoding(&topic),
                 budget,
+                urlencoding(&cli.branch),
             ))
             .await?;
 
@@ -208,9 +214,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Context { project } => {
             let resp = reqwest::get(format!(
-                "{}/api/memory/context/{}",
+                "{}/api/memory/context/{}?ref={}",
                 cli.server,
-                urlencoding(&project)
+                urlencoding(&project),
+                urlencoding(&cli.branch),
             ))
             .await?;
 
@@ -336,6 +343,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "source": source_name,
                 "pinned": pin,
                 "sections": sections,
+                "ref": cli.branch,
             });
 
             let resp = reqwest::Client::new()

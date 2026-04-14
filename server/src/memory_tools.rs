@@ -67,8 +67,8 @@ impl SessionStats {
 }
 
 /// Estimate the total flat memory size by counting all values in the graph.
-pub fn estimate_flat_size(repo: &Repository) -> usize {
-    match repo.get_json("main", "/") {
+pub fn estimate_flat_size(repo: &Repository, ref_name: &str) -> usize {
+    match repo.get_json(ref_name, "/") {
         Ok(val) => serde_json::to_string(&val).unwrap_or_default().len(),
         Err(_) => 0,
     }
@@ -76,9 +76,9 @@ pub fn estimate_flat_size(repo: &Repository) -> usize {
 
 /// Ensure the cached flat-size is current. If dirty, refreshes it and clears the flag.
 /// Call this just before reading `session.total_graph_size_chars` in a read-heavy path.
-pub fn ensure_flat_size(repo: &Repository, session: &SessionStats) {
+pub fn ensure_flat_size(repo: &Repository, session: &SessionStats, ref_name: &str) {
     if session.graph_size_dirty.load(Ordering::Relaxed) {
-        let size = estimate_flat_size(repo) as u64;
+        let size = estimate_flat_size(repo, ref_name) as u64;
         session
             .total_graph_size_chars
             .store(size, Ordering::Relaxed);
@@ -118,8 +118,8 @@ pub struct PinnedEntry {
 
 /// Collect pinned memories as title+body pairs grouped by section path.
 /// Each section has /title and /body children — this pairs them up.
-pub fn collect_pinned(repo: &Repository) -> Vec<PinnedEntry> {
-    let paths = match repo.list_paths("main", "/memory/pinned", Some(20)) {
+pub fn collect_pinned(repo: &Repository, ref_name: &str) -> Vec<PinnedEntry> {
+    let paths = match repo.list_paths(ref_name, "/memory/pinned", Some(20)) {
         Ok(p) => p,
         Err(_) => return Vec::new(),
     };
@@ -136,7 +136,7 @@ pub fn collect_pinned(repo: &Repository) -> Vec<PinnedEntry> {
             continue;
         };
 
-        let Ok(value) = repo.get_json("main", path) else {
+        let Ok(value) = repo.get_json(ref_name, path) else {
             continue;
         };
         let Some(text) = value.as_str() else {
@@ -171,6 +171,7 @@ pub fn run_recall(
     session: &SessionStats,
     topic: &str,
     budget: usize,
+    ref_name: &str,
 ) -> serde_json::Value {
     let budget_chars = budget * 4;
 
@@ -179,7 +180,7 @@ pub fn run_recall(
     let mut seen_paths = std::collections::HashSet::new();
 
     // 1. Pinned memories (up to half the budget)
-    let pinned = collect_pinned(repo);
+    let pinned = collect_pinned(repo, ref_name);
     let pinned_count = pinned.len();
     let pinned_budget = budget_chars / 2;
     let mut pinned_total = 0usize;
@@ -209,7 +210,7 @@ pub fn run_recall(
 
     // Full-phrase search: counts extra, so exact matches win
     if !topic.trim().is_empty()
-        && let Ok(results) = repo.search_values("main", topic.trim(), Some(50))
+        && let Ok(results) = repo.search_values(ref_name, topic.trim(), Some(50))
     {
         for (path, value) in results {
             scored
@@ -221,7 +222,7 @@ pub fn run_recall(
 
     // Per-token search: each token adds one to the score
     for token in &tokens {
-        let Ok(results) = repo.search_values("main", token, Some(50)) else {
+        let Ok(results) = repo.search_values(ref_name, token, Some(50)) else {
             continue;
         };
         for (path, value) in results {
@@ -267,12 +268,13 @@ pub fn run_recall(
         topic_matches += 1;
     }
 
-    ensure_flat_size(repo, session);
+    ensure_flat_size(repo, session, ref_name);
     let flat_size = session.total_graph_size_chars.load(Ordering::Relaxed) as usize;
     session.record(total, flat_size);
 
     serde_json::json!({
         "topic": topic,
+        "ref": ref_name,
         "results": out,
         "pinned_count": pinned_count,
         "topic_matches": topic_matches,
@@ -289,6 +291,7 @@ pub fn run_prime(
     source: &str,
     pinned: bool,
     sections: &[(String, String)], // (title, body)
+    ref_name: &str,
 ) -> Result<serde_json::Value, String> {
     let namespace = if pinned { "pinned" } else { "primed" };
     let mut written = Vec::new();
@@ -317,7 +320,7 @@ pub fn run_prime(
             "body": body,
         });
 
-        repo.set_json("main", &path, &value, opts)
+        repo.set_json(ref_name, &path, &value, opts)
             .map_err(|e| e.to_string())?;
 
         written.push(path);
@@ -327,6 +330,7 @@ pub fn run_prime(
 
     Ok(serde_json::json!({
         "status": "ok",
+        "ref": ref_name,
         "source": source,
         "pinned": pinned,
         "sections_written": written.len(),
@@ -390,6 +394,9 @@ pub struct RememberParams {
     pub context: Option<String>,
     /// Tags for queryability.
     pub tags: Option<Vec<String>>,
+    /// Branch to write to (default: "main").
+    #[serde(default = "default_ref", rename = "ref")]
+    pub ref_name: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -399,12 +406,18 @@ pub struct RecallParams {
     /// Maximum token budget for the response (default: 1500).
     #[serde(default = "default_budget")]
     pub budget: usize,
+    /// Branch to search (default: "main").
+    #[serde(default = "default_ref", rename = "ref")]
+    pub ref_name: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
 pub struct ContextParams {
     /// Project or domain name.
     pub project: String,
+    /// Branch to read (default: "main").
+    #[serde(default = "default_ref", rename = "ref")]
+    pub ref_name: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -448,6 +461,9 @@ pub struct PrimeParams {
     pub pinned: bool,
     /// Pre-parsed markdown sections. Use ctx prime <file.md> on the CLI to parse a file.
     pub sections: Vec<PrimeSectionParam>,
+    /// Branch to write to (default: "main").
+    #[serde(default = "default_ref", rename = "ref")]
+    pub ref_name: String,
 }
 
 fn default_importance() -> String {
@@ -455,6 +471,9 @@ fn default_importance() -> String {
 }
 fn default_budget() -> usize {
     1500
+}
+fn default_ref() -> String {
+    "main".to_string()
 }
 
 fn importance_to_confidence(importance: &str) -> f64 {
@@ -516,11 +535,12 @@ impl CtxOneServer {
         }
 
         let value = serde_json::Value::String(p.fact.clone());
-        match self.repo.set_json("main", &path, &value, opts) {
+        match self.repo.set_json(&p.ref_name, &path, &value, opts) {
             Ok(commit_id) => {
                 self.session.mark_dirty();
                 serde_json::json!({
                     "status": "ok",
+                    "ref": p.ref_name,
                     "fact": p.fact,
                     "path": path,
                     "commit_id": format!("{}", commit_id.short()),
@@ -536,7 +556,7 @@ impl CtxOneServer {
     )]
     async fn recall(&self, params: Parameters<RecallParams>) -> String {
         let p = params.0;
-        let result = run_recall(&self.repo, &self.session, &p.topic, p.budget);
+        let result = run_recall(&self.repo, &self.session, &p.topic, p.budget, &p.ref_name);
         serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string())
     }
 
@@ -548,7 +568,14 @@ impl CtxOneServer {
         let sections: Vec<(String, String)> =
             p.sections.into_iter().map(|s| (s.title, s.body)).collect();
 
-        match run_prime(&self.repo, &self.session, &p.source, p.pinned, &sections) {
+        match run_prime(
+            &self.repo,
+            &self.session,
+            &p.source,
+            p.pinned,
+            &sections,
+            &p.ref_name,
+        ) {
             Ok(result) => {
                 serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string())
             }
@@ -561,11 +588,11 @@ impl CtxOneServer {
     )]
     async fn context(&self, params: Parameters<ContextParams>) -> String {
         let p = params.0;
-        ensure_flat_size(&self.repo, &self.session);
+        ensure_flat_size(&self.repo, &self.session, &p.ref_name);
         let flat_size = self.session.total_graph_size_chars.load(Ordering::Relaxed) as usize;
 
         let path = format!("/memory/projects/{}", p.project);
-        match self.repo.get_json("main", &path) {
+        match self.repo.get_json(&p.ref_name, &path) {
             Ok(value) => {
                 let response =
                     serde_json::to_string_pretty(&value).unwrap_or_else(|_| "null".to_string());
@@ -630,10 +657,9 @@ impl CtxOneServer {
             details_opts,
         );
 
-        let flat = estimate_flat_size(&self.repo);
-        self.session
-            .total_graph_size_chars
-            .store(flat as u64, Ordering::Relaxed);
+        self.session.mark_dirty();
+        ensure_flat_size(&self.repo, &self.session, "main");
+        let flat = self.session.total_graph_size_chars.load(Ordering::Relaxed) as usize;
 
         let response = format!(
             "Session '{}' saved: {} key points, {} decisions",
@@ -649,7 +675,7 @@ impl CtxOneServer {
     )]
     async fn what_changed_since(&self, params: Parameters<WhatChangedSinceParams>) -> String {
         let p = params.0;
-        ensure_flat_size(&self.repo, &self.session);
+        ensure_flat_size(&self.repo, &self.session, "main");
         let flat_size = self.session.total_graph_size_chars.load(Ordering::Relaxed) as usize;
 
         // Get recent log and filter by date
@@ -684,7 +710,7 @@ impl CtxOneServer {
     )]
     async fn why_did_we(&self, params: Parameters<WhyDidWeParams>) -> String {
         let p = params.0;
-        ensure_flat_size(&self.repo, &self.session);
+        ensure_flat_size(&self.repo, &self.session, "main");
         let flat_size = self.session.total_graph_size_chars.load(Ordering::Relaxed) as usize;
 
         // Search for the decision
