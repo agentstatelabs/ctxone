@@ -26,7 +26,7 @@ If you are building an application that uses CtxOne as a component — even a cr
 
 Every version of CtxOne automatically converts to the **Apache License 2.0** four years after its release date. This means:
 
-- **v0.1.0** (released 2026-04-14) becomes Apache 2.0 on **2030-04-14**
+- **v0.2.0** (released 2026-04-14) becomes Apache 2.0 on **2030-04-14**
 - Future versions follow the same pattern
 
 This guarantees that the code is eventually fully open source under a permissive license, while protecting the project's sustainability during the critical early years.
