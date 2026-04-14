@@ -92,4 +92,20 @@ ctxone/
 
 ## License
 
-BSL-1.1
+CtxOne is licensed under the **Business Source License 1.1 (BSL 1.1)**.
+
+**You can** use CtxOne in production, embed it in your products, self-host it on
+your own infrastructure, modify it, and build commercial products on top of it —
+all without a commercial license.
+
+**You cannot** offer CtxOne itself as a competing commercial managed service.
+
+Each version automatically converts to **Apache License 2.0** four years after
+release. See [LICENSING.md](LICENSING.md) for the full plain-English summary and
+[LICENSE](LICENSE) for the legal text.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, project structure,
+and how to get involved. All contributors are expected to follow the
+[Code of Conduct](CODE_OF_CONDUCT.md).
