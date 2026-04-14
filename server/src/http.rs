@@ -21,7 +21,7 @@ use tower_http::cors::{Any, CorsLayer};
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::IntentCategory;
 
-use crate::memory_tools::{SessionStats, refresh_flat_size, run_prime, run_recall};
+use crate::memory_tools::{SessionStats, ensure_flat_size, run_prime, run_recall};
 
 #[derive(Clone)]
 pub struct HubState {
@@ -100,6 +100,7 @@ struct TokenStatsResponse {
 }
 
 async fn token_stats(State(s): State<HubState>) -> impl IntoResponse {
+    ensure_flat_size(&s.repo, &s.session);
     let used = s.session.tokens_sent.load(Ordering::Relaxed);
     let saved = s.session.tokens_saved.load(Ordering::Relaxed);
     let graph_chars = s.session.total_graph_size_chars.load(Ordering::Relaxed);
@@ -285,7 +286,7 @@ async fn remember(
         .set_json("main", &path, &value, opts)
         .map_err(internal_error)?;
 
-    refresh_flat_size(&s.repo, &s.session);
+    s.session.mark_dirty();
 
     Ok(Json(serde_json::json!({
         "status": "ok",
@@ -315,6 +316,7 @@ async fn context(
     let path = format!("/memory/projects/{}", project);
     match s.repo.get_json("main", &path) {
         Ok(value) => {
+            ensure_flat_size(&s.repo, &s.session);
             let flat_size = s.session.total_graph_size_chars.load(Ordering::Relaxed) as usize;
             let sent = serde_json::to_string(&value).unwrap_or_default().len();
             s.session.record(sent, flat_size);

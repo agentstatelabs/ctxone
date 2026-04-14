@@ -145,14 +145,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("HTTP API listening on http://0.0.0.0:{}", http_port);
         eprintln!("Try: curl http://localhost:{}/api/health", http_port);
 
-        // Build a shared session stats instance, primed from the repo
+        // Session starts with a dirty flat-size; the first read will populate it lazily.
         let session = Arc::new(memory_tools::SessionStats::new());
-        if let Ok(val) = repo.get_json("main", "/") {
-            let size = serde_json::to_string(&val).unwrap_or_default().len() as u64;
-            session
-                .total_graph_size_chars
-                .store(size, std::sync::atomic::Ordering::Relaxed);
-        }
 
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()

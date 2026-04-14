@@ -4,7 +4,7 @@
 //! Each tool includes token usage metadata (`_ctxone_stats`) for tracking savings.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -27,10 +27,16 @@ pub struct TokenStats {
 }
 
 /// Cumulative session statistics.
+///
+/// The graph size is cached lazily: writes set `graph_size_dirty = true`,
+/// and the next read that needs the size calls `ensure_flat_size` to
+/// refresh it. This means a batch of writes only pays the full-walk
+/// cost once, on the next read that cares.
 pub struct SessionStats {
     pub tokens_sent: AtomicU64,
     pub tokens_saved: AtomicU64,
     pub total_graph_size_chars: AtomicU64,
+    graph_size_dirty: AtomicBool,
 }
 
 impl SessionStats {
@@ -39,6 +45,7 @@ impl SessionStats {
             tokens_sent: AtomicU64::new(0),
             tokens_saved: AtomicU64::new(0),
             total_graph_size_chars: AtomicU64::new(0),
+            graph_size_dirty: AtomicBool::new(true),
         }
     }
 
@@ -52,6 +59,11 @@ impl SessionStats {
             Ordering::Relaxed,
         );
     }
+
+    /// Mark the cached graph size as stale. Call after any write.
+    pub fn mark_dirty(&self) {
+        self.graph_size_dirty.store(true, Ordering::Relaxed);
+    }
 }
 
 /// Estimate the total flat memory size by counting all values in the graph.
@@ -62,12 +74,16 @@ pub fn estimate_flat_size(repo: &Repository) -> usize {
     }
 }
 
-/// Refresh the cached flat-size estimate on the session.
-pub fn refresh_flat_size(repo: &Repository, session: &SessionStats) {
-    let size = estimate_flat_size(repo) as u64;
-    session
-        .total_graph_size_chars
-        .store(size, Ordering::Relaxed);
+/// Ensure the cached flat-size is current. If dirty, refreshes it and clears the flag.
+/// Call this just before reading `session.total_graph_size_chars` in a read-heavy path.
+pub fn ensure_flat_size(repo: &Repository, session: &SessionStats) {
+    if session.graph_size_dirty.load(Ordering::Relaxed) {
+        let size = estimate_flat_size(repo) as u64;
+        session
+            .total_graph_size_chars
+            .store(size, Ordering::Relaxed);
+        session.graph_size_dirty.store(false, Ordering::Relaxed);
+    }
 }
 
 /// Wrap a response string with token stats metadata.
@@ -251,6 +267,7 @@ pub fn run_recall(
         topic_matches += 1;
     }
 
+    ensure_flat_size(repo, session);
     let flat_size = session.total_graph_size_chars.load(Ordering::Relaxed) as usize;
     session.record(total, flat_size);
 
@@ -306,7 +323,7 @@ pub fn run_prime(
         written.push(path);
     }
 
-    refresh_flat_size(repo, session);
+    session.mark_dirty();
 
     Ok(serde_json::json!({
         "status": "ok",
@@ -469,11 +486,7 @@ pub struct CtxOneServer {
 impl CtxOneServer {
     pub fn new(repo: Arc<Repository>) -> Self {
         let session = Arc::new(SessionStats::new());
-        let flat = estimate_flat_size(&repo);
-        session
-            .total_graph_size_chars
-            .store(flat as u64, Ordering::Relaxed);
-
+        // session starts dirty; first read will populate it.
         Self {
             repo,
             session,
@@ -505,7 +518,7 @@ impl CtxOneServer {
         let value = serde_json::Value::String(p.fact.clone());
         match self.repo.set_json("main", &path, &value, opts) {
             Ok(commit_id) => {
-                refresh_flat_size(&self.repo, &self.session);
+                self.session.mark_dirty();
                 serde_json::json!({
                     "status": "ok",
                     "fact": p.fact,
@@ -548,6 +561,7 @@ impl CtxOneServer {
     )]
     async fn context(&self, params: Parameters<ContextParams>) -> String {
         let p = params.0;
+        ensure_flat_size(&self.repo, &self.session);
         let flat_size = self.session.total_graph_size_chars.load(Ordering::Relaxed) as usize;
 
         let path = format!("/memory/projects/{}", p.project);
@@ -635,6 +649,7 @@ impl CtxOneServer {
     )]
     async fn what_changed_since(&self, params: Parameters<WhatChangedSinceParams>) -> String {
         let p = params.0;
+        ensure_flat_size(&self.repo, &self.session);
         let flat_size = self.session.total_graph_size_chars.load(Ordering::Relaxed) as usize;
 
         // Get recent log and filter by date
@@ -669,6 +684,7 @@ impl CtxOneServer {
     )]
     async fn why_did_we(&self, params: Parameters<WhyDidWeParams>) -> String {
         let p = params.0;
+        ensure_flat_size(&self.repo, &self.session);
         let flat_size = self.session.total_graph_size_chars.load(Ordering::Relaxed) as usize;
 
         // Search for the decision
