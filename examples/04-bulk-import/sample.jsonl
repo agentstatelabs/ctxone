@@ -1,0 +1,5 @@
+{"fact": "CtxOne is licensed under BSL-1.1", "importance": "high", "context": "licensing", "tags": ["legal", "decision"]}
+{"fact": "The engine is AgentStateGraph", "importance": "high", "context": "architecture"}
+{"fact": "Default memory lives at ~/.ctxone/memory.db", "importance": "medium", "context": "architecture", "tags": ["paths"]}
+{"fact": "Token savings ratio is computed as flat/sent", "importance": "medium", "context": "economics"}
+{"fact": "Craig Brown is the primary maintainer", "importance": "low", "context": "team"}

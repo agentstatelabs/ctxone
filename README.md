@@ -93,6 +93,15 @@ ctxone/
 - [Token Savings](docs/TOKEN_SAVINGS.md) — how the ratio is computed, how to read it, how to maximize it
 - [Cookbook](docs/COOKBOOK.md) — git hooks, cron jobs, shell prompts, team setups
 
+**Reference:**
+- [CLI Reference](docs/CLI_REFERENCE.md) — every `ctx` command, flag, and exit code
+- [HTTP API](docs/HTTP_API.md) — REST endpoints exposed by the Hub
+- [MCP Tools](docs/MCP_TOOLS.md) — MCP tools exposed to agents
+- [Integrations](docs/INTEGRATIONS.md) — wiring into Claude Code, Cursor, VS Code, Codex
+- [Troubleshooting](docs/TROUBLESHOOTING.md) — top 10 errors and fixes
+
+**Runnable examples:** see [examples/](examples/)
+
 **Strategy and background:**
 - [Product Vision](docs/VISION.md)
 - [Context Anxiety](docs/CONTEXT_ANXIETY.md) — the problem we solve

@@ -1,0 +1,32 @@
+#!/bin/bash
+# Git pre-push hook that primes README.md into CtxOne's pinned memory.
+# Install: cp this file to .git/hooks/pre-push and chmod +x it.
+
+set -e
+
+# Silently skip if ctx isn't installed
+if ! command -v ctx >/dev/null 2>&1; then
+    exit 0
+fi
+
+# Silently skip if the Hub isn't reachable (don't block pushes)
+if ! ctx status >/dev/null 2>&1; then
+    exit 0
+fi
+
+# Only prime if README.md exists in the repo root
+REPO_ROOT=$(git rev-parse --show-toplevel)
+README="$REPO_ROOT/README.md"
+
+if [ ! -f "$README" ]; then
+    exit 0
+fi
+
+# Prime and report
+if ctx prime "$README" --pin --source project --format id > /dev/null 2>&1; then
+    echo "ctxone: primed README as pinned project context"
+else
+    echo "ctxone: prime failed (non-fatal, push continuing)" >&2
+fi
+
+exit 0

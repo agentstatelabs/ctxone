@@ -1,0 +1,8 @@
+# Sample facts for import-txt.sh
+# Lines starting with # are skipped. Blank lines are skipped.
+
+CtxOne is licensed under BSL-1.1
+The engine (AgentStateGraph) is a versioned, branching state store
+The Hub exposes both stdio MCP and HTTP REST interfaces
+The CLI targets four shells for completions: bash, zsh, fish, elvish
+Default memory lives at ~/.ctxone/memory.db
