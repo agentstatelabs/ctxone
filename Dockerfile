@@ -2,7 +2,7 @@
 # Produces a minimal debian-slim image containing ctx and ctxone-hub.
 
 # -- Stage 1: Build Rust binaries --
-FROM rust:1.86-slim AS builder
+FROM rust:1.88-slim AS builder
 
 WORKDIR /build
 
