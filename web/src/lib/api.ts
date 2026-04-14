@@ -128,3 +128,75 @@ export async function recall(topic: string, budget = 1500): Promise<unknown> {
 		`/api/memory/recall?topic=${encodeURIComponent(topic)}&budget=${budget}`
 	);
 }
+
+export interface PinnedItem {
+	path: string;
+	value: unknown;
+}
+
+export async function getPinned(): Promise<PinnedItem[]> {
+	return fetchJson('/api/memory/pinned');
+}
+
+export interface PrimeSection {
+	title: string;
+	body: string;
+}
+
+export interface PrimeResult {
+	status: string;
+	source: string;
+	pinned: boolean;
+	sections_written: number;
+	paths: string[];
+}
+
+export async function primeSections(
+	source: string,
+	pinned: boolean,
+	sections: PrimeSection[]
+): Promise<PrimeResult> {
+	const resp = await fetch(`${API_BASE}/api/memory/prime`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ source, pinned, sections })
+	});
+	if (!resp.ok) {
+		throw new Error(`prime failed: ${resp.status}`);
+	}
+	return resp.json();
+}
+
+/// Parse markdown into sections at H1/H2 headings. Ported from cli/src/main.rs.
+export function parseMarkdownSections(content: string): PrimeSection[] {
+	const sections: PrimeSection[] = [];
+	let currentTitle: string | null = null;
+	let currentBody: string[] = [];
+
+	const flush = () => {
+		const body = currentBody.join('\n').trim();
+		if (!body) return;
+		sections.push({
+			title: currentTitle ?? 'Intro',
+			body
+		});
+	};
+
+	for (const line of content.split('\n')) {
+		const trimmed = line.replace(/^\s+/, '');
+		const isH1 = trimmed.startsWith('# ') && !trimmed.startsWith('## ');
+		const isH2 = trimmed.startsWith('## ') && !trimmed.startsWith('### ');
+
+		if (isH1 || isH2) {
+			flush();
+			currentBody = [];
+			const prefixLen = isH1 ? 2 : 3;
+			currentTitle = trimmed.slice(prefixLen).trim();
+		} else {
+			currentBody.push(line);
+		}
+	}
+	flush();
+
+	return sections;
+}
