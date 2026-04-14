@@ -15,7 +15,8 @@ const EX_SOFTWARE: i32 = 70; // internal software error
 const EX_IOERR: i32 = 74; // I/O error
 const EX_PROTOCOL: i32 = 76; // remote protocol error / server error
 
-#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum OutputFormat {
     /// Human-readable (default)
     Text,
@@ -27,26 +28,173 @@ pub enum OutputFormat {
 
 #[derive(Parser)]
 #[command(name = "ctx", about = "CtxOne — AI agent memory CLI", version)]
-struct Cli {
-    /// Hub server URL (env: CTX_SERVER)
-    #[arg(
-        long,
-        env = "CTX_SERVER",
-        default_value = "http://localhost:3001",
-        global = true
-    )]
-    server: String,
+struct RawCli {
+    /// Hub server URL (env: CTX_SERVER, config: server)
+    #[arg(long, env = "CTX_SERVER", global = true)]
+    server: Option<String>,
 
-    /// Branch / ref to read from and write to (env: CTX_BRANCH)
-    #[arg(long, env = "CTX_BRANCH", default_value = "main", global = true)]
-    branch: String,
+    /// Branch / ref to read and write (env: CTX_BRANCH, config: branch)
+    #[arg(long, env = "CTX_BRANCH", global = true)]
+    branch: Option<String>,
 
-    /// Output format: text (human), json (for jq), id (minimal) (env: CTX_FORMAT)
-    #[arg(long, env = "CTX_FORMAT", value_enum, default_value_t = OutputFormat::Text, global = true)]
-    format: OutputFormat,
+    /// Output format: text / json / id (env: CTX_FORMAT, config: format)
+    #[arg(long, env = "CTX_FORMAT", value_enum, global = true)]
+    format: Option<OutputFormat>,
 
     #[command(subcommand)]
     command: Commands,
+}
+
+/// Fully-resolved CLI with defaults applied.
+/// Priority: flag → env var → config file → hardcoded default.
+struct Cli {
+    server: String,
+    branch: String,
+    format: OutputFormat,
+    command: Commands,
+}
+
+impl Cli {
+    fn from_raw(raw: RawCli, config: &CtxConfig) -> Self {
+        Self {
+            server: raw
+                .server
+                .or_else(|| config.server.clone())
+                .unwrap_or_else(|| "http://localhost:3001".to_string()),
+            branch: raw
+                .branch
+                .or_else(|| config.branch.clone())
+                .unwrap_or_else(|| "main".to_string()),
+            format: raw.format.or(config.format).unwrap_or(OutputFormat::Text),
+            command: raw.command,
+        }
+    }
+}
+
+// -- Persistent config (~/.ctxone/config.toml) --
+
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+struct CtxConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    server: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format: Option<OutputFormat>,
+}
+
+impl CtxConfig {
+    /// Path to the config file. Separate from the db path so devs can wipe
+    /// the graph without losing their preferred server URL.
+    fn path() -> PathBuf {
+        let home = std::env::var("HOME").unwrap_or_default();
+        PathBuf::from(format!("{}/.ctxone/config.toml", home))
+    }
+
+    fn load() -> Self {
+        let path = Self::path();
+        if !path.exists() {
+            return Self::default();
+        }
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => return Self::default(),
+        };
+        toml::from_str(&content).unwrap_or_default()
+    }
+
+    fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let path = Self::path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let toml_str = toml::to_string_pretty(self)?;
+        std::fs::write(&path, toml_str)?;
+        Ok(())
+    }
+
+    fn set_key(&mut self, key: &str, value: &str) -> Result<(), String> {
+        match key {
+            "server" => self.server = Some(value.to_string()),
+            "branch" => self.branch = Some(value.to_string()),
+            "format" => {
+                let f = match value.to_lowercase().as_str() {
+                    "text" => OutputFormat::Text,
+                    "json" => OutputFormat::Json,
+                    "id" => OutputFormat::Id,
+                    _ => return Err(format!("unknown format: {} (expected text|json|id)", value)),
+                };
+                self.format = Some(f);
+            }
+            _ => {
+                return Err(format!(
+                    "unknown key: {} (expected server|branch|format)",
+                    key
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn get_key(&self, key: &str) -> Result<String, String> {
+        match key {
+            "server" => Ok(self.server.clone().unwrap_or_default()),
+            "branch" => Ok(self.branch.clone().unwrap_or_default()),
+            "format" => Ok(self
+                .format
+                .map(|f| match f {
+                    OutputFormat::Text => "text",
+                    OutputFormat::Json => "json",
+                    OutputFormat::Id => "id",
+                })
+                .unwrap_or("")
+                .to_string()),
+            _ => Err(format!(
+                "unknown key: {} (expected server|branch|format)",
+                key
+            )),
+        }
+    }
+
+    fn unset_key(&mut self, key: &str) -> Result<(), String> {
+        match key {
+            "server" => self.server = None,
+            "branch" => self.branch = None,
+            "format" => self.format = None,
+            _ => {
+                return Err(format!(
+                    "unknown key: {} (expected server|branch|format)",
+                    key
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Print the current config file contents
+    Show,
+    /// Print the path to the config file
+    Path,
+    /// Get a single config value (server, branch, format)
+    Get {
+        /// Key: server, branch, or format
+        key: String,
+    },
+    /// Set a config value and save it to the file
+    Set {
+        /// Key: server, branch, or format
+        key: String,
+        /// New value
+        value: String,
+    },
+    /// Remove a key from the config file
+    Unset {
+        /// Key: server, branch, or format
+        key: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -195,6 +343,11 @@ enum Commands {
         #[arg(long, default_value = "main")]
         from: String,
     },
+    /// Read or write persistent defaults in ~/.ctxone/config.toml
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
     /// Auto-detect and configure AI tools with CtxOne MCP server
     Init {
         /// Install globally (user-level config) vs project-only
@@ -288,7 +441,9 @@ fn unreachable_exit(server: &str, e: reqwest::Error) -> ! {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
+    let raw = RawCli::parse();
+    let config = CtxConfig::load();
+    let cli = Cli::from_raw(raw, &config);
 
     match cli.command {
         Commands::Remember {
@@ -729,7 +884,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         }
         Commands::Completion { shell } => {
-            let mut cmd = Cli::command();
+            let mut cmd = RawCli::command();
             let name = cmd.get_name().to_string();
             generate(shell, &mut cmd, name, &mut std::io::stdout());
         }
@@ -1034,6 +1189,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let commit = v.get("commit_id").and_then(|x| x.as_str()).unwrap_or("");
                 println!("Branch '{}' created from '{}' at {}", name, from, commit);
             });
+        }
+        Commands::Config { action } => {
+            handle_config(action, cli.format)?;
         }
         Commands::Init {
             global,
@@ -1728,6 +1886,90 @@ fn mcp_server_entry() -> Value {
     })
 }
 
+fn handle_config(
+    action: ConfigAction,
+    format: OutputFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match action {
+        ConfigAction::Path => {
+            emit(
+                format,
+                &serde_json::json!({ "path": CtxConfig::path() }),
+                |_| {
+                    println!("{}", CtxConfig::path().display());
+                },
+            );
+        }
+        ConfigAction::Show => {
+            let config = CtxConfig::load();
+            let value = serde_json::to_value(&config).unwrap_or_default();
+            emit(format, &value, |v| {
+                if v.as_object().map(|o| o.is_empty()).unwrap_or(true) {
+                    println!("(empty config at {})", CtxConfig::path().display());
+                    println!("Set a value with: ctx config set <key> <value>");
+                } else {
+                    println!("Config file: {}", CtxConfig::path().display());
+                    if let Some(s) = v.get("server").and_then(|x| x.as_str()) {
+                        println!("  server: {}", s);
+                    }
+                    if let Some(b) = v.get("branch").and_then(|x| x.as_str()) {
+                        println!("  branch: {}", b);
+                    }
+                    if let Some(f) = v.get("format").and_then(|x| x.as_str()) {
+                        println!("  format: {}", f);
+                    }
+                }
+            });
+        }
+        ConfigAction::Get { key } => {
+            let config = CtxConfig::load();
+            match config.get_key(&key) {
+                Ok(value) => {
+                    emit(
+                        format,
+                        &serde_json::json!({ "key": key, "value": value }),
+                        |_| println!("{}", value),
+                    );
+                }
+                Err(e) => {
+                    eprintln!("{}", e);
+                    std::process::exit(EX_DATAERR);
+                }
+            }
+        }
+        ConfigAction::Set { key, value } => {
+            let mut config = CtxConfig::load();
+            if let Err(e) = config.set_key(&key, &value) {
+                eprintln!("{}", e);
+                std::process::exit(EX_DATAERR);
+            }
+            config.save()?;
+            emit(
+                format,
+                &serde_json::json!({ "status": "ok", "key": key, "value": value }),
+                |_| {
+                    println!("Saved: {} = {}", key, value);
+                    println!("  → {}", CtxConfig::path().display());
+                },
+            );
+        }
+        ConfigAction::Unset { key } => {
+            let mut config = CtxConfig::load();
+            if let Err(e) = config.unset_key(&key) {
+                eprintln!("{}", e);
+                std::process::exit(EX_DATAERR);
+            }
+            config.save()?;
+            emit(
+                format,
+                &serde_json::json!({ "status": "ok", "key": key }),
+                |_| println!("Unset: {}", key),
+            );
+        }
+    }
+    Ok(())
+}
+
 fn init_mcp(
     global: bool,
     tool_filter: Option<String>,
@@ -1945,5 +2187,124 @@ mod tests {
         unsafe { std::env::set_var("HOME", "/tmp/test-home") };
         let p = canonical_db_path();
         assert_eq!(p, "/tmp/test-home/.ctxone/memory.db");
+    }
+
+    // -------- CtxConfig --------
+
+    #[test]
+    fn ctx_config_default_is_empty() {
+        let cfg = CtxConfig::default();
+        assert!(cfg.server.is_none());
+        assert!(cfg.branch.is_none());
+        assert!(cfg.format.is_none());
+    }
+
+    #[test]
+    fn ctx_config_set_and_get_round_trip() {
+        let mut cfg = CtxConfig::default();
+        cfg.set_key("server", "http://example.com:3001").unwrap();
+        cfg.set_key("branch", "dev").unwrap();
+        cfg.set_key("format", "json").unwrap();
+
+        assert_eq!(cfg.get_key("server").unwrap(), "http://example.com:3001");
+        assert_eq!(cfg.get_key("branch").unwrap(), "dev");
+        assert_eq!(cfg.get_key("format").unwrap(), "json");
+    }
+
+    #[test]
+    fn ctx_config_set_rejects_unknown_key() {
+        let mut cfg = CtxConfig::default();
+        assert!(cfg.set_key("hostname", "foo").is_err());
+    }
+
+    #[test]
+    fn ctx_config_set_rejects_invalid_format() {
+        let mut cfg = CtxConfig::default();
+        assert!(cfg.set_key("format", "yaml").is_err());
+    }
+
+    #[test]
+    fn ctx_config_unset_clears_value() {
+        let mut cfg = CtxConfig::default();
+        cfg.set_key("server", "http://example.com").unwrap();
+        assert_eq!(cfg.get_key("server").unwrap(), "http://example.com");
+
+        cfg.unset_key("server").unwrap();
+        assert_eq!(cfg.get_key("server").unwrap(), "");
+        assert!(cfg.server.is_none());
+    }
+
+    #[test]
+    fn ctx_config_toml_round_trip() {
+        let mut cfg = CtxConfig::default();
+        cfg.set_key("server", "http://example.com:3001").unwrap();
+        cfg.set_key("format", "id").unwrap();
+
+        let serialized = toml::to_string(&cfg).unwrap();
+        let deserialized: CtxConfig = toml::from_str(&serialized).unwrap();
+        assert_eq!(
+            deserialized.server.as_deref(),
+            Some("http://example.com:3001")
+        );
+        assert_eq!(deserialized.format, Some(OutputFormat::Id));
+        assert_eq!(deserialized.branch, None);
+    }
+
+    // -------- Cli::from_raw priority resolution --------
+
+    fn raw_with_no_flags() -> RawCli {
+        RawCli {
+            server: None,
+            branch: None,
+            format: None,
+            command: Commands::Status,
+        }
+    }
+
+    #[test]
+    fn cli_resolution_uses_hardcoded_defaults_when_nothing_set() {
+        let cli = Cli::from_raw(raw_with_no_flags(), &CtxConfig::default());
+        assert_eq!(cli.server, "http://localhost:3001");
+        assert_eq!(cli.branch, "main");
+        assert_eq!(cli.format, OutputFormat::Text);
+    }
+
+    #[test]
+    fn cli_resolution_uses_config_when_no_flag_or_env() {
+        let mut config = CtxConfig::default();
+        config.set_key("server", "http://config:3001").unwrap();
+        config.set_key("branch", "dev").unwrap();
+
+        let cli = Cli::from_raw(raw_with_no_flags(), &config);
+        assert_eq!(cli.server, "http://config:3001");
+        assert_eq!(cli.branch, "dev");
+        assert_eq!(cli.format, OutputFormat::Text); // config didn't set this
+    }
+
+    #[test]
+    fn cli_resolution_flag_overrides_config() {
+        let mut config = CtxConfig::default();
+        config.set_key("server", "http://config:3001").unwrap();
+
+        let mut raw = raw_with_no_flags();
+        raw.server = Some("http://flag:3001".to_string());
+
+        let cli = Cli::from_raw(raw, &config);
+        assert_eq!(cli.server, "http://flag:3001");
+    }
+
+    #[test]
+    fn cli_resolution_mixes_sources() {
+        // server from config, branch from flag, format default
+        let mut config = CtxConfig::default();
+        config.set_key("server", "http://config:3001").unwrap();
+
+        let mut raw = raw_with_no_flags();
+        raw.branch = Some("feature-x".to_string());
+
+        let cli = Cli::from_raw(raw, &config);
+        assert_eq!(cli.server, "http://config:3001");
+        assert_eq!(cli.branch, "feature-x");
+        assert_eq!(cli.format, OutputFormat::Text);
     }
 }
