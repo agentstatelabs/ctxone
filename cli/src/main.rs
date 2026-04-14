@@ -1331,6 +1331,22 @@ fn detect_tools(global: bool) -> Vec<AiTool> {
         config_type: ConfigType::Toml,
     });
 
+    // Gemini CLI (Google)
+    // Settings live in ~/.gemini/settings.json with an mcpServers object
+    // (same shape as Claude Code / Cursor).
+    let gemini_dir = PathBuf::from(format!("{}/.gemini", home));
+    let gemini_path = if global {
+        gemini_dir.join("settings.json")
+    } else {
+        cwd.join(".gemini/settings.json")
+    };
+    tools.push(AiTool {
+        name: "Gemini",
+        detected: gemini_dir.exists(),
+        config_path: gemini_path,
+        config_type: ConfigType::McpJson,
+    });
+
     tools
 }
 
