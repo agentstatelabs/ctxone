@@ -111,6 +111,8 @@ enum Commands {
         #[arg(long)]
         source: Option<String>,
     },
+    /// Run end-to-end health checks and suggest fixes
+    Doctor,
     /// Diff two refs (branches, tags, or commits)
     Diff {
         /// First ref (usually older / base)
@@ -709,6 +711,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             });
         }
+        Commands::Doctor => {
+            run_doctor(&cli).await?;
+        }
         Commands::Diff { ref_a, ref_b } => {
             let url = format!(
                 "{}/api/diff?ref_a={}&ref_b={}",
@@ -1189,6 +1194,158 @@ async fn run_tail(
 
         tokio::time::sleep(Duration::from_millis(interval_ms)).await;
     }
+}
+
+async fn run_doctor(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let mut checks: Vec<(String, bool, String)> = Vec::new();
+    let mut suggestions: Vec<String> = Vec::new();
+
+    // Check 1: hub binary discoverable
+    let hub_bin = find_hub_binary();
+    let hub_exists = std::path::Path::new(&hub_bin).exists();
+    checks.push((
+        "ctxone-hub binary".to_string(),
+        hub_exists,
+        if hub_exists {
+            hub_bin.clone()
+        } else {
+            "not found in PATH or ~/.local/bin".to_string()
+        },
+    ));
+    if !hub_exists {
+        suggestions.push(
+            "Install ctxone-hub: curl -sSL https://raw.githubusercontent.com/ctxone/ctxone/main/install.sh | sh".to_string(),
+        );
+    }
+
+    // Check 2: canonical db path writable
+    let db = canonical_db_path();
+    let db_path = std::path::Path::new(&db);
+    let parent = db_path.parent().map(|p| p.to_path_buf());
+    let parent_ok = parent
+        .as_ref()
+        .map(|p| p.exists() || std::fs::create_dir_all(p).is_ok())
+        .unwrap_or(false);
+    checks.push(("memory db location".to_string(), parent_ok, db.clone()));
+    if !parent_ok {
+        suggestions.push(format!(
+            "Create the db directory: mkdir -p {}",
+            parent.as_ref().and_then(|p| p.to_str()).unwrap_or("")
+        ));
+    }
+
+    // Check 3: Hub HTTP reachable
+    let hub_reachable = reqwest::get(format!("{}/api/health", cli.server))
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false);
+    checks.push((
+        "hub HTTP endpoint".to_string(),
+        hub_reachable,
+        cli.server.clone(),
+    ));
+    if !hub_reachable {
+        suggestions.push(format!(
+            "Start the Hub: ctx serve --http  (or set CTX_SERVER={})",
+            cli.server
+        ));
+    }
+
+    // Check 4: memory branch exists
+    let main_exists = if hub_reachable {
+        reqwest::get(format!("{}/api/stats/main", cli.server))
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    checks.push((
+        "main branch".to_string(),
+        main_exists,
+        if main_exists {
+            "reachable".to_string()
+        } else {
+            "not reachable (hub down?)".to_string()
+        },
+    ));
+
+    // Check 5: MCP configs for detected AI tools
+    let tools = detect_tools(false);
+    for t in &tools {
+        if !t.detected {
+            continue;
+        }
+        let has_mcp = if t.config_path.exists() {
+            match std::fs::read_to_string(&t.config_path) {
+                Ok(content) => content.contains("\"ctxone\""),
+                Err(_) => false,
+            }
+        } else {
+            false
+        };
+        checks.push((
+            format!("{} MCP config", t.name),
+            has_mcp,
+            if has_mcp {
+                format!("configured at {}", t.config_path.display())
+            } else {
+                "ctxone not in mcpServers".to_string()
+            },
+        ));
+        if !has_mcp {
+            suggestions.push(format!(
+                "Configure {}: ctx init --tool {}",
+                t.name,
+                t.name
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_lowercase()
+            ));
+        }
+    }
+
+    // Build structured output
+    let checks_json: Vec<Value> = checks
+        .iter()
+        .map(|(name, ok, detail)| {
+            serde_json::json!({
+                "name": name,
+                "ok": ok,
+                "detail": detail,
+            })
+        })
+        .collect();
+    let all_ok = checks.iter().all(|(_, ok, _)| *ok);
+    let out = serde_json::json!({
+        "all_ok": all_ok,
+        "checks": checks_json,
+        "suggestions": suggestions,
+    });
+
+    emit(cli.format, &out, |_| {
+        println!("CtxOne Doctor");
+        println!();
+        for (name, ok, detail) in &checks {
+            let marker = if *ok { "\u{2713}" } else { "\u{2717}" };
+            println!("  {} {:24} {}", marker, name, detail);
+        }
+        println!();
+        if all_ok {
+            println!("All checks passed.");
+        } else {
+            println!("Suggestions:");
+            for s in &suggestions {
+                println!("  \u{2192} {}", s);
+            }
+        }
+    });
+
+    if !all_ok {
+        std::process::exit(EX_SOFTWARE);
+    }
+    Ok(())
 }
 
 async fn run_demo(server: &str) -> Result<(), Box<dyn std::error::Error>> {
