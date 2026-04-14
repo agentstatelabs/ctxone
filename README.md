@@ -13,10 +13,13 @@ Persistent, searchable, accountable memory for AI agents. Eliminate context anxi
 
 ## Quick Start
 
+**See the [5-minute quickstart](docs/QUICKSTART.md)** — from nothing to live
+token savings in 5 minutes.
+
 ### Install (curl)
 
 ```bash
-curl -sSL https://ctxone.dev/install.sh | sh
+curl -sSL https://raw.githubusercontent.com/ctxone/ctxone/main/install.sh | sh
 ```
 
 ### Install (Docker)
