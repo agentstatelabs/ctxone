@@ -183,31 +183,72 @@ pub fn run_recall(
         total += entry_size;
     }
 
-    // 2. Topic search results
-    let mut topic_matches = 0usize;
-    if let Ok(results) = repo.search_values("main", topic, Some(50)) {
-        for (path, value) in &results {
-            let section_path = path
-                .strip_suffix("/title")
-                .or_else(|| path.strip_suffix("/body"))
-                .map(String::from)
-                .unwrap_or_else(|| path.clone());
-            if seen_paths.contains(&section_path) {
-                continue;
-            }
+    // 2. Topic search: tokenize the query, search each token, aggregate by path
+    //    and score by how many tokens matched + whether the full phrase hit.
+    let tokens = tokenize_query(topic);
 
-            let entry_size = path.len() + value.len() + 10;
-            if total + entry_size > budget_chars {
-                break;
-            }
-            out.push(serde_json::json!({
-                "path": path,
-                "value": value,
-                "pinned": false,
-            }));
-            total += entry_size;
-            topic_matches += 1;
+    // Map path -> (value, token_hit_count, full_phrase_hit)
+    let mut scored: std::collections::HashMap<String, (String, usize, bool)> =
+        std::collections::HashMap::new();
+
+    // Full-phrase search: counts extra, so exact matches win
+    if !topic.trim().is_empty()
+        && let Ok(results) = repo.search_values("main", topic.trim(), Some(50))
+    {
+        for (path, value) in results {
+            scored
+                .entry(path)
+                .and_modify(|e| e.2 = true)
+                .or_insert((value, 0, true));
         }
+    }
+
+    // Per-token search: each token adds one to the score
+    for token in &tokens {
+        let Ok(results) = repo.search_values("main", token, Some(50)) else {
+            continue;
+        };
+        for (path, value) in results {
+            let entry = scored.entry(path).or_insert((value, 0, false));
+            entry.1 += 1;
+        }
+    }
+
+    // Sort: full-phrase hits first, then by token-hit count desc, then by path
+    let mut ranked: Vec<(String, String, usize, bool)> = scored
+        .into_iter()
+        .map(|(p, (v, count, full))| (p, v, count, full))
+        .collect();
+    ranked.sort_by(|a, b| {
+        b.3.cmp(&a.3) // full phrase wins
+            .then_with(|| b.2.cmp(&a.2)) // then token count
+            .then_with(|| a.0.cmp(&b.0)) // stable by path
+    });
+
+    let mut topic_matches = 0usize;
+    for (path, value, score, full_match) in &ranked {
+        let section_path = path
+            .strip_suffix("/title")
+            .or_else(|| path.strip_suffix("/body"))
+            .map(String::from)
+            .unwrap_or_else(|| path.clone());
+        if seen_paths.contains(&section_path) {
+            continue;
+        }
+
+        let entry_size = path.len() + value.len() + 10;
+        if total + entry_size > budget_chars {
+            break;
+        }
+        out.push(serde_json::json!({
+            "path": path,
+            "value": value,
+            "pinned": false,
+            "score": score,
+            "full_match": full_match,
+        }));
+        total += entry_size;
+        topic_matches += 1;
     }
 
     let flat_size = session.total_graph_size_chars.load(Ordering::Relaxed) as usize;
@@ -274,6 +315,33 @@ pub fn run_prime(
         "sections_written": written.len(),
         "paths": written,
     }))
+}
+
+/// Tokenize a recall query: lowercase, split on non-alphanumeric, drop stopwords
+/// and tokens shorter than 3 characters.
+pub fn tokenize_query(q: &str) -> Vec<String> {
+    const STOPWORDS: &[&str] = &[
+        "the", "and", "for", "with", "about", "that", "this", "what", "how", "why", "our", "use",
+        "are", "was", "were", "from", "into", "their", "its", "has", "have", "will", "can", "did",
+        "does", "some", "any", "all", "some",
+    ];
+
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    for c in q.chars() {
+        if c.is_ascii_alphanumeric() {
+            current.push(c.to_ascii_lowercase());
+        } else if !current.is_empty() {
+            if current.len() >= 3 && !STOPWORDS.contains(&current.as_str()) {
+                tokens.push(current.clone());
+            }
+            current.clear();
+        }
+    }
+    if current.len() >= 3 && !STOPWORDS.contains(&current.as_str()) {
+        tokens.push(current);
+    }
+    tokens
 }
 
 /// Slugify a string for use in paths.
