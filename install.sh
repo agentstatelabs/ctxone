@@ -5,26 +5,27 @@ set -e
 REPO="ctxone/ctxone"
 INSTALL_DIR="${HOME}/.local/bin"
 
-# Detect OS and architecture
-OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
-ARCH="$(uname -m)"
+# Detect OS and architecture, then map to a Rust target triple
+OS_RAW="$(uname -s | tr '[:upper:]' '[:lower:]')"
+ARCH_RAW="$(uname -m)"
 
-case "$OS" in
-    linux)  OS="linux" ;;
-    darwin) OS="darwin" ;;
-    *)      echo "Unsupported OS: $OS"; exit 1 ;;
-esac
-
-case "$ARCH" in
+case "$ARCH_RAW" in
     x86_64|amd64) ARCH="x86_64" ;;
     aarch64|arm64) ARCH="aarch64" ;;
-    *)             echo "Unsupported architecture: $ARCH"; exit 1 ;;
+    *) echo "Unsupported architecture: $ARCH_RAW"; exit 1 ;;
 esac
 
+case "$OS_RAW" in
+    linux)  TARGET="${ARCH}-unknown-linux-gnu" ;;
+    darwin) TARGET="${ARCH}-apple-darwin" ;;
+    *)      echo "Unsupported OS: $OS_RAW"; exit 1 ;;
+esac
+
+OS="$OS_RAW"
+
 echo "CtxOne installer"
-echo "  OS:   $OS"
-echo "  Arch: $ARCH"
-echo "  Dir:  $INSTALL_DIR"
+echo "  Target: $TARGET"
+echo "  Dir:    $INSTALL_DIR"
 echo ""
 
 # Create install directory
@@ -47,9 +48,12 @@ echo "Installing CtxOne $LATEST..."
 
 # Download binaries
 for BIN in ctx ctxone-hub; do
-    URL="https://github.com/${REPO}/releases/download/${LATEST}/${BIN}-${OS}-${ARCH}"
+    URL="https://github.com/${REPO}/releases/download/${LATEST}/${BIN}-${TARGET}"
     echo "  Downloading $BIN..."
-    curl -sL "$URL" -o "${INSTALL_DIR}/${BIN}"
+    if ! curl -fsSL "$URL" -o "${INSTALL_DIR}/${BIN}"; then
+        echo "  Failed: $URL"
+        exit 1
+    fi
     chmod +x "${INSTALL_DIR}/${BIN}"
 done
 
