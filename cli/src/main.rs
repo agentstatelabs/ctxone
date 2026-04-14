@@ -1,4 +1,5 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::{Shell, generate};
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -110,6 +111,11 @@ enum Commands {
         /// Source name (defaults to the file stem)
         #[arg(long)]
         source: Option<String>,
+    },
+    /// Generate shell completion script (bash, zsh, fish, etc.)
+    Completion {
+        /// Shell to generate completions for
+        shell: Shell,
     },
     /// Run end-to-end health checks and suggest fixes
     Doctor,
@@ -710,6 +716,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("These facts will be included in every recall response.");
                 }
             });
+        }
+        Commands::Completion { shell } => {
+            let mut cmd = Cli::command();
+            let name = cmd.get_name().to_string();
+            generate(shell, &mut cmd, name, &mut std::io::stdout());
         }
         Commands::Doctor => {
             run_doctor(&cli).await?;
