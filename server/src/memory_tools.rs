@@ -55,14 +55,23 @@ impl SessionStats {
 }
 
 /// Estimate the total flat memory size by counting all values in the graph.
-fn estimate_flat_size(repo: &Repository) -> usize {
+pub fn estimate_flat_size(repo: &Repository) -> usize {
     match repo.get_json("main", "/") {
         Ok(val) => serde_json::to_string(&val).unwrap_or_default().len(),
         Err(_) => 0,
     }
 }
 
+/// Refresh the cached flat-size estimate on the session.
+pub fn refresh_flat_size(repo: &Repository, session: &SessionStats) {
+    let size = estimate_flat_size(repo) as u64;
+    session
+        .total_graph_size_chars
+        .store(size, Ordering::Relaxed);
+}
+
 /// Wrap a response string with token stats metadata.
+/// Used by the older MCP tools that return plain text (context, summarize_session, etc).
 fn with_stats(response: &str, flat_size: usize, session: &SessionStats) -> String {
     let sent = response.len();
     session.record(sent, flat_size);
@@ -79,6 +88,208 @@ fn with_stats(response: &str, flat_size: usize, session: &SessionStats) -> Strin
 
     let stats_json = serde_json::to_string(&stats).unwrap_or_default();
     format!("{}\n\n_ctxone_stats: {}", response, stats_json)
+}
+
+// -- Shared helpers used by both MCP tools and HTTP handlers --
+
+/// A structured {path, title, body} entry for a pinned memory section.
+#[derive(Clone)]
+pub struct PinnedEntry {
+    pub path: String,
+    pub title: String,
+    pub body: String,
+}
+
+/// Collect pinned memories as title+body pairs grouped by section path.
+/// Each section has /title and /body children — this pairs them up.
+pub fn collect_pinned(repo: &Repository) -> Vec<PinnedEntry> {
+    let paths = match repo.list_paths("main", "/memory/pinned", Some(20)) {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut sections: std::collections::BTreeMap<String, (Option<String>, Option<String>)> =
+        std::collections::BTreeMap::new();
+
+    for path in &paths {
+        let (section_path, field) = if let Some(stripped) = path.strip_suffix("/title") {
+            (stripped.to_string(), "title")
+        } else if let Some(stripped) = path.strip_suffix("/body") {
+            (stripped.to_string(), "body")
+        } else {
+            continue;
+        };
+
+        let Ok(value) = repo.get_json("main", path) else {
+            continue;
+        };
+        let Some(text) = value.as_str() else {
+            continue;
+        };
+
+        let entry = sections.entry(section_path).or_insert((None, None));
+        match field {
+            "title" => entry.0 = Some(text.to_string()),
+            "body" => entry.1 = Some(text.to_string()),
+            _ => {}
+        }
+    }
+
+    sections
+        .into_iter()
+        .filter_map(|(path, (title, body))| match (title, body) {
+            (Some(t), Some(b)) => Some(PinnedEntry {
+                path,
+                title: t,
+                body: b,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Shared recall implementation: always-include pinned, then topic matches, budget-capped.
+/// Returns a structured JSON value. Both MCP tools and HTTP handlers call this.
+pub fn run_recall(
+    repo: &Repository,
+    session: &SessionStats,
+    topic: &str,
+    budget: usize,
+) -> serde_json::Value {
+    let budget_chars = budget * 4;
+
+    let mut out = Vec::new();
+    let mut total = 0usize;
+    let mut seen_paths = std::collections::HashSet::new();
+
+    // 1. Pinned memories (up to half the budget)
+    let pinned = collect_pinned(repo);
+    let pinned_count = pinned.len();
+    let pinned_budget = budget_chars / 2;
+    let mut pinned_total = 0usize;
+    for p in &pinned {
+        let entry_size = p.path.len() + p.title.len() + p.body.len() + 30;
+        if pinned_total + entry_size > pinned_budget && !out.is_empty() {
+            break;
+        }
+        out.push(serde_json::json!({
+            "path": p.path,
+            "title": p.title,
+            "body": p.body,
+            "pinned": true,
+        }));
+        seen_paths.insert(p.path.clone());
+        pinned_total += entry_size;
+        total += entry_size;
+    }
+
+    // 2. Topic search results
+    let mut topic_matches = 0usize;
+    if let Ok(results) = repo.search_values("main", topic, Some(50)) {
+        for (path, value) in &results {
+            let section_path = path
+                .strip_suffix("/title")
+                .or_else(|| path.strip_suffix("/body"))
+                .map(String::from)
+                .unwrap_or_else(|| path.clone());
+            if seen_paths.contains(&section_path) {
+                continue;
+            }
+
+            let entry_size = path.len() + value.len() + 10;
+            if total + entry_size > budget_chars {
+                break;
+            }
+            out.push(serde_json::json!({
+                "path": path,
+                "value": value,
+                "pinned": false,
+            }));
+            total += entry_size;
+            topic_matches += 1;
+        }
+    }
+
+    let flat_size = session.total_graph_size_chars.load(Ordering::Relaxed) as usize;
+    session.record(total, flat_size);
+
+    serde_json::json!({
+        "topic": topic,
+        "results": out,
+        "pinned_count": pinned_count,
+        "topic_matches": topic_matches,
+        "ctx_tokens_sent": total / 4,
+        "ctx_tokens_estimated_flat": flat_size / 4,
+        "ctx_savings_ratio": if total > 0 { flat_size as f64 / total as f64 } else { 0.0 },
+    })
+}
+
+/// Shared prime implementation: write sections under /memory/{pinned|primed}/{source}/{slug}.
+pub fn run_prime(
+    repo: &Repository,
+    session: &SessionStats,
+    source: &str,
+    pinned: bool,
+    sections: &[(String, String)], // (title, body)
+) -> Result<serde_json::Value, String> {
+    let namespace = if pinned { "pinned" } else { "primed" };
+    let mut written = Vec::new();
+
+    for (title, body) in sections {
+        let slug = slugify(title);
+        if slug.is_empty() {
+            continue;
+        }
+        let path = format!("/memory/{}/{}/{}", namespace, source, slug);
+
+        let opts = CommitOptions::new(
+            "ctxone-prime",
+            IntentCategory::Checkpoint,
+            format!("Prime: {}", title),
+        )
+        .with_confidence(0.95)
+        .with_tags(vec![
+            namespace.to_string(),
+            source.to_string(),
+            "prime".to_string(),
+        ]);
+
+        let value = serde_json::json!({
+            "title": title,
+            "body": body,
+        });
+
+        repo.set_json("main", &path, &value, opts)
+            .map_err(|e| e.to_string())?;
+
+        written.push(path);
+    }
+
+    refresh_flat_size(repo, session);
+
+    Ok(serde_json::json!({
+        "status": "ok",
+        "source": source,
+        "pinned": pinned,
+        "sections_written": written.len(),
+        "paths": written,
+    }))
+}
+
+/// Slugify a string for use in paths.
+pub fn slugify(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_dash = false;
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash && !out.is_empty() {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    out.trim_end_matches('-').to_string()
 }
 
 // -- Parameter types --
@@ -132,6 +343,26 @@ pub struct WhatChangedSinceParams {
 pub struct WhyDidWeParams {
     /// The decision to trace (e.g., "use BSL 1.1").
     pub decision: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct PrimeSectionParam {
+    /// Section title (used as a stable path slug).
+    pub title: String,
+    /// Section body (markdown or plain text).
+    pub body: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct PrimeParams {
+    /// Source name (groups sections together, enables idempotent re-priming).
+    pub source: String,
+    /// If true, store as pinned memory (always included in every recall response).
+    /// If false, store as primed memory (searchable like normal facts).
+    #[serde(default)]
+    pub pinned: bool,
+    /// Pre-parsed markdown sections. Use ctx prime <file.md> on the CLI to parse a file.
+    pub sections: Vec<PrimeSectionParam>,
 }
 
 fn default_importance() -> String {
@@ -206,45 +437,39 @@ impl CtxOneServer {
         let value = serde_json::Value::String(p.fact.clone());
         match self.repo.set_json("main", &path, &value, opts) {
             Ok(commit_id) => {
-                // Update flat size estimate
-                let flat = estimate_flat_size(&self.repo);
-                self.session
-                    .total_graph_size_chars
-                    .store(flat as u64, Ordering::Relaxed);
-
-                let response = format!("Remembered at {}: {}", path, commit_id);
-                with_stats(&response, flat, &self.session)
+                refresh_flat_size(&self.repo, &self.session);
+                serde_json::json!({
+                    "status": "ok",
+                    "fact": p.fact,
+                    "path": path,
+                    "commit_id": format!("{}", commit_id.short()),
+                })
+                .to_string()
             }
             Err(e) => format!("Error: {}", e),
         }
     }
 
     #[tool(
-        description = "Retrieve relevant memories for a topic, respecting a token budget. Returns the most important matches first."
+        description = "Retrieve relevant memories for a topic. Always includes pinned context first, then topic-matched facts, respecting a token budget. Response is JSON including token savings metadata."
     )]
     async fn recall(&self, params: Parameters<RecallParams>) -> String {
         let p = params.0;
-        let flat_size = self.session.total_graph_size_chars.load(Ordering::Relaxed) as usize;
+        let result = run_recall(&self.repo, &self.session, &p.topic, p.budget);
+        serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string())
+    }
 
-        // Search values for the topic
-        let max_results = 50;
-        match self.repo.search_values("main", &p.topic, Some(max_results)) {
-            Ok(results) => {
-                let mut output = String::new();
-                let budget_chars = p.budget * 4; // ~4 chars per token
-                for (path, value) in &results {
-                    let line = format!("{}: {}\n", path, value);
-                    if output.len() + line.len() > budget_chars {
-                        break;
-                    }
-                    output.push_str(&line);
-                }
+    #[tool(
+        description = "Load markdown sections as pinned or primed memories. Pinned memories are always included in every recall response (critical context). Sections should be pre-parsed — each entry has a title and body."
+    )]
+    async fn prime(&self, params: Parameters<PrimeParams>) -> String {
+        let p = params.0;
+        let sections: Vec<(String, String)> =
+            p.sections.into_iter().map(|s| (s.title, s.body)).collect();
 
-                if output.is_empty() {
-                    output = format!("No memories found for '{}'", p.topic);
-                }
-
-                with_stats(&output, flat_size, &self.session)
+        match run_prime(&self.repo, &self.session, &p.source, p.pinned, &sections) {
+            Ok(result) => {
+                serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string())
             }
             Err(e) => format!("Error: {}", e),
         }
