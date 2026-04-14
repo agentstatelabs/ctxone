@@ -7,6 +7,7 @@
 //! Options:                    ctxone-hub --storage memory
 //!                             ctxone-hub --path /data/ctxone.db
 
+mod http;
 mod memory_tools;
 
 use std::sync::Arc;
@@ -140,9 +141,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("HTTP API listening on http://0.0.0.0:{}", http_port);
         eprintln!("Try: curl http://localhost:{}/api/health", http_port);
 
-        // TODO: Add HTTP routes for memory tools + token stats endpoint
-        eprintln!("(HTTP mode not yet implemented for Hub — use MCP mode)");
-        std::process::exit(1);
+        // Build a shared session stats instance, primed from the repo
+        let session = Arc::new(memory_tools::SessionStats::new());
+        if let Ok(val) = repo.get_json("main", "/") {
+            let size = serde_json::to_string(&val).unwrap_or_default().len() as u64;
+            session
+                .total_graph_size_chars
+                .store(size, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?
+            .block_on(async {
+                let app = http::router(repo.clone(), session);
+                let addr = format!("0.0.0.0:{}", http_port);
+                let listener = tokio::net::TcpListener::bind(&addr).await?;
+                axum::serve(listener, app).await?;
+                Ok::<(), Box<dyn std::error::Error>>(())
+            })?;
     } else {
         eprintln!("MCP server waiting for client on stdio...");
         eprintln!("Tools: remember, recall, context, summarize_session, what_changed_since, why_did_we");

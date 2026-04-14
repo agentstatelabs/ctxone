@@ -157,21 +157,28 @@ fn timestamp_id() -> String {
 /// The CtxOne memory MCP server.
 #[derive(Clone)]
 pub struct CtxOneServer {
-    repo: Arc<Repository>,
-    session: Arc<SessionStats>,
+    pub repo: Arc<Repository>,
+    pub session: Arc<SessionStats>,
     tool_router: ToolRouter<Self>,
 }
 
 #[tool_router]
 impl CtxOneServer {
     pub fn new(repo: Arc<Repository>) -> Self {
-        // Prime the flat size estimate
-        let flat = estimate_flat_size(&repo);
         let session = Arc::new(SessionStats::new());
+        let flat = estimate_flat_size(&repo);
         session
             .total_graph_size_chars
             .store(flat as u64, Ordering::Relaxed);
 
+        Self {
+            repo,
+            session,
+            tool_router: Self::tool_router(),
+        }
+    }
+
+    pub fn from_parts(repo: Arc<Repository>, session: Arc<SessionStats>) -> Self {
         Self {
             repo,
             session,
