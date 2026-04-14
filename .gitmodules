@@ -1,3 +1,3 @@
 [submodule "engine"]
 	path = engine
-	url = git@github.com-nosql:agentstatelabs/agentstategraph.git
+	url = https://github.com/agentstatelabs/agentstategraph.git
