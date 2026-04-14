@@ -156,13 +156,16 @@ Open the command palette → "MCP: List Servers". `ctxone` should appear.
 
 ### Install scope
 
-Codex uses TOML configuration in `~/.codex/config.toml`. `ctx init`
-currently **does not** write Codex configs automatically — it prints a
-manual instruction. This is a known gap tracked for a future release.
+Codex uses TOML configuration in `~/.codex/config.toml`. `ctx init` writes
+the `[mcp_servers.ctxone]` entry automatically, merging with any existing
+settings (project trust level, other MCP servers like linear or figma)
+without clobbering them.
 
-### Manual setup
+```bash
+ctx init --tool codex
+```
 
-Add to `~/.codex/config.toml`:
+### What gets written
 
 ```toml
 [mcp_servers.ctxone]
@@ -170,12 +173,95 @@ command = "/Users/user/.local/bin/ctxone-hub"
 args = ["--path", "/Users/user/.ctxone/memory.db"]
 ```
 
-Codex will pick up the config on next launch.
+Codex picks up the config on next launch.
 
 ### Verifying
 
 Run `codex` and check the MCP server list (command varies by Codex
 version).
+
+---
+
+## Gemini CLI (Google)
+
+### Install scope
+
+Gemini CLI stores settings in `~/.gemini/settings.json`. The MCP server
+section uses the same `mcpServers` JSON format as Claude Code.
+
+```bash
+# Project-level
+ctx init --tool gemini
+
+# User-level (recommended for a tool you use across projects)
+ctx init --global --tool gemini
+```
+
+`ctx init` merges into the existing file, preserving `theme`, `model`,
+and any other settings plus any pre-existing `mcpServers` entries.
+
+### Verifying
+
+Start a Gemini session and check the MCP server list from the CLI's
+built-in diagnostics. The ctxone entry should appear with `command`
+pointing at your `ctxone-hub` binary.
+
+---
+
+## Grok CLI (xAI)
+
+### Install scope
+
+Grok CLI (`superagent-ai/grok-cli`) uses `.grok/settings.json` with an
+`mcpServers` object — the same JSON shape as Claude Code and Gemini.
+
+```bash
+# Project-level
+ctx init --tool grok
+
+# User-level
+ctx init --global --tool grok
+```
+
+### Verifying
+
+Inside the Grok TUI, type `/mcps` to list configured MCP servers. The
+`ctxone` entry should appear, and Grok will spawn the Hub on session
+start.
+
+---
+
+## Generic fallback — any other MCP client
+
+If you're using an MCP client that `ctx init` doesn't know about yet,
+use `--config-path` to write a standard `mcpServers` JSON config to any
+location:
+
+```bash
+ctx init --config-path ~/.myeditor/mcp.json
+ctx init --config-path .vscode/mcp.json   # also works for VS Code Copilot
+```
+
+`ctx init` writes the same JSON shape every supported tool uses:
+
+```json
+{
+  "mcpServers": {
+    "ctxone": {
+      "command": "/Users/user/.local/bin/ctxone-hub",
+      "args": ["--path", "/Users/user/.ctxone/memory.db"]
+    }
+  }
+}
+```
+
+If the target file already exists, `ctx init` merges into it — your
+other MCP servers are preserved.
+
+Use this when:
+- A new MCP client ships before `ctx init` learns about it
+- You have a custom tool or in-house editor that speaks MCP
+- You want to write to a non-standard path for your team's conventions
 
 ---
 

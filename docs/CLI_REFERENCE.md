@@ -276,11 +276,23 @@ Auto-detect installed AI tools and write CtxOne into their MCP configs.
 USAGE: ctx init [OPTIONS]
 
 OPTIONS:
-      --global           User-level config instead of project-only
-      --project          Project-only (default)
-      --tool <NAME>      Target a specific tool: claude, cursor, vscode, codex
-      --dry-run          Show what would be written without writing
+      --global               User-level config instead of project-only
+      --project              Project-only (default)
+      --tool <NAME>          Target a specific tool: claude, cursor, vscode,
+                             codex, gemini, grok
+      --config-path <PATH>   Write MCP JSON to an arbitrary file — for MCP
+                             clients ctx init doesn't know about yet
+      --dry-run              Show what would be written without writing
 ```
+
+**Supported tools** (auto-detection + auto-configuration):
+Claude Code, Claude Desktop, Cursor, VS Code (Copilot MCP), Codex,
+Gemini CLI, Grok CLI.
+
+**Generic fallback:** use `--config-path` for any MCP client that
+`ctx init` doesn't directly support. It writes the standard
+`mcpServers` JSON shape to any path you specify, merging with any
+existing file.
 
 ### `ctx completion <shell>`
 

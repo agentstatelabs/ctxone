@@ -356,9 +356,14 @@ enum Commands {
         /// Install for current project only (default)
         #[arg(long)]
         project: bool,
-        /// Target a specific tool: claude, cursor, vscode, codex, gemini
+        /// Target a specific tool: claude, cursor, vscode, codex, gemini, grok
         #[arg(long)]
         tool: Option<String>,
+        /// Write to an arbitrary MCP config file (JSON, with an mcpServers object).
+        /// Used for MCP clients not yet directly supported by ctx init.
+        /// Example: ctx init --config-path ~/.myeditor/mcp.json
+        #[arg(long)]
+        config_path: Option<String>,
         /// Show what would be written without writing
         #[arg(long)]
         dry_run: bool,
@@ -1197,9 +1202,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             global,
             project: _,
             tool,
+            config_path,
             dry_run,
         } => {
-            init_mcp(global, tool, dry_run)?;
+            init_mcp(global, tool, config_path, dry_run)?;
         }
     }
 
@@ -1344,6 +1350,22 @@ fn detect_tools(global: bool) -> Vec<AiTool> {
         name: "Gemini",
         detected: gemini_dir.exists(),
         config_path: gemini_path,
+        config_type: ConfigType::McpJson,
+    });
+
+    // Grok CLI (xAI / superagent-ai/grok-cli)
+    // Settings live in ~/.grok/settings.json with an mcpServers object
+    // (same JSON shape as Claude / Gemini / Cursor).
+    let grok_dir = PathBuf::from(format!("{}/.grok", home));
+    let grok_path = if global {
+        grok_dir.join("settings.json")
+    } else {
+        cwd.join(".grok/settings.json")
+    };
+    tools.push(AiTool {
+        name: "Grok",
+        detected: grok_dir.exists(),
+        config_path: grok_path,
         config_type: ConfigType::McpJson,
     });
 
@@ -2033,9 +2055,30 @@ fn handle_config(
 fn init_mcp(
     global: bool,
     tool_filter: Option<String>,
+    generic_config_path: Option<String>,
     dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let tools = detect_tools(global);
+    let mut tools = detect_tools(global);
+
+    // Generic fallback: if the user passed --config-path, add a synthetic
+    // tool entry pointing at that path. Treated as McpJson (the de-facto
+    // standard for MCP client config files).
+    if let Some(path_str) = generic_config_path.as_deref() {
+        tools.push(AiTool {
+            name: "Generic",
+            detected: true,
+            config_path: PathBuf::from(path_str),
+            config_type: ConfigType::McpJson,
+        });
+    }
+
+    // If --config-path was supplied without --tool, narrow the filter to
+    // just the Generic entry so we don't also install into every detected
+    // tool by accident.
+    let effective_filter = match (&tool_filter, &generic_config_path) {
+        (None, Some(_)) => Some("Generic".to_string()),
+        _ => tool_filter.clone(),
+    };
 
     println!("Detected AI tools:");
     for t in &tools {
@@ -2051,7 +2094,7 @@ fn init_mcp(
     let targets: Vec<&AiTool> = tools
         .iter()
         .filter(|t| {
-            if let Some(f) = tool_filter.as_ref() {
+            if let Some(f) = effective_filter.as_ref() {
                 t.name.to_lowercase().contains(&f.to_lowercase())
             } else {
                 t.detected
