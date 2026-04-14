@@ -306,6 +306,51 @@ struct RecallQuery {
     budget: Option<usize>,
 }
 
+/// Collect pinned memories (title+body pairs) as ready-to-return entries.
+/// Groups by section path (everything above /body or /title) so each section is one entry.
+fn collect_pinned(repo: &Repository) -> Vec<(String, String, String)> {
+    let paths = match repo.list_paths("main", "/memory/pinned", Some(20)) {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+
+    // Group by section (strip trailing /title or /body)
+    let mut sections: std::collections::BTreeMap<String, (Option<String>, Option<String>)> =
+        std::collections::BTreeMap::new();
+
+    for path in &paths {
+        let (section_path, field) = if let Some(stripped) = path.strip_suffix("/title") {
+            (stripped.to_string(), "title")
+        } else if let Some(stripped) = path.strip_suffix("/body") {
+            (stripped.to_string(), "body")
+        } else {
+            continue;
+        };
+
+        let Ok(value) = repo.get_json("main", path) else {
+            continue;
+        };
+        let Some(text) = value.as_str() else {
+            continue;
+        };
+
+        let entry = sections.entry(section_path).or_insert((None, None));
+        match field {
+            "title" => entry.0 = Some(text.to_string()),
+            "body" => entry.1 = Some(text.to_string()),
+            _ => {}
+        }
+    }
+
+    sections
+        .into_iter()
+        .filter_map(|(path, (title, body))| match (title, body) {
+            (Some(t), Some(b)) => Some((path, t, b)),
+            _ => None,
+        })
+        .collect()
+}
+
 async fn recall(
     State(s): State<HubState>,
     Query(q): Query<RecallQuery>,
@@ -313,20 +358,60 @@ async fn recall(
     let budget = q.budget.unwrap_or(1500);
     let budget_chars = budget * 4;
 
-    let results = s
+    let mut out = Vec::new();
+    let mut total = 0usize;
+    let mut seen_paths = std::collections::HashSet::new();
+
+    // 1. Always include pinned memories first (up to half the budget, so we leave room for topic matches)
+    let pinned = collect_pinned(&s.repo);
+    let pinned_count = pinned.len();
+    let pinned_budget = budget_chars / 2;
+    let mut pinned_total = 0usize;
+    for (path, title, body) in &pinned {
+        let entry_size = path.len() + title.len() + body.len() + 30;
+        if pinned_total + entry_size > pinned_budget && !out.is_empty() {
+            break;
+        }
+        out.push(serde_json::json!({
+            "path": path,
+            "title": title,
+            "body": body,
+            "pinned": true,
+        }));
+        seen_paths.insert(path.clone());
+        pinned_total += entry_size;
+        total += entry_size;
+    }
+
+    // 2. Topic search results for whatever budget remains
+    let search_results = s
         .repo
         .search_values("main", &q.topic, Some(50))
         .map_err(internal_error)?;
 
-    let mut out = Vec::new();
-    let mut total = 0usize;
-    for (path, value) in &results {
+    let mut topic_matches = 0usize;
+    for (path, value) in &search_results {
+        // Skip fields that belong to a pinned section we already added
+        let section_path = path
+            .strip_suffix("/title")
+            .or_else(|| path.strip_suffix("/body"))
+            .map(String::from)
+            .unwrap_or_else(|| path.clone());
+        if seen_paths.contains(&section_path) {
+            continue;
+        }
+
         let entry_size = path.len() + value.len() + 10;
         if total + entry_size > budget_chars {
             break;
         }
-        out.push(serde_json::json!({ "path": path, "value": value }));
+        out.push(serde_json::json!({
+            "path": path,
+            "value": value,
+            "pinned": false,
+        }));
         total += entry_size;
+        topic_matches += 1;
     }
 
     let flat_size = s.session.total_graph_size_chars.load(Ordering::Relaxed) as usize;
@@ -334,6 +419,8 @@ async fn recall(
 
     Ok(Json(serde_json::json!({
         "results": out,
+        "pinned_count": pinned_count,
+        "topic_matches": topic_matches,
         "ctx_tokens_sent": total / 4,
         "ctx_tokens_estimated_flat": flat_size / 4,
         "ctx_savings_ratio": if total > 0 { flat_size as f64 / total as f64 } else { 0.0 },

@@ -149,12 +149,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if results.is_empty() {
                     println!("No memories found for '{}'", topic);
                 } else {
+                    let mut printed_divider = false;
                     for r in results {
+                        let is_pinned = r.get("pinned").and_then(|v| v.as_bool()).unwrap_or(false);
                         let path = r.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                        let value = r.get("value").and_then(|v| v.as_str()).unwrap_or("");
-                        println!("{}", value);
-                        println!("  ({})", path);
+
+                        if is_pinned {
+                            let title = r.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                            let body = r.get("body").and_then(|v| v.as_str()).unwrap_or("");
+                            println!("[PINNED] {}", title);
+                            for line in body.lines().take(3) {
+                                println!("  {}", line);
+                            }
+                            if body.lines().count() > 3 {
+                                println!("  ...");
+                            }
+                        } else {
+                            if !printed_divider {
+                                println!("\n--- topic matches ---");
+                                printed_divider = true;
+                            }
+                            let value = r.get("value").and_then(|v| v.as_str()).unwrap_or("");
+                            println!("{}", value);
+                            println!("  ({})", path);
+                        }
                     }
+
+                    let pinned_count = parsed
+                        .get("pinned_count")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let topic_matches = parsed
+                        .get("topic_matches")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
                     let sent = parsed
                         .get("ctx_tokens_sent")
                         .and_then(|v| v.as_u64())
@@ -168,8 +196,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .and_then(|v| v.as_f64())
                         .unwrap_or(0.0);
                     println!(
-                        "\n{} tokens sent (flat would be ~{}, {:.1}x savings)",
-                        sent, flat, ratio
+                        "\n{} pinned + {} topic matches, {} tokens sent (flat would be ~{}, {:.1}x savings)",
+                        pinned_count, topic_matches, sent, flat, ratio
                     );
                 }
             } else {
