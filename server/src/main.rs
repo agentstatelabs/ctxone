@@ -77,10 +77,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("  --http                HTTP REST API server");
                 eprintln!();
                 eprintln!("OPTIONS:");
-                eprintln!("  -s, --storage <TYPE>  Storage backend: sqlite (default), memory, or postgres");
+                eprintln!(
+                    "  -s, --storage <TYPE>  Storage backend: sqlite (default), memory, or postgres"
+                );
                 eprintln!("  -p, --path <PATH>     SQLite database path (default: ./ctxone.db)");
                 eprintln!("      --database-url <URL>  Postgres connection URL");
-                eprintln!("      --tenant <ID>     Tenant ID for multi-tenant Postgres (default: \"default\")");
+                eprintln!(
+                    "      --tenant <ID>     Tenant ID for multi-tenant Postgres (default: \"default\")"
+                );
                 eprintln!("      --port <PORT>     HTTP port (default: 3001, requires --http)");
                 eprintln!("  -h, --help            Print help");
                 eprintln!();
@@ -101,12 +105,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("CtxOne Hub v{}", env!("CARGO_PKG_VERSION"));
 
     // Check for DATABASE_URL env var as fallback for postgres
-    if database_url.is_empty() {
-        if let Ok(url) = std::env::var("DATABASE_URL") {
-            database_url = url;
-            if storage_type == "sqlite" {
-                storage_type = "postgres";
-            }
+    if database_url.is_empty()
+        && let Ok(url) = std::env::var("DATABASE_URL")
+    {
+        database_url = url;
+        if storage_type == "sqlite" {
+            storage_type = "postgres";
         }
     }
 
@@ -162,7 +166,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })?;
     } else {
         eprintln!("MCP server waiting for client on stdio...");
-        eprintln!("Tools: remember, recall, context, summarize_session, what_changed_since, why_did_we");
+        eprintln!(
+            "Tools: remember, recall, context, summarize_session, what_changed_since, why_did_we"
+        );
 
         tokio::runtime::Builder::new_current_thread()
             .enable_all()

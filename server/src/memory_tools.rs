@@ -45,9 +45,12 @@ impl SessionStats {
     pub fn record(&self, sent_chars: usize, flat_chars: usize) {
         let sent_tokens = sent_chars / 4;
         let flat_tokens = flat_chars / 4;
-        self.tokens_sent.fetch_add(sent_tokens as u64, Ordering::Relaxed);
-        self.tokens_saved
-            .fetch_add(flat_tokens.saturating_sub(sent_tokens) as u64, Ordering::Relaxed);
+        self.tokens_sent
+            .fetch_add(sent_tokens as u64, Ordering::Relaxed);
+        self.tokens_saved.fetch_add(
+            flat_tokens.saturating_sub(sent_tokens) as u64,
+            Ordering::Relaxed,
+        );
     }
 }
 
@@ -159,6 +162,7 @@ fn timestamp_id() -> String {
 pub struct CtxOneServer {
     pub repo: Arc<Repository>,
     pub session: Arc<SessionStats>,
+    #[allow(dead_code)] // used by rmcp tool_router macro
     tool_router: ToolRouter<Self>,
 }
 
@@ -178,14 +182,6 @@ impl CtxOneServer {
         }
     }
 
-    pub fn from_parts(repo: Arc<Repository>, session: Arc<SessionStats>) -> Self {
-        Self {
-            repo,
-            session,
-            tool_router: Self::tool_router(),
-        }
-    }
-
     #[tool(
         description = "Store a fact, preference, or decision in agent memory. Facts are searchable and carry confidence scores based on importance."
     )]
@@ -197,7 +193,11 @@ impl CtxOneServer {
         };
 
         let confidence = importance_to_confidence(&p.importance);
-        let mut opts = CommitOptions::new("ctxone", IntentCategory::Custom("Observe".to_string()), &p.fact);
+        let mut opts = CommitOptions::new(
+            "ctxone",
+            IntentCategory::Custom("Observe".to_string()),
+            &p.fact,
+        );
         opts = opts.with_confidence(confidence);
         if let Some(tags) = p.tags {
             opts = opts.with_tags(tags);
@@ -224,10 +224,7 @@ impl CtxOneServer {
     )]
     async fn recall(&self, params: Parameters<RecallParams>) -> String {
         let p = params.0;
-        let flat_size = self
-            .session
-            .total_graph_size_chars
-            .load(Ordering::Relaxed) as usize;
+        let flat_size = self.session.total_graph_size_chars.load(Ordering::Relaxed) as usize;
 
         // Search values for the topic
         let max_results = 50;
@@ -258,10 +255,7 @@ impl CtxOneServer {
     )]
     async fn context(&self, params: Parameters<ContextParams>) -> String {
         let p = params.0;
-        let flat_size = self
-            .session
-            .total_graph_size_chars
-            .load(Ordering::Relaxed) as usize;
+        let flat_size = self.session.total_graph_size_chars.load(Ordering::Relaxed) as usize;
 
         let path = format!("/memory/projects/{}", p.project);
         match self.repo.get_json("main", &path) {
@@ -285,7 +279,7 @@ impl CtxOneServer {
         let summary_opts = CommitOptions::new(
             "ctxone",
             IntentCategory::Checkpoint,
-            &format!("Session {} summary", p.session_id),
+            format!("Session {} summary", p.session_id),
         )
         .with_confidence(0.9);
 
@@ -303,7 +297,7 @@ impl CtxOneServer {
             let decisions_opts = CommitOptions::new(
                 "ctxone",
                 IntentCategory::Checkpoint,
-                &format!("Session {} decisions", p.session_id),
+                format!("Session {} decisions", p.session_id),
             )
             .with_confidence(0.95);
 
@@ -320,7 +314,7 @@ impl CtxOneServer {
         let details_opts = CommitOptions::new(
             "ctxone",
             IntentCategory::Custom("Observe".to_string()),
-            &format!("Session {} details", p.session_id),
+            format!("Session {} details", p.session_id),
         );
         let _ = self.repo.set_json(
             "main",
@@ -348,10 +342,7 @@ impl CtxOneServer {
     )]
     async fn what_changed_since(&self, params: Parameters<WhatChangedSinceParams>) -> String {
         let p = params.0;
-        let flat_size = self
-            .session
-            .total_graph_size_chars
-            .load(Ordering::Relaxed) as usize;
+        let flat_size = self.session.total_graph_size_chars.load(Ordering::Relaxed) as usize;
 
         // Get recent log and filter by date
         match self.repo.log("main", 100) {
@@ -385,10 +376,7 @@ impl CtxOneServer {
     )]
     async fn why_did_we(&self, params: Parameters<WhyDidWeParams>) -> String {
         let p = params.0;
-        let flat_size = self
-            .session
-            .total_graph_size_chars
-            .load(Ordering::Relaxed) as usize;
+        let flat_size = self.session.total_graph_size_chars.load(Ordering::Relaxed) as usize;
 
         // Search for the decision
         match self.repo.search_values("main", &p.decision, Some(5)) {
@@ -403,10 +391,11 @@ impl CtxOneServer {
                     // Get blame for this path
                     match self.repo.blame("main", path) {
                         Ok(blame) => {
-                            output.push_str(&format!(
-                                "{}",
-                                serde_json::to_string_pretty(&blame).unwrap_or_default()
-                            ));
+                            output.push_str(
+                                &serde_json::to_string_pretty(&blame)
+                                    .unwrap_or_default()
+                                    .to_string(),
+                            );
                         }
                         Err(e) => {
                             output.push_str(&format!("  (blame unavailable: {})\n", e));

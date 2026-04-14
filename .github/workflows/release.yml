@@ -1,0 +1,151 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g., v0.1.0)'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "[target.aarch64-unknown-linux-gnu]" >> ~/.cargo/config.toml
+          echo 'linker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml
+
+      - name: Build ctx + ctxone-hub
+        run: |
+          cargo build --release -p ctx -p ctxone-hub --target ${{ matrix.target }}
+
+      - name: Package binaries
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          ARCHIVE_NAME="ctxone-${TAG}-${{ matrix.target }}"
+          mkdir -p "${ARCHIVE_NAME}"
+          cp "target/${{ matrix.target }}/release/ctx" "${ARCHIVE_NAME}/"
+          cp "target/${{ matrix.target }}/release/ctxone-hub" "${ARCHIVE_NAME}/"
+          cp LICENSE LICENSING.md README.md "${ARCHIVE_NAME}/"
+          tar czf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
+          echo "ARCHIVE=${ARCHIVE_NAME}.tar.gz" >> $GITHUB_ENV
+
+          # Also upload bare binaries for the install.sh script
+          cp "target/${{ matrix.target }}/release/ctx" "ctx-${{ matrix.target }}"
+          cp "target/${{ matrix.target }}/release/ctxone-hub" "ctxone-hub-${{ matrix.target }}"
+
+      - name: Upload archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-${{ matrix.target }}
+          path: ${{ env.ARCHIVE }}
+
+      - name: Upload bare binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.target }}
+          path: |
+            ctx-${{ matrix.target }}
+            ctxone-hub-${{ matrix.target }}
+
+  release:
+    name: Create Release
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts
+        run: |
+          mkdir -p release-files
+          find artifacts -type f \( -name '*.tar.gz' -o -name 'ctx-*' -o -name 'ctxone-hub-*' \) -exec cp {} release-files/ \;
+          ls -la release-files/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: CtxOne ${{ github.event.inputs.tag || github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.event.inputs.tag || github.ref_name, 'beta') || contains(github.event.inputs.tag || github.ref_name, 'alpha') }}
+          generate_release_notes: true
+          files: release-files/*
+          body: |
+            ## Install
+
+            One-liner:
+            ```bash
+            curl -sSL https://raw.githubusercontent.com/ctxone/ctxone/main/install.sh | sh
+            ```
+
+            Or download a tarball for your platform:
+
+            ```bash
+            # macOS (Apple Silicon)
+            tar xzf ctxone-*-aarch64-apple-darwin.tar.gz
+
+            # macOS (Intel)
+            tar xzf ctxone-*-x86_64-apple-darwin.tar.gz
+
+            # Linux (x86_64)
+            tar xzf ctxone-*-x86_64-unknown-linux-gnu.tar.gz
+
+            # Linux (ARM64)
+            tar xzf ctxone-*-aarch64-unknown-linux-gnu.tar.gz
+            ```
+
+            ## Quick start
+
+            ```bash
+            ctx init                    # Auto-configure your AI tools
+            ctx serve --http            # Start the Hub
+            ctx remember "..."          # Store a fact
+            ctx recall "..."            # See real token savings
+            ```
+
+            See [README](https://github.com/ctxone/ctxone#readme) for more.

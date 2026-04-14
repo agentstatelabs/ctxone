@@ -379,7 +379,7 @@ async fn summarize_session(
     let summary_opts = CommitOptions::new(
         "ctxone",
         IntentCategory::Checkpoint,
-        &format!("Session {} summary", req.session_id),
+        format!("Session {} summary", req.session_id),
     )
     .with_confidence(0.9);
 
@@ -398,7 +398,7 @@ async fn summarize_session(
         let decisions_opts = CommitOptions::new(
             "ctxone",
             IntentCategory::Checkpoint,
-            &format!("Session {} decisions", req.session_id),
+            format!("Session {} decisions", req.session_id),
         )
         .with_confidence(0.95);
 

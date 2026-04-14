@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Only check our own crates — engine is a submodule with its own CI
+      - name: Format check
+        run: cargo fmt --package ctx --package ctxone-hub -- --check
+
+      - name: Clippy
+        run: cargo clippy -p ctx -p ctxone-hub --no-deps -- -D warnings
+
+      - name: Build
+        run: cargo build -p ctx -p ctxone-hub --verbose
+
+      - name: Test
+        run: cargo test -p ctx -p ctxone-hub --verbose
+
+  web:
+    name: Lens (SvelteKit)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Type check
+        run: npm run check
+
+      - name: Build
+        run: npm run build

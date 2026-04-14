@@ -190,62 +190,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(resp) if resp.status().is_success() => {
                     println!("connected ({})", cli.server);
 
-                    if let Ok(r) = reqwest::get(format!("{}/api/stats/tokens", cli.server)).await {
-                        if let Ok(parsed) = r.json::<serde_json::Value>().await {
-                            let used = parsed
-                                .get("session_tokens_used")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0);
-                            let saved = parsed
-                                .get("session_tokens_saved")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0);
-                            let ratio = parsed
-                                .get("cumulative_ratio")
-                                .and_then(|v| v.as_f64())
-                                .unwrap_or(0.0);
-                            println!(
-                                "Session: {} tokens used, {} saved ({:.1}x)",
-                                used, saved, ratio
-                            );
-                        }
+                    if let Ok(r) = reqwest::get(format!("{}/api/stats/tokens", cli.server)).await
+                        && let Ok(parsed) = r.json::<serde_json::Value>().await
+                    {
+                        let used = parsed
+                            .get("session_tokens_used")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let saved = parsed
+                            .get("session_tokens_saved")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let ratio = parsed
+                            .get("cumulative_ratio")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0);
+                        println!(
+                            "Session: {} tokens used, {} saved ({:.1}x)",
+                            used, saved, ratio
+                        );
                     }
                 }
                 Ok(resp) => println!("error {} ({})", resp.status(), cli.server),
                 Err(_) => println!("unreachable ({})", cli.server),
             }
         }
-        Commands::Stats => {
-            match reqwest::get(format!("{}/api/stats/tokens", cli.server)).await {
-                Ok(resp) if resp.status().is_success() => {
-                    let parsed: serde_json::Value = resp.json().await?;
-                    let used = parsed
-                        .get("session_tokens_used")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    let saved = parsed
-                        .get("session_tokens_saved")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    let graph_tokens = parsed
-                        .get("total_graph_size_tokens")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    let ratio = parsed
-                        .get("cumulative_ratio")
-                        .and_then(|v| v.as_f64())
-                        .unwrap_or(0.0);
+        Commands::Stats => match reqwest::get(format!("{}/api/stats/tokens", cli.server)).await {
+            Ok(resp) if resp.status().is_success() => {
+                let parsed: serde_json::Value = resp.json().await?;
+                let used = parsed
+                    .get("session_tokens_used")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let saved = parsed
+                    .get("session_tokens_saved")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let graph_tokens = parsed
+                    .get("total_graph_size_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let ratio = parsed
+                    .get("cumulative_ratio")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
 
-                    println!("CtxOne Token Savings");
-                    println!("  graph size:   {} tokens", graph_tokens);
-                    println!("  tokens sent:  {}", used);
-                    println!("  tokens saved: {}", saved);
-                    println!("  savings:      {:.1}x", ratio);
-                }
-                Ok(_) => println!("Token stats not available."),
-                Err(_) => eprintln!("Hub unreachable ({})", cli.server),
+                println!("CtxOne Token Savings");
+                println!("  graph size:   {} tokens", graph_tokens);
+                println!("  tokens sent:  {}", used);
+                println!("  tokens saved: {}", saved);
+                println!("  savings:      {:.1}x", ratio);
             }
-        }
+            Ok(_) => println!("Token stats not available."),
+            Err(_) => eprintln!("Hub unreachable ({})", cli.server),
+        },
         Commands::Serve {
             port,
             storage,
@@ -263,9 +261,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             args.extend(["--path".to_string(), path]);
 
             println!("Starting CtxOne Hub on port {}...", port);
-            let status = std::process::Command::new(&hub_bin)
-                .args(&args)
-                .status()?;
+            let status = std::process::Command::new(&hub_bin).args(&args).status()?;
             std::process::exit(status.code().unwrap_or(1));
         }
         Commands::Init {
@@ -388,11 +384,8 @@ fn detect_tools(global: bool) -> Vec<AiTool> {
     } else {
         cwd.join(".vscode/mcp.json")
     };
-    let vscode_detected = PathBuf::from(format!(
-        "{}/Library/Application Support/Code",
-        home
-    ))
-    .exists();
+    let vscode_detected =
+        PathBuf::from(format!("{}/Library/Application Support/Code", home)).exists();
     tools.push(AiTool {
         name: "VS Code",
         detected: vscode_detected,
@@ -420,7 +413,11 @@ fn mcp_server_entry() -> Value {
     })
 }
 
-fn init_mcp(global: bool, tool_filter: Option<String>, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn init_mcp(
+    global: bool,
+    tool_filter: Option<String>,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let tools = detect_tools(global);
 
     println!("Detected AI tools:");
@@ -436,7 +433,7 @@ fn init_mcp(global: bool, tool_filter: Option<String>, dry_run: bool) -> Result<
         .filter(|t| {
             tool_filter
                 .as_ref()
-                .map_or(true, |f| t.name.to_lowercase().contains(&f.to_lowercase()))
+                .is_none_or(|f| t.name.to_lowercase().contains(&f.to_lowercase()))
         })
         .collect();
 
@@ -469,14 +466,22 @@ fn init_mcp(global: bool, tool_filter: Option<String>, dry_run: bool) -> Result<
                 let pretty = serde_json::to_string_pretty(&config)?;
 
                 if dry_run {
-                    println!("  [dry-run] {}: would write {}", t.name, t.config_path.display());
+                    println!(
+                        "  [dry-run] {}: would write {}",
+                        t.name,
+                        t.config_path.display()
+                    );
                     println!("  {}", pretty);
                 } else {
                     if let Some(parent) = t.config_path.parent() {
                         std::fs::create_dir_all(parent)?;
                     }
                     std::fs::write(&t.config_path, pretty)?;
-                    println!("  \u{2192} {}: wrote {} \u{2713}", t.name, t.config_path.display());
+                    println!(
+                        "  \u{2192} {}: wrote {} \u{2713}",
+                        t.name,
+                        t.config_path.display()
+                    );
                 }
             }
             ConfigType::Toml => {
