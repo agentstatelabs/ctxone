@@ -1886,6 +1886,50 @@ fn mcp_server_entry() -> Value {
     })
 }
 
+/// Merge a `[mcp_servers.ctxone]` entry into an existing Codex TOML config.
+///
+/// Preserves all existing keys and sections. If the ctxone entry already
+/// exists, it's overwritten with the new command and args. Other mcp_servers
+/// entries (linear, figma, etc.) are left untouched.
+///
+/// Returns the serialized TOML ready to write.
+fn merge_codex_ctxone_toml(existing: &str, hub_bin: &str, db_path: &str) -> Result<String, String> {
+    use toml::Value;
+
+    // Parse existing content (or start with an empty table)
+    let mut doc: Value = if existing.trim().is_empty() {
+        Value::Table(toml::map::Map::new())
+    } else {
+        toml::from_str(existing).map_err(|e| format!("invalid existing TOML: {}", e))?
+    };
+
+    // Ensure mcp_servers is a table
+    let root = doc
+        .as_table_mut()
+        .ok_or_else(|| "config root is not a table".to_string())?;
+
+    let servers = root
+        .entry("mcp_servers".to_string())
+        .or_insert_with(|| Value::Table(toml::map::Map::new()))
+        .as_table_mut()
+        .ok_or_else(|| "mcp_servers is not a table".to_string())?;
+
+    // Build the ctxone entry
+    let mut ctxone = toml::map::Map::new();
+    ctxone.insert("command".to_string(), Value::String(hub_bin.to_string()));
+    ctxone.insert(
+        "args".to_string(),
+        Value::Array(vec![
+            Value::String("--path".to_string()),
+            Value::String(db_path.to_string()),
+        ]),
+    );
+
+    servers.insert("ctxone".to_string(), Value::Table(ctxone));
+
+    toml::to_string_pretty(&doc).map_err(|e| format!("serialize failed: {}", e))
+}
+
 fn handle_config(
     action: ConfigAction,
     format: OutputFormat,
@@ -1984,13 +2028,18 @@ fn init_mcp(
     }
     println!();
 
+    // When the user asks for a specific tool by name, skip the "detected"
+    // gate — they know they want it, even if the tool isn't currently
+    // installed. This lets users set up configs ahead of installing a
+    // tool, and avoids the "why isn't my --tool codex working" footgun.
     let targets: Vec<&AiTool> = tools
         .iter()
-        .filter(|t| t.detected)
         .filter(|t| {
-            tool_filter
-                .as_ref()
-                .is_none_or(|f| t.name.to_lowercase().contains(&f.to_lowercase()))
+            if let Some(f) = tool_filter.as_ref() {
+                t.name.to_lowercase().contains(&f.to_lowercase())
+            } else {
+                t.detected
+            }
         })
         .collect();
 
@@ -2042,16 +2091,44 @@ fn init_mcp(
                 }
             }
             ConfigType::Toml => {
+                let hub_bin = find_hub_binary();
+                let db_path = canonical_db_path();
+                if let Some(parent) = std::path::Path::new(&db_path).parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+
+                let existing = if t.config_path.exists() {
+                    std::fs::read_to_string(&t.config_path).unwrap_or_default()
+                } else {
+                    String::new()
+                };
+
+                let new_content = match merge_codex_ctxone_toml(&existing, &hub_bin, &db_path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("  \u{2717} {}: could not merge TOML config: {}", t.name, e);
+                        continue;
+                    }
+                };
+
                 if dry_run {
                     println!(
-                        "  [dry-run] {}: would configure MCP in {}",
+                        "  [dry-run] {}: would write {}",
                         t.name,
                         t.config_path.display()
                     );
+                    for line in new_content.lines() {
+                        println!("    {}", line);
+                    }
                 } else {
+                    if let Some(parent) = t.config_path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::write(&t.config_path, new_content)?;
                     println!(
-                        "  \u{2192} {}: TOML config not yet supported, configure manually",
-                        t.name
+                        "  \u{2192} {}: wrote {} \u{2713}",
+                        t.name,
+                        t.config_path.display()
                     );
                 }
             }
@@ -2291,6 +2368,82 @@ mod tests {
 
         let cli = Cli::from_raw(raw, &config);
         assert_eq!(cli.server, "http://flag:3001");
+    }
+
+    // -------- merge_codex_ctxone_toml --------
+
+    #[test]
+    fn codex_merge_creates_entry_in_empty_config() {
+        let out =
+            merge_codex_ctxone_toml("", "/usr/local/bin/ctxone-hub", "/home/user/.ctxone/memory.db")
+                .expect("merge should succeed on empty input");
+        assert!(out.contains("[mcp_servers.ctxone]"));
+        assert!(out.contains("command = \"/usr/local/bin/ctxone-hub\""));
+        assert!(out.contains("--path"));
+        assert!(out.contains("/home/user/.ctxone/memory.db"));
+    }
+
+    #[test]
+    fn codex_merge_preserves_other_mcp_servers() {
+        let existing = r#"
+[mcp_servers.linear]
+command = "wsl"
+args = ["npx", "-y", "mcp-remote", "https://mcp.linear.app/sse"]
+"#;
+        let out = merge_codex_ctxone_toml(existing, "/bin/ctxone-hub", "/db")
+            .expect("merge should succeed");
+        assert!(out.contains("[mcp_servers.linear]"));
+        assert!(out.contains("[mcp_servers.ctxone]"));
+        assert!(out.contains("\"wsl\""));
+        assert!(out.contains("\"npx\""));
+    }
+
+    #[test]
+    fn codex_merge_preserves_top_level_keys() {
+        let existing = r#"
+project_trust_level = "workspace-trusted"
+some_other_setting = 42
+
+[mcp_servers.figma]
+command = "figma-mcp"
+"#;
+        let out = merge_codex_ctxone_toml(existing, "/bin/ctxone-hub", "/db")
+            .expect("merge should succeed");
+        assert!(out.contains("project_trust_level = \"workspace-trusted\""));
+        assert!(out.contains("some_other_setting = 42"));
+        assert!(out.contains("[mcp_servers.figma]"));
+        assert!(out.contains("[mcp_servers.ctxone]"));
+    }
+
+    #[test]
+    fn codex_merge_is_idempotent() {
+        // First merge
+        let first = merge_codex_ctxone_toml("", "/bin/hub", "/db/main.db").expect("first merge");
+        // Second merge on the output of the first
+        let second =
+            merge_codex_ctxone_toml(&first, "/bin/hub", "/db/main.db").expect("second merge");
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn codex_merge_overwrites_stale_ctxone_entry() {
+        let existing = r#"
+[mcp_servers.ctxone]
+command = "/old/path/ctxone-hub"
+args = ["--path", "/old/db"]
+"#;
+        let out = merge_codex_ctxone_toml(existing, "/new/path/ctxone-hub", "/new/db")
+            .expect("merge should succeed");
+        assert!(out.contains("/new/path/ctxone-hub"));
+        assert!(out.contains("/new/db"));
+        assert!(!out.contains("/old/path/ctxone-hub"));
+        assert!(!out.contains("/old/db"));
+    }
+
+    #[test]
+    fn codex_merge_rejects_invalid_toml() {
+        let broken = "this is { not valid toml }}";
+        assert!(merge_codex_ctxone_toml(broken, "/bin/hub", "/db").is_err());
     }
 
     #[test]
