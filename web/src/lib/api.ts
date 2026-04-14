@@ -5,18 +5,20 @@
 const API_BASE = import.meta.env.VITE_CTXONE_API_URL || 'http://localhost:3001';
 
 export interface StatsResponse {
-	total_commits: number;
-	total_paths: number;
-	branches: number;
-	epochs: number;
+	commit_count: number;
+	path_count: number;
+	branch_count: number;
+	epoch_count: number;
+	agents: string[];
+	categories: string[];
 }
 
 export interface TokenStats {
-	ctx_tokens_sent: number;
-	ctx_tokens_estimated_flat: number;
-	ctx_savings_ratio: number;
 	session_tokens_used: number;
 	session_tokens_saved: number;
+	total_graph_size_chars: number;
+	total_graph_size_tokens: number;
+	cumulative_ratio: number;
 }
 
 export interface CommitEntry {
