@@ -1752,3 +1752,129 @@ fn init_mcp(
 
     Ok(())
 }
+
+// -- Tests --
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // -------- urlencoding --------
+
+    #[test]
+    fn urlencoding_escapes_spaces() {
+        assert_eq!(urlencoding("hello world"), "hello%20world");
+    }
+
+    #[test]
+    fn urlencoding_escapes_ampersand_and_question() {
+        assert_eq!(urlencoding("a&b?c"), "a%26b%3Fc");
+    }
+
+    #[test]
+    fn urlencoding_passthrough_safe_chars() {
+        assert_eq!(urlencoding("abc123"), "abc123");
+    }
+
+    // -------- parse_markdown_sections --------
+
+    #[test]
+    fn parse_markdown_sections_h1_split() {
+        let md = "# First\n\nbody of first\n\n# Second\n\nbody of second\n";
+        let sections = parse_markdown_sections(md);
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[0].title, "First");
+        assert_eq!(sections[0].body, "body of first");
+        assert_eq!(sections[1].title, "Second");
+        assert_eq!(sections[1].body, "body of second");
+    }
+
+    #[test]
+    fn parse_markdown_sections_h2_split() {
+        let md = "## One\n\ntext one\n\n## Two\n\ntext two";
+        let sections = parse_markdown_sections(md);
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[0].title, "One");
+        assert_eq!(sections[1].title, "Two");
+    }
+
+    #[test]
+    fn parse_markdown_sections_h3_does_not_split() {
+        // H3 should be treated as body content of the enclosing H1 or H2
+        let md = "# Top\n\nintro\n\n### Sub\n\ndeep content\n";
+        let sections = parse_markdown_sections(md);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].title, "Top");
+        assert!(sections[0].body.contains("intro"));
+        assert!(sections[0].body.contains("### Sub"));
+        assert!(sections[0].body.contains("deep content"));
+    }
+
+    #[test]
+    fn parse_markdown_sections_intro_before_first_heading() {
+        let md = "some preamble\n\nmore preamble\n\n# First\n\nbody\n";
+        let sections = parse_markdown_sections(md);
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[0].title, "Intro");
+        assert_eq!(sections[0].body, "some preamble\n\nmore preamble");
+        assert_eq!(sections[1].title, "First");
+    }
+
+    #[test]
+    fn parse_markdown_sections_empty_body_skipped() {
+        let md = "# Only heading\n";
+        let sections = parse_markdown_sections(md);
+        assert_eq!(sections.len(), 0); // no body → skipped
+    }
+
+    #[test]
+    fn parse_markdown_sections_empty_input() {
+        let sections = parse_markdown_sections("");
+        assert_eq!(sections.len(), 0);
+    }
+
+    // -------- extract_id --------
+
+    #[test]
+    fn extract_id_prefers_name() {
+        let v = json!({ "name": "main", "commit_id": "sg_abc", "id": "xyz" });
+        assert_eq!(extract_id(&v), Some("main"));
+    }
+
+    #[test]
+    fn extract_id_falls_back_to_commit_id() {
+        let v = json!({ "commit_id": "sg_abc", "path": "/foo" });
+        assert_eq!(extract_id(&v), Some("sg_abc"));
+    }
+
+    #[test]
+    fn extract_id_falls_back_to_path() {
+        let v = json!({ "path": "/memory/facts/123" });
+        assert_eq!(extract_id(&v), Some("/memory/facts/123"));
+    }
+
+    #[test]
+    fn extract_id_none_for_empty_object() {
+        let v = json!({});
+        assert_eq!(extract_id(&v), None);
+    }
+
+    #[test]
+    fn extract_id_none_for_array() {
+        let v = json!([1, 2, 3]);
+        assert_eq!(extract_id(&v), None);
+    }
+
+    // -------- canonical_db_path --------
+
+    #[test]
+    fn canonical_db_path_uses_home() {
+        // Set HOME to a known value so the test is deterministic
+        // SAFETY: tests are single-threaded by default in Rust; this is only a concern
+        // if tests are explicitly run with --test-threads that mutate env vars.
+        unsafe { std::env::set_var("HOME", "/tmp/test-home") };
+        let p = canonical_db_path();
+        assert_eq!(p, "/tmp/test-home/.ctxone/memory.db");
+    }
+}

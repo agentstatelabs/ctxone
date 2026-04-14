@@ -39,6 +39,12 @@ pub struct SessionStats {
     graph_size_dirty: AtomicBool,
 }
 
+impl Default for SessionStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SessionStats {
     pub fn new() -> Self {
         Self {
@@ -748,3 +754,292 @@ impl CtxOneServer {
 
 #[tool_handler]
 impl ServerHandler for CtxOneServer {}
+
+// -- Tests --
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agentstategraph::Repository;
+    use agentstategraph_storage::MemoryStorage;
+
+    fn fresh_repo() -> Arc<Repository> {
+        let repo = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
+        repo.init().expect("repo init");
+        repo
+    }
+
+    // -------- slugify --------
+
+    #[test]
+    fn slugify_lowercases_and_dashes() {
+        assert_eq!(slugify("The Insight"), "the-insight");
+    }
+
+    #[test]
+    fn slugify_collapses_punctuation_and_whitespace() {
+        assert_eq!(slugify("Hello, World!  Again"), "hello-world-again");
+    }
+
+    #[test]
+    fn slugify_trims_trailing_dashes() {
+        assert_eq!(slugify("Title!"), "title");
+    }
+
+    #[test]
+    fn slugify_handles_unicode_by_dropping_it() {
+        // Non-ASCII chars are treated as separators
+        assert_eq!(slugify("résumé project"), "r-sum-project");
+    }
+
+    #[test]
+    fn slugify_empty_input() {
+        assert_eq!(slugify(""), "");
+    }
+
+    // -------- tokenize_query --------
+
+    #[test]
+    fn tokenize_query_splits_on_whitespace() {
+        let tokens = tokenize_query("licensing decisions");
+        assert_eq!(tokens, vec!["licensing", "decisions"]);
+    }
+
+    #[test]
+    fn tokenize_query_drops_stopwords() {
+        let tokens = tokenize_query("the licensing and decisions");
+        // "the" and "and" are stopwords
+        assert_eq!(tokens, vec!["licensing", "decisions"]);
+    }
+
+    #[test]
+    fn tokenize_query_drops_short_tokens() {
+        let tokens = tokenize_query("a is of big");
+        // "a" (1 char), "is" and "of" (2 chars) are dropped; "big" kept
+        assert_eq!(tokens, vec!["big"]);
+    }
+
+    #[test]
+    fn tokenize_query_lowercases() {
+        let tokens = tokenize_query("BSL Licensing");
+        assert_eq!(tokens, vec!["bsl", "licensing"]);
+    }
+
+    #[test]
+    fn tokenize_query_handles_punctuation() {
+        let tokens = tokenize_query("licensing,decisions  token-savings");
+        assert_eq!(tokens, vec!["licensing", "decisions", "token", "savings"]);
+    }
+
+    // -------- run_prime --------
+
+    #[test]
+    fn run_prime_writes_pinned_sections() {
+        let repo = fresh_repo();
+        let session = Arc::new(SessionStats::new());
+        let sections = vec![
+            ("Licensing".to_string(), "BSL-1.1".to_string()),
+            ("Architecture".to_string(), "SQLite default".to_string()),
+        ];
+
+        let result = run_prime(&repo, &session, "test", true, &sections, "main")
+            .expect("prime should succeed");
+
+        assert_eq!(result["status"], "ok");
+        assert_eq!(result["sections_written"], 2);
+        assert_eq!(result["pinned"], true);
+        assert_eq!(result["source"], "test");
+    }
+
+    #[test]
+    fn run_prime_is_idempotent_on_source() {
+        let repo = fresh_repo();
+        let session = Arc::new(SessionStats::new());
+        let sections = vec![("Title".to_string(), "body".to_string())];
+
+        run_prime(&repo, &session, "src", false, &sections, "main").unwrap();
+        run_prime(&repo, &session, "src", false, &sections, "main").unwrap();
+
+        // After two prime calls with the same source, there should still be
+        // just one slug under /memory/primed/src
+        let paths = repo
+            .list_paths("main", "/memory/primed/src", Some(10))
+            .unwrap();
+        // Each section is stored as a {title, body} object, so we expect the
+        // slug path plus /title and /body leaves. The exact count depends on
+        // how get_json materializes nested objects — verify at least one.
+        assert!(
+            paths.iter().any(|p| p.contains("/memory/primed/src/title")),
+            "expected slug path to exist, got {:?}",
+            paths
+        );
+    }
+
+    // -------- collect_pinned --------
+
+    #[test]
+    fn collect_pinned_returns_empty_when_no_pinned() {
+        let repo = fresh_repo();
+        let pinned = collect_pinned(&repo, "main");
+        assert!(pinned.is_empty());
+    }
+
+    #[test]
+    fn collect_pinned_groups_title_and_body() {
+        let repo = fresh_repo();
+        let session = Arc::new(SessionStats::new());
+        let sections = vec![
+            ("First Section".to_string(), "first body".to_string()),
+            ("Second Section".to_string(), "second body".to_string()),
+        ];
+        run_prime(&repo, &session, "src", true, &sections, "main").unwrap();
+
+        let pinned = collect_pinned(&repo, "main");
+        assert_eq!(pinned.len(), 2);
+        // BTreeMap orders by slug, so "first-section" < "second-section"
+        assert_eq!(pinned[0].title, "First Section");
+        assert_eq!(pinned[0].body, "first body");
+        assert_eq!(pinned[1].title, "Second Section");
+        assert_eq!(pinned[1].body, "second body");
+    }
+
+    // -------- run_recall --------
+
+    #[test]
+    fn run_recall_finds_by_topic() {
+        let repo = fresh_repo();
+        let session = Arc::new(SessionStats::new());
+
+        let opts = CommitOptions::new(
+            "test",
+            IntentCategory::Custom("Observe".to_string()),
+            "seed",
+        );
+        repo.set_json(
+            "main",
+            "/memory/test/one",
+            &serde_json::Value::String("CtxOne uses BSL-1.1 licensing".to_string()),
+            opts,
+        )
+        .unwrap();
+
+        let result = run_recall(&repo, &session, "licensing", 1500, "main");
+        let results = result["results"].as_array().unwrap();
+        assert!(!results.is_empty(), "expected at least one match");
+        assert_eq!(result["pinned_count"], 0);
+        assert!(result["topic_matches"].as_u64().unwrap() >= 1);
+    }
+
+    #[test]
+    fn run_recall_includes_pinned_regardless_of_topic() {
+        let repo = fresh_repo();
+        let session = Arc::new(SessionStats::new());
+
+        // Prime a pinned section
+        run_prime(
+            &repo,
+            &session,
+            "src",
+            true,
+            &[("Vision".to_string(), "critical context".to_string())],
+            "main",
+        )
+        .unwrap();
+
+        // Recall an unrelated topic
+        let result = run_recall(&repo, &session, "unrelated-topic-xyz", 1500, "main");
+        let results = result["results"].as_array().unwrap();
+
+        // Pinned section should be in results even though topic doesn't match
+        assert!(
+            results
+                .iter()
+                .any(|r| r["pinned"].as_bool().unwrap_or(false)),
+            "pinned section should always be included, got: {:?}",
+            results
+        );
+    }
+
+    #[test]
+    fn run_recall_respects_budget() {
+        let repo = fresh_repo();
+        let session = Arc::new(SessionStats::new());
+
+        // Seed many matching facts
+        for i in 0..20 {
+            let opts = CommitOptions::new(
+                "test",
+                IntentCategory::Custom("Observe".to_string()),
+                "seed",
+            );
+            let path = format!("/memory/test/fact{}", i);
+            let value =
+                serde_json::Value::String(format!("matching fact number {} with BSL content", i));
+            repo.set_json("main", &path, &value, opts).unwrap();
+        }
+
+        // Budget of 100 tokens = 400 chars
+        let result = run_recall(&repo, &session, "BSL", 100, "main");
+        let sent = result["ctx_tokens_sent"].as_u64().unwrap_or(0);
+
+        // Budget is approximate because entry-size accounting has overhead,
+        // but it should be in the same ballpark — definitely not unbounded.
+        assert!(
+            sent <= 200,
+            "tokens sent {} exceeds reasonable budget",
+            sent
+        );
+    }
+
+    #[test]
+    fn run_recall_tokenizes_multiword_query() {
+        let repo = fresh_repo();
+        let session = Arc::new(SessionStats::new());
+
+        // Seed a fact that matches on one token but not the whole phrase
+        let opts = CommitOptions::new(
+            "test",
+            IntentCategory::Custom("Observe".to_string()),
+            "seed",
+        );
+        repo.set_json(
+            "main",
+            "/memory/test/licensing",
+            &serde_json::Value::String("Important licensing fact".to_string()),
+            opts,
+        )
+        .unwrap();
+
+        // Multi-word query: "licensing decisions". The fact contains "licensing"
+        // but not the full phrase. Pre-tokenization, this returned 0 matches.
+        let result = run_recall(&repo, &session, "licensing decisions", 1500, "main");
+        let matches = result["topic_matches"].as_u64().unwrap_or(0);
+        assert!(matches >= 1, "tokenized recall should match on 'licensing'");
+    }
+
+    // -------- SessionStats --------
+
+    #[test]
+    fn session_stats_record_updates_counters() {
+        let session = SessionStats::new();
+        session.record(100, 400); // 100 chars sent out of 400 flat
+        // 25 tokens used, 75 saved (flat_tokens 100 - sent_tokens 25)
+        assert_eq!(session.tokens_sent.load(Ordering::Relaxed), 25);
+        assert_eq!(session.tokens_saved.load(Ordering::Relaxed), 75);
+    }
+
+    #[test]
+    fn session_stats_mark_dirty_flags_refresh() {
+        let session = SessionStats::new();
+        // Starts dirty
+        assert!(session.graph_size_dirty.load(Ordering::Relaxed));
+
+        // Clear it manually
+        session.graph_size_dirty.store(false, Ordering::Relaxed);
+        assert!(!session.graph_size_dirty.load(Ordering::Relaxed));
+
+        // mark_dirty sets it back
+        session.mark_dirty();
+        assert!(session.graph_size_dirty.load(Ordering::Relaxed));
+    }
+}

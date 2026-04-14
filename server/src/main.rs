@@ -7,8 +7,7 @@
 //! Options:                    ctxone-hub --storage memory
 //!                             ctxone-hub --path /data/ctxone.db
 
-mod http;
-mod memory_tools;
+use ctxone_hub::{http, memory_tools};
 
 use std::sync::Arc;
 

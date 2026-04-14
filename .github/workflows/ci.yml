@@ -29,7 +29,7 @@ jobs:
         run: cargo fmt --package ctx --package ctxone-hub -- --check
 
       - name: Clippy
-        run: cargo clippy -p ctx -p ctxone-hub --no-deps -- -D warnings
+        run: cargo clippy -p ctx -p ctxone-hub --no-deps --tests -- -D warnings
 
       - name: Build
         run: cargo build -p ctx -p ctxone-hub --verbose

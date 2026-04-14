@@ -6,9 +6,17 @@ authors.workspace = true
 license.workspace = true
 description = "CtxOne Hub — MCP server for AI agent memory"
 
+[lib]
+name = "ctxone_hub"
+path = "src/lib.rs"
+
 [[bin]]
 name = "ctxone-hub"
 path = "src/main.rs"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
 
 [dependencies]
 agentstategraph = { workspace = true }
