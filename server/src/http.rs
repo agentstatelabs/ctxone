@@ -53,6 +53,8 @@ pub fn router(repo: Arc<Repository>, session: Arc<SessionStats>) -> Router {
         .route("/api/memory/remember", post(remember))
         .route("/api/memory/recall", get(recall))
         .route("/api/memory/context/{project}", get(context))
+        .route("/api/memory/prime", post(prime))
+        .route("/api/memory/pinned", get(list_pinned))
         .route("/api/memory/summarize_session", post(summarize_session))
         .route("/api/memory/what_changed_since", get(what_changed_since))
         .route("/api/memory/why_did_we", get(why_did_we))
@@ -473,4 +475,114 @@ async fn why_did_we(
         "decision": q.decision,
         "traces": traces,
     })))
+}
+
+// -- Prime / pinned context --
+
+#[derive(Deserialize)]
+struct PrimeSection {
+    title: String,
+    body: String,
+}
+
+#[derive(Deserialize)]
+struct PrimeRequest {
+    /// Source name (e.g., "project", "onboarding"). Groups sections together.
+    source: String,
+    /// If true, store under /memory/pinned/ (always loaded by recall).
+    /// Otherwise store under /memory/primed/ (searchable like normal facts).
+    #[serde(default)]
+    pinned: bool,
+    /// Parsed markdown sections.
+    sections: Vec<PrimeSection>,
+}
+
+fn slugify(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_dash = false;
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash && !out.is_empty() {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    out.trim_end_matches('-').to_string()
+}
+
+async fn prime(
+    State(s): State<HubState>,
+    Json(req): Json<PrimeRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let namespace = if req.pinned { "pinned" } else { "primed" };
+    let mut written = Vec::new();
+
+    for section in &req.sections {
+        let slug = slugify(&section.title);
+        if slug.is_empty() {
+            continue;
+        }
+        let path = format!("/memory/{}/{}/{}", namespace, req.source, slug);
+
+        let opts = CommitOptions::new(
+            "ctxone-prime",
+            IntentCategory::Checkpoint,
+            format!("Prime: {}", section.title),
+        )
+        .with_confidence(0.95)
+        .with_tags(vec![
+            namespace.to_string(),
+            req.source.clone(),
+            "prime".to_string(),
+        ]);
+
+        let value = serde_json::json!({
+            "title": section.title,
+            "body": section.body,
+        });
+
+        s.repo
+            .set_json("main", &path, &value, opts)
+            .map_err(internal_error)?;
+
+        written.push(path);
+    }
+
+    // Refresh flat-size estimate
+    if let Ok(val) = s.repo.get_json("main", "/") {
+        let size = serde_json::to_string(&val).unwrap_or_default().len() as u64;
+        s.session
+            .total_graph_size_chars
+            .store(size, Ordering::Relaxed);
+    }
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "source": req.source,
+        "pinned": req.pinned,
+        "sections_written": written.len(),
+        "paths": written,
+    })))
+}
+
+async fn list_pinned(
+    State(s): State<HubState>,
+) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+    let paths = s
+        .repo
+        .list_paths("main", "/memory/pinned", Some(20))
+        .map_err(internal_error)?;
+
+    let mut out = Vec::new();
+    for p in &paths {
+        if let Ok(val) = s.repo.get_json("main", p) {
+            out.push(serde_json::json!({
+                "path": p,
+                "value": val,
+            }));
+        }
+    }
+    Ok(Json(out))
 }

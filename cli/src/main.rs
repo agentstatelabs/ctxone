@@ -61,6 +61,17 @@ enum Commands {
         #[arg(long)]
         http: bool,
     },
+    /// Load a markdown file as primed memory. Use --pin to make it always-included.
+    Prime {
+        /// Path to the markdown file
+        file: String,
+        /// Pin: these memories are always included in recall (critical context)
+        #[arg(long)]
+        pin: bool,
+        /// Source name (defaults to the file stem)
+        #[arg(long)]
+        source: Option<String>,
+    },
     /// Auto-detect and configure AI tools with CtxOne MCP server
     Init {
         /// Install globally (user-level config) vs project-only
@@ -268,6 +279,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let status = std::process::Command::new(&hub_bin).args(&args).status()?;
             std::process::exit(status.code().unwrap_or(1));
         }
+        Commands::Prime { file, pin, source } => {
+            let content = std::fs::read_to_string(&file)?;
+            let sections = parse_markdown_sections(&content);
+
+            if sections.is_empty() {
+                eprintln!(
+                    "No sections found in {}. Add H1 or H2 headings to structure the content.",
+                    file
+                );
+                std::process::exit(1);
+            }
+
+            let source_name = source.unwrap_or_else(|| {
+                std::path::Path::new(&file)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("default")
+                    .to_string()
+            });
+
+            let body = serde_json::json!({
+                "source": source_name,
+                "pinned": pin,
+                "sections": sections,
+            });
+
+            let resp = reqwest::Client::new()
+                .post(format!("{}/api/memory/prime", cli.server))
+                .json(&body)
+                .send()
+                .await?;
+
+            if resp.status().is_success() {
+                let parsed: serde_json::Value = resp.json().await?;
+                let count = parsed
+                    .get("sections_written")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let kind = if pin { "pinned" } else { "primed" };
+                println!(
+                    "{} {} sections from {} under source '{}'",
+                    kind, count, file, source_name
+                );
+                if pin {
+                    println!("These facts will be included in every recall response.");
+                }
+            } else {
+                eprintln!("Error: {} — {}", resp.status(), resp.text().await?);
+                std::process::exit(1);
+            }
+        }
         Commands::Init {
             global,
             project: _,
@@ -407,6 +469,63 @@ fn detect_tools(global: bool) -> Vec<AiTool> {
     });
 
     tools
+}
+
+#[derive(serde::Serialize)]
+struct Section {
+    title: String,
+    body: String,
+}
+
+/// Parse a markdown document into sections split at H1 or H2 headings.
+/// Content before the first heading is captured under a synthetic "Intro" section if non-empty.
+fn parse_markdown_sections(content: &str) -> Vec<Section> {
+    let mut sections: Vec<Section> = Vec::new();
+    let mut current_title: Option<String> = None;
+    let mut current_body = String::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        let is_h1 = trimmed.starts_with("# ") && !trimmed.starts_with("## ");
+        let is_h2 = trimmed.starts_with("## ") && !trimmed.starts_with("### ");
+
+        if is_h1 || is_h2 {
+            // Flush the current section
+            if let Some(title) = current_title.take() {
+                let body = current_body.trim().to_string();
+                if !body.is_empty() {
+                    sections.push(Section { title, body });
+                }
+            } else if !current_body.trim().is_empty() {
+                sections.push(Section {
+                    title: "Intro".to_string(),
+                    body: current_body.trim().to_string(),
+                });
+            }
+            current_body.clear();
+
+            let prefix_len = if is_h1 { 2 } else { 3 };
+            current_title = Some(trimmed[prefix_len..].trim().to_string());
+        } else {
+            current_body.push_str(line);
+            current_body.push('\n');
+        }
+    }
+
+    // Flush the final section
+    if let Some(title) = current_title {
+        let body = current_body.trim().to_string();
+        if !body.is_empty() {
+            sections.push(Section { title, body });
+        }
+    } else if !current_body.trim().is_empty() {
+        sections.push(Section {
+            title: "Intro".to_string(),
+            body: current_body.trim().to_string(),
+        });
+    }
+
+    sections
 }
 
 fn canonical_db_path() -> String {
