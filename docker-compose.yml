@@ -1,8 +1,11 @@
 services:
   hub:
-    build:
-      context: .
-      target: runtime
+    # Prefer the published image. To build locally instead, comment the
+    # image line and uncomment the build block.
+    image: ghcr.io/ctxone/ctxone:latest
+    # build:
+    #   context: .
+    #   target: runtime
     command: ["ctxone-hub", "--http", "--port", "3001", "--path", "/data/ctxone.db"]
     ports:
       - "3001:3001"
@@ -10,23 +13,10 @@ services:
       - ctxone-data:/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3001/api/health"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:3001/api/health"]
       interval: 30s
       timeout: 5s
       retries: 3
-
-  lens:
-    build:
-      context: .
-      target: runtime
-    command: ["node", "/app/web/build"]
-    ports:
-      - "5173:3000"
-    environment:
-      - CTXONE_API_URL=http://hub:3001
-    depends_on:
-      hub:
-        condition: service_healthy
 
 volumes:
   ctxone-data:

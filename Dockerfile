@@ -1,41 +1,45 @@
 # CtxOne — multi-stage build
-# Stage 1: Build Rust binaries (ctx + ctxone-hub)
-FROM rust:1.86-slim AS builder-rust
+# Produces a minimal debian-slim image containing ctx and ctxone-hub.
+
+# -- Stage 1: Build Rust binaries --
+FROM rust:1.86-slim AS builder
 
 WORKDIR /build
-COPY Cargo.toml ./
+
+# Install build dependencies
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy workspace root + Cargo.lock for reproducible builds
+COPY Cargo.toml Cargo.lock ./
+
+# Copy our crates and the engine submodule
 COPY cli/ cli/
 COPY server/ server/
-
-# Copy engine submodule
 COPY engine/ engine/
 
-RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
-RUN cargo build --workspace --release && strip target/release/ctx target/release/ctxone-hub
+# Build just the two binaries we ship, not the whole workspace
+RUN cargo build --release -p ctx -p ctxone-hub \
+    && strip target/release/ctx target/release/ctxone-hub
 
-# Stage 2: Build SvelteKit web app
-FROM node:22-slim AS builder-web
-
-WORKDIR /build/web
-COPY web/package.json web/package-lock.json* ./
-RUN npm ci
-COPY web/ .
-RUN npm run build
-
-# Stage 3: Runtime
+# -- Stage 2: Runtime --
 FROM debian:bookworm-slim AS runtime
 
-RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
 
-# Rust binaries
-COPY --from=builder-rust /build/target/release/ctx /usr/local/bin/ctx
-COPY --from=builder-rust /build/target/release/ctxone-hub /usr/local/bin/ctxone-hub
+COPY --from=builder /build/target/release/ctx /usr/local/bin/ctx
+COPY --from=builder /build/target/release/ctxone-hub /usr/local/bin/ctxone-hub
 
-# Web app
-COPY --from=builder-web /build/web/build /app/web/build
-COPY --from=builder-web /build/web/package.json /app/web/package.json
+# Data volume for the SQLite database
+VOLUME /data
 
-WORKDIR /app
-EXPOSE 3001 3000
+EXPOSE 3001
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD curl -fsS http://localhost:3001/api/health || exit 1
+
+# Default: run the Hub in HTTP mode, pointing at /data/ctxone.db
 CMD ["ctxone-hub", "--http", "--port", "3001", "--path", "/data/ctxone.db"]
