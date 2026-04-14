@@ -54,9 +54,9 @@ enum Commands {
         /// Storage backend: sqlite, postgres, memory
         #[arg(long, default_value = "sqlite")]
         storage: String,
-        /// Database path (for sqlite)
-        #[arg(long, default_value = "./ctxone.db")]
-        path: String,
+        /// Database path (for sqlite). Defaults to ~/.ctxone/memory.db
+        #[arg(long)]
+        path: Option<String>,
         /// Also start HTTP API server
         #[arg(long)]
         http: bool,
@@ -250,7 +250,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             path,
             http,
         } => {
-            // Launch ctxone-hub binary
+            let db_path = path.unwrap_or_else(canonical_db_path);
+            if let Some(parent) = std::path::Path::new(&db_path).parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+
             let hub_bin = find_hub_binary();
             let mut args = vec![];
             if http {
@@ -258,9 +262,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             args.extend(["--port".to_string(), port.to_string()]);
             args.extend(["--storage".to_string(), storage]);
-            args.extend(["--path".to_string(), path]);
+            args.extend(["--path".to_string(), db_path.clone()]);
 
-            println!("Starting CtxOne Hub on port {}...", port);
+            println!("Starting CtxOne Hub on port {} (db: {})", port, db_path);
             let status = std::process::Command::new(&hub_bin).args(&args).status()?;
             std::process::exit(status.code().unwrap_or(1));
         }
@@ -405,11 +409,23 @@ fn detect_tools(global: bool) -> Vec<AiTool> {
     tools
 }
 
+fn canonical_db_path() -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    format!("{}/.ctxone/memory.db", home)
+}
+
 fn mcp_server_entry() -> Value {
     let hub_bin = find_hub_binary();
+    let db_path = canonical_db_path();
+
+    // Ensure the parent directory exists so the Hub can create the db on first run.
+    if let Some(parent) = std::path::Path::new(&db_path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
     serde_json::json!({
         "command": hub_bin,
-        "args": []
+        "args": ["--path", db_path]
     })
 }
 
