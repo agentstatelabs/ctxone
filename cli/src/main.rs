@@ -126,6 +126,17 @@ enum Commands {
         /// Second ref (usually newer / target)
         ref_b: String,
     },
+    /// Merge a source branch into a target branch
+    Merge {
+        /// Source branch (the one with new changes)
+        source: String,
+        /// Target branch to merge into (default: main)
+        #[arg(long, default_value = "main")]
+        into: String,
+        /// Commit message describing the merge
+        #[arg(short = 'm', long)]
+        message: Option<String>,
+    },
     /// Forget (delete) a memory at a specific path
     Forget {
         /// Path to forget (get it from ctx search or ctx ls)
@@ -771,6 +782,64 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ops.len(),
                     if ops.len() == 1 { "" } else { "s" }
                 );
+            });
+        }
+        Commands::Merge {
+            source,
+            into,
+            message,
+        } => {
+            let mut body = serde_json::json!({
+                "source": source,
+                "target": into,
+            });
+            if let Some(m) = message {
+                body["description"] = serde_json::json!(m);
+            }
+
+            let resp = match reqwest::Client::new()
+                .post(format!("{}/api/merge", cli.server))
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(&cli.server, e),
+            };
+
+            // Conflicts come back as 409 with a JSON body, not an opaque error
+            if resp.status() == reqwest::StatusCode::CONFLICT {
+                let text = resp.text().await?;
+                if let Ok(parsed) = serde_json::from_str::<Value>(&text) {
+                    emit(cli.format, &parsed, |v| {
+                        let empty_vec = vec![];
+                        let conflicts = v
+                            .get("conflicts")
+                            .and_then(|x| x.as_array())
+                            .unwrap_or(&empty_vec);
+                        eprintln!(
+                            "Merge conflict: {} conflict{}",
+                            conflicts.len(),
+                            if conflicts.len() == 1 { "" } else { "s" }
+                        );
+                        for c in conflicts {
+                            eprintln!("  {}", serde_json::to_string_pretty(c).unwrap_or_default());
+                        }
+                    });
+                } else {
+                    eprintln!("Merge conflict: {}", text);
+                }
+                std::process::exit(EX_DATAERR);
+            }
+
+            if !resp.status().is_success() {
+                http_error_exit(resp, "merge failed").await;
+            }
+
+            let parsed: Value = resp.json().await?;
+            emit(cli.format, &parsed, |v| {
+                let commit = v.get("commit_id").and_then(|x| x.as_str()).unwrap_or("");
+                println!("Merged '{}' into '{}' at {}", source, into, commit);
             });
         }
         Commands::Forget { path, reason } => {

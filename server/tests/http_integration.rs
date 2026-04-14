@@ -362,6 +362,68 @@ async fn diff_shows_changes_between_branches() {
     assert!(!ops.is_empty(), "expected at least one diff op");
 }
 
+// -------- Merge --------
+
+#[tokio::test]
+async fn merge_branch_into_main() {
+    let router = test_router();
+
+    // Seed main and create experiment branch
+    call_json(
+        router.clone(),
+        post_json(
+            "/api/memory/remember",
+            json!({"fact": "mainfact licensing decision", "context": "test"}),
+        ),
+    )
+    .await;
+    call_json(
+        router.clone(),
+        post_json("/api/branches", json!({"name": "exp", "from": "main"})),
+    )
+    .await;
+    call_json(
+        router.clone(),
+        post_json(
+            "/api/memory/remember",
+            json!({"fact": "expfact architecture decision", "context": "test", "ref": "exp"}),
+        ),
+    )
+    .await;
+
+    // Merge exp into main
+    let (status, body) = call_json(
+        router.clone(),
+        post_json(
+            "/api/merge",
+            json!({
+                "source": "exp",
+                "target": "main",
+                "description": "Merge experiment back to main",
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "ok");
+    assert!(body["commit_id"].as_str().unwrap().starts_with("sg_"));
+
+    // After merge, main should see both facts — query "decision" matches both
+    let (_, body) = call_json(router, get("/api/memory/recall?topic=decision&ref=main")).await;
+    let results = body["results"].as_array().unwrap();
+    let values: Vec<&str> = results.iter().filter_map(|r| r["value"].as_str()).collect();
+    assert!(
+        values.iter().any(|v| v.contains("mainfact")),
+        "main should still contain the original fact, got: {:?}",
+        values
+    );
+    assert!(
+        values.iter().any(|v| v.contains("expfact")),
+        "main should now contain the experiment fact, got: {:?}",
+        values
+    );
+}
+
 // -------- Search / ls --------
 
 #[tokio::test]

@@ -49,6 +49,7 @@ pub fn router(repo: Arc<Repository>, session: Arc<SessionStats>) -> Router {
         .route("/api/log/{ref_name}", get(get_log))
         .route("/api/blame/{ref_name}", get(blame))
         .route("/api/diff", get(diff_refs))
+        .route("/api/merge", post(merge_refs))
         .route("/api/branches", get(list_branches).post(create_branch))
         // Memory endpoints (high-level)
         .route("/api/memory/remember", post(remember))
@@ -289,6 +290,61 @@ async fn diff_refs(
         "ref_b": q.ref_b,
         "ops": json_ops,
     })))
+}
+
+#[derive(Deserialize)]
+struct MergeRequest {
+    /// Branch with changes to merge from.
+    source: String,
+    /// Branch to merge into. Defaults to "main".
+    #[serde(default = "default_ref")]
+    target: String,
+    /// Commit message describing the merge.
+    #[serde(default = "default_merge_description")]
+    description: String,
+    /// Optional reasoning for the merge.
+    reasoning: Option<String>,
+}
+
+fn default_merge_description() -> String {
+    "Merge".to_string()
+}
+
+async fn merge_refs(
+    State(s): State<HubState>,
+    Json(req): Json<MergeRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let mut opts = CommitOptions::new("ctxone", IntentCategory::Merge, &req.description);
+    if let Some(r) = req.reasoning {
+        opts = opts.with_reasoning(r);
+    }
+
+    match s.repo.merge(&req.source, &req.target, opts) {
+        Ok(commit_id) => {
+            s.session.mark_dirty();
+            Ok(Json(serde_json::json!({
+                "status": "ok",
+                "source": req.source,
+                "target": req.target,
+                "commit_id": format!("{}", commit_id.short()),
+            })))
+        }
+        Err(agentstategraph::RepoError::MergeConflicts(conflicts)) => {
+            // Conflicts are a domain-level result, not a 500. Return 409 with details.
+            let conflict_json = serde_json::to_value(&conflicts).unwrap_or_default();
+            Err((
+                StatusCode::CONFLICT,
+                serde_json::json!({
+                    "status": "conflict",
+                    "source": req.source,
+                    "target": req.target,
+                    "conflicts": conflict_json,
+                })
+                .to_string(),
+            ))
+        }
+        Err(e) => Err(internal_error(e)),
+    }
 }
 
 // -- Memory endpoints --
