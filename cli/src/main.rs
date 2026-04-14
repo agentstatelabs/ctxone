@@ -61,6 +61,8 @@ enum Commands {
         #[arg(long)]
         http: bool,
     },
+    /// Seed the Hub with realistic demo data and show live token savings
+    Demo,
     /// Load a markdown file as primed memory. Use --pin to make it always-included.
     Prime {
         /// Path to the markdown file
@@ -307,6 +309,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let status = std::process::Command::new(&hub_bin).args(&args).status()?;
             std::process::exit(status.code().unwrap_or(1));
         }
+        Commands::Demo => {
+            run_demo(&cli.server).await?;
+        }
         Commands::Prime { file, pin, source } => {
             let content = std::fs::read_to_string(&file)?;
             let sections = parse_markdown_sections(&content);
@@ -497,6 +502,229 @@ fn detect_tools(global: bool) -> Vec<AiTool> {
     });
 
     tools
+}
+
+async fn run_demo(server: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // Verify Hub is reachable first
+    match reqwest::get(format!("{}/api/health", server)).await {
+        Ok(r) if r.status().is_success() => {}
+        _ => {
+            eprintln!(
+                "Hub unreachable at {}. Start it with: ctx serve --http",
+                server
+            );
+            std::process::exit(1);
+        }
+    }
+
+    println!("Seeding demo memory graph...\n");
+
+    // Realistic project facts grouped by context
+    let seed: &[(&str, &str, &str)] = &[
+        // Licensing / legal
+        (
+            "licensing",
+            "high",
+            "CtxOne is licensed under BSL-1.1 with automatic Apache 2.0 conversion after 4 years",
+        ),
+        (
+            "licensing",
+            "high",
+            "The engine (AgentStateGraph) is BSL-1.1 licensed by the same author",
+        ),
+        (
+            "licensing",
+            "medium",
+            "Commercial licensing contact: info@agentstatelabs.com",
+        ),
+        // Architecture
+        (
+            "architecture",
+            "high",
+            "CtxOne Hub wraps AgentStateGraph with a token-tracking memory API",
+        ),
+        (
+            "architecture",
+            "high",
+            "Lens is a SvelteKit web app that reads the Hub over HTTP",
+        ),
+        (
+            "architecture",
+            "high",
+            "The ctx CLI is Rust with clap, talks to the Hub over HTTP",
+        ),
+        (
+            "architecture",
+            "medium",
+            "Default database path is ~/.ctxone/memory.db for shared memory across tools",
+        ),
+        (
+            "architecture",
+            "medium",
+            "The Hub exposes both MCP stdio mode and REST HTTP mode",
+        ),
+        (
+            "architecture",
+            "low",
+            "The engine uses blake3 for content hashing and SQLite for default storage",
+        ),
+        // Features
+        (
+            "features",
+            "high",
+            "ctx init auto-configures Claude Code, Cursor, VS Code, Codex with MCP",
+        ),
+        (
+            "features",
+            "high",
+            "ctx prime loads markdown files as pinned or searchable memories",
+        ),
+        (
+            "features",
+            "high",
+            "Pinned memories are always included in every recall response",
+        ),
+        (
+            "features",
+            "medium",
+            "ctx recall returns token savings metadata on every call",
+        ),
+        (
+            "features",
+            "medium",
+            "ctx stats shows cumulative session token savings",
+        ),
+        // Token economics
+        (
+            "economics",
+            "high",
+            "Flat memory files scale O(n) on cost — every turn loads everything",
+        ),
+        (
+            "economics",
+            "high",
+            "CtxOne scales O(log n) — recall loads only what's relevant",
+        ),
+        (
+            "economics",
+            "medium",
+            "Typical savings: 60x tokens per session vs flat memory files",
+        ),
+        (
+            "economics",
+            "medium",
+            "Enterprise ROI: mid-sized company saves ~$32k/year on token costs",
+        ),
+        // Team / process
+        ("team", "medium", "Craig Brown is the primary maintainer"),
+        (
+            "team",
+            "medium",
+            "Pre-commit: run cargo fmt, clippy, and svelte-check",
+        ),
+        (
+            "team",
+            "low",
+            "CI runs on every push to main and on tagged releases",
+        ),
+    ];
+
+    let client = reqwest::Client::new();
+    let mut remembered = 0;
+    for (context, importance, fact) in seed {
+        let body = serde_json::json!({
+            "fact": fact,
+            "importance": importance,
+            "context": context,
+        });
+
+        let resp = client
+            .post(format!("{}/api/memory/remember", server))
+            .json(&body)
+            .send()
+            .await?;
+
+        if resp.status().is_success() {
+            remembered += 1;
+            print!(".");
+            use std::io::Write;
+            std::io::stdout().flush().ok();
+        }
+    }
+    println!("\nSeeded {} facts.\n", remembered);
+
+    // Run a few realistic recalls and show savings
+    let queries = [
+        ("licensing", 1500usize),
+        ("architecture", 1500),
+        ("tokens", 1500),
+        ("Lens", 800),
+    ];
+
+    for (topic, budget) in queries {
+        let resp = reqwest::get(format!(
+            "{}/api/memory/recall?topic={}&budget={}",
+            server,
+            urlencoding(topic),
+            budget
+        ))
+        .await?;
+
+        if let Ok(parsed) = resp.json::<serde_json::Value>().await {
+            let matches = parsed
+                .get("topic_matches")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let sent = parsed
+                .get("ctx_tokens_sent")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let flat = parsed
+                .get("ctx_tokens_estimated_flat")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let ratio = parsed
+                .get("ctx_savings_ratio")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+
+            println!(
+                "  recall \"{}\"  →  {} matches, {} tokens sent vs {} flat ({:.1}x savings)",
+                topic, matches, sent, flat, ratio
+            );
+        }
+    }
+
+    // Final cumulative stats
+    if let Ok(resp) = reqwest::get(format!("{}/api/stats/tokens", server)).await
+        && let Ok(parsed) = resp.json::<serde_json::Value>().await
+    {
+        let used = parsed
+            .get("session_tokens_used")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let saved = parsed
+            .get("session_tokens_saved")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let ratio = parsed
+            .get("cumulative_ratio")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+
+        println!();
+        println!("Cumulative savings this session:");
+        println!(
+            "  {} tokens sent, {} tokens saved, {:.1}x overall",
+            used, saved, ratio
+        );
+    }
+
+    println!();
+    println!("Try: ctx recall \"your topic here\"");
+    println!("Or open Lens: http://localhost:5173");
+
+    Ok(())
 }
 
 #[derive(serde::Serialize)]
