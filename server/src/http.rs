@@ -541,10 +541,11 @@ async fn prime(
 async fn list_pinned(
     State(s): State<HubState>,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+    // If /memory/pinned doesn't exist yet, return an empty list instead of 500.
     let paths = s
         .repo
         .list_paths("main", "/memory/pinned", Some(20))
-        .map_err(internal_error)?;
+        .unwrap_or_default();
 
     let mut out = Vec::new();
     for p in &paths {

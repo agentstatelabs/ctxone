@@ -67,6 +67,8 @@ enum Commands {
     },
     /// Seed the Hub with realistic demo data and show live token savings
     Demo,
+    /// List pinned memories (always-included critical context)
+    Pinned,
     /// Load a markdown file as primed memory. Use --pin to make it always-included.
     Prime {
         /// Path to the markdown file
@@ -318,6 +320,74 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Demo => {
             run_demo(&cli.server).await?;
+        }
+        Commands::Pinned => {
+            let resp = reqwest::get(format!("{}/api/memory/pinned", cli.server)).await?;
+            if !resp.status().is_success() {
+                eprintln!("Error: {} — {}", resp.status(), resp.text().await?);
+                std::process::exit(1);
+            }
+            let items: Vec<serde_json::Value> = resp.json().await?;
+
+            // Group by source and section
+            use std::collections::BTreeMap;
+            type Section = (Option<String>, Option<String>);
+            let mut grouped: BTreeMap<String, BTreeMap<String, Section>> = BTreeMap::new();
+
+            for item in &items {
+                let path = item.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                let value = item.get("value");
+
+                // path: /memory/pinned/<source>/<slug>/(title|body)
+                let parts: Vec<&str> = path.split('/').collect();
+                if parts.len() < 6 {
+                    continue;
+                }
+                let source = parts[3].to_string();
+                let slug = parts[4].to_string();
+                let field = parts[5];
+
+                let text = value.and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let section_entry = grouped
+                    .entry(source)
+                    .or_default()
+                    .entry(slug)
+                    .or_insert((None, None));
+                match field {
+                    "title" => section_entry.0 = Some(text),
+                    "body" => section_entry.1 = Some(text),
+                    _ => {}
+                }
+            }
+
+            if grouped.is_empty() {
+                println!("No pinned memories.");
+                println!("Add some with: ctx prime <file.md> --pin");
+                return Ok(());
+            }
+
+            let mut total_sections = 0;
+            for (source, sections) in &grouped {
+                println!("[{}]", source);
+                for (title, body) in sections.values() {
+                    if let (Some(t), Some(b)) = (title, body) {
+                        println!("  {}", t);
+                        for line in b.lines().take(2) {
+                            println!("    {}", line);
+                        }
+                        if b.lines().count() > 2 {
+                            println!("    ...");
+                        }
+                        total_sections += 1;
+                    }
+                }
+                println!();
+            }
+            println!(
+                "{} pinned sections across {} sources",
+                total_sections,
+                grouped.len()
+            );
         }
         Commands::Prime { file, pin, source } => {
             let content = std::fs::read_to_string(&file)?;
