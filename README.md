@@ -87,6 +87,13 @@ ctxone/
 
 ## Documentation
 
+**Get started:**
+- [Quickstart](docs/QUICKSTART.md) — from nothing to live token savings in 5 minutes
+- [Architecture](docs/ARCHITECTURE.md) — the mental model (pinned vs primed, how recall ranks, why O(log n))
+- [Token Savings](docs/TOKEN_SAVINGS.md) — how the ratio is computed, how to read it, how to maximize it
+- [Cookbook](docs/COOKBOOK.md) — git hooks, cron jobs, shell prompts, team setups
+
+**Strategy and background:**
 - [Product Vision](docs/VISION.md)
 - [Context Anxiety](docs/CONTEXT_ANXIETY.md) — the problem we solve
 - [Token Economics](docs/TOKEN_ECONOMICS.md) — the math behind 60x savings
