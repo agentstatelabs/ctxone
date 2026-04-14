@@ -1,17 +1,48 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::Value;
 use std::path::PathBuf;
+
+// -- Exit codes (sysexits.h-style) --
+#[allow(dead_code)]
+const EX_OK: i32 = 0;
+#[allow(dead_code)]
+const EX_USAGE: i32 = 64; // bad arguments (clap handles this)
+const EX_DATAERR: i32 = 65; // bad input data
+const EX_NOINPUT: i32 = 66; // input not found / not readable
+const EX_UNAVAILABLE: i32 = 69; // service unavailable (hub unreachable)
+const EX_SOFTWARE: i32 = 70; // internal software error
+const EX_IOERR: i32 = 74; // I/O error
+const EX_PROTOCOL: i32 = 76; // remote protocol error / server error
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+pub enum OutputFormat {
+    /// Human-readable (default)
+    Text,
+    /// JSON for tool-chain piping (jq, etc.)
+    Json,
+    /// Minimal output: one identifier per line, nothing else
+    Id,
+}
 
 #[derive(Parser)]
 #[command(name = "ctx", about = "CtxOne — AI agent memory CLI", version)]
 struct Cli {
-    /// Hub server URL
-    #[arg(long, default_value = "http://localhost:3001", global = true)]
+    /// Hub server URL (env: CTX_SERVER)
+    #[arg(
+        long,
+        env = "CTX_SERVER",
+        default_value = "http://localhost:3001",
+        global = true
+    )]
     server: String,
 
-    /// Branch / ref to read from and write to
-    #[arg(long, default_value = "main", global = true)]
+    /// Branch / ref to read from and write to (env: CTX_BRANCH)
+    #[arg(long, env = "CTX_BRANCH", default_value = "main", global = true)]
     branch: String,
+
+    /// Output format: text (human), json (for jq), id (minimal) (env: CTX_FORMAT)
+    #[arg(long, env = "CTX_FORMAT", value_enum, default_value_t = OutputFormat::Text, global = true)]
+    format: OutputFormat,
 
     #[command(subcommand)]
     command: Commands,
@@ -147,6 +178,80 @@ enum Commands {
     },
 }
 
+// -- Output / error helpers --
+
+/// Extract the "id-like" value from an object, preferring names over paths.
+fn extract_id(v: &Value) -> Option<&str> {
+    // Objects with a `name` field (branches, etc.) use it.
+    // Otherwise fall back through commit_id → id → path.
+    for key in ["name", "commit_id", "id", "path"] {
+        if let Some(s) = v.get(key).and_then(|x| x.as_str()) {
+            return Some(s);
+        }
+    }
+    None
+}
+
+/// Render a Value according to the chosen output format.
+/// For `Text`, calls the supplied closure with the parsed value; for `Json`,
+/// prints pretty JSON; for `Id`, extracts sensible identifier fields.
+fn emit<F: FnOnce(&Value)>(format: OutputFormat, value: &Value, text_fn: F) {
+    match format {
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(value).unwrap_or_default()
+            );
+        }
+        OutputFormat::Text => text_fn(value),
+        OutputFormat::Id => {
+            // Arrays of strings: print each string directly
+            if let Some(arr) = value.as_array() {
+                for item in arr {
+                    if let Some(s) = item.as_str() {
+                        println!("{}", s);
+                    } else if let Some(id) = extract_id(item) {
+                        println!("{}", id);
+                    }
+                }
+                return;
+            }
+            // Scalar string
+            if let Some(s) = value.as_str() {
+                println!("{}", s);
+                return;
+            }
+            // Object with a known id field
+            if let Some(id) = extract_id(value) {
+                println!("{}", id);
+            }
+        }
+    }
+}
+
+/// Map an HTTP error response to a sysexits-style exit code and print a diagnostic.
+async fn http_error_exit(resp: reqwest::Response, context: &str) -> ! {
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    eprintln!("{}: {} — {}", context, status, body);
+    let code = if status.is_server_error() {
+        EX_PROTOCOL
+    } else if status.as_u16() == 404 {
+        EX_NOINPUT
+    } else if status.is_client_error() {
+        EX_DATAERR
+    } else {
+        EX_SOFTWARE
+    };
+    std::process::exit(code);
+}
+
+/// Handle a reqwest error (network failure) and exit as unavailable.
+fn unreachable_exit(server: &str, e: reqwest::Error) -> ! {
+    eprintln!("Hub unreachable ({}): {}", server, e);
+    std::process::exit(EX_UNAVAILABLE);
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
@@ -158,8 +263,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             context,
             tags,
         } => {
+            // Read fact from stdin if "-"
+            let fact = if fact == "-" {
+                use std::io::Read;
+                let mut buf = String::new();
+                if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
+                    eprintln!("Failed to read stdin: {}", e);
+                    std::process::exit(EX_IOERR);
+                }
+                buf.trim().to_string()
+            } else {
+                fact
+            };
+
+            if fact.is_empty() {
+                eprintln!("Refusing to store an empty fact");
+                std::process::exit(EX_DATAERR);
+            }
+
             let mut body = serde_json::json!({
-                "fact": fact,
+                "fact": fact.clone(),
                 "importance": importance,
                 "ref": cli.branch,
             });
@@ -170,169 +293,200 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 body["tags"] = serde_json::json!(tags);
             }
 
-            let resp = reqwest::Client::new()
+            let resp = match reqwest::Client::new()
                 .post(format!("{}/api/memory/remember", cli.server))
                 .json(&body)
                 .send()
-                .await?;
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(&cli.server, e),
+            };
 
-            if resp.status().is_success() {
-                let parsed: serde_json::Value = resp.json().await?;
+            if !resp.status().is_success() {
+                http_error_exit(resp, "remember failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(cli.format, &parsed, |v| {
                 println!("Remembered: {}", fact);
-                if let Some(path) = parsed.get("path").and_then(|v| v.as_str()) {
+                if let Some(path) = v.get("path").and_then(|x| x.as_str()) {
                     println!("  path: {}", path);
                 }
-                if let Some(id) = parsed.get("commit_id").and_then(|v| v.as_str()) {
+                if let Some(id) = v.get("commit_id").and_then(|x| x.as_str()) {
                     println!("  commit: {}", id);
                 }
-            } else {
-                eprintln!("Error: {} — {}", resp.status(), resp.text().await?);
-            }
+            });
         }
         Commands::Recall { topic, budget } => {
-            let resp = reqwest::get(format!(
+            let url = format!(
                 "{}/api/memory/recall?topic={}&budget={}&ref={}",
                 cli.server,
                 urlencoding(&topic),
                 budget,
                 urlencoding(&cli.branch),
-            ))
-            .await?;
-
-            if resp.status().is_success() {
-                let parsed: serde_json::Value = resp.json().await?;
+            );
+            let resp = match reqwest::get(&url).await {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(&cli.server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "recall failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(cli.format, &parsed, |v| {
                 let empty_vec = vec![];
-                let results = parsed
+                let results = v
                     .get("results")
-                    .and_then(|v| v.as_array())
+                    .and_then(|x| x.as_array())
                     .unwrap_or(&empty_vec);
                 if results.is_empty() {
                     println!("No memories found for '{}'", topic);
-                } else {
-                    let mut printed_divider = false;
-                    for r in results {
-                        let is_pinned = r.get("pinned").and_then(|v| v.as_bool()).unwrap_or(false);
-                        let path = r.get("path").and_then(|v| v.as_str()).unwrap_or("");
-
-                        if is_pinned {
-                            let title = r.get("title").and_then(|v| v.as_str()).unwrap_or("");
-                            let body = r.get("body").and_then(|v| v.as_str()).unwrap_or("");
-                            println!("[PINNED] {}", title);
-                            for line in body.lines().take(3) {
-                                println!("  {}", line);
-                            }
-                            if body.lines().count() > 3 {
-                                println!("  ...");
-                            }
-                        } else {
-                            if !printed_divider {
-                                println!("\n--- topic matches ---");
-                                printed_divider = true;
-                            }
-                            let value = r.get("value").and_then(|v| v.as_str()).unwrap_or("");
-                            println!("{}", value);
-                            println!("  ({})", path);
-                        }
-                    }
-
-                    let pinned_count = parsed
-                        .get("pinned_count")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    let topic_matches = parsed
-                        .get("topic_matches")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    let sent = parsed
-                        .get("ctx_tokens_sent")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    let flat = parsed
-                        .get("ctx_tokens_estimated_flat")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    let ratio = parsed
-                        .get("ctx_savings_ratio")
-                        .and_then(|v| v.as_f64())
-                        .unwrap_or(0.0);
-                    println!(
-                        "\n{} pinned + {} topic matches, {} tokens sent (flat would be ~{}, {:.1}x savings)",
-                        pinned_count, topic_matches, sent, flat, ratio
-                    );
+                    return;
                 }
-            } else {
-                eprintln!("Error: {} — {}", resp.status(), resp.text().await?);
-            }
+                let mut printed_divider = false;
+                for r in results {
+                    let is_pinned = r.get("pinned").and_then(|x| x.as_bool()).unwrap_or(false);
+                    let path = r.get("path").and_then(|x| x.as_str()).unwrap_or("");
+
+                    if is_pinned {
+                        let title = r.get("title").and_then(|x| x.as_str()).unwrap_or("");
+                        let body = r.get("body").and_then(|x| x.as_str()).unwrap_or("");
+                        println!("[PINNED] {}", title);
+                        for line in body.lines().take(3) {
+                            println!("  {}", line);
+                        }
+                        if body.lines().count() > 3 {
+                            println!("  ...");
+                        }
+                    } else {
+                        if !printed_divider {
+                            println!("\n--- topic matches ---");
+                            printed_divider = true;
+                        }
+                        let value = r.get("value").and_then(|x| x.as_str()).unwrap_or("");
+                        println!("{}", value);
+                        println!("  ({})", path);
+                    }
+                }
+
+                let pinned_count = v.get("pinned_count").and_then(|x| x.as_u64()).unwrap_or(0);
+                let topic_matches = v.get("topic_matches").and_then(|x| x.as_u64()).unwrap_or(0);
+                let sent = v
+                    .get("ctx_tokens_sent")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0);
+                let flat = v
+                    .get("ctx_tokens_estimated_flat")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0);
+                let ratio = v
+                    .get("ctx_savings_ratio")
+                    .and_then(|x| x.as_f64())
+                    .unwrap_or(0.0);
+                println!(
+                    "\n{} pinned + {} topic matches, {} tokens sent (flat would be ~{}, {:.1}x savings)",
+                    pinned_count, topic_matches, sent, flat, ratio
+                );
+            });
         }
         Commands::Context { project } => {
-            let resp = reqwest::get(format!(
+            let url = format!(
                 "{}/api/memory/context/{}?ref={}",
                 cli.server,
                 urlencoding(&project),
                 urlencoding(&cli.branch),
-            ))
-            .await?;
-
-            if resp.status().is_success() {
-                let parsed: serde_json::Value = resp.json().await?;
-                if let Some(ctx) = parsed.get("context") {
+            );
+            let resp = match reqwest::get(&url).await {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(&cli.server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "context failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(cli.format, &parsed, |v| {
+                if let Some(ctx) = v.get("context") {
                     println!("{}", serde_json::to_string_pretty(ctx).unwrap_or_default());
                 } else {
                     println!("No context found for '{}'", project);
                 }
-            } else {
-                eprintln!("Error: {} — {}", resp.status(), resp.text().await?);
-            }
+            });
         }
         Commands::Status => {
-            print!("Hub: ");
-            match reqwest::get(format!("{}/api/health", cli.server)).await {
-                Ok(resp) if resp.status().is_success() => {
-                    println!("connected ({})", cli.server);
+            let health_url = format!("{}/api/health", cli.server);
+            let reachable = reqwest::get(&health_url)
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
 
-                    if let Ok(r) = reqwest::get(format!("{}/api/stats/tokens", cli.server)).await
-                        && let Ok(parsed) = r.json::<serde_json::Value>().await
-                    {
-                        let used = parsed
-                            .get("session_tokens_used")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
-                        let saved = parsed
-                            .get("session_tokens_saved")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0);
-                        let ratio = parsed
-                            .get("cumulative_ratio")
-                            .and_then(|v| v.as_f64())
-                            .unwrap_or(0.0);
-                        println!(
-                            "Session: {} tokens used, {} saved ({:.1}x)",
-                            used, saved, ratio
-                        );
-                    }
-                }
-                Ok(resp) => println!("error {} ({})", resp.status(), cli.server),
-                Err(_) => println!("unreachable ({})", cli.server),
+            if !reachable {
+                emit(
+                    cli.format,
+                    &serde_json::json!({
+                        "connected": false,
+                        "server": cli.server,
+                    }),
+                    |_| println!("Hub: unreachable ({})", cli.server),
+                );
+                std::process::exit(EX_UNAVAILABLE);
             }
+
+            let mut out = serde_json::json!({
+                "connected": true,
+                "server": cli.server,
+            });
+            if let Ok(r) = reqwest::get(format!("{}/api/stats/tokens", cli.server)).await
+                && let Ok(parsed) = r.json::<Value>().await
+            {
+                out["tokens"] = parsed;
+            }
+            emit(cli.format, &out, |v| {
+                println!("Hub: connected ({})", cli.server);
+                if let Some(t) = v.get("tokens") {
+                    let used = t
+                        .get("session_tokens_used")
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(0);
+                    let saved = t
+                        .get("session_tokens_saved")
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(0);
+                    let ratio = t
+                        .get("cumulative_ratio")
+                        .and_then(|x| x.as_f64())
+                        .unwrap_or(0.0);
+                    println!(
+                        "Session: {} tokens used, {} saved ({:.1}x)",
+                        used, saved, ratio
+                    );
+                }
+            });
         }
-        Commands::Stats => match reqwest::get(format!("{}/api/stats/tokens", cli.server)).await {
-            Ok(resp) if resp.status().is_success() => {
-                let parsed: serde_json::Value = resp.json().await?;
-                let used = parsed
+        Commands::Stats => {
+            let resp = match reqwest::get(format!("{}/api/stats/tokens", cli.server)).await {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(&cli.server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "stats failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(cli.format, &parsed, |v| {
+                let used = v
                     .get("session_tokens_used")
-                    .and_then(|v| v.as_u64())
+                    .and_then(|x| x.as_u64())
                     .unwrap_or(0);
-                let saved = parsed
+                let saved = v
                     .get("session_tokens_saved")
-                    .and_then(|v| v.as_u64())
+                    .and_then(|x| x.as_u64())
                     .unwrap_or(0);
-                let graph_tokens = parsed
+                let graph_tokens = v
                     .get("total_graph_size_tokens")
-                    .and_then(|v| v.as_u64())
+                    .and_then(|x| x.as_u64())
                     .unwrap_or(0);
-                let ratio = parsed
+                let ratio = v
                     .get("cumulative_ratio")
-                    .and_then(|v| v.as_f64())
+                    .and_then(|x| x.as_f64())
                     .unwrap_or(0.0);
 
                 println!("CtxOne Token Savings");
@@ -340,10 +494,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("  tokens sent:  {}", used);
                 println!("  tokens saved: {}", saved);
                 println!("  savings:      {:.1}x", ratio);
-            }
-            Ok(_) => println!("Token stats not available."),
-            Err(_) => eprintln!("Hub unreachable ({})", cli.server),
-        },
+            });
+        }
         Commands::Serve {
             port,
             storage,
@@ -372,14 +524,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             run_demo(&cli.server).await?;
         }
         Commands::Pinned => {
-            let resp = reqwest::get(format!("{}/api/memory/pinned", cli.server)).await?;
+            let resp = match reqwest::get(format!("{}/api/memory/pinned", cli.server)).await {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(&cli.server, e),
+            };
             if !resp.status().is_success() {
-                eprintln!("Error: {} — {}", resp.status(), resp.text().await?);
-                std::process::exit(1);
+                http_error_exit(resp, "pinned failed").await;
             }
-            let items: Vec<serde_json::Value> = resp.json().await?;
+            let items: Vec<Value> = resp.json().await?;
 
-            // Group by source and section
+            // Structured group for JSON output
             use std::collections::BTreeMap;
             type Section = (Option<String>, Option<String>);
             let mut grouped: BTreeMap<String, BTreeMap<String, Section>> = BTreeMap::new();
@@ -387,8 +541,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             for item in &items {
                 let path = item.get("path").and_then(|v| v.as_str()).unwrap_or("");
                 let value = item.get("value");
-
-                // path: /memory/pinned/<source>/<slug>/(title|body)
                 let parts: Vec<&str> = path.split('/').collect();
                 if parts.len() < 6 {
                     continue;
@@ -396,7 +548,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let source = parts[3].to_string();
                 let slug = parts[4].to_string();
                 let field = parts[5];
-
                 let text = value.and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let section_entry = grouped
                     .entry(source)
@@ -410,53 +561,101 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            if grouped.is_empty() {
-                println!("No pinned memories.");
-                println!("Add some with: ctx prime <file.md> --pin");
-                return Ok(());
-            }
-
-            let mut total_sections = 0;
+            // Build a serializable representation for JSON mode
+            let mut json_sources: Vec<Value> = Vec::new();
             for (source, sections) in &grouped {
-                println!("[{}]", source);
-                for (title, body) in sections.values() {
+                let mut json_sections: Vec<Value> = Vec::new();
+                for (slug, (title, body)) in sections {
                     if let (Some(t), Some(b)) = (title, body) {
-                        println!("  {}", t);
-                        for line in b.lines().take(2) {
-                            println!("    {}", line);
-                        }
-                        if b.lines().count() > 2 {
-                            println!("    ...");
-                        }
-                        total_sections += 1;
+                        json_sections.push(serde_json::json!({
+                            "slug": slug,
+                            "title": t,
+                            "body": b,
+                        }));
                     }
                 }
-                println!();
+                json_sources.push(serde_json::json!({
+                    "source": source,
+                    "sections": json_sections,
+                }));
             }
-            println!(
-                "{} pinned sections across {} sources",
-                total_sections,
-                grouped.len()
-            );
+            let total_sections: usize = json_sources
+                .iter()
+                .filter_map(|s| s.get("sections").and_then(|x| x.as_array()))
+                .map(|a| a.len())
+                .sum();
+            let out = serde_json::json!({
+                "total_sections": total_sections,
+                "sources": json_sources,
+            });
+
+            emit(cli.format, &out, |_| {
+                if grouped.is_empty() {
+                    println!("No pinned memories.");
+                    println!("Add some with: ctx prime <file.md> --pin");
+                    return;
+                }
+                for (source, sections) in &grouped {
+                    println!("[{}]", source);
+                    for (title, body) in sections.values() {
+                        if let (Some(t), Some(b)) = (title, body) {
+                            println!("  {}", t);
+                            for line in b.lines().take(2) {
+                                println!("    {}", line);
+                            }
+                            if b.lines().count() > 2 {
+                                println!("    ...");
+                            }
+                        }
+                    }
+                    println!();
+                }
+                println!(
+                    "{} pinned sections across {} sources",
+                    total_sections,
+                    grouped.len()
+                );
+            });
         }
         Commands::Prime { file, pin, source } => {
-            let content = std::fs::read_to_string(&file)?;
-            let sections = parse_markdown_sections(&content);
+            // Read from stdin if file is "-", otherwise from the path
+            let (content, display_name) = if file == "-" {
+                use std::io::Read;
+                let mut buf = String::new();
+                if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
+                    eprintln!("Failed to read stdin: {}", e);
+                    std::process::exit(EX_IOERR);
+                }
+                (buf, "<stdin>".to_string())
+            } else {
+                match std::fs::read_to_string(&file) {
+                    Ok(c) => (c, file.clone()),
+                    Err(e) => {
+                        eprintln!("Cannot read {}: {}", file, e);
+                        std::process::exit(EX_NOINPUT);
+                    }
+                }
+            };
 
+            let sections = parse_markdown_sections(&content);
             if sections.is_empty() {
                 eprintln!(
                     "No sections found in {}. Add H1 or H2 headings to structure the content.",
-                    file
+                    display_name
                 );
-                std::process::exit(1);
+                std::process::exit(EX_DATAERR);
             }
 
             let source_name = source.unwrap_or_else(|| {
-                std::path::Path::new(&file)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("default")
-                    .to_string()
+                if file == "-" {
+                    "stdin".to_string()
+                } else {
+                    std::path::Path::new(&file)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("default")
+                        .to_string()
+                }
             });
 
             let body = serde_json::json!({
@@ -466,30 +665,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "ref": cli.branch,
             });
 
-            let resp = reqwest::Client::new()
+            let resp = match reqwest::Client::new()
                 .post(format!("{}/api/memory/prime", cli.server))
                 .json(&body)
                 .send()
-                .await?;
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(&cli.server, e),
+            };
 
-            if resp.status().is_success() {
-                let parsed: serde_json::Value = resp.json().await?;
-                let count = parsed
+            if !resp.status().is_success() {
+                http_error_exit(resp, "prime failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(cli.format, &parsed, |v| {
+                let count = v
                     .get("sections_written")
-                    .and_then(|v| v.as_u64())
+                    .and_then(|x| x.as_u64())
                     .unwrap_or(0);
                 let kind = if pin { "pinned" } else { "primed" };
                 println!(
                     "{} {} sections from {} under source '{}'",
-                    kind, count, file, source_name
+                    kind, count, display_name, source_name
                 );
                 if pin {
                     println!("These facts will be included in every recall response.");
                 }
-            } else {
-                eprintln!("Error: {} — {}", resp.status(), resp.text().await?);
-                std::process::exit(1);
-            }
+            });
         }
         Commands::Search { query, max } => {
             let url = format!(
@@ -499,27 +702,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 urlencoding(&query),
                 max,
             );
-            let resp = reqwest::get(&url).await?;
+            let resp = match reqwest::get(&url).await {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(&cli.server, e),
+            };
             if !resp.status().is_success() {
-                eprintln!("Error: {} — {}", resp.status(), resp.text().await?);
-                std::process::exit(1);
+                http_error_exit(resp, "search failed").await;
             }
-            let results: Vec<serde_json::Value> = resp.json().await?;
-            if results.is_empty() {
-                println!("No matches for '{}'", query);
-            } else {
-                for r in &results {
-                    let path = r.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                    let value = r.get("value").and_then(|v| v.as_str()).unwrap_or("");
-                    println!("{}", path);
-                    println!("  {}", value);
+            let results: Vec<Value> = resp.json().await?;
+            let value = Value::Array(results.clone());
+            emit(cli.format, &value, |_| {
+                if results.is_empty() {
+                    println!("No matches for '{}'", query);
+                } else {
+                    for r in &results {
+                        let path = r.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                        let val = r.get("value").and_then(|v| v.as_str()).unwrap_or("");
+                        println!("{}", path);
+                        println!("  {}", val);
+                    }
+                    println!(
+                        "\n{} match{}",
+                        results.len(),
+                        if results.len() == 1 { "" } else { "es" }
+                    );
                 }
-                println!(
-                    "\n{} match{}",
-                    results.len(),
-                    if results.len() == 1 { "" } else { "es" }
-                );
-            }
+            });
         }
         Commands::Ls { prefix, max_depth } => {
             let url = format!(
@@ -529,20 +737,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 urlencoding(&prefix),
                 max_depth,
             );
-            let resp = reqwest::get(&url).await?;
+            let resp = match reqwest::get(&url).await {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(&cli.server, e),
+            };
             if !resp.status().is_success() {
-                eprintln!("Error: {} — {}", resp.status(), resp.text().await?);
-                std::process::exit(1);
+                http_error_exit(resp, "ls failed").await;
             }
             let paths: Vec<String> = resp.json().await?;
-            if paths.is_empty() {
-                println!("No paths under {}", prefix);
-            } else {
-                for p in &paths {
-                    println!("{}", p);
+            let value = serde_json::json!(paths);
+            emit(cli.format, &value, |_| {
+                if paths.is_empty() {
+                    println!("No paths under {}", prefix);
+                } else {
+                    for p in &paths {
+                        println!("{}", p);
+                    }
+                    println!("\n{} paths", paths.len());
                 }
-                println!("\n{} paths", paths.len());
-            }
+            });
         }
         Commands::Get { path } => {
             let url = format!(
@@ -551,16 +764,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 urlencoding(&cli.branch),
                 urlencoding(&path),
             );
-            let resp = reqwest::get(&url).await?;
+            let resp = match reqwest::get(&url).await {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(&cli.server, e),
+            };
             if !resp.status().is_success() {
-                eprintln!("Error: {} — {}", resp.status(), resp.text().await?);
-                std::process::exit(1);
+                http_error_exit(resp, "get failed").await;
             }
-            let value: serde_json::Value = resp.json().await?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&value).unwrap_or_default()
-            );
+            let value: Value = resp.json().await?;
+            emit(cli.format, &value, |v| {
+                println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
+            });
         }
         Commands::Log { limit } => {
             let url = format!(
@@ -569,13 +783,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 urlencoding(&cli.branch),
                 limit,
             );
-            let resp = reqwest::get(&url).await?;
+            let resp = match reqwest::get(&url).await {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(&cli.server, e),
+            };
             if !resp.status().is_success() {
-                eprintln!("Error: {} — {}", resp.status(), resp.text().await?);
-                std::process::exit(1);
+                http_error_exit(resp, "log failed").await;
             }
-            let commits: Vec<serde_json::Value> = resp.json().await?;
-            print_commits(&commits);
+            let commits: Vec<Value> = resp.json().await?;
+            let value = Value::Array(commits.clone());
+            emit(cli.format, &value, |_| print_commits(&commits));
         }
         Commands::Blame { path } => {
             let url = format!(
@@ -584,55 +801,63 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 urlencoding(&cli.branch),
                 urlencoding(&path),
             );
-            let resp = reqwest::get(&url).await?;
+            let resp = match reqwest::get(&url).await {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(&cli.server, e),
+            };
             if !resp.status().is_success() {
-                eprintln!("Error: {} — {}", resp.status(), resp.text().await?);
-                std::process::exit(1);
+                http_error_exit(resp, "blame failed").await;
             }
-            let value: serde_json::Value = resp.json().await?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&value).unwrap_or_default()
-            );
+            let value: Value = resp.json().await?;
+            emit(cli.format, &value, |v| {
+                println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
+            });
         }
         Commands::Tail { interval } => {
             run_tail(&cli.server, &cli.branch, interval).await?;
         }
         Commands::Branches => {
-            let resp = reqwest::get(format!("{}/api/branches", cli.server)).await?;
+            let resp = match reqwest::get(format!("{}/api/branches", cli.server)).await {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(&cli.server, e),
+            };
             if !resp.status().is_success() {
-                eprintln!("Error: {} — {}", resp.status(), resp.text().await?);
-                std::process::exit(1);
+                http_error_exit(resp, "branches failed").await;
             }
-            let branches: Vec<serde_json::Value> = resp.json().await?;
-            if branches.is_empty() {
-                println!("No branches.");
-            } else {
-                for b in &branches {
-                    let name = b.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                    let id = b.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                    let marker = if name == cli.branch { "*" } else { " " };
-                    println!("{} {:30}  {}", marker, name, id);
+            let branches: Vec<Value> = resp.json().await?;
+            let value = Value::Array(branches.clone());
+            emit(cli.format, &value, |_| {
+                if branches.is_empty() {
+                    println!("No branches.");
+                } else {
+                    for b in &branches {
+                        let name = b.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                        let id = b.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                        let marker = if name == cli.branch { "*" } else { " " };
+                        println!("{} {:30}  {}", marker, name, id);
+                    }
                 }
-            }
+            });
         }
         Commands::Branch { name, from } => {
             let body = serde_json::json!({ "name": name, "from": from });
-            let resp = reqwest::Client::new()
+            let resp = match reqwest::Client::new()
                 .post(format!("{}/api/branches", cli.server))
                 .json(&body)
                 .send()
-                .await?;
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(&cli.server, e),
+            };
             if !resp.status().is_success() {
-                eprintln!("Error: {} — {}", resp.status(), resp.text().await?);
-                std::process::exit(1);
+                http_error_exit(resp, "branch create failed").await;
             }
-            let parsed: serde_json::Value = resp.json().await?;
-            let commit = parsed
-                .get("commit_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            println!("Branch '{}' created from '{}' at {}", name, from, commit);
+            let parsed: Value = resp.json().await?;
+            emit(cli.format, &parsed, |v| {
+                let commit = v.get("commit_id").and_then(|x| x.as_str()).unwrap_or("");
+                println!("Branch '{}' created from '{}' at {}", name, from, commit);
+            });
         }
         Commands::Init {
             global,
