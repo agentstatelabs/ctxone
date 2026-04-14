@@ -48,6 +48,7 @@ pub fn router(repo: Arc<Repository>, session: Arc<SessionStats>) -> Router {
         .route("/api/state/{ref_name}/search", get(search_values))
         .route("/api/log/{ref_name}", get(get_log))
         .route("/api/blame/{ref_name}", get(blame))
+        .route("/api/diff", get(diff_refs))
         .route("/api/branches", get(list_branches).post(create_branch))
         // Memory endpoints (high-level)
         .route("/api/memory/remember", post(remember))
@@ -266,6 +267,27 @@ async fn create_branch(
         "name": req.name,
         "from": req.from,
         "commit_id": format!("{}", id.short()),
+    })))
+}
+
+#[derive(Deserialize)]
+struct DiffQuery {
+    /// First ref (usually the older / base).
+    ref_a: String,
+    /// Second ref (usually the newer / target).
+    ref_b: String,
+}
+
+async fn diff_refs(
+    State(s): State<HubState>,
+    Query(q): Query<DiffQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let ops = s.repo.diff(&q.ref_a, &q.ref_b).map_err(internal_error)?;
+    let json_ops = serde_json::to_value(&ops).unwrap_or_default();
+    Ok(Json(serde_json::json!({
+        "ref_a": q.ref_a,
+        "ref_b": q.ref_b,
+        "ops": json_ops,
     })))
 }
 

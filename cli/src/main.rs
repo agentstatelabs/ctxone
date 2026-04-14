@@ -111,6 +111,13 @@ enum Commands {
         #[arg(long)]
         source: Option<String>,
     },
+    /// Diff two refs (branches, tags, or commits)
+    Diff {
+        /// First ref (usually older / base)
+        ref_a: String,
+        /// Second ref (usually newer / target)
+        ref_b: String,
+    },
     /// Forget (delete) a memory at a specific path
     Forget {
         /// Path to forget (get it from ctx search or ctx ls)
@@ -700,6 +707,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if pin {
                     println!("These facts will be included in every recall response.");
                 }
+            });
+        }
+        Commands::Diff { ref_a, ref_b } => {
+            let url = format!(
+                "{}/api/diff?ref_a={}&ref_b={}",
+                cli.server,
+                urlencoding(&ref_a),
+                urlencoding(&ref_b),
+            );
+            let resp = match reqwest::get(&url).await {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(&cli.server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "diff failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(cli.format, &parsed, |v| {
+                let empty_vec = vec![];
+                let ops = v
+                    .get("ops")
+                    .and_then(|x| x.as_array())
+                    .unwrap_or(&empty_vec);
+                if ops.is_empty() {
+                    println!("No differences between {} and {}", ref_a, ref_b);
+                    return;
+                }
+                for op in ops {
+                    let tag = op.get("op").and_then(|x| x.as_str()).unwrap_or("?");
+                    let path = op.get("path").and_then(|x| x.as_str()).unwrap_or("");
+                    let key = op.get("key").and_then(|x| x.as_str()).unwrap_or("");
+                    let marker = match tag {
+                        "SetValue" => "~",
+                        "AddKey" | "AppendItem" => "+",
+                        "RemoveKey" | "RemoveItem" => "-",
+                        _ => "?",
+                    };
+                    if key.is_empty() {
+                        println!("{} {:12} {}", marker, tag, path);
+                    } else {
+                        println!("{} {:12} {}/{}", marker, tag, path, key);
+                    }
+                }
+                println!(
+                    "\n{} change{}",
+                    ops.len(),
+                    if ops.len() == 1 { "" } else { "s" }
+                );
             });
         }
         Commands::Forget { path, reason } => {
