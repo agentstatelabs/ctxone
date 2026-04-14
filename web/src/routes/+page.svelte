@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { getHealth, getStats, getLog, getTokenStats } from '$lib/api';
+	import { getHealth, getStats, getLog, getTokenStats, remember } from '$lib/api';
 	import type { StatsResponse, CommitEntry, TokenStats } from '$lib/api';
 
 	let connected = $state(false);
@@ -9,18 +9,51 @@
 	let recentCommits: CommitEntry[] = $state([]);
 	let error: string | null = $state(null);
 
+	// Remember form state
+	let factText = $state('');
+	let factImportance: 'high' | 'medium' | 'low' = $state('medium');
+	let factContext = $state('');
+	let saving = $state(false);
+	let saveMessage: string | null = $state(null);
+
+	async function refresh() {
+		try {
+			stats = await getStats();
+			tokenStats = await getTokenStats();
+			recentCommits = await getLog('main', 5);
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Unknown error';
+		}
+	}
+
 	onMount(async () => {
 		connected = await getHealth();
 		if (connected) {
-			try {
-				stats = await getStats();
-				tokenStats = await getTokenStats();
-				recentCommits = await getLog('main', 5);
-			} catch (e) {
-				error = e instanceof Error ? e.message : 'Unknown error';
-			}
+			await refresh();
 		}
 	});
+
+	async function handleRemember(e: SubmitEvent) {
+		e.preventDefault();
+		if (!factText.trim()) return;
+		saving = true;
+		saveMessage = null;
+		try {
+			const result = await remember({
+				fact: factText,
+				importance: factImportance,
+				context: factContext.trim() || undefined
+			});
+			saveMessage = `Saved: ${result.path}`;
+			factText = '';
+			factContext = '';
+			await refresh();
+		} catch (e) {
+			saveMessage = e instanceof Error ? e.message : 'Save failed';
+		} finally {
+			saving = false;
+		}
+	}
 </script>
 
 <h2>Dashboard</h2>
@@ -32,6 +65,37 @@
 
 {#if error}
 	<p class="error">{error}</p>
+{/if}
+
+{#if connected}
+	<form class="remember-form" onsubmit={handleRemember}>
+		<h3>Remember a fact</h3>
+		<textarea
+			bind:value={factText}
+			placeholder="e.g., We use BSL-1.1 for all projects"
+			rows="2"
+			disabled={saving}
+		></textarea>
+		<div class="remember-row">
+			<select bind:value={factImportance} disabled={saving}>
+				<option value="high">High</option>
+				<option value="medium">Medium</option>
+				<option value="low">Low</option>
+			</select>
+			<input
+				type="text"
+				bind:value={factContext}
+				placeholder="context (e.g., licensing)"
+				disabled={saving}
+			/>
+			<button type="submit" disabled={saving || !factText.trim()}>
+				{saving ? 'Saving...' : 'Remember'}
+			</button>
+		</div>
+		{#if saveMessage}
+			<p class="save-message">{saveMessage}</p>
+		{/if}
+	</form>
 {/if}
 
 {#if stats}
@@ -187,4 +251,87 @@
 	.savings-value { color: #fff; font-family: monospace; }
 	.savings-value.saved { color: #22c55e; }
 	.savings-value.ratio { color: #3b82f6; font-size: 1.4rem; font-weight: 700; }
+
+	.remember-form {
+		background: #111;
+		border: 1px solid #222;
+		border-radius: 8px;
+		padding: 1.25rem 1.5rem;
+		margin-bottom: 2rem;
+	}
+
+	.remember-form h3 {
+		margin: 0 0 0.75rem 0;
+		color: #fff;
+		font-size: 1rem;
+		font-weight: 600;
+	}
+
+	.remember-form textarea {
+		width: 100%;
+		background: #0a0a0a;
+		border: 1px solid #333;
+		border-radius: 6px;
+		color: #e0e0e0;
+		padding: 0.625rem 0.75rem;
+		font-size: 0.95rem;
+		font-family: inherit;
+		box-sizing: border-box;
+		resize: vertical;
+	}
+
+	.remember-form textarea:focus,
+	.remember-form input:focus,
+	.remember-form select:focus {
+		outline: none;
+		border-color: #3b82f6;
+	}
+
+	.remember-row {
+		display: flex;
+		gap: 0.5rem;
+		margin-top: 0.5rem;
+	}
+
+	.remember-form select,
+	.remember-form input {
+		background: #0a0a0a;
+		border: 1px solid #333;
+		border-radius: 6px;
+		color: #e0e0e0;
+		padding: 0.5rem 0.75rem;
+		font-size: 0.9rem;
+		font-family: inherit;
+	}
+
+	.remember-form input {
+		flex: 1;
+	}
+
+	.remember-form button {
+		background: #3b82f6;
+		border: none;
+		border-radius: 6px;
+		color: #fff;
+		padding: 0.5rem 1rem;
+		cursor: pointer;
+		font-size: 0.9rem;
+		font-weight: 500;
+	}
+
+	.remember-form button:hover:not(:disabled) {
+		background: #2563eb;
+	}
+
+	.remember-form button:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	.save-message {
+		color: #22c55e;
+		font-size: 0.85rem;
+		margin: 0.5rem 0 0 0;
+		font-family: monospace;
+	}
 </style>

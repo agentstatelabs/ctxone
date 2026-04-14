@@ -103,3 +103,28 @@ export async function getBlame(ref_name = 'main', path: string): Promise<BlameEn
 export async function getBranches(): Promise<Array<{ name: string; id: string }>> {
 	return fetchJson('/api/branches');
 }
+
+export interface RememberRequest {
+	fact: string;
+	importance?: 'high' | 'medium' | 'low';
+	context?: string;
+	tags?: string[];
+}
+
+export async function remember(req: RememberRequest): Promise<{ path: string; commit_id: string }> {
+	const resp = await fetch(`${API_BASE}/api/memory/remember`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(req)
+	});
+	if (!resp.ok) {
+		throw new Error(`remember failed: ${resp.status}`);
+	}
+	return resp.json();
+}
+
+export async function recall(topic: string, budget = 1500): Promise<unknown> {
+	return fetchJson(
+		`/api/memory/recall?topic=${encodeURIComponent(topic)}&budget=${budget}`
+	);
+}
