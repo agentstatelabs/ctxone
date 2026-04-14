@@ -10,6 +10,7 @@ Persistent, searchable, accountable memory for AI agents. Eliminate context anxi
 | **CtxOne Engine** | `engine/` | Core memory + graph layer (AgentStateGraph) |
 | **CtxOne Lens** | `web/` | Web UI for browsing agent memory |
 | **ctx** | `cli/` | CLI for interacting with agent memory |
+| **ctxone (Python)** | `bindings/python/` | Python client library (`pip install ctxone`) |
 
 ## Quick Start
 

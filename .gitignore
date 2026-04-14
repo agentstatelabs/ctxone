@@ -5,3 +5,14 @@
 *.db
 .env
 .DS_Store
+
+# Python
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.coverage
+htmlcov/
+bindings/python/build/
+bindings/python/dist/
