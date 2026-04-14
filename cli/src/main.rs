@@ -80,6 +80,56 @@ enum Commands {
         #[arg(long)]
         source: Option<String>,
     },
+    /// Search the graph for a literal substring. Unlike recall, this is not
+    /// LLM-oriented — it returns full matching paths and values, no budget.
+    Search {
+        /// Substring to search for (case-insensitive)
+        query: String,
+        /// Max results (default: 50)
+        #[arg(short = 'n', long, default_value_t = 50)]
+        max: usize,
+    },
+    /// List paths in the memory graph under a prefix
+    Ls {
+        /// Prefix to list under (default: /)
+        #[arg(default_value = "/")]
+        prefix: String,
+        /// Max tree depth (default: 50)
+        #[arg(long, default_value_t = 50)]
+        max_depth: usize,
+    },
+    /// Read a value at a specific path
+    Get {
+        /// Path to read (e.g., /memory/facts/abc)
+        path: String,
+    },
+    /// Show recent commit history
+    Log {
+        /// Max commits to show (default: 20)
+        #[arg(short = 'n', long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Show provenance chain for a path (who wrote it, when, why)
+    Blame {
+        /// Path to blame
+        path: String,
+    },
+    /// Tail -f style live monitor of new commits
+    Tail {
+        /// Polling interval in milliseconds (default: 2000)
+        #[arg(long, default_value_t = 2000)]
+        interval: u64,
+    },
+    /// List all branches
+    Branches,
+    /// Create a new branch
+    Branch {
+        /// Name of the new branch
+        name: String,
+        /// Ref to branch from (default: main)
+        #[arg(long, default_value = "main")]
+        from: String,
+    },
     /// Auto-detect and configure AI tools with CtxOne MCP server
     Init {
         /// Install globally (user-level config) vs project-only
@@ -441,6 +491,149 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
         }
+        Commands::Search { query, max } => {
+            let url = format!(
+                "{}/api/state/{}/search?query={}&max_results={}",
+                cli.server,
+                urlencoding(&cli.branch),
+                urlencoding(&query),
+                max,
+            );
+            let resp = reqwest::get(&url).await?;
+            if !resp.status().is_success() {
+                eprintln!("Error: {} — {}", resp.status(), resp.text().await?);
+                std::process::exit(1);
+            }
+            let results: Vec<serde_json::Value> = resp.json().await?;
+            if results.is_empty() {
+                println!("No matches for '{}'", query);
+            } else {
+                for r in &results {
+                    let path = r.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                    let value = r.get("value").and_then(|v| v.as_str()).unwrap_or("");
+                    println!("{}", path);
+                    println!("  {}", value);
+                }
+                println!(
+                    "\n{} match{}",
+                    results.len(),
+                    if results.len() == 1 { "" } else { "es" }
+                );
+            }
+        }
+        Commands::Ls { prefix, max_depth } => {
+            let url = format!(
+                "{}/api/state/{}/paths?prefix={}&max_depth={}",
+                cli.server,
+                urlencoding(&cli.branch),
+                urlencoding(&prefix),
+                max_depth,
+            );
+            let resp = reqwest::get(&url).await?;
+            if !resp.status().is_success() {
+                eprintln!("Error: {} — {}", resp.status(), resp.text().await?);
+                std::process::exit(1);
+            }
+            let paths: Vec<String> = resp.json().await?;
+            if paths.is_empty() {
+                println!("No paths under {}", prefix);
+            } else {
+                for p in &paths {
+                    println!("{}", p);
+                }
+                println!("\n{} paths", paths.len());
+            }
+        }
+        Commands::Get { path } => {
+            let url = format!(
+                "{}/api/state/{}?path={}",
+                cli.server,
+                urlencoding(&cli.branch),
+                urlencoding(&path),
+            );
+            let resp = reqwest::get(&url).await?;
+            if !resp.status().is_success() {
+                eprintln!("Error: {} — {}", resp.status(), resp.text().await?);
+                std::process::exit(1);
+            }
+            let value: serde_json::Value = resp.json().await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&value).unwrap_or_default()
+            );
+        }
+        Commands::Log { limit } => {
+            let url = format!(
+                "{}/api/log/{}?limit={}",
+                cli.server,
+                urlencoding(&cli.branch),
+                limit,
+            );
+            let resp = reqwest::get(&url).await?;
+            if !resp.status().is_success() {
+                eprintln!("Error: {} — {}", resp.status(), resp.text().await?);
+                std::process::exit(1);
+            }
+            let commits: Vec<serde_json::Value> = resp.json().await?;
+            print_commits(&commits);
+        }
+        Commands::Blame { path } => {
+            let url = format!(
+                "{}/api/blame/{}?path={}",
+                cli.server,
+                urlencoding(&cli.branch),
+                urlencoding(&path),
+            );
+            let resp = reqwest::get(&url).await?;
+            if !resp.status().is_success() {
+                eprintln!("Error: {} — {}", resp.status(), resp.text().await?);
+                std::process::exit(1);
+            }
+            let value: serde_json::Value = resp.json().await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&value).unwrap_or_default()
+            );
+        }
+        Commands::Tail { interval } => {
+            run_tail(&cli.server, &cli.branch, interval).await?;
+        }
+        Commands::Branches => {
+            let resp = reqwest::get(format!("{}/api/branches", cli.server)).await?;
+            if !resp.status().is_success() {
+                eprintln!("Error: {} — {}", resp.status(), resp.text().await?);
+                std::process::exit(1);
+            }
+            let branches: Vec<serde_json::Value> = resp.json().await?;
+            if branches.is_empty() {
+                println!("No branches.");
+            } else {
+                for b in &branches {
+                    let name = b.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    let id = b.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    let marker = if name == cli.branch { "*" } else { " " };
+                    println!("{} {:30}  {}", marker, name, id);
+                }
+            }
+        }
+        Commands::Branch { name, from } => {
+            let body = serde_json::json!({ "name": name, "from": from });
+            let resp = reqwest::Client::new()
+                .post(format!("{}/api/branches", cli.server))
+                .json(&body)
+                .send()
+                .await?;
+            if !resp.status().is_success() {
+                eprintln!("Error: {} — {}", resp.status(), resp.text().await?);
+                std::process::exit(1);
+            }
+            let parsed: serde_json::Value = resp.json().await?;
+            let commit = parsed
+                .get("commit_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            println!("Branch '{}' created from '{}' at {}", name, from, commit);
+        }
         Commands::Init {
             global,
             project: _,
@@ -580,6 +773,106 @@ fn detect_tools(global: bool) -> Vec<AiTool> {
     });
 
     tools
+}
+
+fn print_commits(commits: &[serde_json::Value]) {
+    if commits.is_empty() {
+        println!("No commits.");
+        return;
+    }
+    for c in commits {
+        let ts = c
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .get(..19)
+            .unwrap_or("");
+        let id = c.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        let category = c
+            .get("intent")
+            .and_then(|i| i.get("category"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let desc = c
+            .get("intent")
+            .and_then(|i| i.get("description"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let conf = c.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        println!(
+            "{}  {}  [{}]  {}  ({:.0}%)",
+            ts,
+            id,
+            category,
+            desc,
+            conf * 100.0
+        );
+    }
+}
+
+async fn run_tail(
+    server: &str,
+    branch: &str,
+    interval_ms: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::collections::HashSet;
+    use std::time::Duration;
+
+    println!(
+        "Watching {} for new commits (every {}ms, Ctrl-C to stop)",
+        branch, interval_ms
+    );
+    println!();
+
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut first = true;
+
+    loop {
+        let url = format!("{}/api/log/{}?limit=20", server, urlencoding(branch),);
+        match reqwest::get(&url).await {
+            Ok(resp) if resp.status().is_success() => {
+                if let Ok(commits) = resp.json::<Vec<serde_json::Value>>().await {
+                    // Print in oldest-first order so new ones scroll at the bottom
+                    let mut fresh: Vec<&serde_json::Value> = commits
+                        .iter()
+                        .filter(|c| {
+                            let id = c.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                            !seen.contains(id)
+                        })
+                        .collect();
+                    fresh.reverse();
+
+                    if first {
+                        // On first pass, show the most recent 5 as history
+                        let history: Vec<serde_json::Value> =
+                            commits.iter().take(5).rev().cloned().collect();
+                        print_commits(&history);
+                        for c in &commits {
+                            if let Some(id) = c.get("id").and_then(|v| v.as_str()) {
+                                seen.insert(id.to_string());
+                            }
+                        }
+                        first = false;
+                    } else {
+                        for c in &fresh {
+                            print_commits(std::slice::from_ref(*c));
+                            if let Some(id) = c.get("id").and_then(|v| v.as_str()) {
+                                seen.insert(id.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(resp) => {
+                eprintln!("Error: {}", resp.status());
+            }
+            Err(e) => {
+                eprintln!("Hub unreachable: {}", e);
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+    }
 }
 
 async fn run_demo(server: &str) -> Result<(), Box<dyn std::error::Error>> {
