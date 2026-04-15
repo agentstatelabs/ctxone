@@ -1,0 +1,27 @@
+---
+/**
+ * The landing page at ctxone.com/
+ *
+ * Composes the five main sections: hero, problem, feature grid,
+ * savings showcase, integrations, final CTA.
+ */
+import LandingLayout from '../layouts/LandingLayout.astro';
+import Hero from '../components/Hero.astro';
+import ProblemSection from '../components/ProblemSection.astro';
+import FeatureGrid from '../components/FeatureGrid.astro';
+import SavingsShowcase from '../components/SavingsShowcase.astro';
+import IntegrationsRow from '../components/IntegrationsRow.astro';
+import CallToAction from '../components/CallToAction.astro';
+---
+
+<LandingLayout
+	title="CtxOne — memory that survives the session"
+	description="Persistent, searchable, accountable memory for AI agents. Write a fact once — Claude, Cursor, and every other tool you use remembers it forever, across sessions, across branches, with full provenance."
+>
+	<Hero />
+	<ProblemSection />
+	<FeatureGrid />
+	<SavingsShowcase />
+	<IntegrationsRow />
+	<CallToAction />
+</LandingLayout>

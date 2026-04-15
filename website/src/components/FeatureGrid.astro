@@ -1,0 +1,131 @@
+---
+/**
+ * Three-column feature grid: Remember, Recall, Blame. Each column
+ * pairs a CLI snippet with the matching MCP tool name so readers see
+ * "this is how you do it from a shell" and "this is what the model
+ * calls it" at the same glance.
+ */
+---
+
+<section class="section">
+	<div class="container">
+		<h2 class="section-title">Three verbs. That's the whole product.</h2>
+		<p class="section-lede">
+			CtxOne boils down to three things an AI tool does to memory.
+			Everything else — branches, priming, session stats, provenance
+			— falls out of these.
+		</p>
+
+		<div class="grid">
+			<article class="card">
+				<h3>Remember</h3>
+				<p>
+					Write a fact once. It survives sessions, branches, and tool
+					switches. Importance maps to a confidence score so
+					high-value facts aren't drowned out by chatter.
+				</p>
+				<pre><code>$ ctx remember "BSL-1.1 for all new repos" \
+    --importance high --context licensing
+
+<span class="comment"># from an LLM:</span>
+remember(fact="BSL-1.1 for all new repos",
+         importance="high", context="licensing")</code></pre>
+			</article>
+
+			<article class="card">
+				<h3>Recall</h3>
+				<p>
+					Ask a topic. Get pinned context plus relevant facts,
+					capped at a token budget. Every response includes the
+					live savings ratio so the 60× claim is provable in real
+					time.
+				</p>
+				<pre><code>$ ctx recall "licensing" --budget 1500
+
+<span class="comment"># from an LLM:</span>
+recall(topic="licensing", budget=1500)</code></pre>
+			</article>
+
+			<article class="card">
+				<h3>Blame</h3>
+				<p>
+					Every commit carries an agent ID, a timestamp, an intent,
+					and optional reasoning. <code>ctx blame</code> traces a
+					fact back to the tool, user, and session that wrote it.
+				</p>
+				<pre><code>$ ctx blame /memory/legal/bsl
+
+<span class="comment"># who wrote it, when, and why:</span>
+agent:  claude-code
+when:   2026-03-14T09:17:23Z
+intent: Observe
+reason: user preference</code></pre>
+			</article>
+		</div>
+	</div>
+</section>
+
+<style>
+	.grid {
+		display: grid;
+		grid-template-columns: repeat(3, 1fr);
+		gap: 1.25rem;
+	}
+
+	.card {
+		background: var(--ctx-panel);
+		border: 1px solid var(--ctx-border);
+		border-radius: var(--ctx-radius-lg);
+		padding: 1.5rem;
+	}
+
+	.card h3 {
+		margin: 0 0 0.75rem 0;
+		font-size: 1.1rem;
+		color: #ffffff;
+	}
+
+	.card p {
+		color: var(--ctx-text-dim);
+		font-size: 0.9rem;
+		margin: 0 0 1rem 0;
+		line-height: 1.55;
+	}
+
+	.card p code {
+		background: #0a0a0a;
+		padding: 0.1rem 0.35rem;
+		border-radius: var(--ctx-radius-sm);
+		font-size: 0.85em;
+		color: var(--ctx-accent-text);
+		font-family: var(--ctx-font-mono);
+	}
+
+	.card pre {
+		background: #050505;
+		border: 1px solid var(--ctx-border-lo);
+		border-radius: var(--ctx-radius-md);
+		padding: 0.85rem 1rem;
+		font-size: 0.75rem;
+		overflow-x: auto;
+		color: var(--ctx-text);
+		margin: 0;
+		line-height: 1.5;
+	}
+
+	.card pre code {
+		background: transparent;
+		padding: 0;
+		color: inherit;
+	}
+
+	.comment {
+		color: var(--ctx-text-faint);
+	}
+
+	@media (max-width: 900px) {
+		.grid {
+			grid-template-columns: 1fr;
+		}
+	}
+</style>

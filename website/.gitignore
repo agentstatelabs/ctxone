@@ -1,0 +1,13 @@
+# Astro build output
+dist/
+.astro/
+
+# npm
+node_modules/
+
+# Imported docs — repopulated by scripts/import-docs.mjs on every build.
+# Source of truth is ../docs/*.md, not this tree.
+src/content/docs/
+
+# macOS
+.DS_Store

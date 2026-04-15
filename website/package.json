@@ -1,0 +1,23 @@
+{
+	"name": "ctxone-website",
+	"type": "module",
+	"version": "0.72.0",
+	"private": true,
+	"scripts": {
+		"dev": "npm run prepare:docs && astro dev",
+		"start": "npm run prepare:docs && astro dev",
+		"build": "npm run prepare:docs && astro build",
+		"preview": "astro preview",
+		"astro": "astro",
+		"prepare:docs": "node scripts/import-docs.mjs"
+	},
+	"dependencies": {
+		"@astrojs/starlight": "^0.37.0",
+		"astro": "^5.5.0",
+		"sharp": "^0.33.0"
+	},
+	"overrides": {
+		"@astrojs/sitemap": "3.6.0",
+		"zod": "^3.25.76"
+	}
+}

@@ -1,0 +1,256 @@
+---
+/**
+ * Use case page: self-hosted chat (Open WebUI, ThreadWeaver, similar).
+ *
+ * Audience: someone already running Open WebUI or ThreadWeaver at home
+ * and wishing the model actually remembered their last conversation.
+ */
+import LandingLayout from '../../layouts/LandingLayout.astro';
+---
+
+<LandingLayout
+	title="CtxOne for self-hosted chat"
+	description="Real memory for Open WebUI and other self-hosted chat tools. Auto-inject relevant facts on every turn, no tool-calling required."
+>
+	<section class="section">
+		<div class="container narrow">
+			<div class="eyebrow">Use case</div>
+			<h1>Real memory for self-hosted chat.</h1>
+
+			<p class="lede">
+				You run Open WebUI at home. The model forgets, between
+				messages, which framework you picked last week. You paste
+				the same context again. And again. The whole point of
+				self-hosting was to own your data — but the model isn't
+				using it.
+			</p>
+
+			<p>
+				CtxOne ships a native Open WebUI plugin with two parts:
+				a <strong>Tool</strong> the model can call explicitly
+				(<code>remember</code>, <code>recall</code>,
+				<code>forget</code>, <code>list_pinned</code>), and a
+				<strong>Filter</strong> that runs around every chat turn
+				and auto-injects relevant memory into the system prompt.
+				The Filter works even with models that don't support tool
+				calling at all.
+			</p>
+
+			<h2>The one-command self-hosted stack</h2>
+
+			<p>
+				We ship a reference docker-compose at
+				<a
+					href="https://github.com/ctxone/ctxone/tree/main/examples/self-hosted-stack"
+					rel="noopener"
+				>
+					<code>examples/self-hosted-stack/</code>
+				</a>
+				that stands up the full environment in one command:
+			</p>
+
+			<pre><code class="language-bash">git clone https://github.com/ctxone/ctxone
+cd ctxone/examples/self-hosted-stack
+cp .env.example .env        # edit WEBUI_SECRET_KEY
+docker compose up -d</code></pre>
+
+			<p>This gives you:</p>
+			<ul>
+				<li>
+					<strong>CtxOne Hub</strong> on port 3001 — the memory
+					layer
+				</li>
+				<li>
+					<strong>CtxOne Lens</strong> on port 5173 — the web UI
+					for browsing, blame, diff, and forget
+				</li>
+				<li>
+					<strong>Ollama</strong> on port 11434 — local LLM
+					runtime
+				</li>
+				<li>
+					<strong>Open WebUI</strong> on port 8080 — chat UI
+					with the CtxOne plugin file bind-mounted at
+					<code>/app/ctxone-plugin.py</code>, ready to drop into
+					Admin Panel → Functions
+				</li>
+			</ul>
+
+			<h2>What the Filter does, in practice</h2>
+
+			<p>
+				On every message the user sends, the Filter intercepts the
+				request in its <code>inlet()</code> hook, calls
+				<code>hub.recall(topic=last_user_message)</code>, and
+				prepends a new system message to the conversation that
+				looks like this:
+			</p>
+
+			<pre><code class="language-text">## Relevant memory from CtxOne
+Retrieved for topic: 'licensing'
+
+- [pinned] **Vision** — ship a BSL-1.1 product with MIT clients
+- [fact] CtxOne uses BSL-1.1
+- [fact] Converts to Apache 2.0 four years after release
+
+_(CtxOne: this retrieval is 14.2× smaller than loading
+the full memory graph.)_</code></pre>
+
+			<p>
+				The model sees that before it generates its reply. It
+				doesn't have to ask for it. The user doesn't have to know
+				CtxOne exists. It just works — and because the Filter runs
+				entirely in Open WebUI's Python process talking to the Hub
+				over HTTP, there's no extra wire protocol to debug.
+			</p>
+
+			<h2>Per-user memory isolation</h2>
+
+			<p>
+				The plugin sets both the <code>X-CtxOne-Session</code>
+				and <code>X-CtxOne-Agent</code> request headers to the
+				Open WebUI user's email. That means:
+			</p>
+
+			<ul>
+				<li>
+					Each user gets their own session in the Hub's token
+					stats (<code>GET /api/stats/tokens/&lt;user@example.com&gt;</code>),
+					so you can tell who's using the most tokens and which
+					users are getting the most value from memory.
+				</li>
+				<li>
+					Every fact written via the Tool is attributed to that
+					user in <code>ctx blame</code>, so a shared install
+					still has clear provenance.
+				</li>
+				<li>
+					Users can optionally pin a private branch (via
+					UserValves) so their memory doesn't leak into anyone
+					else's chat.
+				</li>
+			</ul>
+
+			<h2>Opt-in self-teaching</h2>
+
+			<p>
+				The Filter has an <code>outlet()</code> hook that's off
+				by default. When you turn it on per-user, it stores the
+				assistant's replies as low-importance facts so every
+				conversation becomes training data for the next one.
+				It's off by default because auto-capture is useful but
+				can also fill your memory with junk — your call.
+			</p>
+
+			<h2>Ready to try it?</h2>
+
+			<div class="cta-row">
+				<a
+					class="btn btn-primary"
+					href="/integrations/open-webui/"
+				>
+					Read the Open WebUI guide →
+				</a>
+				<a
+					class="btn btn-secondary"
+					href="https://github.com/ctxone/ctxone/tree/main/examples/self-hosted-stack"
+					rel="noopener"
+				>
+					See the compose file
+				</a>
+			</div>
+		</div>
+	</section>
+</LandingLayout>
+
+<style>
+	.narrow {
+		max-width: 44rem;
+	}
+
+	.eyebrow {
+		color: var(--ctx-accent);
+		font-family: var(--ctx-font-mono);
+		font-size: 0.75rem;
+		text-transform: uppercase;
+		letter-spacing: 0.1em;
+		margin-bottom: 0.75rem;
+	}
+
+	h1 {
+		font-size: clamp(1.8rem, 4vw, 2.75rem);
+		font-weight: 800;
+		color: #ffffff;
+		margin: 0 0 1.5rem 0;
+		line-height: 1.15;
+		letter-spacing: -0.02em;
+	}
+
+	h2 {
+		font-size: 1.3rem;
+		color: #ffffff;
+		margin: 2.5rem 0 0.75rem 0;
+	}
+
+	p {
+		color: var(--ctx-text);
+		font-size: 1rem;
+		margin: 0 0 1rem 0;
+		line-height: 1.65;
+	}
+
+	.lede {
+		color: var(--ctx-text-dim);
+		font-size: 1.1rem;
+	}
+
+	ul {
+		color: var(--ctx-text);
+		margin: 0 0 1rem 0;
+		padding-left: 1.25rem;
+		line-height: 1.65;
+	}
+
+	ul li {
+		margin-bottom: 0.65rem;
+	}
+
+	code {
+		background: var(--ctx-panel);
+		border: 1px solid var(--ctx-border);
+		padding: 0.1rem 0.4rem;
+		border-radius: var(--ctx-radius-sm);
+		font-size: 0.9em;
+		color: var(--ctx-accent-text);
+		font-family: var(--ctx-font-mono);
+	}
+
+	pre {
+		background: var(--ctx-panel);
+		border: 1px solid var(--ctx-border);
+		border-radius: var(--ctx-radius-md);
+		padding: 1rem 1.25rem;
+		overflow-x: auto;
+		margin: 1.25rem 0;
+	}
+
+	pre code {
+		background: transparent;
+		border: none;
+		padding: 0;
+		color: var(--ctx-text-code);
+		font-size: 0.85rem;
+		line-height: 1.55;
+	}
+
+	.cta-row {
+		display: flex;
+		gap: 0.75rem;
+		margin: 1.5rem 0;
+		flex-wrap: wrap;
+	}
+
+	strong {
+		color: #ffffff;
+	}
+</style>

@@ -1,0 +1,103 @@
+---
+/**
+ * The install one-liner with a copy-to-clipboard button. The only
+ * interactive bit on the landing page — a tiny inline <script> handles
+ * the clipboard copy so we don't ship a framework for one button.
+ */
+const cmd = 'curl -sSL https://raw.githubusercontent.com/ctxone/ctxone/main/install.sh | sh';
+---
+
+<div class="install" data-install={cmd}>
+	<code class="install-cmd">
+		<span class="prompt">$</span>
+		<span class="text">{cmd}</span>
+	</code>
+	<button type="button" class="copy-btn" aria-label="Copy install command">
+		<span class="copy-label">Copy</span>
+	</button>
+</div>
+
+<script>
+	// Tiny clipboard helper. No framework, no bundler overhead.
+	document.querySelectorAll('.install').forEach((el) => {
+		const btn = el.querySelector<HTMLButtonElement>('.copy-btn');
+		const label = btn?.querySelector<HTMLSpanElement>('.copy-label');
+		const cmd = (el as HTMLElement).dataset.install ?? '';
+		if (!btn || !label) return;
+
+		btn.addEventListener('click', async () => {
+			try {
+				await navigator.clipboard.writeText(cmd);
+				const original = label.textContent ?? 'Copy';
+				label.textContent = 'Copied ✓';
+				btn.classList.add('copied');
+				setTimeout(() => {
+					label.textContent = original;
+					btn.classList.remove('copied');
+				}, 1500);
+			} catch (err) {
+				console.error('[ctxone] clipboard copy failed:', err);
+			}
+		});
+	});
+</script>
+
+<style>
+	.install {
+		display: flex;
+		align-items: stretch;
+		background: var(--ctx-panel);
+		border: 1px solid var(--ctx-border-hi);
+		border-radius: var(--ctx-radius-md);
+		max-width: 36rem;
+		overflow: hidden;
+		font-family: var(--ctx-font-mono);
+	}
+
+	.install-cmd {
+		flex: 1;
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		padding: 0.85rem 1rem;
+		font-size: 0.85rem;
+		color: var(--ctx-text);
+		overflow-x: auto;
+		white-space: nowrap;
+		font-family: inherit;
+	}
+
+	.prompt {
+		color: var(--ctx-accent);
+		user-select: none;
+		flex-shrink: 0;
+	}
+
+	.text {
+		flex: 1;
+	}
+
+	.copy-btn {
+		background: var(--ctx-panel-hi);
+		border: none;
+		border-left: 1px solid var(--ctx-border-hi);
+		color: var(--ctx-text-dim);
+		padding: 0 1.1rem;
+		font-size: 0.75rem;
+		font-family: var(--ctx-font-mono);
+		font-weight: 600;
+		cursor: pointer;
+		transition: color 0.12s, background 0.12s;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+	}
+
+	.copy-btn:hover {
+		color: var(--ctx-text);
+		background: var(--ctx-border);
+	}
+
+	.copy-btn.copied {
+		color: var(--ctx-success);
+	}
+</style>

@@ -1,0 +1,82 @@
+/*
+ * Starlight theme overrides — map our CtxOne brand tokens onto
+ * Starlight's own CSS custom properties. Starlight uses a standardized
+ * set of `--sl-*` variables; overriding them in :root (dark mode) and
+ * [data-theme='light'] is the supported customization path.
+ *
+ * Since Lens is dark-only and we want brand consistency, we also
+ * override the light-mode variables to match the dark palette — the
+ * theme toggle still works but both modes now render dark. (If we
+ * ever add a real light mode later, restore Starlight's light defaults
+ * here.)
+ */
+
+:root,
+[data-theme='dark'] {
+	/* Backgrounds */
+	--sl-color-bg: #0a0a0a;
+	--sl-color-bg-nav: #0a0a0a;
+	--sl-color-bg-sidebar: #0a0a0a;
+	--sl-color-bg-inline-code: #111111;
+	--sl-color-bg-accent: #1e3a5f;
+
+	/* Text */
+	--sl-color-white: #ffffff;
+	--sl-color-gray-1: #e0e0e0;
+	--sl-color-gray-2: #c8c8c8;
+	--sl-color-gray-3: #888888;
+	--sl-color-gray-4: #666666;
+	--sl-color-gray-5: #444444;
+	--sl-color-gray-6: #222222;
+	--sl-color-gray-7: #151515;
+	--sl-color-black: #0a0a0a;
+
+	/* Accent (link color, active sidebar item, etc.) */
+	--sl-color-accent-low: #1e3a5f;
+	--sl-color-accent: #3b82f6;
+	--sl-color-accent-high: #93c5fd;
+
+	/* Text colors that Starlight reads per-semantic */
+	--sl-color-text: #e0e0e0;
+	--sl-color-text-accent: #93c5fd;
+	--sl-color-text-invert: #0a0a0a;
+
+	/* Borders and hairlines */
+	--sl-color-hairline-light: #222222;
+	--sl-color-hairline: #1a1a1a;
+	--sl-color-hairline-shade: #333333;
+
+	/* Fonts */
+	--sl-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+		'Helvetica Neue', Arial, sans-serif;
+	--sl-font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+		'Liberation Mono', 'Courier New', monospace;
+}
+
+/* Force dark palette even when a visitor prefers light. Brand > pref
+ * for this site. */
+:root[data-theme='light'] {
+	--sl-color-bg: #0a0a0a;
+	--sl-color-bg-nav: #0a0a0a;
+	--sl-color-bg-sidebar: #0a0a0a;
+	--sl-color-bg-inline-code: #111111;
+	--sl-color-bg-accent: #1e3a5f;
+	--sl-color-white: #ffffff;
+	--sl-color-gray-1: #e0e0e0;
+	--sl-color-gray-2: #c8c8c8;
+	--sl-color-gray-3: #888888;
+	--sl-color-gray-4: #666666;
+	--sl-color-gray-5: #444444;
+	--sl-color-gray-6: #222222;
+	--sl-color-gray-7: #151515;
+	--sl-color-black: #0a0a0a;
+	--sl-color-accent-low: #1e3a5f;
+	--sl-color-accent: #3b82f6;
+	--sl-color-accent-high: #93c5fd;
+	--sl-color-text: #e0e0e0;
+	--sl-color-text-accent: #93c5fd;
+	--sl-color-text-invert: #0a0a0a;
+	--sl-color-hairline-light: #222222;
+	--sl-color-hairline: #1a1a1a;
+	--sl-color-hairline-shade: #333333;
+}

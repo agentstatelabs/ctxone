@@ -1,0 +1,97 @@
+---
+/**
+ * Final push-to-install block at the bottom of the landing page.
+ * Repeats the install one-liner so users who scrolled all the way
+ * through don't have to scroll back up.
+ */
+import InstallOneliner from './InstallOneliner.astro';
+---
+
+<section class="section cta-section">
+	<div class="container">
+		<h2>Install it. Use it. See the ratio climb.</h2>
+		<p class="lede">
+			There is no signup. No server to rent. No SaaS bill. Just a
+			binary that runs on your laptop and a graph file under
+			<code>~/.ctxone</code>.
+		</p>
+		<InstallOneliner />
+		<div class="links">
+			<a class="btn btn-primary" href="/getting-started/quickstart/">
+				5-minute quickstart →
+			</a>
+			<a
+				class="btn btn-secondary"
+				href="https://github.com/ctxone/ctxone"
+				rel="noopener"
+			>
+				Star on GitHub
+			</a>
+		</div>
+		<p class="license-note">
+			Source-available under BSL-1.1. Every release converts to
+			Apache-2.0 four years after it ships —
+			<a href="/license/">full story</a>.
+		</p>
+	</div>
+</section>
+
+<style>
+	.cta-section {
+		padding: 5rem 0;
+		background:
+			radial-gradient(
+				ellipse at bottom,
+				rgba(59, 130, 246, 0.06),
+				transparent 60%
+			),
+			var(--ctx-bg);
+		text-align: center;
+		border-bottom: none;
+	}
+
+	.cta-section .container {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+	}
+
+	h2 {
+		font-size: clamp(1.5rem, 3vw, 2.25rem);
+		font-weight: 800;
+		color: #ffffff;
+		margin: 0 0 0.75rem 0;
+		letter-spacing: -0.01em;
+	}
+
+	.lede {
+		color: var(--ctx-text-dim);
+		font-size: 1rem;
+		max-width: 36rem;
+		margin: 0 0 2rem 0;
+	}
+
+	.lede code {
+		background: var(--ctx-panel);
+		border: 1px solid var(--ctx-border);
+		padding: 0.1rem 0.4rem;
+		border-radius: var(--ctx-radius-sm);
+		font-size: 0.9em;
+		color: var(--ctx-accent-text);
+		font-family: var(--ctx-font-mono);
+	}
+
+	.links {
+		display: flex;
+		gap: 0.75rem;
+		margin-top: 1.5rem;
+		flex-wrap: wrap;
+		justify-content: center;
+	}
+
+	.license-note {
+		margin-top: 2rem;
+		color: var(--ctx-text-faint);
+		font-size: 0.8rem;
+	}
+</style>

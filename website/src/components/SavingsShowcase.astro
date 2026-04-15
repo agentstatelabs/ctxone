@@ -1,0 +1,194 @@
+---
+/**
+ * The 60× showcase. Visualizes the before/after: a flat 12k-token
+ * memory file vs CtxOne's 200-token budgeted recall for the same
+ * topic. Pure CSS — no JavaScript, no framework.
+ */
+---
+
+<section class="section">
+	<div class="container">
+		<h2 class="section-title">The 60× number, provable in real time</h2>
+		<p class="section-lede">
+			Every <code>recall</code> response includes a
+			<code>_ctxone_stats</code> field showing exactly how many tokens
+			you sent vs how many you would have sent if the model had seen
+			the full memory graph. This isn't marketing — it's the live
+			delta the Hub computes on every request.
+		</p>
+
+		<div class="compare">
+			<div class="col col-flat">
+				<div class="label">Flat memory</div>
+				<div class="caption">What the model sees without CtxOne</div>
+				<div class="bar bar-flat">
+					<span class="bar-inner"></span>
+				</div>
+				<div class="number number-flat">12,000 tokens</div>
+				<div class="note">Every session, every time</div>
+			</div>
+
+			<div class="arrow">→</div>
+
+			<div class="col col-ctx">
+				<div class="label">CtxOne recall</div>
+				<div class="caption">What the model sees with CtxOne</div>
+				<div class="bar bar-ctx">
+					<span class="bar-inner"></span>
+				</div>
+				<div class="number number-ctx">200 tokens</div>
+				<div class="note">Topic-matched + pinned</div>
+			</div>
+		</div>
+
+		<div class="ratio">
+			<span class="x">60×</span>
+			<span class="x-label">savings ratio</span>
+		</div>
+
+		<p class="footnote">
+			Shown: a mature graph of a few hundred facts, recalled for a
+			specific topic. On a fresh graph the ratio is close to 1× — it
+			grows with the graph, because that's how selective retrieval
+			works. <a href="/how-it-works/token-savings/">See the math →</a>
+		</p>
+	</div>
+</section>
+
+<style>
+	.compare {
+		display: flex;
+		align-items: center;
+		gap: 2rem;
+		margin: 2.5rem 0 2rem 0;
+		flex-wrap: wrap;
+	}
+
+	.col {
+		flex: 1;
+		min-width: 14rem;
+		background: var(--ctx-panel);
+		border: 1px solid var(--ctx-border);
+		border-radius: var(--ctx-radius-lg);
+		padding: 1.25rem 1.5rem;
+	}
+
+	.label {
+		font-size: 0.7rem;
+		color: var(--ctx-text-faint);
+		text-transform: uppercase;
+		letter-spacing: 0.1em;
+		margin-bottom: 0.5rem;
+	}
+
+	.caption {
+		color: var(--ctx-text-dim);
+		font-size: 0.85rem;
+		margin-bottom: 1rem;
+	}
+
+	.bar {
+		height: 1.1rem;
+		background: #050505;
+		border: 1px solid var(--ctx-border-lo);
+		border-radius: var(--ctx-radius-sm);
+		overflow: hidden;
+		margin-bottom: 1rem;
+	}
+
+	.bar-inner {
+		display: block;
+		height: 100%;
+	}
+
+	.bar-flat .bar-inner {
+		width: 100%;
+		background: repeating-linear-gradient(
+			45deg,
+			#ef4444,
+			#ef4444 8px,
+			#c0392b 8px,
+			#c0392b 16px
+		);
+	}
+
+	.bar-ctx .bar-inner {
+		width: 1.7%;
+		background: var(--ctx-accent);
+	}
+
+	.number {
+		font-family: var(--ctx-font-mono);
+		font-size: 1.4rem;
+		font-weight: 700;
+		color: #ffffff;
+	}
+
+	.number-ctx {
+		color: var(--ctx-accent-text);
+	}
+
+	.note {
+		color: var(--ctx-text-faint);
+		font-size: 0.75rem;
+		margin-top: 0.25rem;
+	}
+
+	.arrow {
+		font-size: 2rem;
+		color: var(--ctx-text-faint);
+		flex-shrink: 0;
+	}
+
+	.ratio {
+		display: flex;
+		align-items: baseline;
+		gap: 0.75rem;
+		margin: 1rem 0 1.5rem 0;
+	}
+
+	.x {
+		font-family: var(--ctx-font-mono);
+		font-size: 4rem;
+		font-weight: 800;
+		color: var(--ctx-accent);
+		line-height: 1;
+	}
+
+	.x-label {
+		color: var(--ctx-text-dim);
+		font-size: 1rem;
+		text-transform: uppercase;
+		letter-spacing: 0.1em;
+	}
+
+	.footnote {
+		color: var(--ctx-text-dim);
+		font-size: 0.85rem;
+		max-width: 36rem;
+		margin: 0;
+	}
+
+	.footnote code,
+	.section-lede code {
+		background: var(--ctx-panel);
+		border: 1px solid var(--ctx-border);
+		padding: 0.1rem 0.35rem;
+		border-radius: var(--ctx-radius-sm);
+		font-size: 0.9em;
+		color: var(--ctx-accent-text);
+		font-family: var(--ctx-font-mono);
+	}
+
+	@media (max-width: 720px) {
+		.compare {
+			flex-direction: column;
+		}
+		.arrow {
+			transform: rotate(90deg);
+		}
+		.x {
+			font-size: 3rem;
+		}
+	}
+</style>

@@ -1,0 +1,60 @@
+---
+/**
+ * Problem-framing section. One tight paragraph about why context
+ * dies between sessions, with a link to the full argument in docs.
+ */
+---
+
+<section class="section">
+	<div class="container">
+		<h2 class="section-title">Why context keeps dying</h2>
+		<p class="section-lede">
+			Every AI coding session starts cold. You re-explain the same
+			architectural decisions, the same licensing rules, the same
+			reasons you picked SQLite over Postgres. The model burns most
+			of its context window re-learning what you already told it
+			yesterday, and by afternoon it's still confidently wrong about
+			basic facts.
+		</p>
+		<p class="fix">
+			CtxOne fixes this by giving your AI tools a real memory layer —
+			stored locally, versioned like git, attributable like
+			<code>git blame</code>, and cheap to query because it returns
+			only the facts relevant to <em>this</em> question.
+		</p>
+		<p class="read-more">
+			<a href="/why-ctxone/context-anxiety/">
+				Read the full argument →
+			</a>
+		</p>
+	</div>
+</section>
+
+<style>
+	.fix {
+		color: var(--ctx-text);
+		font-size: 1rem;
+		max-width: 40rem;
+		margin: 0 0 1.25rem 0;
+		line-height: 1.6;
+	}
+
+	.fix code {
+		background: var(--ctx-panel);
+		border: 1px solid var(--ctx-border);
+		padding: 0.1rem 0.4rem;
+		border-radius: var(--ctx-radius-sm);
+		font-size: 0.9em;
+		color: var(--ctx-accent-text);
+	}
+
+	.fix em {
+		color: #ffffff;
+		font-style: italic;
+	}
+
+	.read-more {
+		margin: 0;
+		font-size: 0.9rem;
+	}
+</style>

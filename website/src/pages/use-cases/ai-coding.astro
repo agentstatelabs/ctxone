@@ -1,0 +1,222 @@
+---
+/**
+ * Use case page: solo dev with AI coding tools.
+ *
+ * Audience: someone who already uses Claude Code / Cursor / VS Code
+ * and is tired of re-explaining their project every morning.
+ */
+import LandingLayout from '../../layouts/LandingLayout.astro';
+import InstallOneliner from '../../components/InstallOneliner.astro';
+---
+
+<LandingLayout
+	title="CtxOne for AI coding tools"
+	description="Stop re-explaining your project to Claude every morning. ctx init, write a fact once, and every AI coding tool you use remembers it forever."
+>
+	<section class="section">
+		<div class="container narrow">
+			<div class="eyebrow">Use case</div>
+			<h1>Stop re-explaining your project to Claude every morning.</h1>
+
+			<p class="lede">
+				You open Claude Code on Tuesday and it asks the same three
+				questions it asked on Monday. You paste the same paragraph
+				about your stack. The model burns 2,000 tokens on
+				re-onboarding before it writes a single line of useful code.
+			</p>
+
+			<p>
+				CtxOne fixes this with an MCP server that sits between your
+				AI coding tool and a local memory graph. Every fact you
+				write once — "we picked SQLite over Postgres because we need
+				zero-config", "BSL-1.1 for all new repos", "don't touch the
+				migrations directory without checking with Priya first" —
+				survives forever, across sessions, across branches, across
+				tool switches.
+			</p>
+
+			<h2>The three commands that change everything</h2>
+
+			<pre><code class="language-bash"># 1. Install once
+curl -sSL https://raw.githubusercontent.com/ctxone/ctxone/main/install.sh | sh
+
+# 2. Wire into every AI tool you have, in one go
+ctx init
+
+# 3. Tell it something you'd otherwise have to repeat tomorrow
+ctx remember "We use BSL-1.1 for all new repos" \
+    --importance high --context licensing</code></pre>
+
+			<p>
+				<code>ctx init</code> auto-detects Claude Code, Cursor, VS
+				Code, Codex, and Gemini. For each one, it writes the right
+				MCP config file with a <code>--agent-id</code> flag so
+				<code>ctx blame</code> can tell you later which tool wrote
+				which fact. Next time you open any of those tools, the
+				memory is already there.
+			</p>
+
+			<h2>What changes</h2>
+			<ul>
+				<li>
+					<strong>Onboarding cost goes to zero.</strong> The
+					model doesn't need to re-learn your stack because it
+					loads pinned context automatically on every call.
+				</li>
+				<li>
+					<strong>60× fewer tokens per turn.</strong> Recall
+					returns only the facts relevant to the current
+					question, not the entire memory file.
+				</li>
+				<li>
+					<strong>You get a blame log.</strong>
+					<code>ctx blame &lt;path&gt;</code> shows exactly which
+					tool (or which of your colleagues) wrote which fact,
+					when, and why.
+				</li>
+				<li>
+					<strong>You can branch experiments.</strong>
+					<code>ctx branch experiment --from main</code> lets
+					you try a different set of facts without polluting
+					your main memory.
+				</li>
+			</ul>
+
+			<h2>What it looks like</h2>
+
+			<p>
+				After a week of use, a typical recall looks like this:
+			</p>
+
+			<pre><code class="language-text">{`$ ctx recall "deployment strategy"
+
+[pinned] Vision: ship a single binary, no orchestration
+[fact]   We deploy via docker compose, not k8s
+[fact]   Staging at staging.example.com, prod at example.com
+[fact]   Rollback: docker compose down; git checkout v0.X; up
+[fact]   Blue/green not worth it at this scale
+
+_ctxone_stats: {
+  "ctx_tokens_sent": 87,
+  "ctx_tokens_estimated_flat": 5432,
+  "ctx_savings_ratio": 62.4
+}`}</code></pre>
+
+			<p>
+				<code>ctx_savings_ratio</code> is the live number — this
+				particular recall sent 87 tokens instead of the 5,432 it
+				would have cost to dump the full memory file. That's the
+				60× claim, computed per-request.
+			</p>
+
+			<h2>Ready to try it?</h2>
+			<InstallOneliner />
+
+			<p class="more">
+				Next:
+				<a href="/getting-started/quickstart/">
+					5-minute quickstart
+				</a>
+				&nbsp;·&nbsp;
+				<a href="/integrations/ai-coding-tools/">
+					Full integration guide
+				</a>
+				&nbsp;·&nbsp;
+				<a href="/how-it-works/token-savings/">
+					The math behind the ratio
+				</a>
+			</p>
+		</div>
+	</section>
+</LandingLayout>
+
+<style>
+	.narrow {
+		max-width: 44rem;
+	}
+
+	.eyebrow {
+		color: var(--ctx-accent);
+		font-family: var(--ctx-font-mono);
+		font-size: 0.75rem;
+		text-transform: uppercase;
+		letter-spacing: 0.1em;
+		margin-bottom: 0.75rem;
+	}
+
+	h1 {
+		font-size: clamp(1.8rem, 4vw, 2.75rem);
+		font-weight: 800;
+		color: #ffffff;
+		margin: 0 0 1.5rem 0;
+		line-height: 1.15;
+		letter-spacing: -0.02em;
+	}
+
+	h2 {
+		font-size: 1.3rem;
+		color: #ffffff;
+		margin: 2.5rem 0 0.75rem 0;
+	}
+
+	p {
+		color: var(--ctx-text);
+		font-size: 1rem;
+		margin: 0 0 1rem 0;
+		line-height: 1.65;
+	}
+
+	.lede {
+		color: var(--ctx-text-dim);
+		font-size: 1.1rem;
+	}
+
+	ul {
+		color: var(--ctx-text);
+		margin: 0 0 1rem 0;
+		padding-left: 1.25rem;
+		line-height: 1.65;
+	}
+
+	ul li {
+		margin-bottom: 0.65rem;
+	}
+
+	code {
+		background: var(--ctx-panel);
+		border: 1px solid var(--ctx-border);
+		padding: 0.1rem 0.4rem;
+		border-radius: var(--ctx-radius-sm);
+		font-size: 0.9em;
+		color: var(--ctx-accent-text);
+		font-family: var(--ctx-font-mono);
+	}
+
+	pre {
+		background: var(--ctx-panel);
+		border: 1px solid var(--ctx-border);
+		border-radius: var(--ctx-radius-md);
+		padding: 1rem 1.25rem;
+		overflow-x: auto;
+		margin: 1.25rem 0;
+	}
+
+	pre code {
+		background: transparent;
+		border: none;
+		padding: 0;
+		color: var(--ctx-text-code);
+		font-size: 0.85rem;
+		line-height: 1.55;
+	}
+
+	.more {
+		color: var(--ctx-text-dim);
+		font-size: 0.9rem;
+		margin-top: 2rem;
+	}
+
+	strong {
+		color: #ffffff;
+	}
+</style>

@@ -1,0 +1,111 @@
+---
+/**
+ * Landing-page hero. Lives above the fold. Three jobs:
+ *
+ *   1. State what CtxOne is in one line
+ *   2. Give the copy-paste install command
+ *   3. Offer the two CTAs (start + GitHub)
+ *
+ * Keep the copy short and concrete. Marketing-speak dies here.
+ */
+import InstallOneliner from './InstallOneliner.astro';
+---
+
+<section class="hero">
+	<div class="container">
+		<h1>Memory that survives the session.</h1>
+
+		<p class="lede">
+			CtxOne is the persistent, searchable, accountable memory layer
+			for AI agents. Write a fact once — Claude, Cursor, and every
+			other tool you use remembers it forever, across sessions,
+			across branches, with full provenance.
+		</p>
+
+		<InstallOneliner />
+
+		<div class="cta-row">
+			<a class="btn btn-primary" href="/getting-started/quickstart/">
+				Get started →
+			</a>
+			<a
+				class="btn btn-secondary"
+				href="https://github.com/ctxone/ctxone"
+				rel="noopener"
+			>
+				View on GitHub
+			</a>
+		</div>
+
+		<p class="badges">
+			<span class="badge">BSL-1.1 → Apache 2.0</span>
+			<span class="badge">Self-hosted</span>
+			<span class="badge">MCP native</span>
+			<span class="badge">Zero telemetry</span>
+		</p>
+	</div>
+</section>
+
+<style>
+	.hero {
+		padding: 6rem 0 4rem 0;
+		background:
+			radial-gradient(
+				ellipse at top,
+				rgba(59, 130, 246, 0.08),
+				transparent 50%
+			),
+			var(--ctx-bg);
+		border-bottom: 1px solid var(--ctx-border-lo);
+	}
+
+	h1 {
+		font-size: clamp(2rem, 5vw, 3.25rem);
+		font-weight: 800;
+		line-height: 1.1;
+		margin: 0 0 1.25rem 0;
+		color: #ffffff;
+		letter-spacing: -0.02em;
+		max-width: 20ch;
+	}
+
+	.lede {
+		font-size: 1.1rem;
+		color: var(--ctx-text-dim);
+		margin: 0 0 2rem 0;
+		max-width: 38rem;
+		line-height: 1.6;
+	}
+
+	.cta-row {
+		display: flex;
+		gap: 0.75rem;
+		margin: 1.5rem 0 2.5rem 0;
+		flex-wrap: wrap;
+	}
+
+	.badges {
+		display: flex;
+		gap: 0.75rem;
+		flex-wrap: wrap;
+		margin: 0;
+	}
+
+	.badge {
+		display: inline-flex;
+		align-items: center;
+		padding: 0.35rem 0.75rem;
+		background: var(--ctx-panel);
+		border: 1px solid var(--ctx-border);
+		border-radius: 999px;
+		font-size: 0.75rem;
+		color: var(--ctx-text-dim);
+		font-family: var(--ctx-font-mono);
+	}
+
+	@media (max-width: 640px) {
+		.hero {
+			padding: 4rem 0 2.5rem 0;
+		}
+	}
+</style>

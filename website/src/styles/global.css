@@ -1,0 +1,157 @@
+/*
+ * CtxOne brand tokens + minimal reset for landing page components.
+ *
+ * These values are lifted directly from web/src/routes/+layout.svelte
+ * (the Lens app) so the marketing site and the product UI share the
+ * same visual language. When the brand moves, it moves in one place.
+ */
+
+:root {
+	/* Palette */
+	--ctx-bg: #0a0a0a;
+	--ctx-panel: #111111;
+	--ctx-panel-hi: #151515;
+	--ctx-border: #222222;
+	--ctx-border-hi: #333333;
+	--ctx-border-lo: #1a1a1a;
+	--ctx-text: #e0e0e0;
+	--ctx-text-dim: #888888;
+	--ctx-text-faint: #555555;
+	--ctx-text-code: #a5d6a7;
+	--ctx-accent: #3b82f6;
+	--ctx-accent-hover: #2563eb;
+	--ctx-accent-dim: #1e3a5f;
+	--ctx-accent-text: #93c5fd;
+	--ctx-success: #22c55e;
+	--ctx-warn: #fcd34d;
+	--ctx-error: #ef4444;
+
+	/* Typography */
+	--ctx-font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+		'Helvetica Neue', Arial, sans-serif;
+	--ctx-font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+		'Liberation Mono', 'Courier New', monospace;
+
+	/* Sizing */
+	--ctx-radius-sm: 4px;
+	--ctx-radius-md: 6px;
+	--ctx-radius-lg: 8px;
+	--ctx-max-width: 1100px;
+}
+
+/* Minimal reset for landing-page components. Starlight ships its own
+ * reset for the docs pages, so we only apply this inside top-level
+ * .astro pages (not docs). */
+.landing {
+	background: var(--ctx-bg);
+	color: var(--ctx-text);
+	font-family: var(--ctx-font-sans);
+	line-height: 1.55;
+	-webkit-font-smoothing: antialiased;
+	min-height: 100vh;
+}
+
+.landing * {
+	box-sizing: border-box;
+}
+
+.landing a {
+	color: var(--ctx-accent);
+	text-decoration: none;
+	transition: color 0.12s;
+}
+
+.landing a:hover {
+	color: var(--ctx-accent-hover);
+	text-decoration: underline;
+}
+
+.landing code,
+.landing pre {
+	font-family: var(--ctx-font-mono);
+}
+
+.landing pre {
+	background: #0a0a0a;
+	border: 1px solid var(--ctx-border);
+	border-radius: var(--ctx-radius-md);
+	padding: 1rem 1.25rem;
+	overflow-x: auto;
+	font-size: 0.85rem;
+	color: var(--ctx-text-code);
+}
+
+.landing .container {
+	max-width: var(--ctx-max-width);
+	margin: 0 auto;
+	padding: 0 1.5rem;
+}
+
+.landing .section {
+	padding: 4rem 0;
+	border-bottom: 1px solid var(--ctx-border-lo);
+}
+
+.landing .section:last-child {
+	border-bottom: none;
+}
+
+.landing .section-title {
+	font-size: 1.5rem;
+	font-weight: 700;
+	color: #ffffff;
+	margin: 0 0 0.5rem 0;
+}
+
+.landing .section-lede {
+	color: var(--ctx-text-dim);
+	font-size: 1rem;
+	margin: 0 0 2rem 0;
+	max-width: 40rem;
+}
+
+.landing .btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.5rem;
+	padding: 0.75rem 1.25rem;
+	border-radius: var(--ctx-radius-md);
+	font-size: 0.95rem;
+	font-weight: 600;
+	text-decoration: none;
+	transition: all 0.12s;
+	border: 1px solid transparent;
+}
+
+.landing .btn-primary {
+	background: var(--ctx-accent);
+	color: #ffffff;
+}
+
+.landing .btn-primary:hover {
+	background: var(--ctx-accent-hover);
+	color: #ffffff;
+	text-decoration: none;
+}
+
+.landing .btn-secondary {
+	background: var(--ctx-panel);
+	color: var(--ctx-text);
+	border-color: var(--ctx-border-hi);
+}
+
+.landing .btn-secondary:hover {
+	background: var(--ctx-panel-hi);
+	color: #ffffff;
+	text-decoration: none;
+}
+
+/* Responsive baseline */
+@media (max-width: 640px) {
+	.landing .section {
+		padding: 2.5rem 0;
+	}
+	.landing .section-title {
+		font-size: 1.25rem;
+	}
+}

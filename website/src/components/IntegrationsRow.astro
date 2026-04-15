@@ -1,0 +1,151 @@
+---
+/**
+ * Logo-strip-ish section showing everything CtxOne integrates with.
+ * Pure text (no external logo assets to juggle licensing for) —
+ * each "tile" is a card with the tool name, the integration method,
+ * and a link to the relevant doc.
+ */
+
+type Tool = {
+	name: string;
+	kind: string;
+	href: string;
+};
+
+const coding: Tool[] = [
+	{ name: 'Claude Code', kind: 'MCP', href: '/integrations/ai-coding-tools/' },
+	{ name: 'Cursor', kind: 'MCP', href: '/integrations/ai-coding-tools/' },
+	{ name: 'VS Code', kind: 'MCP', href: '/integrations/ai-coding-tools/' },
+	{ name: 'Codex', kind: 'MCP', href: '/integrations/ai-coding-tools/' },
+	{ name: 'Gemini', kind: 'MCP', href: '/integrations/ai-coding-tools/' },
+];
+
+const chat: Tool[] = [
+	{
+		name: 'Open WebUI',
+		kind: 'Tool + Filter',
+		href: '/integrations/open-webui/',
+	},
+];
+
+const direct: Tool[] = [
+	{ name: 'Python', kind: 'pip install ctxone', href: 'https://pypi.org/project/ctxone/' },
+	{ name: 'CLI', kind: 'ctx …', href: '/reference/cli/' },
+	{ name: 'HTTP API', kind: 'REST', href: '/reference/http-api/' },
+];
+---
+
+<section class="section">
+	<div class="container">
+		<h2 class="section-title">Works with the tools you already use</h2>
+		<p class="section-lede">
+			CtxOne exposes MCP for AI coding tools, native plugins for
+			chat UIs, and direct client libraries for everything else.
+			<code>ctx init</code> auto-detects and wires them in one command.
+		</p>
+
+		<div class="group">
+			<h3>AI coding tools</h3>
+			<div class="tiles">
+				{
+					coding.map((t) => (
+						<a class="tile" href={t.href}>
+							<span class="tile-name">{t.name}</span>
+							<span class="tile-kind">{t.kind}</span>
+						</a>
+					))
+				}
+			</div>
+		</div>
+
+		<div class="group">
+			<h3>Self-hosted chat</h3>
+			<div class="tiles">
+				{
+					chat.map((t) => (
+						<a class="tile" href={t.href}>
+							<span class="tile-name">{t.name}</span>
+							<span class="tile-kind">{t.kind}</span>
+						</a>
+					))
+				}
+			</div>
+		</div>
+
+		<div class="group">
+			<h3>Direct embed</h3>
+			<div class="tiles">
+				{
+					direct.map((t) => (
+						<a class="tile" href={t.href}>
+							<span class="tile-name">{t.name}</span>
+							<span class="tile-kind">{t.kind}</span>
+						</a>
+					))
+				}
+			</div>
+		</div>
+	</div>
+</section>
+
+<style>
+	.group {
+		margin-top: 1.75rem;
+	}
+
+	.group h3 {
+		font-size: 0.75rem;
+		color: var(--ctx-text-faint);
+		text-transform: uppercase;
+		letter-spacing: 0.1em;
+		margin: 0 0 0.75rem 0;
+		font-weight: 600;
+	}
+
+	.tiles {
+		display: flex;
+		gap: 0.75rem;
+		flex-wrap: wrap;
+	}
+
+	.tile {
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+		padding: 0.75rem 1.1rem;
+		background: var(--ctx-panel);
+		border: 1px solid var(--ctx-border);
+		border-radius: var(--ctx-radius-md);
+		text-decoration: none;
+		transition: all 0.15s;
+		min-width: 10rem;
+	}
+
+	.tile:hover {
+		background: var(--ctx-panel-hi);
+		border-color: var(--ctx-accent-dim);
+		text-decoration: none;
+	}
+
+	.tile-name {
+		color: #ffffff;
+		font-weight: 600;
+		font-size: 0.95rem;
+	}
+
+	.tile-kind {
+		color: var(--ctx-text-faint);
+		font-size: 0.75rem;
+		font-family: var(--ctx-font-mono);
+	}
+
+	.section-lede code {
+		background: var(--ctx-panel);
+		border: 1px solid var(--ctx-border);
+		padding: 0.1rem 0.4rem;
+		border-radius: var(--ctx-radius-sm);
+		font-size: 0.9em;
+		color: var(--ctx-accent-text);
+		font-family: var(--ctx-font-mono);
+	}
+</style>

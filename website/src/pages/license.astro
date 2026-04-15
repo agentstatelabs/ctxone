@@ -1,0 +1,229 @@
+---
+/**
+ * License page. Explains the BSL-1.1 → Apache 2.0 story.
+ *
+ * No paywall, no gotchas — just the argument for why source-available-
+ * now, open-source-in-four-years is the right shape for a product that
+ * still needs to defend its business model.
+ */
+import LandingLayout from '../layouts/LandingLayout.astro';
+---
+
+<LandingLayout
+	title="CtxOne License — BSL-1.1 → Apache 2.0"
+	description="Source-available now, Apache 2.0 in four years. The BSL-1.1 story behind CtxOne's license."
+>
+	<section class="section">
+		<div class="container narrow">
+			<div class="eyebrow">License</div>
+			<h1>Source-available now, Apache 2.0 in four years.</h1>
+
+			<p class="lede">
+				Every CtxOne release is licensed under the Business Source
+				License 1.1 (BSL-1.1). Exactly four years after the
+				release date, that specific release automatically converts
+				to Apache 2.0. You can read the source today, run it, fork
+				it, send patches, and ship a modified version — with one
+				caveat.
+			</p>
+
+			<h2>What you can do today</h2>
+
+			<ul>
+				<li>
+					<strong>Read and modify the source.</strong> Every
+					file in the monorepo is source-available from day
+					one. Fork it, build it, run it in your own
+					infrastructure.
+				</li>
+				<li>
+					<strong>Use it for work or personal use.</strong>
+					Solo developers, teams, companies, startups — use
+					CtxOne however you want, for whatever you're
+					building.
+				</li>
+				<li>
+					<strong>Run it on production systems.</strong>
+					Self-host the Hub, embed it in internal tools, wire
+					it into your AI coding pipeline, run it behind your
+					VPN. All allowed.
+				</li>
+				<li>
+					<strong>Contribute back.</strong> PRs welcome. We
+					merge improvements, attribute contributors in
+					release notes, and don't ask for CLAs.
+				</li>
+			</ul>
+
+			<h2>The one caveat (the "Additional Use Grant")</h2>
+
+			<p>
+				You can't resell CtxOne as a managed memory service — i.e.
+				charge other people to run CtxOne on their behalf. That's
+				the one competitive restriction, and it's what makes
+				BSL-1.1 different from a pure permissive license.
+			</p>
+
+			<p>
+				Everything else is fine. Use CtxOne as a component inside
+				a larger product you sell; use it internally at a company;
+				use it to build an AI coding tool; use it as infrastructure
+				for your own SaaS. The only thing the license prevents is
+				"hosted CtxOne as a service" — which is the only
+				commercial configuration where a third party could
+				free-ride on our work at our expense.
+			</p>
+
+			<h2>The four-year auto-convert</h2>
+
+			<p>
+				Every release carries a "Change Date" four years in the
+				future. On that date, the license for that release
+				automatically converts to Apache 2.0 — no action required
+				from us, no way for us to take it back.
+			</p>
+
+			<p>
+				So <code>v0.72.0</code>, released on April 15, 2026, will
+				convert to Apache 2.0 on <strong>April 15, 2030</strong>.
+				Every subsequent release has its own four-year clock.
+				This means:
+			</p>
+
+			<ul>
+				<li>
+					We can't pull the rug. Even if CtxOne is acquired,
+					dies, or pivots, every shipped release eventually
+					becomes Apache 2.0.
+				</li>
+				<li>
+					You get a floor of guaranteed open-source code: at
+					any given moment, the "Apache-2.0 today" subset of
+					CtxOne is some version from four years ago.
+				</li>
+				<li>
+					The restriction that prevents managed-service
+					reselling only applies to versions younger than four
+					years. Older versions are completely permissive.
+				</li>
+			</ul>
+
+			<h2>Why not MIT / Apache from day one?</h2>
+
+			<p>
+				Because the obvious path for a tiny team building
+				infrastructure in 2026 is: ship permissive, AWS ships a
+				managed version, AWS captures the commercial upside, tiny
+				team quietly dies, open source suffers. BSL-1.1 is the
+				license designed specifically to prevent that failure
+				mode without locking users out.
+			</p>
+
+			<p>
+				We believe the right balance is: real transparency
+				(source-available from day one, no proprietary bits),
+				real open source (Apache 2.0 on a fixed timeline), and a
+				narrow competitive restriction (you can't sell us to
+				ourselves). BSL-1.1 is designed exactly for that balance.
+			</p>
+
+			<h2>Read the full license</h2>
+
+			<p>
+				The canonical license text lives at
+				<a
+					href="https://github.com/ctxone/ctxone/blob/main/LICENSE"
+					rel="noopener"
+				>
+					<code>LICENSE</code>
+				</a>
+				in the repo. Every source file also carries an SPDX
+				identifier pointing at it.
+			</p>
+
+			<p class="more">
+				Questions? Open a
+				<a
+					href="https://github.com/ctxone/ctxone/issues"
+					rel="noopener"
+				>
+					GitHub issue
+				</a>
+				or email license@ctxone.com.
+			</p>
+		</div>
+	</section>
+</LandingLayout>
+
+<style>
+	.narrow {
+		max-width: 44rem;
+	}
+
+	.eyebrow {
+		color: var(--ctx-accent);
+		font-family: var(--ctx-font-mono);
+		font-size: 0.75rem;
+		text-transform: uppercase;
+		letter-spacing: 0.1em;
+		margin-bottom: 0.75rem;
+	}
+
+	h1 {
+		font-size: clamp(1.8rem, 4vw, 2.75rem);
+		font-weight: 800;
+		color: #ffffff;
+		margin: 0 0 1.5rem 0;
+		line-height: 1.15;
+		letter-spacing: -0.02em;
+	}
+
+	h2 {
+		font-size: 1.3rem;
+		color: #ffffff;
+		margin: 2.5rem 0 0.75rem 0;
+	}
+
+	p {
+		color: var(--ctx-text);
+		font-size: 1rem;
+		margin: 0 0 1rem 0;
+		line-height: 1.65;
+	}
+
+	.lede {
+		color: var(--ctx-text-dim);
+		font-size: 1.1rem;
+	}
+
+	ul {
+		color: var(--ctx-text);
+		margin: 0 0 1rem 0;
+		padding-left: 1.25rem;
+		line-height: 1.65;
+	}
+
+	ul li {
+		margin-bottom: 0.65rem;
+	}
+
+	code {
+		background: var(--ctx-panel);
+		border: 1px solid var(--ctx-border);
+		padding: 0.1rem 0.4rem;
+		border-radius: var(--ctx-radius-sm);
+		font-size: 0.9em;
+		color: var(--ctx-accent-text);
+		font-family: var(--ctx-font-mono);
+	}
+
+	.more {
+		color: var(--ctx-text-dim);
+		font-size: 0.9rem;
+		margin-top: 2rem;
+	}
+
+	strong {
+		color: #ffffff;
+	}
+</style>

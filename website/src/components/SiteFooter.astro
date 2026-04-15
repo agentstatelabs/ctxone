@@ -1,0 +1,169 @@
+---
+/**
+ * Footer for landing + use-case + license pages. Starlight generates
+ * its own footer for docs pages, so this is only used on the Astro
+ * landing pages under src/pages/.
+ */
+const year = new Date().getFullYear();
+---
+
+<footer class="footer">
+	<div class="container footer-grid">
+		<div class="col-brand">
+			<div class="wordmark">CtxOne</div>
+			<p class="tag">Memory that survives the session.</p>
+		</div>
+
+		<div class="col-links">
+			<h4>Docs</h4>
+			<ul>
+				<li><a href="/getting-started/quickstart/">Quickstart</a></li>
+				<li><a href="/how-it-works/architecture/">Architecture</a></li>
+				<li><a href="/reference/cli/">CLI reference</a></li>
+				<li><a href="/reference/http-api/">HTTP API</a></li>
+				<li><a href="/operating/troubleshooting/">Troubleshooting</a></li>
+			</ul>
+		</div>
+
+		<div class="col-links">
+			<h4>Integrations</h4>
+			<ul>
+				<li><a href="/integrations/ai-coding-tools/">AI coding tools</a></li>
+				<li><a href="/integrations/open-webui/">Open WebUI</a></li>
+				<li><a href="/use-cases/ai-coding/">For AI coding</a></li>
+				<li><a href="/use-cases/self-hosted-chat/">For self-hosted chat</a></li>
+			</ul>
+		</div>
+
+		<div class="col-links">
+			<h4>Project</h4>
+			<ul>
+				<li>
+					<a href="https://github.com/ctxone/ctxone" rel="noopener">GitHub</a>
+				</li>
+				<li>
+					<a href="https://pypi.org/project/ctxone/" rel="noopener">PyPI</a>
+				</li>
+				<li>
+					<a
+						href="https://github.com/ctxone/ctxone/releases"
+						rel="noopener"
+					>
+						Releases
+					</a>
+				</li>
+				<li><a href="/license/">License (BSL-1.1)</a></li>
+				<li>
+					<a
+						href="https://github.com/ctxone/ctxone/issues"
+						rel="noopener"
+					>
+						Report an issue
+					</a>
+				</li>
+			</ul>
+		</div>
+	</div>
+
+	<div class="container footer-base">
+		<div class="copyright">
+			© {year} CtxOne. Source-available (BSL-1.1 → Apache-2.0 after 4 years).
+		</div>
+		<div class="built-on">
+			Built on
+			<a
+				href="https://github.com/agentstatelabs/agentstategraph"
+				rel="noopener"
+			>
+				AgentStateGraph
+			</a>
+		</div>
+	</div>
+</footer>
+
+<style>
+	.footer {
+		background: #050505;
+		border-top: 1px solid var(--ctx-border);
+		padding: 3rem 0 1.5rem 0;
+		color: var(--ctx-text-dim);
+		font-size: 0.85rem;
+	}
+
+	.footer-grid {
+		display: grid;
+		grid-template-columns: 1.4fr 1fr 1fr 1fr;
+		gap: 2rem;
+		padding-bottom: 2rem;
+		border-bottom: 1px solid var(--ctx-border-lo);
+	}
+
+	.col-brand .wordmark {
+		color: var(--ctx-accent);
+		font-family: var(--ctx-font-mono);
+		font-weight: 800;
+		font-size: 1.15rem;
+		margin-bottom: 0.35rem;
+	}
+
+	.col-brand .tag {
+		color: var(--ctx-text-dim);
+		margin: 0;
+		max-width: 18rem;
+	}
+
+	.col-links h4 {
+		color: #ffffff;
+		font-size: 0.75rem;
+		text-transform: uppercase;
+		letter-spacing: 0.1em;
+		margin: 0 0 0.75rem 0;
+		font-weight: 600;
+	}
+
+	.col-links ul {
+		list-style: none;
+		padding: 0;
+		margin: 0;
+	}
+
+	.col-links li {
+		margin-bottom: 0.4rem;
+	}
+
+	.col-links a {
+		color: var(--ctx-text-dim);
+	}
+
+	.col-links a:hover {
+		color: var(--ctx-text);
+		text-decoration: none;
+	}
+
+	.footer-base {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		margin-top: 1.5rem;
+		font-size: 0.75rem;
+		color: var(--ctx-text-faint);
+		flex-wrap: wrap;
+		gap: 1rem;
+	}
+
+	.footer-base a {
+		color: var(--ctx-text-dim);
+	}
+
+	@media (max-width: 820px) {
+		.footer-grid {
+			grid-template-columns: 1fr 1fr;
+		}
+	}
+
+	@media (max-width: 520px) {
+		.footer-grid {
+			grid-template-columns: 1fr;
+		}
+	}
+</style>

@@ -1,0 +1,141 @@
+---
+/**
+ * Layout used by the top-level Astro pages (landing, use cases,
+ * license). Sets global styles, head tags, and wraps content in the
+ * `.landing` class so our reset in global.css applies.
+ *
+ * Starlight-managed doc pages do NOT use this layout — they use
+ * Starlight's own layout, which we customize via theme.css.
+ */
+import '../styles/global.css';
+import SiteFooter from '../components/SiteFooter.astro';
+
+interface Props {
+	title: string;
+	description?: string;
+}
+
+const {
+	title,
+	description = 'Persistent, searchable, accountable memory for AI agents. Write a fact once — Claude, Cursor, and every other tool you use remembers it forever.',
+} = Astro.props;
+---
+
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>{title}</title>
+		<meta name="description" content={description} />
+		<meta property="og:title" content={title} />
+		<meta property="og:description" content={description} />
+		<meta property="og:type" content="website" />
+		<meta property="og:url" content={Astro.url.href} />
+		<meta property="og:image" content="https://ctxone.com/og-image.png" />
+		<meta name="twitter:card" content="summary_large_image" />
+		<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+		<link rel="canonical" href={Astro.url.href} />
+	</head>
+	<body class="landing">
+		<nav class="top-nav">
+			<div class="container nav-inner">
+				<a href="/" class="brand">
+					<span class="dot"></span>
+					<span class="brand-text">CtxOne</span>
+				</a>
+				<div class="nav-links">
+					<a href="/getting-started/quickstart/">Docs</a>
+					<a href="/use-cases/ai-coding/">Use cases</a>
+					<a href="/license/">License</a>
+					<a
+						href="https://github.com/ctxone/ctxone"
+						rel="noopener"
+						class="nav-gh"
+					>
+						GitHub
+					</a>
+				</div>
+			</div>
+		</nav>
+
+		<main>
+			<slot />
+		</main>
+
+		<SiteFooter />
+	</body>
+</html>
+
+<style>
+	.top-nav {
+		position: sticky;
+		top: 0;
+		z-index: 10;
+		background: rgba(10, 10, 10, 0.85);
+		backdrop-filter: blur(8px);
+		border-bottom: 1px solid var(--ctx-border-lo);
+	}
+
+	.nav-inner {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 1rem 1.5rem;
+	}
+
+	.brand {
+		display: flex;
+		align-items: center;
+		gap: 0.6rem;
+		color: #ffffff !important;
+		font-family: var(--ctx-font-mono);
+		font-weight: 800;
+		font-size: 1.05rem;
+		text-decoration: none;
+	}
+
+	.brand:hover {
+		text-decoration: none;
+	}
+
+	.dot {
+		width: 12px;
+		height: 12px;
+		border-radius: 3px;
+		background: var(--ctx-accent);
+		box-shadow: 0 0 12px rgba(59, 130, 246, 0.5);
+	}
+
+	.nav-links {
+		display: flex;
+		gap: 1.5rem;
+		align-items: center;
+	}
+
+	.nav-links a {
+		color: var(--ctx-text-dim);
+		font-size: 0.9rem;
+		font-weight: 500;
+	}
+
+	.nav-links a:hover {
+		color: #ffffff;
+		text-decoration: none;
+	}
+
+	.nav-gh {
+		padding: 0.35rem 0.85rem;
+		border: 1px solid var(--ctx-border-hi);
+		border-radius: var(--ctx-radius-md);
+	}
+
+	@media (max-width: 640px) {
+		.nav-links {
+			gap: 0.9rem;
+		}
+		.nav-links a:not(.nav-gh) {
+			display: none;
+		}
+	}
+</style>

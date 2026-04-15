@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 40" width="200" height="40" role="img" aria-label="CtxOne">
+  <defs>
+    <style>
+      .mark { fill: #3b82f6; }
+      .wordmark { fill: #e0e0e0; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace; font-size: 22px; font-weight: 700; }
+    </style>
+  </defs>
+  <!-- Three interlocking squares: mnemonic for pinned + primed + active memory -->
+  <g class="mark">
+    <rect x="2" y="8" width="10" height="10" rx="1"/>
+    <rect x="14" y="14" width="10" height="10" rx="1"/>
+    <rect x="2" y="22" width="10" height="10" rx="1"/>
+  </g>
+  <text x="34" y="27" class="wordmark">CtxOne</text>
+</svg>
