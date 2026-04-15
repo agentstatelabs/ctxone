@@ -1,22 +1,31 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
-	import { getLog, getBlame } from '$lib/api';
-	import type { CommitEntry, BlameEntry } from '$lib/api';
+	import { getLog } from '$lib/api';
+	import type { CommitEntry } from '$lib/api';
+	import { branchStore } from '$lib/branchStore.svelte';
 
 	let commits: CommitEntry[] = $state([]);
 	let selectedCommit: CommitEntry | null = $state(null);
 	let error: string | null = $state(null);
 
-	onMount(async () => {
+	async function loadLog() {
+		error = null;
+		selectedCommit = null;
 		try {
-			commits = await getLog('main', 50);
+			commits = await getLog(branchStore.current, 50);
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to load history';
+			commits = [];
 		}
+	}
+
+	$effect(() => {
+		// Re-load whenever the active branch changes
+		void branchStore.current;
+		loadLog();
 	});
 </script>
 
-<h2>Commit History</h2>
+<h2>Commit History <span class="branch-label">on {branchStore.current}</span></h2>
 
 {#if error}
 	<p class="error">{error}</p>
@@ -123,4 +132,12 @@
 
 	.error { color: #ef4444; }
 	.empty { color: #555; padding: 2rem; text-align: center; }
+
+	.branch-label {
+		font-size: 0.85rem;
+		font-family: monospace;
+		color: #3b82f6;
+		font-weight: normal;
+		margin-left: 0.5rem;
+	}
 </style>

@@ -129,6 +129,67 @@ export async function recall(topic: string, budget = 1500): Promise<unknown> {
 	);
 }
 
+export interface ForgetRequest {
+	path: string;
+	reason?: string;
+	ref?: string;
+}
+
+export async function forget(req: ForgetRequest): Promise<{ path: string; commit_id: string }> {
+	const resp = await fetch(`${API_BASE}/api/memory/forget`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({
+			path: req.path,
+			reason: req.reason ?? 'forgotten via Lens',
+			ref: req.ref ?? 'main'
+		})
+	});
+	if (!resp.ok) {
+		const msg = await resp.text();
+		throw new Error(`forget failed: ${resp.status} ${msg}`);
+	}
+	return resp.json();
+}
+
+export interface DiffOp {
+	op: string;
+	path: string;
+	value?: unknown;
+}
+
+export interface DiffResponse {
+	ref_a: string;
+	ref_b: string;
+	ops: DiffOp[];
+}
+
+export async function getDiff(refA: string, refB: string): Promise<DiffResponse> {
+	return fetchJson(
+		`/api/diff?ref_a=${encodeURIComponent(refA)}&ref_b=${encodeURIComponent(refB)}`
+	);
+}
+
+export interface CreateBranchRequest {
+	name: string;
+	from?: string;
+}
+
+export async function createBranch(
+	req: CreateBranchRequest
+): Promise<{ status: string; name: string; commit_id: string }> {
+	const resp = await fetch(`${API_BASE}/api/branches`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ name: req.name, from: req.from ?? 'main' })
+	});
+	if (!resp.ok) {
+		const msg = await resp.text();
+		throw new Error(`branch failed: ${resp.status} ${msg}`);
+	}
+	return resp.json();
+}
+
 export interface PinnedItem {
 	path: string;
 	value: unknown;

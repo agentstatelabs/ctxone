@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { searchValues } from '$lib/api';
 	import type { SearchResult } from '$lib/api';
+	import { branchStore } from '$lib/branchStore.svelte';
 
 	let query = $state('');
 	let results: SearchResult[] = $state([]);
@@ -12,7 +13,7 @@
 		searched = true;
 		error = null;
 		try {
-			results = await searchValues('main', query);
+			results = await searchValues(branchStore.current, query);
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Search failed';
 			results = [];
@@ -20,7 +21,7 @@
 	}
 </script>
 
-<h2>Search Memory</h2>
+<h2>Search Memory <span class="branch-label">on {branchStore.current}</span></h2>
 
 <form onsubmit={handleSearch} class="search-form">
 	<input
@@ -84,6 +85,14 @@
 
 	.count { color: #666; margin-bottom: 1rem; }
 	.error { color: #ef4444; }
+
+	.branch-label {
+		font-size: 0.85rem;
+		font-family: monospace;
+		color: #3b82f6;
+		font-weight: normal;
+		margin-left: 0.5rem;
+	}
 
 	.results {
 		background: #111;
