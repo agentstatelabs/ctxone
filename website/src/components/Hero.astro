@@ -1,25 +1,48 @@
 ---
 /**
- * Landing-page hero. Lives above the fold. Three jobs:
+ * Landing-page hero. Lives above the fold. Jobs:
  *
- *   1. State what CtxOne is in one line
- *   2. Give the copy-paste install command
- *   3. Offer the two CTAs (start + GitHub)
+ *   1. Name the pain the reader feels every morning
+ *   2. Give that pain a name (context anxiety) and a category
+ *   3. State the three pillars of what CTXone gives you back:
+ *      stateful, sharable, inspectable
+ *   4. Install one-liner + two CTAs
  *
- * Keep the copy short and concrete. Marketing-speak dies here.
+ * Kept deliberately personal. It's a dev tool but the reader is
+ * a human who's frustrated every morning — lead with that, not
+ * with abstractions about "memory layers."
  */
 import InstallOneliner from './InstallOneliner.astro';
 ---
 
 <section class="hero">
+	<div class="scanlines" aria-hidden="true"></div>
 	<div class="container">
-		<h1>Memory that survives the session.</h1>
+		<div class="eyebrow">
+			<span class="dot"></span>
+			<span class="eyebrow-text">CTXONE // memory for agents</span>
+		</div>
+
+		<h1>
+			Stop re-explaining your project
+			<span class="glow">every morning.</span>
+		</h1>
 
 		<p class="lede">
-			CtxOne is the persistent, searchable, accountable memory layer
-			for AI agents. Write a fact once — Claude, Cursor, and every
-			other tool you use remembers it forever, across sessions,
-			across branches, with full provenance.
+			You know the feeling. Third day in a row, you paste the same
+			paragraph about your stack. You budget tokens for memory the
+			model should already have. That low-grade dread has a name:
+			<strong class="anxiety">context anxiety</strong>.
+		</p>
+
+		<p class="lede">
+			CTXone is the memory layer that cures it —
+			<strong class="pillar pillar-stateful">stateful</strong>
+			across sessions,
+			<strong class="pillar pillar-sharable">sharable</strong>
+			across tools,
+			<strong class="pillar pillar-inspectable">inspectable</strong>
+			with git-style blame.
 		</p>
 
 		<InstallOneliner />
@@ -48,45 +71,149 @@ import InstallOneliner from './InstallOneliner.astro';
 
 <style>
 	.hero {
-		padding: 6rem 0 4rem 0;
+		position: relative;
+		padding: 6rem 0 4.5rem 0;
 		background:
 			radial-gradient(
-				ellipse at top,
-				rgba(59, 130, 246, 0.08),
-				transparent 50%
+				ellipse 60% 80% at 50% 0%,
+				rgba(34, 197, 94, 0.12),
+				transparent 60%
+			),
+			radial-gradient(
+				ellipse 80% 60% at 30% 20%,
+				rgba(59, 130, 246, 0.18),
+				transparent 55%
+			),
+			radial-gradient(
+				ellipse 60% 60% at 80% 10%,
+				rgba(252, 211, 77, 0.06),
+				transparent 55%
 			),
 			var(--ctx-bg);
 		border-bottom: 1px solid var(--ctx-border-lo);
+		overflow: hidden;
+	}
+
+	/* CRT scanline texture — repeating horizontal stripes at very
+	 * low opacity. Gives the hero a subtle terminal-phosphor feel
+	 * without being a retro gimmick. */
+	.scanlines {
+		position: absolute;
+		inset: 0;
+		pointer-events: none;
+		background: repeating-linear-gradient(
+			to bottom,
+			transparent 0,
+			transparent 2px,
+			rgba(255, 255, 255, 0.018) 2px,
+			rgba(255, 255, 255, 0.018) 3px
+		);
+		mix-blend-mode: screen;
+	}
+
+	.container {
+		position: relative;
+		z-index: 1;
+	}
+
+	.eyebrow {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.55rem;
+		padding: 0.35rem 0.85rem;
+		background: rgba(34, 197, 94, 0.08);
+		border: 1px solid rgba(34, 197, 94, 0.28);
+		border-radius: 999px;
+		font-family: var(--ctx-font-mono);
+		font-size: 0.7rem;
+		letter-spacing: 0.12em;
+		color: var(--ctx-success);
+		margin-bottom: 1.75rem;
+	}
+
+	.eyebrow .dot {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		background: var(--ctx-success);
+		box-shadow: 0 0 10px rgba(34, 197, 94, 0.8);
+		animation: pulse 2s ease-in-out infinite;
+	}
+
+	@keyframes pulse {
+		0%, 100% {
+			opacity: 1;
+		}
+		50% {
+			opacity: 0.4;
+		}
+	}
+
+	.eyebrow-text {
+		font-weight: 700;
 	}
 
 	h1 {
-		font-size: clamp(2rem, 5vw, 3.25rem);
+		font-size: clamp(2.25rem, 5.5vw, 3.75rem);
 		font-weight: 800;
-		line-height: 1.1;
-		margin: 0 0 1.25rem 0;
+		line-height: 1.05;
+		margin: 0 0 1.5rem 0;
 		color: #ffffff;
-		letter-spacing: -0.02em;
+		letter-spacing: -0.025em;
 		max-width: 20ch;
+	}
+
+	h1 .glow {
+		color: var(--ctx-success);
+		text-shadow:
+			0 0 30px rgba(34, 197, 94, 0.4),
+			0 0 60px rgba(34, 197, 94, 0.2);
 	}
 
 	.lede {
 		font-size: 1.1rem;
 		color: var(--ctx-text-dim);
-		margin: 0 0 2rem 0;
+		margin: 0 0 1.1rem 0;
 		max-width: 38rem;
-		line-height: 1.6;
+		line-height: 1.65;
+	}
+
+	.lede:last-of-type {
+		margin-bottom: 2.25rem;
+	}
+
+	.anxiety {
+		color: var(--ctx-warn);
+		font-weight: 600;
+		text-shadow: 0 0 16px rgba(252, 211, 77, 0.25);
+	}
+
+	.pillar {
+		font-weight: 600;
+	}
+
+	.pillar-stateful {
+		color: var(--ctx-accent);
+	}
+
+	.pillar-sharable {
+		color: var(--ctx-success);
+	}
+
+	.pillar-inspectable {
+		color: var(--ctx-warn);
 	}
 
 	.cta-row {
 		display: flex;
 		gap: 0.75rem;
-		margin: 1.5rem 0 2.5rem 0;
+		margin: 1.75rem 0 2.5rem 0;
 		flex-wrap: wrap;
 	}
 
 	.badges {
 		display: flex;
-		gap: 0.75rem;
+		gap: 0.6rem;
 		flex-wrap: wrap;
 		margin: 0;
 	}
@@ -95,17 +222,18 @@ import InstallOneliner from './InstallOneliner.astro';
 		display: inline-flex;
 		align-items: center;
 		padding: 0.35rem 0.75rem;
-		background: var(--ctx-panel);
+		background: rgba(17, 17, 17, 0.6);
 		border: 1px solid var(--ctx-border);
 		border-radius: 999px;
-		font-size: 0.75rem;
+		font-size: 0.72rem;
 		color: var(--ctx-text-dim);
 		font-family: var(--ctx-font-mono);
+		letter-spacing: 0.04em;
 	}
 
 	@media (max-width: 640px) {
 		.hero {
-			padding: 4rem 0 2.5rem 0;
+			padding: 4rem 0 3rem 0;
 		}
 	}
 </style>

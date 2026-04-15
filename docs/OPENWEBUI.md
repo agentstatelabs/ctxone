@@ -1,6 +1,6 @@
-# CtxOne for Open WebUI
+# CTXone for Open WebUI
 
-CtxOne ships two Open WebUI plugins out of the box:
+CTXone ships two Open WebUI plugins out of the box:
 
 - **Tool** — function-calling tools the model can invoke explicitly
   (`remember`, `recall`, `forget`, `list_pinned`). Same capability as the
@@ -32,7 +32,7 @@ when the model *knows* it wants to save something important, like
 
 ## Install
 
-You need a running CtxOne Hub somewhere Open WebUI can reach. The
+You need a running CTXone Hub somewhere Open WebUI can reach. The
 [Quickstart](QUICKSTART.md) covers that — easiest is
 `docker compose up` from the repo root, which exposes the Hub on
 `http://localhost:3001`.
@@ -99,7 +99,7 @@ Each user in Open WebUI gets their own copy of these:
 
 ## How attribution works
 
-Every commit CtxOne writes needs an agent ID — that's the "who"
+Every commit CTXone writes needs an agent ID — that's the "who"
 shown in `ctx blame` output. The integration resolves this from
 Open WebUI's `__user__` dict, in this order:
 
@@ -127,14 +127,14 @@ runs:
 4. If there are matches, render them as a system prompt block:
 
    ```
-   ## Relevant memory from CtxOne
+   ## Relevant memory from CTXone
    Retrieved for topic: 'licensing'
 
    - [pinned] **Vision** — ship a BSL-1.1 product with MIT clients
-   - [fact] CtxOne uses BSL-1.1
+   - [fact] CTXone uses BSL-1.1
    - [fact] Converts to Apache 2 after 4 years
 
-   _(CtxOne: this retrieval is 14.2× smaller than loading the full
+   _(CTXone: this retrieval is 14.2× smaller than loading the full
    memory graph.)_
    ```
 
@@ -151,7 +151,7 @@ your memory with junk, which is why it's off by default.
 
 ## Troubleshooting
 
-### "CtxOne Hub is unreachable"
+### "CTXone Hub is unreachable"
 
 The most common cause is Open WebUI running in Docker with the Hub
 running on the host. `localhost:3001` inside a container refers to
@@ -190,11 +190,11 @@ ctx ls /memory/openwebui/
 ctx --branch <your-branch> recall "<topic>"
 ```
 
-Or browse through CtxOne Lens at `http://localhost:5173/browse` — the
+Or browse through CTXone Lens at `http://localhost:5173/browse` — the
 blame panel shows which user wrote each fact via Open WebUI and when.
 
 ## Related docs
 
 - [QUICKSTART.md](QUICKSTART.md) — spinning up a Hub
 - [INTEGRATIONS.md](INTEGRATIONS.md) — MCP wiring for Claude Code, Cursor, etc.
-- [VISION.md](VISION.md) — why CtxOne exists at all
+- [VISION.md](VISION.md) — why CTXone exists at all

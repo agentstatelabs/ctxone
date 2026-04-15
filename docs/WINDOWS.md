@@ -1,4 +1,4 @@
-# Running CtxOne on Windows
+# Running CTXone on Windows
 
 A complete Windows guide: install, first run, AI tool setup, background
 service, update, uninstall, and troubleshooting. For the cross-platform
@@ -24,7 +24,7 @@ Three files end up in `%LOCALAPPDATA%\ctxone\bin\`: `ctx.exe`,
 | You want... | Use |
 |-------------|-----|
 | The lightest, most native experience | **`install.ps1`** (recommended) |
-| To run CtxOne without touching your Windows PATH | **Docker Desktop** |
+| To run CTXone without touching your Windows PATH | **Docker Desktop** |
 | To hack on the source | **Build from source** |
 
 All three options produce a working Hub. They don't conflict — you can
@@ -118,8 +118,8 @@ ctx serve --http
 You'll see:
 
 ```
-Starting CtxOne Hub on port 3001 (db: C:\Users\you\AppData\Roaming\ctxone\memory.db)
-CtxOne Hub v0.60.0
+Starting CTXone Hub on port 3001 (db: C:\Users\you\AppData\Roaming\ctxone\memory.db)
+CTXone Hub v0.60.0
 Storage: C:\Users\you\AppData\Roaming\ctxone\memory.db
 HTTP API listening on http://0.0.0.0:3001
 ```
@@ -138,7 +138,7 @@ ctx demo
 `ctx demo` seeds 21 facts and runs four recalls, showing live token
 savings. If you see output like `18.4x overall`, everything's working.
 
-## Wiring CtxOne into your AI tools
+## Wiring CTXone into your AI tools
 
 ```powershell
 ctx init
@@ -186,17 +186,17 @@ $Settings = New-ScheduledTaskSettingsSet `
     -StartWhenAvailable
 
 Register-ScheduledTask `
-    -TaskName "CtxOne Hub" `
+    -TaskName "CTXone Hub" `
     -Action $Action `
     -Trigger $Trigger `
     -Settings $Settings `
-    -Description "CtxOne memory layer for AI agents"
+    -Description "CTXone memory layer for AI agents"
 ```
 
 Start it immediately:
 
 ```powershell
-Start-ScheduledTask -TaskName "CtxOne Hub"
+Start-ScheduledTask -TaskName "CTXone Hub"
 ```
 
 Verify:
@@ -208,7 +208,7 @@ ctx status
 Remove later:
 
 ```powershell
-Unregister-ScheduledTask -TaskName "CtxOne Hub" -Confirm:$false
+Unregister-ScheduledTask -TaskName "CTXone Hub" -Confirm:$false
 ```
 
 ### Option B: Start menu shortcut
@@ -217,7 +217,7 @@ Lowest friction if you don't need it running all the time.
 
 ```powershell
 $WScript = New-Object -ComObject WScript.Shell
-$Shortcut = $WScript.CreateShortcut("$env:APPDATA\Microsoft\Windows\Start Menu\Programs\CtxOne Hub.lnk")
+$Shortcut = $WScript.CreateShortcut("$env:APPDATA\Microsoft\Windows\Start Menu\Programs\CTXone Hub.lnk")
 $Shortcut.TargetPath = "$env:LOCALAPPDATA\ctxone\bin\ctxone-hub.exe"
 $Shortcut.Arguments = "--http --port 3001"
 $Shortcut.WorkingDirectory = "$env:APPDATA\ctxone"
@@ -225,7 +225,7 @@ $Shortcut.WindowStyle = 7   # Minimized
 $Shortcut.Save()
 ```
 
-Now "CtxOne Hub" appears in your Start menu and launches a minimized
+Now "CTXone Hub" appears in your Start menu and launches a minimized
 window when clicked.
 
 ### Option C: Run as a real Windows service (NSSM)
@@ -234,11 +234,11 @@ For always-on production-style setups. Install
 [NSSM](https://nssm.cc/) first, then:
 
 ```powershell
-nssm install CtxOneHub "$env:LOCALAPPDATA\ctxone\bin\ctxone-hub.exe"
-nssm set CtxOneHub AppParameters "--http --port 3001 --path $env:APPDATA\ctxone\memory.db"
-nssm set CtxOneHub DisplayName "CtxOne Hub"
-nssm set CtxOneHub Start SERVICE_AUTO_START
-nssm start CtxOneHub
+nssm install CTXoneHub "$env:LOCALAPPDATA\ctxone\bin\ctxone-hub.exe"
+nssm set CTXoneHub AppParameters "--http --port 3001 --path $env:APPDATA\ctxone\memory.db"
+nssm set CTXoneHub DisplayName "CTXone Hub"
+nssm set CTXoneHub Start SERVICE_AUTO_START
+nssm start CTXoneHub
 ```
 
 This runs the Hub under the Windows service control manager — it starts
@@ -247,7 +247,7 @@ at boot before any user logs in, restarts on crash, and shows up in
 
 ## Paths reference
 
-CtxOne uses Windows-standard locations:
+CTXone uses Windows-standard locations:
 
 | What | Where |
 |------|-------|
@@ -269,11 +269,11 @@ If the Hub is running via Task Scheduler or NSSM, restart it:
 
 ```powershell
 # Task Scheduler
-Stop-ScheduledTask -TaskName "CtxOne Hub"
-Start-ScheduledTask -TaskName "CtxOne Hub"
+Stop-ScheduledTask -TaskName "CTXone Hub"
+Start-ScheduledTask -TaskName "CTXone Hub"
 
 # NSSM
-nssm restart CtxOneHub
+nssm restart CTXoneHub
 ```
 
 ## Uninstalling
@@ -283,10 +283,10 @@ nssm restart CtxOneHub
 Stop-Process -Name "ctxone-hub" -ErrorAction SilentlyContinue
 
 # 2. Remove scheduled task (if you set one up)
-Unregister-ScheduledTask -TaskName "CtxOne Hub" -Confirm:$false -ErrorAction SilentlyContinue
+Unregister-ScheduledTask -TaskName "CTXone Hub" -Confirm:$false -ErrorAction SilentlyContinue
 
 # 3. Remove NSSM service (if you set one up)
-nssm remove CtxOneHub confirm
+nssm remove CTXoneHub confirm
 
 # 4. Delete the binaries
 Remove-Item -Recurse -Force "$env:LOCALAPPDATA\ctxone"
@@ -361,10 +361,10 @@ Or persist the new default in your config:
 ctx config set server http://localhost:3002
 ```
 
-### `ctx init` wrote configs but Claude Code / Cursor can't see CtxOne
+### `ctx init` wrote configs but Claude Code / Cursor can't see CTXone
 
 Restart the AI tool. Most MCP clients load config at startup. If the
-tool still doesn't see CtxOne:
+tool still doesn't see CTXone:
 
 ```powershell
 ctx init --dry-run

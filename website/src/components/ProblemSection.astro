@@ -1,60 +1,239 @@
 ---
 /**
- * Problem-framing section. One tight paragraph about why context
- * dies between sessions, with a link to the full argument in docs.
+ * Problem-framing section. Three vignettes — one per pillar — that
+ * each name a pain the reader feels, then explain what CTXone does
+ * about it. The mapping is:
+ *
+ *   Stateful     → yesterday's context vanished
+ *   Sharable     → your teammate is flying blind
+ *   Inspectable  → who told the model that? no one remembers
+ *
+ * Each vignette is a personal story, not a feature bullet. That's
+ * the whole point — this is a dev tool but the reader is human.
  */
 ---
 
-<section class="section">
+<section class="section problem">
 	<div class="container">
-		<h2 class="section-title">Why context keeps dying</h2>
+		<div class="eyebrow">
+			<span class="dot"></span>
+			<span class="eyebrow-text">CONTEXT_ANXIETY.md</span>
+		</div>
+		<h2 class="section-title">Three flavors of context anxiety.</h2>
 		<p class="section-lede">
-			Every AI coding session starts cold. You re-explain the same
-			architectural decisions, the same licensing rules, the same
-			reasons you picked SQLite over Postgres. The model burns most
-			of its context window re-learning what you already told it
-			yesterday, and by afternoon it's still confidently wrong about
-			basic facts.
+			Everyone using AI coding tools feels all three, even if
+			they've never named them. CTXone's three pillars map
+			one-to-one to the three versions of the pain.
 		</p>
-		<p class="fix">
-			CtxOne fixes this by giving your AI tools a real memory layer —
-			stored locally, versioned like git, attributable like
-			<code>git blame</code>, and cheap to query because it returns
-			only the facts relevant to <em>this</em> question.
-		</p>
+
+		<div class="vignettes">
+			<article class="vignette v-stateful">
+				<div class="v-label">01 // STATEFUL</div>
+				<h3>Yesterday's context is gone.</h3>
+				<p class="scene">
+					You told Claude on Tuesday that you're using
+					SQLite, not Postgres, and why. Wednesday morning
+					you open a new chat and it's asking about your
+					"Postgres schema" again. You paste the same
+					paragraph. You budget tokens for memory the model
+					should already have.
+				</p>
+				<p class="fix">
+					<strong>CTXone remembers.</strong> Every fact
+					survives sessions, branches, and tool switches
+					because it's stored in a local graph, not in the
+					model's context window.
+				</p>
+			</article>
+
+			<article class="vignette v-sharable">
+				<div class="v-label">02 // SHARABLE</div>
+				<h3>Your teammate is flying blind.</h3>
+				<p class="scene">
+					You primed your Cursor install with the team's
+					architectural decisions. Priya didn't. Now she's
+					arguing with the model about whether to use Redis
+					for the job queue — a question you settled three
+					months ago in Slack and she never saw.
+				</p>
+				<p class="fix">
+					<strong>CTXone is shared.</strong> The graph is a
+					file. Commit it, sync it, mount it over the team's
+					lab network. Whatever you primed is what everyone
+					else sees.
+				</p>
+			</article>
+
+			<article class="vignette v-inspectable">
+				<div class="v-label">03 // INSPECTABLE</div>
+				<h3>Who told the model that?</h3>
+				<p class="scene">
+					You open a file Claude edited last week and there's
+					a comment about "the new API versioning policy."
+					You don't remember a policy. Nobody on the team
+					remembers a policy. Did the model hallucinate it?
+					Did you mention it once in a side chat? Nobody can
+					check. The decision is orphaned.
+				</p>
+				<p class="fix">
+					<strong>CTXone is accountable.</strong> Every
+					commit carries an agent ID, a timestamp, an intent,
+					and reasoning. <code>ctx blame</code> shows you
+					exactly who wrote what, when, and why — git-style.
+				</p>
+			</article>
+		</div>
+
 		<p class="read-more">
 			<a href="/why-ctxone/context-anxiety/">
-				Read the full argument →
+				Read the full context anxiety argument →
 			</a>
 		</p>
 	</div>
 </section>
 
 <style>
-	.fix {
+	.problem {
+		background:
+			radial-gradient(
+				ellipse 50% 40% at 20% 0%,
+				rgba(59, 130, 246, 0.05),
+				transparent 60%
+			),
+			var(--ctx-bg);
+	}
+
+	.eyebrow {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.55rem;
+		padding: 0.3rem 0.8rem;
+		background: rgba(252, 211, 77, 0.06);
+		border: 1px solid rgba(252, 211, 77, 0.25);
+		border-radius: 999px;
+		font-family: var(--ctx-font-mono);
+		font-size: 0.68rem;
+		letter-spacing: 0.1em;
+		color: var(--ctx-warn);
+		margin-bottom: 1rem;
+	}
+
+	.eyebrow .dot {
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		background: var(--ctx-warn);
+	}
+
+	.eyebrow-text {
+		font-weight: 700;
+	}
+
+	.vignettes {
+		display: grid;
+		grid-template-columns: repeat(3, 1fr);
+		gap: 1.25rem;
+		margin-top: 2rem;
+	}
+
+	.vignette {
+		background: var(--ctx-panel);
+		border: 1px solid var(--ctx-border);
+		border-radius: var(--ctx-radius-lg);
+		padding: 1.5rem;
+		position: relative;
+		overflow: hidden;
+	}
+
+	.vignette::before {
+		content: '';
+		position: absolute;
+		left: 0;
+		top: 0;
+		bottom: 0;
+		width: 3px;
+	}
+
+	.v-stateful::before {
+		background: var(--ctx-accent);
+		box-shadow: 0 0 12px rgba(59, 130, 246, 0.5);
+	}
+
+	.v-sharable::before {
+		background: var(--ctx-success);
+		box-shadow: 0 0 12px rgba(34, 197, 94, 0.5);
+	}
+
+	.v-inspectable::before {
+		background: var(--ctx-warn);
+		box-shadow: 0 0 12px rgba(252, 211, 77, 0.5);
+	}
+
+	.v-label {
+		font-family: var(--ctx-font-mono);
+		font-size: 0.68rem;
+		letter-spacing: 0.12em;
+		color: var(--ctx-text-faint);
+		margin-bottom: 0.5rem;
+	}
+
+	.v-stateful .v-label {
+		color: var(--ctx-accent);
+	}
+
+	.v-sharable .v-label {
+		color: var(--ctx-success);
+	}
+
+	.v-inspectable .v-label {
+		color: var(--ctx-warn);
+	}
+
+	.vignette h3 {
+		font-size: 1.1rem;
+		color: #ffffff;
+		margin: 0 0 0.85rem 0;
+		line-height: 1.25;
+	}
+
+	.scene {
 		color: var(--ctx-text);
-		font-size: 1rem;
-		max-width: 40rem;
-		margin: 0 0 1.25rem 0;
+		font-size: 0.9rem;
 		line-height: 1.6;
+		margin: 0 0 0.85rem 0;
+	}
+
+	.fix {
+		color: var(--ctx-text-dim);
+		font-size: 0.88rem;
+		line-height: 1.55;
+		margin: 0;
+		padding-top: 0.85rem;
+		border-top: 1px dashed var(--ctx-border);
+	}
+
+	.fix strong {
+		color: #ffffff;
 	}
 
 	.fix code {
-		background: var(--ctx-panel);
-		border: 1px solid var(--ctx-border);
+		background: #050505;
+		border: 1px solid var(--ctx-border-lo);
 		padding: 0.1rem 0.4rem;
 		border-radius: var(--ctx-radius-sm);
 		font-size: 0.9em;
-		color: var(--ctx-accent-text);
-	}
-
-	.fix em {
-		color: #ffffff;
-		font-style: italic;
+		color: var(--ctx-warn);
+		font-family: var(--ctx-font-mono);
 	}
 
 	.read-more {
-		margin: 0;
+		margin: 2rem 0 0 0;
 		font-size: 0.9rem;
+	}
+
+	@media (max-width: 920px) {
+		.vignettes {
+			grid-template-columns: 1fr;
+		}
 	}
 </style>

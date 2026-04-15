@@ -1,10 +1,10 @@
-# Integrating CtxOne with AI Tools
+# Integrating CTXone with AI Tools
 
-How to wire CtxOne into the common AI coding tools so every session starts
+How to wire CTXone into the common AI coding tools so every session starts
 with project context loaded. For details on what each MCP tool does, see
 [MCP_TOOLS.md](MCP_TOOLS.md).
 
-**Chat hosts (not coding tools):** for Open WebUI specifically, CtxOne
+**Chat hosts (not coding tools):** for Open WebUI specifically, CTXone
 ships native Tool and Filter plugins — see [OPENWEBUI.md](OPENWEBUI.md).
 The Filter auto-injects relevant memory into every turn, which works
 even with models that don't support tool-calling.
@@ -25,13 +25,13 @@ Detected AI tools:
   ✓ VS Code
   ✗ Codex
 
-Install CtxOne MCP server into these tools? [Y/n] y
+Install CTXone MCP server into these tools? [Y/n] y
   → Claude Code: wrote .mcp.json ✓
   → Cursor: wrote .cursor/mcp.json ✓
   → VS Code: wrote .vscode/mcp.json ✓
 ```
 
-That's it. Restart the AI tool and CtxOne is live. The rest of this doc
+That's it. Restart the AI tool and CTXone is live. The rest of this doc
 explains what `ctx init` actually writes and how to do it manually.
 
 ## What `ctx init` writes
@@ -81,7 +81,7 @@ It should list `remember`, `recall`, `prime`, `context`,
 
 ### Typical session
 
-With CtxOne configured, a Claude Code session looks like:
+With CTXone configured, a Claude Code session looks like:
 
 1. You open the project.
 2. Claude Code calls `recall "<your first question>"` — gets pinned project
@@ -92,7 +92,7 @@ With CtxOne configured, a Claude Code session looks like:
 5. Next time you open the project, step 2 returns those summaries. **No
    re-explaining.**
 
-Claude Code is the tool CtxOne was designed for. Expect the best experience
+Claude Code is the tool CTXone was designed for. Expect the best experience
 here.
 
 ---
@@ -314,7 +314,7 @@ Notes:
   production to avoid surprises.
 - **`args`** — always include `--path` pointing at a shared location. This
   is what makes memory shared across tools.
-- **Stdio transport** — CtxOne Hub speaks stdio MCP by default. Don't pass
+- **Stdio transport** — CTXone Hub speaks stdio MCP by default. Don't pass
   `--http`; that's for the REST API.
 - **Single-session** — the Hub handles one stdio client at a time. When
   the AI tool exits, the Hub exits with it. Each tool session gets a fresh
@@ -369,14 +369,14 @@ full docker-compose setup.
 
 ## Troubleshooting
 
-**The tool says CtxOne isn't configured, even after `ctx init`.**
+**The tool says CTXone isn't configured, even after `ctx init`.**
 Restart the tool. Most MCP clients load config at startup.
 
 **Hub spawns but no memory is shared.**
 Check each tool's config file and verify `--path` points at the same
 absolute path. `ctx init --dry-run` shows exactly what gets written.
 
-**The tool lists CtxOne but tool calls fail.**
+**The tool lists CTXone but tool calls fail.**
 Run `ctx doctor` — it catches most infrastructure issues. If doctor is
 green, check the Hub logs (stderr of the spawned process) via your tool's
 MCP diagnostic view.

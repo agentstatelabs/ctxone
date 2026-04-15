@@ -5,7 +5,7 @@ For strategy, see [VISION.md](VISION.md).
 
 ## The one-sentence pitch
 
-CtxOne is a **versioned, searchable, structured memory store** that gives AI
+CTXone is a **versioned, searchable, structured memory store** that gives AI
 agents persistent context without the token cost of carrying that context on
 every turn.
 
@@ -22,7 +22,7 @@ turn 3:  [whole memory file] + [message]  → cost O(n)
 ...
 ```
 
-CtxOne inverts this. The graph is stored once, on disk. Every recall fetches
+CTXone inverts this. The graph is stored once, on disk. Every recall fetches
 **only the facts relevant to the current question**, plus a small set of
 always-included "pinned" facts. Adding more knowledge to the graph doesn't
 increase per-turn cost.
@@ -35,7 +35,7 @@ turn 3:  [pinned + relevant 2 facts] + [message]  → cost O(log n)
 ```
 
 The engine is [AgentStateGraph](https://github.com/agentstatelabs/agentstategraph) —
-a branching, versioned state store with intent metadata. CtxOne layers a
+a branching, versioned state store with intent metadata. CTXone layers a
 memory-oriented API on top.
 
 ## The four kinds of memory
@@ -174,7 +174,7 @@ improvement.
           │               │              │          │
           ▼               ▼              ▼          ▼
     ┌───────────────────────────────────────────────────┐
-    │            CtxOne Hub (ctxone-hub)                │
+    │            CTXone Hub (ctxone-hub)                │
     │   MCP tools: remember / recall / prime / ...      │
     │   HTTP API: /api/memory/*, /api/state/*           │
     │   Token tracker: session savings                  │
@@ -182,7 +182,7 @@ improvement.
                            │
                            ▼
     ┌───────────────────────────────────────────────────┐
-    │       CtxOne Engine (AgentStateGraph)             │
+    │       CTXone Engine (AgentStateGraph)             │
     │   Versioned state store, branches, blame,         │
     │   intent metadata, confidence scoring             │
     └──────────────────────┬────────────────────────────┘
@@ -199,7 +199,7 @@ Alongside the stdio MCP path, two other surfaces talk to the Hub over HTTP:
 
 - **`ctx` CLI** — scripting and inspection (`remember`, `recall`, `search`,
   `log`, `diff`, `tail`, ...)
-- **CtxOne Lens** — SvelteKit web UI for browsing the graph visually
+- **CTXone Lens** — SvelteKit web UI for browsing the graph visually
 
 All three surfaces hit the same Hub. There's no parallel memory.
 

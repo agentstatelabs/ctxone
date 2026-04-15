@@ -1,6 +1,6 @@
 """Tests for the Open WebUI integration.
 
-These mock the Hub client so we don't need a running CtxOne instance.
+These mock the Hub client so we don't need a running CTXone instance.
 The goal is to verify the Tool and Filter classes:
     - Build Hub clients with the right URL / branch / timeout
     - Honor UserValves overrides (branch, enabled, capture_replies)
@@ -164,7 +164,7 @@ def test_format_recall_renders_entries_with_tags():
         fake_pinned_entry(title="Vision", body="ship fast"),
     ]
     block = _format_recall_as_system_prompt("licensing", entries, 12.3)
-    assert "## Relevant memory from CtxOne" in block
+    assert "## Relevant memory from CTXone" in block
     assert "'licensing'" in block
     assert "[fact]" in block
     assert "BSL-1.1" in block
@@ -238,12 +238,12 @@ def test_tools_recall_formats_results_as_markdown(tools):
     with patch.object(Tools, "_hub") as mock_hub_method:
         mock_hub = MagicMock()
         mock_hub.recall.return_value = fake_recall_result(
-            entries=[fake_memory_entry(value="CtxOne uses BSL-1.1")]
+            entries=[fake_memory_entry(value="CTXone uses BSL-1.1")]
         )
         mock_hub_method.return_value = mock_hub
 
         result = tools.recall("licensing")
-        assert "Relevant memory from CtxOne" in result
+        assert "Relevant memory from CTXone" in result
         assert "BSL-1.1" in result
 
 
@@ -377,7 +377,7 @@ def test_filter_inlet_injects_system_message_on_match(filt):
     with patch.object(Filter, "_hub") as mock_hub_method:
         mock_hub = MagicMock()
         mock_hub.recall.return_value = fake_recall_result(
-            entries=[fake_memory_entry(value="CtxOne uses BSL-1.1")],
+            entries=[fake_memory_entry(value="CTXone uses BSL-1.1")],
             ratio=15.0,
         )
         mock_hub_method.return_value = mock_hub
@@ -392,7 +392,7 @@ def test_filter_inlet_injects_system_message_on_match(filt):
         # New system message prepended with the memory block
         assert out["messages"][0]["role"] == "system"
         assert "BSL-1.1" in out["messages"][0]["content"]
-        assert "Relevant memory from CtxOne" in out["messages"][0]["content"]
+        assert "Relevant memory from CTXone" in out["messages"][0]["content"]
 
         # Original user message still there after the injection
         assert out["messages"][1]["role"] == "user"

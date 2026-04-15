@@ -1,61 +1,122 @@
 ---
 /**
- * The 60× showcase. Visualizes the before/after: a flat 12k-token
- * memory file vs CtxOne's 200-token budgeted recall for the same
- * topic. Pure CSS — no JavaScript, no framework.
+ * Savings showcase. Visualizes the before/after token cost on a
+ * single recall: flat memory vs CTXone's budgeted recall for the
+ * same topic.
+ *
+ * Calibrated to 5× on day one, with a line about how the ratio
+ * climbs with graph size. The whole point of under-promising here
+ * is that the user's actual experience (usually higher) becomes
+ * an upside surprise, not a broken marketing claim.
  */
 ---
 
-<section class="section">
+<section class="section savings">
 	<div class="container">
-		<h2 class="section-title">The 60× number, provable in real time</h2>
+		<div class="eyebrow">
+			<span class="dot"></span>
+			<span class="eyebrow-text">LIVE // ctx_savings_ratio</span>
+		</div>
+		<h2 class="section-title">5× on day one. More as your graph grows.</h2>
 		<p class="section-lede">
 			Every <code>recall</code> response includes a
-			<code>_ctxone_stats</code> field showing exactly how many tokens
-			you sent vs how many you would have sent if the model had seen
-			the full memory graph. This isn't marketing — it's the live
-			delta the Hub computes on every request.
+			<code>_ctxone_stats</code> field showing exactly how many
+			tokens you sent vs how many you would have sent if the
+			model had seen the full memory graph. This isn't
+			marketing — it's the live delta the Hub computes on
+			every request.
 		</p>
 
 		<div class="compare">
 			<div class="col col-flat">
 				<div class="label">Flat memory</div>
-				<div class="caption">What the model sees without CtxOne</div>
+				<div class="caption">What the model sees without CTXone</div>
 				<div class="bar bar-flat">
 					<span class="bar-inner"></span>
 				</div>
-				<div class="number number-flat">12,000 tokens</div>
+				<div class="number number-flat">1,500 tokens</div>
 				<div class="note">Every session, every time</div>
 			</div>
 
 			<div class="arrow">→</div>
 
 			<div class="col col-ctx">
-				<div class="label">CtxOne recall</div>
-				<div class="caption">What the model sees with CtxOne</div>
+				<div class="label">CTXone recall</div>
+				<div class="caption">What the model sees with CTXone</div>
 				<div class="bar bar-ctx">
 					<span class="bar-inner"></span>
 				</div>
-				<div class="number number-ctx">200 tokens</div>
+				<div class="number number-ctx">300 tokens</div>
 				<div class="note">Topic-matched + pinned</div>
 			</div>
 		</div>
 
 		<div class="ratio">
-			<span class="x">60×</span>
-			<span class="x-label">savings ratio</span>
+			<div class="ratio-box">
+				<span class="x">5×</span>
+				<span class="x-label">savings ratio (day one)</span>
+			</div>
 		</div>
 
 		<p class="footnote">
-			Shown: a mature graph of a few hundred facts, recalled for a
-			specific topic. On a fresh graph the ratio is close to 1× — it
-			grows with the graph, because that's how selective retrieval
-			works. <a href="/how-it-works/token-savings/">See the math →</a>
+			Shown: a fresh graph with a few dozen facts. As you write
+			more, recall stays the same size but the baseline grows —
+			the ratio climbs to <strong>10×, 20×, and higher</strong>
+			on graphs that have been lived in for a week or more. Start
+			at 5×, discover the rest.
+			<a href="/how-it-works/token-savings/">See the math →</a>
 		</p>
 	</div>
 </section>
 
 <style>
+	.savings {
+		background:
+			radial-gradient(
+				ellipse 60% 50% at 50% 100%,
+				rgba(34, 197, 94, 0.08),
+				transparent 60%
+			),
+			var(--ctx-bg);
+	}
+
+	.eyebrow {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.55rem;
+		padding: 0.3rem 0.8rem;
+		background: rgba(34, 197, 94, 0.08);
+		border: 1px solid rgba(34, 197, 94, 0.28);
+		border-radius: 999px;
+		font-family: var(--ctx-font-mono);
+		font-size: 0.68rem;
+		letter-spacing: 0.1em;
+		color: var(--ctx-success);
+		margin-bottom: 1rem;
+	}
+
+	.eyebrow .dot {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		background: var(--ctx-success);
+		box-shadow: 0 0 10px rgba(34, 197, 94, 0.8);
+		animation: blink 1.6s ease-in-out infinite;
+	}
+
+	@keyframes blink {
+		0%, 100% {
+			opacity: 1;
+		}
+		50% {
+			opacity: 0.35;
+		}
+	}
+
+	.eyebrow-text {
+		font-weight: 700;
+	}
+
 	.compare {
 		display: flex;
 		align-items: center;
@@ -71,6 +132,16 @@
 		border: 1px solid var(--ctx-border);
 		border-radius: var(--ctx-radius-lg);
 		padding: 1.25rem 1.5rem;
+		position: relative;
+	}
+
+	.col-flat {
+		border-color: rgba(239, 68, 68, 0.25);
+	}
+
+	.col-ctx {
+		border-color: rgba(34, 197, 94, 0.35);
+		box-shadow: 0 0 20px rgba(34, 197, 94, 0.05);
 	}
 
 	.label {
@@ -79,6 +150,15 @@
 		text-transform: uppercase;
 		letter-spacing: 0.1em;
 		margin-bottom: 0.5rem;
+		font-family: var(--ctx-font-mono);
+	}
+
+	.col-flat .label {
+		color: var(--ctx-error);
+	}
+
+	.col-ctx .label {
+		color: var(--ctx-success);
 	}
 
 	.caption {
@@ -110,11 +190,14 @@
 			#c0392b 8px,
 			#c0392b 16px
 		);
+		box-shadow: inset 0 0 20px rgba(239, 68, 68, 0.3);
 	}
 
+	/* 300/1500 = 20% — 5× savings */
 	.bar-ctx .bar-inner {
-		width: 1.7%;
-		background: var(--ctx-accent);
+		width: 20%;
+		background: var(--ctx-success);
+		box-shadow: 0 0 12px rgba(34, 197, 94, 0.6);
 	}
 
 	.number {
@@ -125,7 +208,8 @@
 	}
 
 	.number-ctx {
-		color: var(--ctx-accent-text);
+		color: var(--ctx-success);
+		text-shadow: 0 0 16px rgba(34, 197, 94, 0.4);
 	}
 
 	.note {
@@ -142,31 +226,55 @@
 
 	.ratio {
 		display: flex;
+		justify-content: flex-start;
+		margin: 1rem 0 1.5rem 0;
+	}
+
+	.ratio-box {
+		display: inline-flex;
 		align-items: baseline;
 		gap: 0.75rem;
-		margin: 1rem 0 1.5rem 0;
+		padding: 1rem 1.75rem;
+		background:
+			radial-gradient(
+				ellipse at center,
+				rgba(34, 197, 94, 0.15),
+				transparent 70%
+			),
+			var(--ctx-panel);
+		border: 1px solid rgba(34, 197, 94, 0.35);
+		border-radius: var(--ctx-radius-lg);
 	}
 
 	.x {
 		font-family: var(--ctx-font-mono);
-		font-size: 4rem;
+		font-size: 4.5rem;
 		font-weight: 800;
-		color: var(--ctx-accent);
+		color: var(--ctx-success);
 		line-height: 1;
+		text-shadow:
+			0 0 24px rgba(34, 197, 94, 0.6),
+			0 0 48px rgba(34, 197, 94, 0.3);
 	}
 
 	.x-label {
 		color: var(--ctx-text-dim);
-		font-size: 1rem;
+		font-size: 0.85rem;
 		text-transform: uppercase;
 		letter-spacing: 0.1em;
+		font-family: var(--ctx-font-mono);
 	}
 
 	.footnote {
 		color: var(--ctx-text-dim);
 		font-size: 0.85rem;
-		max-width: 36rem;
+		max-width: 40rem;
 		margin: 0;
+		line-height: 1.65;
+	}
+
+	.footnote strong {
+		color: var(--ctx-warn);
 	}
 
 	.footnote code,
@@ -188,7 +296,7 @@
 			transform: rotate(90deg);
 		}
 		.x {
-			font-size: 3rem;
+			font-size: 3.25rem;
 		}
 	}
 </style>

@@ -291,11 +291,11 @@ import { Card, CardGrid } from '@astrojs/starlight/components';
   <Card title="How it works" icon="puzzle">
     Read [Architecture](/how-it-works/architecture/) for the mental model
     and [Token savings](/how-it-works/token-savings/) for the math behind
-    the 60× claim.
+    the live savings ratio.
   </Card>
 
   <Card title="Integrate" icon="setting">
-    Wire CtxOne into [AI coding tools](/integrations/ai-coding-tools/) with
+    Wire CTXone into [AI coding tools](/integrations/ai-coding-tools/) with
     \`ctx init\`, or drop the [Open WebUI plugin](/integrations/open-webui/)
     into a self-hosted chat install.
   </Card>

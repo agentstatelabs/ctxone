@@ -33,9 +33,11 @@ O(log n) scaling on memory costs instead of O(n).
 2. **Immediate demo.** "Watch this fresh session get full project context in
    3 seconds." The value is obvious in a single demonstration.
 
-3. **Measurable ROI.** 60x token reduction is not a vibes improvement — it's
-   a number that CFOs can put in a spreadsheet. Enterprise license pays for
-   itself in the first week of token savings alone.
+3. **Measurable ROI.** Token reduction is not a vibes improvement — it's a
+   number that CFOs can put in a spreadsheet. The savings ratio starts around
+   5× on day one and climbs as the memory graph grows; on mature graphs with
+   hundreds of pinned facts the ratio reaches double digits. Enterprise license
+   pays for itself in the first week of token savings alone.
 
 4. **Unique capability.** No existing tool offers structured, searchable,
    blameable, branchable agent memory with confidence scoring. Vector stores
@@ -58,8 +60,9 @@ persistent memory — searchable, structured, and transparent. Close sessions
 freely. Start new ones instantly. No more context anxiety."
 
 For **enterprises** (top-down sales):
-"Your agents waste 60x tokens re-learning context that was already known.
-AgentStateGraph's structured memory reduces token costs by 60x while making
+"Your agents waste tokens re-learning context that was already known.
+CTXone's structured memory reduces per-turn token costs — starting around 5×
+on day one and climbing into double digits as the graph matures — while making
 every session consistently productive. Plus: full accountability — see exactly
 what every agent knows, when it learned it, and at what confidence."
 

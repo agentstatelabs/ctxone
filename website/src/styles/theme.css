@@ -1,5 +1,5 @@
 /*
- * Starlight theme overrides — map our CtxOne brand tokens onto
+ * Starlight theme overrides — map our CTXone brand tokens onto
  * Starlight's own CSS custom properties. Starlight uses a standardized
  * set of `--sl-*` variables; overriding them in :root (dark mode) and
  * [data-theme='light'] is the supported customization path.

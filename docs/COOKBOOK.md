@@ -1,6 +1,6 @@
 # Cookbook
 
-Real-world recipes for putting CtxOne into a developer workflow. Every recipe
+Real-world recipes for putting CTXone into a developer workflow. Every recipe
 is self-contained and copy-pasteable.
 
 ## Table of contents
@@ -83,7 +83,7 @@ if [ -z "$DIGEST" ]; then
   exit 0
 fi
 
-echo "CtxOne activity since $SINCE:"
+echo "CTXone activity since $SINCE:"
 echo
 echo "$DIGEST"
 ```
@@ -92,7 +92,7 @@ Wire it to cron:
 
 ```cron
 # crontab -e
-7 9 * * * /usr/local/bin/ctxone-daily-digest.sh | mail -s "CtxOne digest" you@example.com
+7 9 * * * /usr/local/bin/ctxone-daily-digest.sh | mail -s "CTXone digest" you@example.com
 ```
 
 **Why `--format json | jq`:** the Hub returns structured commit data with

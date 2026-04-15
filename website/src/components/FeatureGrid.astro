@@ -4,27 +4,36 @@
  * pairs a CLI snippet with the matching MCP tool name so readers see
  * "this is how you do it from a shell" and "this is what the model
  * calls it" at the same glance.
+ *
+ * Card accent colors match the pillar mapping from the hero:
+ *   Remember → blue    (stateful)
+ *   Recall   → green   (topic-matched)
+ *   Blame    → amber   (inspectable)
  */
 ---
 
-<section class="section">
+<section class="section features">
 	<div class="container">
+		<div class="eyebrow">
+			<span class="eyebrow-text">THREE_VERBS //</span>
+		</div>
 		<h2 class="section-title">Three verbs. That's the whole product.</h2>
 		<p class="section-lede">
-			CtxOne boils down to three things an AI tool does to memory.
+			CTXone boils down to three things an AI tool does to memory.
 			Everything else — branches, priming, session stats, provenance
 			— falls out of these.
 		</p>
 
 		<div class="grid">
-			<article class="card">
+			<article class="card card-blue">
+				<div class="card-label">01 // REMEMBER</div>
 				<h3>Remember</h3>
 				<p>
 					Write a fact once. It survives sessions, branches, and tool
 					switches. Importance maps to a confidence score so
 					high-value facts aren't drowned out by chatter.
 				</p>
-				<pre><code>$ ctx remember "BSL-1.1 for all new repos" \
+				<pre><code><span class="prompt">$</span> ctx remember "BSL-1.1 for all new repos" \
     --importance high --context licensing
 
 <span class="comment"># from an LLM:</span>
@@ -32,28 +41,30 @@ remember(fact="BSL-1.1 for all new repos",
          importance="high", context="licensing")</code></pre>
 			</article>
 
-			<article class="card">
+			<article class="card card-green">
+				<div class="card-label">02 // RECALL</div>
 				<h3>Recall</h3>
 				<p>
 					Ask a topic. Get pinned context plus relevant facts,
 					capped at a token budget. Every response includes the
-					live savings ratio so the 60× claim is provable in real
+					live savings ratio so the claim is provable in real
 					time.
 				</p>
-				<pre><code>$ ctx recall "licensing" --budget 1500
+				<pre><code><span class="prompt">$</span> ctx recall "licensing" --budget 1500
 
 <span class="comment"># from an LLM:</span>
 recall(topic="licensing", budget=1500)</code></pre>
 			</article>
 
-			<article class="card">
+			<article class="card card-amber">
+				<div class="card-label">03 // BLAME</div>
 				<h3>Blame</h3>
 				<p>
 					Every commit carries an agent ID, a timestamp, an intent,
 					and optional reasoning. <code>ctx blame</code> traces a
 					fact back to the tool, user, and session that wrote it.
 				</p>
-				<pre><code>$ ctx blame /memory/legal/bsl
+				<pre><code><span class="prompt">$</span> ctx blame /memory/legal/bsl
 
 <span class="comment"># who wrote it, when, and why:</span>
 agent:  claude-code
@@ -66,10 +77,38 @@ reason: user preference</code></pre>
 </section>
 
 <style>
+	.features {
+		background:
+			radial-gradient(
+				ellipse 70% 40% at 50% 100%,
+				rgba(59, 130, 246, 0.04),
+				transparent 60%
+			),
+			var(--ctx-bg);
+	}
+
+	.eyebrow {
+		display: inline-block;
+		padding: 0.3rem 0.8rem;
+		background: rgba(59, 130, 246, 0.08);
+		border: 1px solid rgba(59, 130, 246, 0.28);
+		border-radius: 999px;
+		font-family: var(--ctx-font-mono);
+		font-size: 0.68rem;
+		letter-spacing: 0.1em;
+		color: var(--ctx-accent);
+		margin-bottom: 1rem;
+	}
+
+	.eyebrow-text {
+		font-weight: 700;
+	}
+
 	.grid {
 		display: grid;
 		grid-template-columns: repeat(3, 1fr);
 		gap: 1.25rem;
+		margin-top: 0.5rem;
 	}
 
 	.card {
@@ -77,11 +116,63 @@ reason: user preference</code></pre>
 		border: 1px solid var(--ctx-border);
 		border-radius: var(--ctx-radius-lg);
 		padding: 1.5rem;
+		position: relative;
+		overflow: hidden;
+		transition: transform 0.15s, box-shadow 0.15s;
+	}
+
+	.card::before {
+		content: '';
+		position: absolute;
+		top: 0;
+		left: 0;
+		right: 0;
+		height: 3px;
+	}
+
+	.card-blue::before {
+		background: var(--ctx-accent);
+		box-shadow: 0 0 12px rgba(59, 130, 246, 0.5);
+	}
+
+	.card-green::before {
+		background: var(--ctx-success);
+		box-shadow: 0 0 12px rgba(34, 197, 94, 0.5);
+	}
+
+	.card-amber::before {
+		background: var(--ctx-warn);
+		box-shadow: 0 0 12px rgba(252, 211, 77, 0.5);
+	}
+
+	.card:hover {
+		transform: translateY(-2px);
+		box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+	}
+
+	.card-label {
+		font-family: var(--ctx-font-mono);
+		font-size: 0.68rem;
+		letter-spacing: 0.12em;
+		color: var(--ctx-text-faint);
+		margin-bottom: 0.5rem;
+	}
+
+	.card-blue .card-label {
+		color: var(--ctx-accent);
+	}
+
+	.card-green .card-label {
+		color: var(--ctx-success);
+	}
+
+	.card-amber .card-label {
+		color: var(--ctx-warn);
 	}
 
 	.card h3 {
-		margin: 0 0 0.75rem 0;
-		font-size: 1.1rem;
+		margin: 0 0 0.85rem 0;
+		font-size: 1.2rem;
 		color: #ffffff;
 	}
 
@@ -97,7 +188,7 @@ reason: user preference</code></pre>
 		padding: 0.1rem 0.35rem;
 		border-radius: var(--ctx-radius-sm);
 		font-size: 0.85em;
-		color: var(--ctx-accent-text);
+		color: var(--ctx-warn);
 		font-family: var(--ctx-font-mono);
 	}
 
@@ -110,13 +201,18 @@ reason: user preference</code></pre>
 		overflow-x: auto;
 		color: var(--ctx-text);
 		margin: 0;
-		line-height: 1.5;
+		line-height: 1.55;
 	}
 
 	.card pre code {
 		background: transparent;
 		padding: 0;
 		color: inherit;
+	}
+
+	.prompt {
+		color: var(--ctx-success);
+		user-select: none;
 	}
 
 	.comment {

@@ -101,7 +101,7 @@ ctx log -n 100 | grep -i "<term>"
 If it was deleted, you can still see the old commit in `blame` but the
 current state won't have it.
 
-## 4. `ctx init` wrote a config but Claude Code / Cursor still doesn't see CtxOne
+## 4. `ctx init` wrote a config but Claude Code / Cursor still doesn't see CTXone
 
 **Cause A — the AI tool needs a restart.** Most MCP clients load config on
 startup. Restart Claude Code / Cursor / VS Code after running `ctx init`.
@@ -201,7 +201,7 @@ command in the other terminal.
 
 ## 10. Postgres Hub errors: `database "ctxone" does not exist`
 
-**Cause:** the Postgres database itself isn't created. CtxOne creates the
+**Cause:** the Postgres database itself isn't created. CTXone creates the
 *schema* on init but expects the database to already exist.
 
 **Fix:**
@@ -226,9 +226,9 @@ The Hub will create its tables on first run.
 
 ## Schema migrations
 
-CtxOne tracks its own **schema version** separately from the underlying
+CTXone tracks its own **schema version** separately from the underlying
 storage (SQLite / Postgres / in-memory). Whenever we change the *shape*
-of what CtxOne writes to the graph — path conventions, structured field
+of what CTXone writes to the graph — path conventions, structured field
 layouts, session formats — the schema version is bumped and migrations
 run on Hub startup.
 
@@ -297,10 +297,10 @@ RUST_LOG=debug ctx serve --http
 # Trace — every field of every span, useful for deep debugging
 RUST_LOG=trace ctx serve --http
 
-# Scoped — only enable debug for CtxOne's own code
+# Scoped — only enable debug for CTXone's own code
 RUST_LOG=ctxone_hub=debug ctx serve --http
 
-# Combined — debug CtxOne, info HTTP request traces from tower-http
+# Combined — debug CTXone, info HTTP request traces from tower-http
 RUST_LOG=ctxone_hub=debug,tower_http=info ctx serve --http
 ```
 
@@ -369,7 +369,7 @@ Usually it's one of three things:
 ## Per-session token tracking
 
 The Hub tracks tokens-used and tokens-saved **per session** when
-clients send the `X-CtxOne-Session` header. Without the header, all
+clients send the `X-CTXone-Session` header. Without the header, all
 usage rolls up under the `"default"` session.
 
 ### Endpoints
@@ -407,12 +407,12 @@ python my-agent.py
 **Raw HTTP:**
 
 ```bash
-curl -H "X-CtxOne-Session: alice@example.com" \
+curl -H "X-CTXone-Session: alice@example.com" \
      "http://localhost:3001/api/memory/recall?topic=licensing"
 ```
 
 **Open WebUI plugin:** the `ctxone.integrations.openwebui` Tool and
-Filter automatically set `X-CtxOne-Session` to the Open WebUI user's
+Filter automatically set `X-CTXone-Session` to the Open WebUI user's
 email (or name/id), so a multi-user self-hosted install gets per-user
 stats for free.
 
@@ -428,7 +428,7 @@ the session invisible to the registry. Do one `recall` to materialize it.
 
 `ctx blame` shows a "who" column for every fact in the graph — the
 agent ID that was stamped on the commit. By default that's
-`"ctxone"`, which is useful for "this came from CtxOne" but tells
+`"ctxone"`, which is useful for "this came from CTXone" but tells
 you nothing about *which* tool wrote it. T2 makes agent IDs
 per-tool so you can tell Claude Code's writes from Cursor's from
 Open WebUI's.
@@ -437,7 +437,7 @@ Open WebUI's.
 
 Highest priority wins:
 
-1. **HTTP request**: `X-CtxOne-Agent: <name>` header on the request
+1. **HTTP request**: `X-CTXone-Agent: <name>` header on the request
 2. **MCP stdio**: `--agent-id <name>` flag passed when spawning
    `ctxone-hub` as a subprocess (or `CTX_AGENT_ID` env var)
 3. **Fallback**: `"ctxone"`
@@ -455,7 +455,7 @@ hub.remember("...")                 # blame shows "my-script"
 **Raw HTTP:**
 
 ```bash
-curl -H "X-CtxOne-Agent: my-script" \
+curl -H "X-CTXone-Agent: my-script" \
      -H "Content-Type: application/json" \
      -d '{"fact":"..."}' \
      http://localhost:3001/api/memory/remember
@@ -469,7 +469,7 @@ If you have an old config that predates T2, re-run `ctx init` to
 upgrade it.
 
 **Open WebUI plugin:** the bundled Tool and Filter automatically
-set both `X-CtxOne-Agent` and `X-CtxOne-Session` to the user's
+set both `X-CTXone-Agent` and `X-CTXone-Session` to the user's
 email (or name/id/fallback), so a multi-user install gets per-user
 attribution for free.
 

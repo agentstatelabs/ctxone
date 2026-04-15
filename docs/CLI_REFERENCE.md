@@ -248,7 +248,7 @@ One-line Hub health check plus session token summary.
 Detailed token savings breakdown.
 
 ```
-CtxOne Token Savings
+CTXone Token Savings
   graph size:   451 tokens
   tokens sent:  98
   tokens saved: 1706
@@ -268,7 +268,7 @@ End-to-end health check. Verifies:
 - `~/.ctxone/memory.db` parent is writable
 - Hub HTTP endpoint is reachable
 - `main` branch is accessible
-- Each detected AI tool has a CtxOne MCP config
+- Each detected AI tool has a CTXone MCP config
 
 Prints each check with ✓ or ✗, plus suggested fixes. Exits 70 on failure so
 scripts can gate on it.
@@ -289,7 +289,7 @@ OPTIONS:
 
 ### `ctx init [options]`
 
-Auto-detect installed AI tools and write CtxOne into their MCP configs.
+Auto-detect installed AI tools and write CTXone into their MCP configs.
 
 ```
 USAGE: ctx init [OPTIONS]
@@ -367,7 +367,7 @@ ctx completion fish > ~/.config/fish/completions/ctx.fish
     },
     {
       "path": "/memory/licensing/18a6...",
-      "value": "CtxOne uses BSL-1.1",
+      "value": "CTXone uses BSL-1.1",
       "pinned": false,
       "score": 2,
       "full_match": true
@@ -394,7 +394,7 @@ Array of commits:
     "confidence": 0.95,
     "intent": {
       "category": "Custom(\"Observe\")",
-      "description": "CtxOne uses BSL-1.1",
+      "description": "CTXone uses BSL-1.1",
       "tags": []
     },
     "reasoning": null

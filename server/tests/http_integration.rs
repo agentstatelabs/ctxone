@@ -65,7 +65,7 @@ fn post_json(uri: &str, body: Value) -> Request<Body> {
         .unwrap()
 }
 
-/// Build a GET with an `X-CtxOne-Session` header attached.
+/// Build a GET with an `X-CTXone-Session` header attached.
 fn get_with_session(uri: &str, session: &str) -> Request<Body> {
     Request::builder()
         .uri(uri)
@@ -75,7 +75,7 @@ fn get_with_session(uri: &str, session: &str) -> Request<Body> {
         .unwrap()
 }
 
-/// Build a POST with an `X-CtxOne-Session` header attached.
+/// Build a POST with an `X-CTXone-Session` header attached.
 fn post_with_session(uri: &str, session: &str, body: Value) -> Request<Body> {
     Request::builder()
         .uri(uri)
@@ -86,7 +86,7 @@ fn post_with_session(uri: &str, session: &str, body: Value) -> Request<Body> {
         .unwrap()
 }
 
-/// Build a POST with an `X-CtxOne-Agent` header attached.
+/// Build a POST with an `X-CTXone-Agent` header attached.
 fn post_with_agent(uri: &str, agent: &str, body: Value) -> Request<Body> {
     Request::builder()
         .uri(uri)
@@ -1013,7 +1013,7 @@ async fn remember_with_session_header_does_not_leak_into_default() {
 async fn remember_without_agent_header_defaults_to_ctxone() {
     let router = test_router();
 
-    // Write a fact without an X-CtxOne-Agent header
+    // Write a fact without an X-CTXone-Agent header
     let (_, body) = call_json(
         router.clone(),
         post_json(

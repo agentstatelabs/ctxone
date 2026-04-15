@@ -1,6 +1,6 @@
 # MCP Tools Reference
 
-The CtxOne Hub exposes 7 MCP tools over the stdio transport. Any
+The CTXone Hub exposes 7 MCP tools over the stdio transport. Any
 MCP-compatible agent (Claude Code, Cursor, VS Code Copilot with MCP,
 Codex, etc.) can call these directly.
 
@@ -232,14 +232,14 @@ Tools that return JSON natively (`remember`, `recall`, `prime`, `context`)
 embed the same fields directly in the response object.
 
 Well-behaved agents can extract and surface these numbers to the user —
-CtxOne is the only memory layer where "how much did this query save?" is a
+CTXone is the only memory layer where "how much did this query save?" is a
 first-class API response.
 
 ## Authority chain
 
 Every tool call writes commits with `agent_id = "ctxone"` (or
 `"ctxone-prime"` for prime operations). This means `ctx blame` shows
-CtxOne-mediated writes separately from writes via the raw engine CLI.
+CTXone-mediated writes separately from writes via the raw engine CLI.
 
 If you're running multiple agents that share a Hub, consider giving each
 agent its own namespaced branch (`agents/alice`, `agents/bob`) so blame is

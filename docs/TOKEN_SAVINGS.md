@@ -1,6 +1,6 @@
 # Token Savings — How the Ratio Is Computed
 
-CtxOne's core pitch is **fewer tokens per turn, more useful context**. This
+CTXone's core pitch is **fewer tokens per turn, more useful context**. This
 doc explains how the savings are measured, how to interpret the ratio, and
 how to maximize it.
 
@@ -9,7 +9,7 @@ For the architecture, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## The baseline: flat memory
 
-Imagine you stored everything CtxOne knows as a single JSON file and shipped
+Imagine you stored everything CTXone knows as a single JSON file and shipped
 that file as context to the model on every turn. That's the **flat memory
 baseline**.
 
@@ -70,7 +70,7 @@ After a recall, the CLI prints:
 `ctx stats` shows the cumulative session totals:
 
 ```
-CtxOne Token Savings
+CTXone Token Savings
   graph size:   451 tokens
   tokens sent:  98
   tokens saved: 1706
@@ -153,7 +153,7 @@ $ ctx recall "licensing"
   ...
 
 --- topic matches ---
-CtxOne is licensed under BSL-1.1...
+CTXone is licensed under BSL-1.1...
 The engine (AgentStateGraph) is BSL-1.1...
 
 5 pinned + 2 topic matches, 620 tokens sent (flat would be ~1191, 1.9x savings)
@@ -175,7 +175,7 @@ It's a rough estimate. Actual tokenization depends on the model and the
 content (code tokenizes differently than prose). 4 chars/token is the
 standard back-of-envelope for English text used by most model providers.
 
-For precise accounting you'd need to call the model's tokenizer. CtxOne
+For precise accounting you'd need to call the model's tokenizer. CTXone
 uses 4 because:
 
 1. It's fast (no tokenizer dependency)

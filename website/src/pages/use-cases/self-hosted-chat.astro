@@ -9,7 +9,7 @@ import LandingLayout from '../../layouts/LandingLayout.astro';
 ---
 
 <LandingLayout
-	title="CtxOne for self-hosted chat"
+	title="CTXone for self-hosted chat"
 	description="Real memory for Open WebUI and other self-hosted chat tools. Auto-inject relevant facts on every turn, no tool-calling required."
 >
 	<section class="section">
@@ -26,7 +26,7 @@ import LandingLayout from '../../layouts/LandingLayout.astro';
 			</p>
 
 			<p>
-				CtxOne ships a native Open WebUI plugin with two parts:
+				CTXone ships a native Open WebUI plugin with two parts:
 				a <strong>Tool</strong> the model can call explicitly
 				(<code>remember</code>, <code>recall</code>,
 				<code>forget</code>, <code>list_pinned</code>), and a
@@ -57,11 +57,11 @@ docker compose up -d</code></pre>
 			<p>This gives you:</p>
 			<ul>
 				<li>
-					<strong>CtxOne Hub</strong> on port 3001 — the memory
+					<strong>CTXone Hub</strong> on port 3001 — the memory
 					layer
 				</li>
 				<li>
-					<strong>CtxOne Lens</strong> on port 5173 — the web UI
+					<strong>CTXone Lens</strong> on port 5173 — the web UI
 					for browsing, blame, diff, and forget
 				</li>
 				<li>
@@ -70,7 +70,7 @@ docker compose up -d</code></pre>
 				</li>
 				<li>
 					<strong>Open WebUI</strong> on port 8080 — chat UI
-					with the CtxOne plugin file bind-mounted at
+					with the CTXone plugin file bind-mounted at
 					<code>/app/ctxone-plugin.py</code>, ready to drop into
 					Admin Panel → Functions
 				</li>
@@ -86,20 +86,20 @@ docker compose up -d</code></pre>
 				looks like this:
 			</p>
 
-			<pre><code class="language-text">## Relevant memory from CtxOne
+			<pre><code class="language-text">## Relevant memory from CTXone
 Retrieved for topic: 'licensing'
 
 - [pinned] **Vision** — ship a BSL-1.1 product with MIT clients
-- [fact] CtxOne uses BSL-1.1
+- [fact] CTXone uses BSL-1.1
 - [fact] Converts to Apache 2.0 four years after release
 
-_(CtxOne: this retrieval is 14.2× smaller than loading
+_(CTXone: this retrieval is 14.2× smaller than loading
 the full memory graph.)_</code></pre>
 
 			<p>
 				The model sees that before it generates its reply. It
 				doesn't have to ask for it. The user doesn't have to know
-				CtxOne exists. It just works — and because the Filter runs
+				CTXone exists. It just works — and because the Filter runs
 				entirely in Open WebUI's Python process talking to the Hub
 				over HTTP, there's no extra wire protocol to debug.
 			</p>
@@ -107,8 +107,8 @@ the full memory graph.)_</code></pre>
 			<h2>Per-user memory isolation</h2>
 
 			<p>
-				The plugin sets both the <code>X-CtxOne-Session</code>
-				and <code>X-CtxOne-Agent</code> request headers to the
+				The plugin sets both the <code>X-CTXone-Session</code>
+				and <code>X-CTXone-Agent</code> request headers to the
 				Open WebUI user's email. That means:
 			</p>
 

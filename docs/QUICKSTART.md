@@ -45,8 +45,8 @@ ctx serve --http
 You'll see:
 
 ```
-Starting CtxOne Hub on port 3001 (db: /Users/user/.ctxone/memory.db)
-CtxOne Hub v0.5.0
+Starting CTXone Hub on port 3001 (db: /Users/user/.ctxone/memory.db)
+CTXone Hub v0.5.0
 Storage: /Users/user/.ctxone/memory.db
 HTTP API listening on http://0.0.0.0:3001
 ```
@@ -126,14 +126,14 @@ Detected AI tools:
   ✓ Cursor
   ✗ Codex
 
-Install CtxOne MCP server into these tools? [Y/n] y
+Install CTXone MCP server into these tools? [Y/n] y
   → Claude Code: wrote .mcp.json ✓
   → Cursor: wrote .cursor/mcp.json ✓
 
-CtxOne is ready. Try: "remember that we use BSL-1.1 licensing"
+CTXone is ready. Try: "remember that we use BSL-1.1 licensing"
 ```
 
-After this, Claude Code / Cursor / etc. will call CtxOne's MCP tools
+After this, Claude Code / Cursor / etc. will call CTXone's MCP tools
 (`remember`, `recall`, `prime`, etc.) automatically. Every session starts
 with pinned context loaded and topic-relevant memories at hand — no more
 re-explaining your project.

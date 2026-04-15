@@ -337,7 +337,7 @@ def test_is_reachable_false_on_connection_error():
     assert hub.is_reachable() is False
 
 
-# -------- session_id (X-CtxOne-Session header) --------
+# -------- session_id (X-CTXone-Session header) --------
 
 def test_session_id_defaults_to_none_and_sends_no_header():
     session = MagicMock()
@@ -347,7 +347,7 @@ def test_session_id_defaults_to_none_and_sends_no_header():
     hub.ls("/")
     _, kwargs = session.get.call_args
     headers = kwargs.get("headers") or {}
-    assert "X-CtxOne-Session" not in headers
+    assert "X-CTXone-Session" not in headers
 
 
 def test_session_id_sent_as_header_on_get():
@@ -359,7 +359,7 @@ def test_session_id_sent_as_header_on_get():
 
     hub.ls("/")
     _, kwargs = session.get.call_args
-    assert kwargs["headers"]["X-CtxOne-Session"] == "alice@example.com"
+    assert kwargs["headers"]["X-CTXone-Session"] == "alice@example.com"
 
 
 def test_session_id_sent_as_header_on_post():
@@ -378,7 +378,7 @@ def test_session_id_sent_as_header_on_post():
 
     hub.remember("fact")
     _, kwargs = session.post.call_args
-    assert kwargs["headers"]["X-CtxOne-Session"] == "bob@example.com"
+    assert kwargs["headers"]["X-CTXone-Session"] == "bob@example.com"
 
 
 def test_session_id_read_from_env_when_not_explicit(monkeypatch):
@@ -389,7 +389,7 @@ def test_session_id_read_from_env_when_not_explicit(monkeypatch):
 
     hub.ls("/")
     _, kwargs = session.get.call_args
-    assert kwargs["headers"]["X-CtxOne-Session"] == "env-session"
+    assert kwargs["headers"]["X-CTXone-Session"] == "env-session"
 
 
 def test_explicit_session_id_overrides_env(monkeypatch):
@@ -402,10 +402,10 @@ def test_explicit_session_id_overrides_env(monkeypatch):
 
     hub.ls("/")
     _, kwargs = session.get.call_args
-    assert kwargs["headers"]["X-CtxOne-Session"] == "explicit"
+    assert kwargs["headers"]["X-CTXone-Session"] == "explicit"
 
 
-# -------- agent_id (X-CtxOne-Agent header) --------
+# -------- agent_id (X-CTXone-Agent header) --------
 
 def test_agent_id_defaults_to_none_and_sends_no_header(monkeypatch):
     # Guard against any CTX_AGENT_ID left in the environment
@@ -417,7 +417,7 @@ def test_agent_id_defaults_to_none_and_sends_no_header(monkeypatch):
     hub.ls("/")
     _, kwargs = session.get.call_args
     headers = kwargs.get("headers") or {}
-    assert "X-CtxOne-Agent" not in headers
+    assert "X-CTXone-Agent" not in headers
 
 
 def test_agent_id_sent_as_header_on_get(monkeypatch):
@@ -428,7 +428,7 @@ def test_agent_id_sent_as_header_on_get(monkeypatch):
 
     hub.ls("/")
     _, kwargs = session.get.call_args
-    assert kwargs["headers"]["X-CtxOne-Agent"] == "claude-code"
+    assert kwargs["headers"]["X-CTXone-Agent"] == "claude-code"
 
 
 def test_agent_id_sent_as_header_on_post(monkeypatch):
@@ -446,7 +446,7 @@ def test_agent_id_sent_as_header_on_post(monkeypatch):
 
     hub.remember("fact")
     _, kwargs = session.post.call_args
-    assert kwargs["headers"]["X-CtxOne-Agent"] == "cursor"
+    assert kwargs["headers"]["X-CTXone-Agent"] == "cursor"
 
 
 def test_agent_id_read_from_env_when_not_explicit(monkeypatch):
@@ -457,7 +457,7 @@ def test_agent_id_read_from_env_when_not_explicit(monkeypatch):
 
     hub.ls("/")
     _, kwargs = session.get.call_args
-    assert kwargs["headers"]["X-CtxOne-Agent"] == "env-agent"
+    assert kwargs["headers"]["X-CTXone-Agent"] == "env-agent"
 
 
 def test_explicit_agent_id_overrides_env(monkeypatch):
@@ -468,7 +468,7 @@ def test_explicit_agent_id_overrides_env(monkeypatch):
 
     hub.ls("/")
     _, kwargs = session.get.call_args
-    assert kwargs["headers"]["X-CtxOne-Agent"] == "explicit-agent"
+    assert kwargs["headers"]["X-CTXone-Agent"] == "explicit-agent"
 
 
 def test_both_session_and_agent_headers_sent_together(monkeypatch):
@@ -485,5 +485,5 @@ def test_both_session_and_agent_headers_sent_together(monkeypatch):
 
     hub.ls("/")
     _, kwargs = session.get.call_args
-    assert kwargs["headers"]["X-CtxOne-Session"] == "alice@example.com"
-    assert kwargs["headers"]["X-CtxOne-Agent"] == "claude-code"
+    assert kwargs["headers"]["X-CTXone-Session"] == "alice@example.com"
+    assert kwargs["headers"]["X-CTXone-Agent"] == "claude-code"

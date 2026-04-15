@@ -1,4 +1,4 @@
-# CtxOne
+# CTXone
 
 Persistent, searchable, accountable memory for AI agents. Eliminate context anxiety.
 
@@ -6,9 +6,9 @@ Persistent, searchable, accountable memory for AI agents. Eliminate context anxi
 
 | Component | Directory | Description |
 |-----------|-----------|-------------|
-| **CtxOne Hub** | `server/` | MCP server — the memory interface for AI tools |
-| **CtxOne Engine** | `engine/` | Core memory + graph layer (AgentStateGraph) |
-| **CtxOne Lens** | `web/` | Web UI for browsing agent memory |
+| **CTXone Hub** | `server/` | MCP server — the memory interface for AI tools |
+| **CTXone Engine** | `engine/` | Core memory + graph layer (AgentStateGraph) |
+| **CTXone Lens** | `web/` | Web UI for browsing agent memory |
 | **ctx** | `cli/` | CLI for interacting with agent memory |
 | **ctxone (Python)** | `bindings/python/` | Python client library (`pip install ctxone`) |
 
@@ -92,7 +92,7 @@ ctx stats
 
 ## Token Savings
 
-CtxOne tracks token usage in real-time. Every response includes how many tokens were
+CTXone tracks token usage in real-time. Every response includes how many tokens were
 sent vs how many would have been sent with flat memory loading — making the savings
 measurable and provable.
 
@@ -101,9 +101,9 @@ measurable and provable.
 ```
 ctxone/
 ├── cli/           # ctx CLI (Rust)
-├── server/        # CtxOne Hub — MCP server (Rust)
+├── server/        # CTXone Hub — MCP server (Rust)
 ├── engine/        # AgentStateGraph core (git submodule)
-├── web/           # CtxOne Lens — web UI (SvelteKit)
+├── web/           # CTXone Lens — web UI (SvelteKit)
 ├── docs/          # Product strategy and design docs
 ├── install.sh
 ├── Dockerfile
@@ -132,19 +132,19 @@ ctxone/
 **Strategy and background:**
 - [Product Vision](docs/VISION.md)
 - [Context Anxiety](docs/CONTEXT_ANXIETY.md) — the problem we solve
-- [Token Economics](docs/TOKEN_ECONOMICS.md) — the math behind 60x savings
+- [Token Economics](docs/TOKEN_ECONOMICS.md) — the math behind the savings ratio
 - [Use Cases](docs/USE_CASES.md)
 - [Memory MCP Design](docs/MEMORY_MCP_DESIGN.md) — technical design
 
 ## License
 
-CtxOne is licensed under the **Business Source License 1.1 (BSL 1.1)**.
+CTXone is licensed under the **Business Source License 1.1 (BSL 1.1)**.
 
-**You can** use CtxOne in production, embed it in your products, self-host it on
+**You can** use CTXone in production, embed it in your products, self-host it on
 your own infrastructure, modify it, and build commercial products on top of it —
 all without a commercial license.
 
-**You cannot** offer CtxOne itself as a competing commercial managed service.
+**You cannot** offer CTXone itself as a competing commercial managed service.
 
 Each version automatically converts to **Apache License 2.0** four years after
 release. See [LICENSING.md](LICENSING.md) for the full plain-English summary and

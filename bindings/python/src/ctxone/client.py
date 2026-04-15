@@ -53,7 +53,7 @@ class Hub:
             session: Optional `requests.Session` for connection pooling
                 and custom headers.
             session_id: Logical session identifier sent as the
-                `X-CtxOne-Session` header on every request. The Hub
+                `X-CTXone-Session` header on every request. The Hub
                 accounts tokens-used per session so agents sharing a
                 process can keep their stats separate. Defaults to the
                 `CTX_SESSION_ID` env var, or `None` (Hub falls back to
@@ -62,7 +62,7 @@ class Hub:
                 writes. The Hub stamps commits with this string so
                 ``ctx blame`` can show "who wrote this fact" — e.g.
                 ``"claude-code"``, ``"cursor"``, or a user email.
-                Sent as the ``X-CtxOne-Agent`` header. Defaults to the
+                Sent as the ``X-CTXone-Agent`` header. Defaults to the
                 ``CTX_AGENT_ID`` env var, or ``None`` (Hub falls back
                 to ``"ctxone"``).
         """
@@ -427,9 +427,9 @@ class Hub:
         """Build the request header dict with session/agent attached."""
         headers: dict[str, str] = {}
         if self.session_id:
-            headers["X-CtxOne-Session"] = self.session_id
+            headers["X-CTXone-Session"] = self.session_id
         if self.agent_id:
-            headers["X-CtxOne-Agent"] = self.agent_id
+            headers["X-CTXone-Agent"] = self.agent_id
         return headers
 
     def _get(self, path: str, params: dict[str, str] | None = None) -> Any:

@@ -9,7 +9,7 @@ export default defineConfig({
 
 	integrations: [
 		starlight({
-			title: 'CtxOne',
+			title: 'CTXone',
 			description:
 				'Persistent, searchable, accountable memory for AI agents. Write a fact once — Claude, Cursor, and every other tool you use remembers it forever.',
 			// The landing page lives in src/pages/index.astro — not a
@@ -72,7 +72,7 @@ export default defineConfig({
 					],
 				},
 				{
-					label: 'Why CtxOne',
+					label: 'Why CTXone',
 					collapsed: true,
 					items: [
 						{ label: 'Vision', slug: 'why-ctxone/vision' },

@@ -1,6 +1,6 @@
 # HTTP API Reference
 
-The CtxOne Hub exposes a REST API over HTTP when run with `--http`. This
+The CTXone Hub exposes a REST API over HTTP when run with `--http`. This
 doc lists every endpoint, its request format, response format, and any
 query parameters.
 
@@ -65,7 +65,7 @@ Cumulative token savings **aggregated across every session**.
 ### `GET /api/stats/tokens/{session_id}`
 
 Stats for a single logical session. `session_id` is whatever clients
-pass in the `X-CtxOne-Session` header; absent clients roll up under
+pass in the `X-CTXone-Session` header; absent clients roll up under
 `"default"`.
 
 **Response (200):**
@@ -160,7 +160,7 @@ Literal substring search across values and keys.
 **Response (200):**
 ```json
 [
-  {"path": "/memory/licensing/abc", "value": "CtxOne uses BSL-1.1"},
+  {"path": "/memory/licensing/abc", "value": "CTXone uses BSL-1.1"},
   ...
 ]
 ```
@@ -254,7 +254,7 @@ Create a new branch.
 
 ## Memory endpoints (the high-level API)
 
-These are the endpoints CtxOne's memory layer adds on top of the underlying
+These are the endpoints CTXone's memory layer adds on top of the underlying
 state primitives.
 
 ### `POST /api/memory/remember`
@@ -264,7 +264,7 @@ Store a fact.
 **Request body:**
 ```json
 {
-  "fact": "CtxOne uses BSL-1.1 licensing",
+  "fact": "CTXone uses BSL-1.1 licensing",
   "importance": "high",
   "context": "licensing",
   "tags": ["legal", "decision"],
@@ -490,7 +490,7 @@ for details.
 
 ## Per-session token tracking
 
-Send `X-CtxOne-Session: <id>` on any request to have its token usage
+Send `X-CTXone-Session: <id>` on any request to have its token usage
 counted under that session. Absent the header, usage rolls up under
 the `"default"` session. Per-session stats are exposed via:
 
@@ -503,7 +503,7 @@ The Python client accepts a `session_id` constructor arg or reads
 
 ## Per-tool agent IDs
 
-Send `X-CtxOne-Agent: <name>` on any write request
+Send `X-CTXone-Agent: <name>` on any write request
 (`remember`/`forget`/`prime`/`summarize_session`/`merge`) to stamp
 the commit with that agent ID. `ctx blame` and `/api/log/{ref}`
 responses surface this as `agent_id`, so you can tell which tool
@@ -526,7 +526,7 @@ proxy in front with whatever auth layer you already use.
 
 Multi-tenant auth is tracked as future work — see the engine's
 `agentstategraph-mcp` binary, which supports `--auth` and `--keys-file`
-for tenant isolation. CtxOne Hub doesn't currently expose these.
+for tenant isolation. CTXone Hub doesn't currently expose these.
 
 ---
 

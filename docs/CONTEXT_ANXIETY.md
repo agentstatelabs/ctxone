@@ -99,5 +99,5 @@ We call this **context anxiety** — and AgentStateGraph eliminates it."
 - **ThreadWeaver:** Position as "the chat app that never forgets"
 - **Social media:** Tweet/post defining "context anxiety" — viral potential
 - **README:** Add to "Why AgentStateGraph?" section
-- **Enterprise pitch:** "Context anxiety costs your agents 60x in wasted tokens"
+- **Enterprise pitch:** "Context anxiety costs your agents 5× more tokens per turn on day one — and the ratio grows as your memory matures"
 - **Conference talks:** Lead with the pain, reveal the term, present the solution

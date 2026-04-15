@@ -1,5 +1,16 @@
 # Token Economics — The Math Behind AgentStateGraph Memory
 
+> **Calibration note.** The ratios on this page (60× per session, etc.) are
+> a theoretical ceiling derived from a specific model of "flat memory
+> dumped into context every turn." They are not the number we promise on
+> the landing page. The **live** `ctx_savings_ratio` the Hub computes on
+> every recall starts around **5×** on a fresh graph and climbs as the
+> graph matures — that 5× is what we quote publicly. The 60× ceiling is
+> what the math allows under optimistic conditions; real users sit
+> somewhere between 5× and that ceiling depending on graph size and how
+> scoped their recalls are. For the measurement details see
+> [TOKEN_SAVINGS.md](TOKEN_SAVINGS.md).
+
 ## The Current Model (Flat Memory)
 
 Memory file loaded into context on every turn:

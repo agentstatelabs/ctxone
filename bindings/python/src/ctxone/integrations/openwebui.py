@@ -1,9 +1,9 @@
 """
-title: CtxOne Memory
+title: CTXone Memory
 author: Craig Brown
 author_url: https://github.com/ctxone
 git_url: https://github.com/ctxone/ctxone
-description: Persistent, searchable, accountable memory for Open WebUI chats — via CtxOne Hub.
+description: Persistent, searchable, accountable memory for Open WebUI chats — via CTXone Hub.
 required_open_webui_version: 0.4.0
 requirements: ctxone>=0.73.0
 version: 0.73.0
@@ -21,7 +21,7 @@ This module provides two Open WebUI plugins that share a Hub client:
                   (optionally) captures the assistant's reply as a fact.
 
 You can use either or both. The Filter is the interesting one — it makes
-CtxOne behave like background memory the model doesn't have to ask for,
+CTXone behave like background memory the model doesn't have to ask for,
 which also means it works with models that don't support tool-calling.
 
 ## Install as an Open WebUI function
@@ -47,7 +47,7 @@ Both plugins expose two Pydantic `Valves` tiers:
                       request timeout, and whether writes are enabled.
 
     - `UserValves`  — per-user overrides. The user's email becomes the
-                      agent ID in commits, so CtxOne's blame view shows
+                      agent ID in commits, so CTXone's blame view shows
                       exactly which user said what. Users can also pick a
                       private branch, a topic budget, and turn the filter
                       on/off for themselves.
@@ -145,7 +145,7 @@ def _format_recall_as_system_prompt(
         return ""
 
     lines = [
-        "## Relevant memory from CtxOne",
+        "## Relevant memory from CTXone",
         f"Retrieved for topic: {topic!r}",
         "",
     ]
@@ -169,7 +169,7 @@ def _format_recall_as_system_prompt(
     if savings_ratio and savings_ratio > 1.0:
         lines.append("")
         lines.append(
-            f"_(CtxOne: this retrieval is {savings_ratio:.1f}× "
+            f"_(CTXone: this retrieval is {savings_ratio:.1f}× "
             "smaller than loading the full memory graph.)_"
         )
     return "\n".join(lines)
@@ -181,7 +181,7 @@ def _format_recall_as_system_prompt(
 
 
 class Tools:
-    """CtxOne memory tools exposed to the model as function calls.
+    """CTXone memory tools exposed to the model as function calls.
 
     Open WebUI introspects every method on this class, turns type hints
     into a JSON-schema for function calling, and uses the first docstring
@@ -191,7 +191,7 @@ class Tools:
     class Valves(BaseModel):
         hub_url: str = Field(
             default="http://localhost:3001",
-            description="CtxOne Hub URL. Default is localhost:3001.",
+            description="CTXone Hub URL. Default is localhost:3001.",
         )
         default_branch: str = Field(
             default="main",
@@ -235,7 +235,7 @@ class Tools:
 
         The default branch is resolved per-user so private branches
         stay private even when the tool is shared across chats. The
-        Hub's X-CtxOne-Session header is set to the user's email (or
+        Hub's X-CTXone-Session header is set to the user's email (or
         name/id) so per-user token stats stay isolated on the Hub
         side — visible via `GET /api/stats/tokens/<user-email>`.
         """
@@ -257,7 +257,7 @@ class Tools:
         importance: Optional[str] = None,
         __user__: Optional[dict] = None,
     ) -> str:
-        """Store a fact in CtxOne long-term memory.
+        """Store a fact in CTXone long-term memory.
 
         :param fact: The fact to remember, in natural language.
         :param context: Optional category name (e.g. "licensing",
@@ -267,7 +267,7 @@ class Tools:
             user's configured importance.
         """
         if not self.valves.allow_writes:
-            return "Error: writes are disabled on this CtxOne installation."
+            return "Error: writes are disabled on this CTXone installation."
 
         user_valves = self._user_valves(__user__)
         imp = importance or user_valves.remember_importance
@@ -286,7 +286,7 @@ class Tools:
                 f"on branch {result.ref} as commit {result.commit_id}."
             )
         except HubUnreachable as e:
-            return f"Error: CtxOne Hub is unreachable at {self.valves.hub_url}: {e}"
+            return f"Error: CTXone Hub is unreachable at {self.valves.hub_url}: {e}"
         except CtxOneError as e:
             return f"Error: remember failed: {e}"
 
@@ -296,7 +296,7 @@ class Tools:
         budget: Optional[int] = None,
         __user__: Optional[dict] = None,
     ) -> str:
-        """Retrieve memories relevant to a topic from CtxOne.
+        """Retrieve memories relevant to a topic from CTXone.
 
         Always includes pinned memories first, then topic-matched facts,
         respecting a token budget. Returns a human-readable summary.
@@ -310,7 +310,7 @@ class Tools:
             hub = self._hub(__user__)
             result = hub.recall(topic, budget=budget or self.valves.recall_budget)
         except HubUnreachable as e:
-            return f"Error: CtxOne Hub is unreachable at {self.valves.hub_url}: {e}"
+            return f"Error: CTXone Hub is unreachable at {self.valves.hub_url}: {e}"
         except CtxOneError as e:
             return f"Error: recall failed: {e}"
 
@@ -338,7 +338,7 @@ class Tools:
         :param reason: Why this is being forgotten. Shows up in blame.
         """
         if not self.valves.allow_writes:
-            return "Error: writes are disabled on this CtxOne installation."
+            return "Error: writes are disabled on this CTXone installation."
 
         try:
             hub = self._hub(__user__)
@@ -348,7 +348,7 @@ class Tools:
             )
             return f"Forgot {path} (rollback commit {commit_id})."
         except HubUnreachable as e:
-            return f"Error: CtxOne Hub is unreachable at {self.valves.hub_url}: {e}"
+            return f"Error: CTXone Hub is unreachable at {self.valves.hub_url}: {e}"
         except CtxOneError as e:
             return f"Error: forget failed: {e}"
 
@@ -365,7 +365,7 @@ class Tools:
             hub = self._hub(__user__)
             grouped = hub.pinned_grouped()
         except HubUnreachable as e:
-            return f"Error: CtxOne Hub is unreachable at {self.valves.hub_url}: {e}"
+            return f"Error: CTXone Hub is unreachable at {self.valves.hub_url}: {e}"
         except CtxOneError as e:
             return f"Error: list_pinned failed: {e}"
 
@@ -399,9 +399,9 @@ class Tools:
 
 
 class Filter:
-    """Auto-injects CtxOne memory into every chat turn.
+    """Auto-injects CTXone memory into every chat turn.
 
-    This is the plugin that lets CtxOne behave like background memory the
+    This is the plugin that lets CTXone behave like background memory the
     model doesn't have to ask for. On each inlet, it looks at the user's
     most recent message, calls `hub.recall(topic=that_message)`, and
     prepends the result as a system message so the model sees it before
@@ -421,7 +421,7 @@ class Filter:
         )
         hub_url: str = Field(
             default="http://localhost:3001",
-            description="CtxOne Hub URL. Default is localhost:3001.",
+            description="CTXone Hub URL. Default is localhost:3001.",
         )
         default_branch: str = Field(
             default="main",
@@ -573,7 +573,7 @@ class Filter:
     def _hub(self, user: Optional[dict] = None) -> Hub:
         """Build a Hub client for this request, with the user's agent ID.
 
-        Sets X-CtxOne-Session so the Hub's per-session token stats
+        Sets X-CTXone-Session so the Hub's per-session token stats
         show this user's usage separately from everyone else's.
         """
         email = _user_email(user)

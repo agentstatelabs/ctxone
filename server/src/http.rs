@@ -58,7 +58,7 @@ impl HubState {
 }
 
 /// Extractor for the session identifier carried by the
-/// `X-CtxOne-Session` request header. Falls back to `"default"` when
+/// `X-CTXone-Session` request header. Falls back to `"default"` when
 /// the header is absent or malformed.
 #[derive(Debug, Clone)]
 pub struct SessionId(pub String);
@@ -84,7 +84,7 @@ where
     }
 }
 
-/// Extractor for the agent identifier carried by the `X-CtxOne-Agent`
+/// Extractor for the agent identifier carried by the `X-CTXone-Agent`
 /// request header. Falls back to `"ctxone"` when the header is absent
 /// or empty. The agent ID is what `ctx blame` displays in the "who"
 /// column, so setting it correctly is the cheapest way to answer the
@@ -117,7 +117,7 @@ where
 ///
 /// Call sites typically construct an empty `SessionRegistry` via
 /// `Arc::new(SessionRegistry::new())`. The registry grows as
-/// requests arrive and each new `X-CtxOne-Session` header is seen.
+/// requests arrive and each new `X-CTXone-Session` header is seen.
 pub fn router(repo: Arc<Repository>, sessions: Arc<SessionRegistry>) -> Router {
     router_with_config(repo, sessions, HubConfig::default())
 }

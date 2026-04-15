@@ -10,7 +10,7 @@ import InstallOneliner from '../../components/InstallOneliner.astro';
 ---
 
 <LandingLayout
-	title="CtxOne for AI coding tools"
+	title="CTXone for AI coding tools"
 	description="Stop re-explaining your project to Claude every morning. ctx init, write a fact once, and every AI coding tool you use remembers it forever."
 >
 	<section class="section">
@@ -26,7 +26,7 @@ import InstallOneliner from '../../components/InstallOneliner.astro';
 			</p>
 
 			<p>
-				CtxOne fixes this with an MCP server that sits between your
+				CTXone fixes this with an MCP server that sits between your
 				AI coding tool and a local memory graph. Every fact you
 				write once — "we picked SQLite over Postgres because we need
 				zero-config", "BSL-1.1 for all new repos", "don't touch the
@@ -64,9 +64,10 @@ ctx remember "We use BSL-1.1 for all new repos" \
 					loads pinned context automatically on every call.
 				</li>
 				<li>
-					<strong>60× fewer tokens per turn.</strong> Recall
-					returns only the facts relevant to the current
-					question, not the entire memory file.
+					<strong>5× fewer tokens per turn, day one.</strong>
+					Recall returns only the facts relevant to the current
+					question, not the entire memory file. The ratio
+					climbs as your graph grows.
 				</li>
 				<li>
 					<strong>You get a blame log.</strong>
@@ -97,16 +98,21 @@ ctx remember "We use BSL-1.1 for all new repos" \
 [fact]   Blue/green not worth it at this scale
 
 _ctxone_stats: {
-  "ctx_tokens_sent": 87,
-  "ctx_tokens_estimated_flat": 5432,
-  "ctx_savings_ratio": 62.4
+  "ctx_tokens_sent": 180,
+  "ctx_tokens_estimated_flat": 900,
+  "ctx_savings_ratio": 5.0
 }`}</code></pre>
 
 			<p>
 				<code>ctx_savings_ratio</code> is the live number — this
-				particular recall sent 87 tokens instead of the 5,432 it
-				would have cost to dump the full memory file. That's the
-				60× claim, computed per-request.
+				particular recall sent 180 tokens instead of the 900 it
+				would have cost to dump the relevant slice of the memory
+				file. The ratio starts around 5× on a fresh graph and
+				climbs as you write more facts — every new one makes the
+				baseline bigger without making the targeted recall any
+				larger. On mature graphs we routinely see double-digit
+				savings; we just don't want to promise it until we can
+				measure it under your workload.
 			</p>
 
 			<h2>Ready to try it?</h2>
