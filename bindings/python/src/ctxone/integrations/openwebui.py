@@ -5,8 +5,8 @@ author_url: https://github.com/ctxone
 git_url: https://github.com/ctxone/ctxone
 description: Persistent, searchable, accountable memory for Open WebUI chats — via CtxOne Hub.
 required_open_webui_version: 0.4.0
-requirements: ctxone>=0.72.0
-version: 0.72.0
+requirements: ctxone>=0.73.0
+version: 0.73.0
 license: BSL-1.1
 
 This module provides two Open WebUI plugins that share a Hub client:
@@ -28,7 +28,7 @@ which also means it works with models that don't support tool-calling.
 
 Copy the contents of this file into Open WebUI → Admin Panel → Functions →
 **+** → paste. The frontmatter docstring at the top lets Open WebUI
-auto-pip-install `ctxone>=0.72.0` on first load (requires
+auto-pip-install `ctxone>=0.73.0` on first load (requires
 `ENABLE_PIP_INSTALL_FRONTMATTER_REQUIREMENTS=true` in the Open WebUI env).
 
 ## Install as a local Python package
