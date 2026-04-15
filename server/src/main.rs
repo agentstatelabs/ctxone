@@ -6,6 +6,12 @@
 //! Run as HTTP server:         ctxone-hub --http
 //! Options:                    ctxone-hub --storage memory
 //!                             ctxone-hub --path /data/ctxone.db
+//!
+//! Logging is controlled via the `RUST_LOG` env var (see `tracing-subscriber`
+//! docs). Default level is `info`. Examples:
+//!     RUST_LOG=debug ctxone-hub --http
+//!     RUST_LOG=ctxone_hub=trace ctxone-hub --http
+//! All logs go to stderr so they never corrupt the MCP stdio JSON stream.
 
 use ctxone_hub::{http, memory_tools};
 
@@ -14,6 +20,32 @@ use std::sync::Arc;
 use agentstategraph::Repository;
 use agentstategraph_storage::{MemoryStorage, SqliteStorage};
 use rmcp::ServiceExt;
+use tracing::{error, info, warn};
+use tracing_subscriber::{EnvFilter, fmt};
+
+fn init_tracing(mcp_stdio: bool) {
+    // Parse RUST_LOG, defaulting to "info" if unset.
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    let fmt_layer = fmt::layer()
+        // Always write to stderr. In MCP stdio mode, stdout is the
+        // JSON-RPC channel and must never be polluted by log output.
+        .with_writer(std::io::stderr)
+        // Quieter format for MCP stdio (minimize noise to the parent
+        // process), richer format for HTTP mode.
+        .with_target(!mcp_stdio)
+        .with_level(true)
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()));
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt_layer)
+        .init();
+}
+
+// Bring registry into scope for the init above
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -66,6 +98,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             "--help" | "-h" => {
+                // --help output stays as plain eprintln — it's the classic
+                // usage-on-stderr contract, not a log line.
                 eprintln!("CtxOne Hub v{}", env!("CARGO_PKG_VERSION"));
                 eprintln!();
                 eprintln!("USAGE:");
@@ -87,6 +121,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("      --port <PORT>     HTTP port (default: 3001, requires --http)");
                 eprintln!("  -h, --help            Print help");
                 eprintln!();
+                eprintln!("LOGGING:");
+                eprintln!("      RUST_LOG=<level>  info (default), debug, trace, warn, error");
+                eprintln!("                        e.g., RUST_LOG=debug ctxone-hub --http");
+                eprintln!();
                 eprintln!("MCP TOOLS:");
                 eprintln!("  remember              Store a fact in agent memory");
                 eprintln!("  recall                Retrieve relevant memories (token-budgeted)");
@@ -101,7 +139,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         i += 1;
     }
 
-    eprintln!("CtxOne Hub v{}", env!("CARGO_PKG_VERSION"));
+    // Initialize tracing before doing anything loggable.
+    init_tracing(!http_mode);
+
+    info!(version = env!("CARGO_PKG_VERSION"), "CtxOne Hub starting");
 
     // Check for DATABASE_URL env var as fallback for postgres
     if database_url.is_empty()
@@ -115,15 +156,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let repo: Arc<Repository> = match storage_type {
         "memory" => {
-            eprintln!("Storage: in-memory (ephemeral)");
+            info!(storage = "memory", "Storage: in-memory (ephemeral)");
             Arc::new(Repository::new(Box::new(MemoryStorage::new())))
         }
         "postgres" => {
             if database_url.is_empty() {
-                eprintln!("Error: --database-url or DATABASE_URL required for postgres storage");
+                error!("--database-url or DATABASE_URL required for postgres storage");
                 std::process::exit(1);
             }
-            eprintln!("Storage: postgres (tenant: {})", tenant_id);
+            info!(
+                storage = "postgres",
+                tenant = %tenant_id,
+                "Storage: postgres"
+            );
             let rt = tokio::runtime::Runtime::new()?;
             let storage = rt.block_on(async {
                 agentstategraph_storage::PostgresStorage::connect_tenant(&database_url, &tenant_id)
@@ -132,7 +177,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Arc::new(Repository::new(Box::new(storage)))
         }
         _ => {
-            eprintln!("Storage: {}", db_path);
+            info!(storage = "sqlite", path = %db_path, "Storage: sqlite");
             let storage = SqliteStorage::open(&db_path)?;
             Arc::new(Repository::new(Box::new(storage)))
         }
@@ -141,8 +186,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     repo.init()?;
 
     if http_mode {
-        eprintln!("HTTP API listening on http://0.0.0.0:{}", http_port);
-        eprintln!("Try: curl http://localhost:{}/api/health", http_port);
+        let addr = format!("0.0.0.0:{}", http_port);
+        info!(port = http_port, addr = %addr, "HTTP API listening");
+        info!("Try: curl http://localhost:{}/api/health", http_port);
 
         // Session starts with a dirty flat-size; the first read will populate it lazily.
         let session = Arc::new(memory_tools::SessionStats::new());
@@ -152,15 +198,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .build()?
             .block_on(async {
                 let app = http::router(repo.clone(), session);
-                let addr = format!("0.0.0.0:{}", http_port);
                 let listener = tokio::net::TcpListener::bind(&addr).await?;
-                axum::serve(listener, app).await?;
+                if let Err(e) = axum::serve(listener, app).await {
+                    error!(error = %e, "HTTP server error");
+                    return Err::<(), Box<dyn std::error::Error>>(e.into());
+                }
                 Ok::<(), Box<dyn std::error::Error>>(())
             })?;
     } else {
-        eprintln!("MCP server waiting for client on stdio...");
-        eprintln!(
-            "Tools: remember, recall, context, summarize_session, what_changed_since, why_did_we"
+        info!(
+            transport = "stdio",
+            "MCP server waiting for client (tools: remember, recall, prime, context, \
+             summarize_session, what_changed_since, why_did_we)"
         );
 
         tokio::runtime::Builder::new_current_thread()
@@ -170,13 +219,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let service = memory_tools::CtxOneServer::new(repo)
                     .serve(rmcp::transport::stdio())
                     .await
-                    .map_err(|e| format!("MCP server error: {}", e))?;
+                    .map_err(|e| {
+                        error!(error = %e, "MCP server failed to start");
+                        format!("MCP server error: {}", e)
+                    })?;
 
-                service.waiting().await?;
+                if let Err(e) = service.waiting().await {
+                    warn!(error = %e, "MCP server exited with error");
+                }
                 Ok::<(), Box<dyn std::error::Error>>(())
             })?;
     }
 
-    eprintln!("Hub shut down.");
+    info!("Hub shut down");
     Ok(())
 }

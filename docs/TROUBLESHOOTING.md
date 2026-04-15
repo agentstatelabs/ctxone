@@ -224,11 +224,40 @@ The Hub will create its tables on first run.
 
 ---
 
+## Enabling verbose logs
+
+The Hub uses the `tracing` crate. Set `RUST_LOG` before starting it to
+control verbosity:
+
+```bash
+# Default — info-level startup and recall telemetry
+ctx serve --http
+
+# Debug — also see prime/forget/remember request details
+RUST_LOG=debug ctx serve --http
+
+# Trace — every field of every span, useful for deep debugging
+RUST_LOG=trace ctx serve --http
+
+# Scoped — only enable debug for CtxOne's own code
+RUST_LOG=ctxone_hub=debug ctx serve --http
+
+# Combined — debug CtxOne, info HTTP request traces from tower-http
+RUST_LOG=ctxone_hub=debug,tower_http=info ctx serve --http
+```
+
+All logs go to **stderr**, so they never corrupt the stdio MCP channel
+when the Hub runs as an MCP server.
+
+In HTTP mode, every `recall` call emits an `info`-level line with the
+topic, tokens sent, and savings ratio — useful for watching memory earn
+its keep in real time. Writes log at `debug` level.
+
 ## Still stuck?
 
 - Run `ctx doctor` — it catches most infrastructure problems automatically.
 - Check the Hub logs. If running via `ctx serve`, errors print to stderr in
-  that terminal.
+  that terminal. Use `RUST_LOG=debug` for more detail.
 - Open an issue at https://github.com/ctxone/ctxone/issues with: what you
   tried, what you expected, what you got, and the output of `ctx --version`
   and `ctx doctor`.

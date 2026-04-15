@@ -17,6 +17,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::trace::TraceLayer;
+use tracing::{debug, info, instrument, warn};
 
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::IntentCategory;
@@ -34,6 +36,11 @@ pub fn router(repo: Arc<Repository>, session: Arc<SessionStats>) -> Router {
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
+
+    // Request tracing layer — emits a span per HTTP request. At `info` level
+    // you get one line per request with method, URI, status, and latency.
+    // At `debug` you also get the request body, at `trace` the response body.
+    let trace = TraceLayer::new_for_http();
 
     let state = HubState { repo, session };
 
@@ -61,6 +68,7 @@ pub fn router(repo: Arc<Repository>, session: Arc<SessionStats>) -> Router {
         .route("/api/memory/summarize_session", post(summarize_session))
         .route("/api/memory/what_changed_since", get(what_changed_since))
         .route("/api/memory/why_did_we", get(why_did_we))
+        .layer(trace)
         .layer(cors)
         .with_state(state)
 }
@@ -68,7 +76,9 @@ pub fn router(repo: Arc<Repository>, session: Arc<SessionStats>) -> Router {
 // -- Helpers --
 
 fn internal_error(e: impl std::fmt::Display) -> (StatusCode, String) {
-    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    let msg = e.to_string();
+    warn!(error = %msg, "request returned 500");
+    (StatusCode::INTERNAL_SERVER_ERROR, msg)
 }
 
 fn importance_to_confidence(importance: &str) -> f64 {
@@ -310,6 +320,7 @@ fn default_merge_description() -> String {
     "Merge".to_string()
 }
 
+#[instrument(skip_all, fields(source = %req.source, target = %req.target))]
 async fn merge_refs(
     State(s): State<HubState>,
     Json(req): Json<MergeRequest>,
@@ -368,6 +379,15 @@ fn default_ref() -> String {
     "main".to_string()
 }
 
+#[instrument(
+    skip_all,
+    fields(
+        context = req.context.as_deref().unwrap_or(""),
+        importance = %req.importance,
+        ref_name = %req.ref_name,
+        fact_len = req.fact.len(),
+    )
+)]
 async fn remember(
     State(s): State<HubState>,
     Json(req): Json<RememberRequest>,
@@ -419,6 +439,7 @@ fn default_forget_reason() -> String {
     "forgotten by user".to_string()
 }
 
+#[instrument(skip_all, fields(path = %req.path, ref_name = %req.ref_name))]
 async fn forget(
     State(s): State<HubState>,
     Json(req): Json<ForgetRequest>,
@@ -448,18 +469,31 @@ struct RecallQuery {
     ref_name: String,
 }
 
+#[instrument(skip_all, fields(ref_name = %q.ref_name, budget = q.budget.unwrap_or(1500)))]
 async fn recall(
     State(s): State<HubState>,
     Query(q): Query<RecallQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let budget = q.budget.unwrap_or(1500);
-    Ok(Json(run_recall(
-        &s.repo,
-        &s.session,
-        &q.topic,
-        budget,
-        &q.ref_name,
-    )))
+    let result = run_recall(&s.repo, &s.session, &q.topic, budget, &q.ref_name);
+    // Log savings inline — at info level this gives one line per recall
+    // showing the topic and the ratio. Useful for seeing the memory layer
+    // earning its keep in real time.
+    let tokens_sent = result
+        .get("ctx_tokens_sent")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let ratio = result
+        .get("ctx_savings_ratio")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    info!(
+        topic = %q.topic,
+        tokens_sent,
+        ratio = format!("{:.1}x", ratio),
+        "recall"
+    );
+    Ok(Json(result))
 }
 
 #[derive(Deserialize)]
@@ -631,6 +665,15 @@ struct PrimeRequest {
     ref_name: String,
 }
 
+#[instrument(
+    skip_all,
+    fields(
+        source = %req.source,
+        pinned = req.pinned,
+        ref_name = %req.ref_name,
+        sections = req.sections.len(),
+    )
+)]
 async fn prime(
     State(s): State<HubState>,
     Json(req): Json<PrimeRequest>,
@@ -640,6 +683,7 @@ async fn prime(
         .into_iter()
         .map(|s| (s.title, s.body))
         .collect();
+    debug!(count = sections.len(), "priming sections");
 
     run_prime(
         &s.repo,
