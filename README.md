@@ -37,6 +37,13 @@ iwr https://raw.githubusercontent.com/ctxone/ctxone/main/install.ps1 | iex
 docker run -p 3001:3001 -v ctxone-data:/data ghcr.io/ctxone/ctxone:latest
 ```
 
+This works identically on macOS (via Docker Desktop), Linux (native),
+and Windows (via Docker Desktop's WSL2 backend — the Linux image runs
+inside WSL2 and Windows sees port 3001 on localhost). There's no
+separate "Windows container" image; Windows users can either run the
+Linux image under Docker Desktop or use `install.ps1` for native
+`ctx.exe` / `ctxone-hub.exe`.
+
 **Python**:
 
 ```bash
