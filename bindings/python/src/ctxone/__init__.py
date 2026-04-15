@@ -28,7 +28,7 @@ from .types import (
     TokenStats,
 )
 
-__version__ = "0.60.0"
+__version__ = "0.65.0"
 
 __all__ = [
     "Hub",
