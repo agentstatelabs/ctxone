@@ -717,3 +717,76 @@ async fn list_pinned(
     }
     Ok(Json(out))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn importance_high_maps_to_high_confidence() {
+        assert_eq!(importance_to_confidence("high"), 0.95);
+    }
+
+    #[test]
+    fn importance_medium_maps_to_default_confidence() {
+        assert_eq!(importance_to_confidence("medium"), 0.7);
+    }
+
+    #[test]
+    fn importance_low_maps_to_low_confidence() {
+        assert_eq!(importance_to_confidence("low"), 0.4);
+    }
+
+    #[test]
+    fn importance_unknown_falls_back_to_medium() {
+        // An unrecognized importance should not panic or return zero —
+        // it defaults to the "medium" confidence so callers can pass
+        // any string safely.
+        assert_eq!(importance_to_confidence("super-critical"), 0.7);
+        assert_eq!(importance_to_confidence(""), 0.7);
+    }
+
+    #[test]
+    fn timestamp_id_is_nonempty_hex() {
+        let id = timestamp_id();
+        assert!(!id.is_empty());
+        assert!(
+            id.chars().all(|c| c.is_ascii_hexdigit()),
+            "timestamp_id should be hex, got: {}",
+            id
+        );
+    }
+
+    #[test]
+    fn timestamp_id_is_unique_across_calls() {
+        // Back-to-back calls should not collide at nanosecond resolution.
+        // (If two calls land on the same nanosecond we'd be in trouble —
+        // the whole point of this ID is uniqueness.)
+        let a = timestamp_id();
+        // Tiny spin to guarantee clock advances on coarse-clock platforms
+        for _ in 0..1000 {
+            std::hint::black_box(());
+        }
+        let b = timestamp_id();
+        assert_ne!(a, b, "two calls produced the same id: {}", a);
+    }
+
+    #[test]
+    fn default_ref_is_main() {
+        assert_eq!(default_ref(), "main");
+    }
+
+    #[test]
+    fn default_merge_description_is_stable() {
+        assert_eq!(default_merge_description(), "Merge");
+    }
+
+    #[test]
+    fn default_forget_reason_is_human_readable() {
+        // Not matching exact text — just checking we produce something
+        // non-empty that a user would understand in a blame view.
+        let r = default_forget_reason();
+        assert!(!r.is_empty());
+        assert!(r.contains("forgotten") || r.contains("forget"));
+    }
+}

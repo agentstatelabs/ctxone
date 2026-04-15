@@ -38,6 +38,16 @@ async fn call_json(router: axum::Router, req: Request<Body>) -> (StatusCode, Val
     (status, json_value)
 }
 
+/// Helper: call the router and return the status + raw body string.
+/// Use this for endpoints that may return plain-text errors (500s etc).
+async fn call_raw(router: axum::Router, req: Request<Body>) -> (StatusCode, String) {
+    let resp = router.oneshot(req).await.expect("router call");
+    let status = resp.status();
+    let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body = String::from_utf8_lossy(&body_bytes).into_owned();
+    (status, body)
+}
+
 fn get(uri: &str) -> Request<Body> {
     Request::builder()
         .uri(uri)
@@ -488,6 +498,326 @@ async fn log_returns_commit_history() {
     let commits = body.as_array().unwrap();
     assert!(!commits.is_empty());
     assert!(commits[0]["id"].as_str().unwrap().starts_with("sg_"));
+}
+
+// -------- stats/{ref_name} --------
+
+#[tokio::test]
+async fn stats_returns_ref_metadata() {
+    let router = test_router();
+
+    // Seed a commit so stats has something to report
+    call_json(
+        router.clone(),
+        post_json(
+            "/api/memory/remember",
+            json!({"fact": "seed", "context": "test"}),
+        ),
+    )
+    .await;
+
+    let (status, body) = call_json(router, get("/api/stats/main")).await;
+    assert_eq!(status, StatusCode::OK);
+    // Stats is a free-form JSON value — just check it's an object and not empty
+    assert!(body.is_object(), "expected stats object, got {:?}", body);
+}
+
+// -------- context/{project} --------
+
+#[tokio::test]
+async fn context_returns_null_when_project_missing() {
+    let router = test_router();
+    let (status, body) = call_json(router, get("/api/memory/context/ghost")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["project"], "ghost");
+    assert!(body["context"].is_null());
+}
+
+// -------- summarize_session --------
+
+#[tokio::test]
+async fn summarize_session_writes_key_points_and_decisions() {
+    let router = test_router();
+
+    let (status, body) = call_json(
+        router.clone(),
+        post_json(
+            "/api/memory/summarize_session",
+            json!({
+                "session_id": "abc123",
+                "key_points": ["picked BSL-1.1", "sqlite default"],
+                "decisions": ["ship v0.70"],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["session_id"], "abc123");
+    assert_eq!(body["key_points"], 2);
+    assert_eq!(body["decisions"], 1);
+
+    // Verify the summary is actually written to the graph
+    let (_, state) = call_json(
+        router.clone(),
+        get("/api/state/main?path=/sessions/abc123/summary"),
+    )
+    .await;
+    let summary = state.as_str().unwrap_or_default();
+    assert!(
+        summary.contains("BSL-1.1"),
+        "summary missing key point: {}",
+        summary
+    );
+
+    let (_, decisions) = call_json(router, get("/api/state/main?path=/sessions/abc123/decisions")).await;
+    // decisions are stored as a JSON array
+    assert!(
+        decisions.to_string().contains("ship v0.70"),
+        "decisions missing: {}",
+        decisions
+    );
+}
+
+#[tokio::test]
+async fn summarize_session_without_decisions_is_fine() {
+    let router = test_router();
+    let (status, body) = call_json(
+        router,
+        post_json(
+            "/api/memory/summarize_session",
+            json!({
+                "session_id": "nodecisions",
+                "key_points": ["just a note"],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["decisions"], 0);
+}
+
+// -------- what_changed_since --------
+
+#[tokio::test]
+async fn what_changed_since_returns_recent_commits() {
+    let router = test_router();
+
+    // Write a fact so there's something to report
+    call_json(
+        router.clone(),
+        post_json(
+            "/api/memory/remember",
+            json!({"fact": "new decision", "context": "test"}),
+        ),
+    )
+    .await;
+
+    // since=1970 should match everything
+    let (status, body) = call_json(
+        router,
+        get("/api/memory/what_changed_since?since=1970-01-01T00:00:00Z"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let changes = body.as_array().unwrap();
+    assert!(!changes.is_empty(), "expected at least one change");
+    assert!(changes[0].get("description").is_some());
+}
+
+#[tokio::test]
+async fn what_changed_since_filters_out_old_commits() {
+    let router = test_router();
+
+    call_json(
+        router.clone(),
+        post_json(
+            "/api/memory/remember",
+            json!({"fact": "old fact", "context": "test"}),
+        ),
+    )
+    .await;
+
+    // since=2099 should match nothing
+    let (status, body) = call_json(
+        router,
+        get("/api/memory/what_changed_since?since=2099-01-01T00:00:00Z"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_array().unwrap().len(), 0);
+}
+
+// -------- why_did_we --------
+
+#[tokio::test]
+async fn why_did_we_returns_blame_traces_for_matching_decisions() {
+    let router = test_router();
+
+    call_json(
+        router.clone(),
+        post_json(
+            "/api/memory/remember",
+            json!({
+                "fact": "We chose Rust for performance reasons",
+                "context": "architecture",
+            }),
+        ),
+    )
+    .await;
+
+    let (status, body) = call_json(router, get("/api/memory/why_did_we?decision=Rust")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["decision"], "Rust");
+    let traces = body["traces"].as_array().unwrap();
+    assert!(
+        !traces.is_empty(),
+        "expected at least one blame trace, got {:?}",
+        traces
+    );
+    assert!(traces[0].get("path").is_some());
+    assert!(traces[0].get("blame").is_some());
+}
+
+#[tokio::test]
+async fn why_did_we_returns_empty_for_unknown_decision() {
+    let router = test_router();
+    let (status, body) = call_json(router, get("/api/memory/why_did_we?decision=nonexistent-xyz")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["traces"].as_array().unwrap().len(), 0);
+}
+
+// -------- blame --------
+
+#[tokio::test]
+async fn blame_returns_commit_provenance_for_path() {
+    let router = test_router();
+
+    // Write a fact and grab its path
+    let (_, body) = call_json(
+        router.clone(),
+        post_json(
+            "/api/memory/remember",
+            json!({"fact": "blame target", "context": "test"}),
+        ),
+    )
+    .await;
+    let path = body["path"].as_str().unwrap().to_string();
+
+    let (status, body) = call_json(
+        router,
+        get(&format!("/api/blame/main?path={}", urlencoding(&path))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // blame returns structured data — just check the response isn't empty/null
+    assert!(
+        !body.is_null(),
+        "blame should return non-null for a known path"
+    );
+}
+
+// -------- Error paths --------
+
+#[tokio::test]
+async fn create_branch_from_missing_ref_returns_500() {
+    let router = test_router();
+    let (status, body) = call_raw(
+        router,
+        post_json(
+            "/api/branches",
+            json!({"name": "new-branch", "from": "ghost-ref"}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "branching from missing ref should fail"
+    );
+    // Error body should mention the missing ref so users can diagnose
+    assert!(
+        body.contains("ghost-ref") || body.contains("not found"),
+        "expected descriptive error, got: {}",
+        body
+    );
+}
+
+#[tokio::test]
+async fn remember_to_missing_branch_returns_500() {
+    let router = test_router();
+    let (status, _) = call_raw(
+        router,
+        post_json(
+            "/api/memory/remember",
+            json!({
+                "fact": "doomed",
+                "context": "test",
+                "ref": "nonexistent-branch",
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn malformed_json_remember_returns_400() {
+    let router = test_router();
+    let req = Request::builder()
+        .uri("/api/memory/remember")
+        .method("POST")
+        .header("content-type", "application/json")
+        .body(Body::from("{ not valid json"))
+        .unwrap();
+    let resp = router.oneshot(req).await.unwrap();
+    // axum's Json extractor returns 400 for invalid JSON
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn remember_missing_required_field_returns_422() {
+    let router = test_router();
+    // Missing `fact` field
+    let req = Request::builder()
+        .uri("/api/memory/remember")
+        .method("POST")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"context": "test"}"#))
+        .unwrap();
+    let resp = router.oneshot(req).await.unwrap();
+    // axum returns 422 for missing fields during Json deserialization
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+// -------- Token savings metadata --------
+
+#[tokio::test]
+async fn recall_response_includes_savings_ratio() {
+    let router = test_router();
+
+    // Seed a bunch of facts to make flat-size nontrivial
+    for i in 0..10 {
+        call_json(
+            router.clone(),
+            post_json(
+                "/api/memory/remember",
+                json!({"fact": format!("long-enough fact number {} with some body text", i), "context": "test"}),
+            ),
+        )
+        .await;
+    }
+
+    let (_, body) = call_json(router, get("/api/memory/recall?topic=fact&budget=1500")).await;
+    assert!(body.get("ctx_tokens_sent").is_some());
+    assert!(body.get("ctx_tokens_estimated_flat").is_some());
+    assert!(body.get("ctx_savings_ratio").is_some());
+}
+
+// Minimal URL encoder for paths containing slashes — keeps the test file
+// zero-dependency. Only handles the characters we actually emit.
+fn urlencoding(s: &str) -> String {
+    s.replace('/', "%2F")
 }
 
 // -------- Pinned list --------

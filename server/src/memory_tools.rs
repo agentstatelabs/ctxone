@@ -1042,4 +1042,156 @@ mod tests {
         session.mark_dirty();
         assert!(session.graph_size_dirty.load(Ordering::Relaxed));
     }
+
+    // -------- estimate_flat_size --------
+
+    #[test]
+    fn estimate_flat_size_on_empty_repo_is_small() {
+        let repo = fresh_repo();
+        let size = estimate_flat_size(&repo, "main");
+        // Fresh repo may have some baseline structure (e.g., root object {})
+        // but it should definitely fit in 128 chars.
+        assert!(
+            size <= 128,
+            "fresh repo flat size should be near-zero, got {}",
+            size
+        );
+    }
+
+    #[test]
+    fn estimate_flat_size_grows_as_facts_are_added() {
+        let repo = fresh_repo();
+        let initial = estimate_flat_size(&repo, "main");
+
+        // Write a reasonably-sized fact
+        let long_value = "a".repeat(500);
+        let opts = CommitOptions::new(
+            "test",
+            IntentCategory::Custom("Observe".to_string()),
+            "seed",
+        );
+        repo.set_json(
+            "main",
+            "/memory/test/big",
+            &serde_json::Value::String(long_value),
+            opts,
+        )
+        .unwrap();
+
+        let after = estimate_flat_size(&repo, "main");
+        assert!(
+            after > initial + 400,
+            "flat size should grow by roughly the fact size; initial={}, after={}",
+            initial,
+            after
+        );
+    }
+
+    #[test]
+    fn estimate_flat_size_returns_zero_for_missing_ref() {
+        let repo = fresh_repo();
+        // A branch that doesn't exist should yield 0, not panic
+        let size = estimate_flat_size(&repo, "ghost-branch");
+        assert_eq!(size, 0);
+    }
+
+    // -------- ensure_flat_size --------
+
+    #[test]
+    fn ensure_flat_size_populates_counter_when_dirty() {
+        let repo = fresh_repo();
+        let session = Arc::new(SessionStats::new());
+
+        // SessionStats starts dirty, so counter should be 0 / stale
+        assert!(session.graph_size_dirty.load(Ordering::Relaxed));
+
+        // Seed something so flat-size is nonzero
+        let opts = CommitOptions::new(
+            "test",
+            IntentCategory::Custom("Observe".to_string()),
+            "seed",
+        );
+        repo.set_json(
+            "main",
+            "/memory/test/x",
+            &serde_json::Value::String("hello world".to_string()),
+            opts,
+        )
+        .unwrap();
+
+        ensure_flat_size(&repo, &session, "main");
+
+        // Dirty flag cleared, counter populated
+        assert!(!session.graph_size_dirty.load(Ordering::Relaxed));
+        assert!(session.total_graph_size_chars.load(Ordering::Relaxed) > 0);
+    }
+
+    #[test]
+    fn ensure_flat_size_skips_when_not_dirty() {
+        let repo = fresh_repo();
+        let session = Arc::new(SessionStats::new());
+
+        // Mark clean and set a sentinel value
+        session.graph_size_dirty.store(false, Ordering::Relaxed);
+        session
+            .total_graph_size_chars
+            .store(99999, Ordering::Relaxed);
+
+        ensure_flat_size(&repo, &session, "main");
+
+        // Sentinel preserved because cache was considered fresh
+        assert_eq!(session.total_graph_size_chars.load(Ordering::Relaxed), 99999);
+    }
+
+    // -------- with_stats --------
+
+    #[test]
+    fn with_stats_appends_metadata_and_records() {
+        let session = SessionStats::new();
+        let wrapped = with_stats("hello", 400, &session);
+        // Original response preserved
+        assert!(wrapped.starts_with("hello"));
+        // Metadata block appended
+        assert!(wrapped.contains("_ctxone_stats"));
+        assert!(wrapped.contains("ctx_tokens_sent"));
+        assert!(wrapped.contains("ctx_savings_ratio"));
+        // Session counters updated
+        assert!(session.tokens_sent.load(Ordering::Relaxed) > 0);
+    }
+
+    #[test]
+    fn with_stats_handles_empty_response() {
+        let session = SessionStats::new();
+        let wrapped = with_stats("", 100, &session);
+        // Zero-length response → savings ratio is 0.0 (not NaN/inf)
+        assert!(wrapped.contains("\"ctx_savings_ratio\":0"));
+    }
+
+    // -------- importance_to_confidence / timestamp_id (memory_tools copy) --------
+
+    #[test]
+    fn importance_to_confidence_in_memory_tools() {
+        assert_eq!(importance_to_confidence("high"), 0.95);
+        assert_eq!(importance_to_confidence("medium"), 0.7);
+        assert_eq!(importance_to_confidence("low"), 0.4);
+        assert_eq!(importance_to_confidence("unknown"), 0.7);
+    }
+
+    #[test]
+    fn timestamp_id_in_memory_tools_is_hex_and_unique() {
+        let a = timestamp_id();
+        for _ in 0..1000 {
+            std::hint::black_box(());
+        }
+        let b = timestamp_id();
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn default_budget_is_reasonable() {
+        // 1500 tokens ≈ a page of content — tight enough to force
+        // pruning but loose enough to show something useful.
+        assert_eq!(default_budget(), 1500);
+    }
 }
