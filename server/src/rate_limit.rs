@@ -33,9 +33,9 @@
 //! `main.rs` already does this.
 
 use ::governor::middleware::NoOpMiddleware;
+use tower_governor::GovernorLayer;
 use tower_governor::governor::{GovernorConfig, GovernorConfigBuilder};
 use tower_governor::key_extractor::PeerIpKeyExtractor;
-use tower_governor::GovernorLayer;
 use tracing::{info, warn};
 
 /// Compiled config type for the peer-IP keyed rate limiter.
@@ -47,8 +47,7 @@ pub type PeerIpGovernorConfig = GovernorConfig<PeerIpKeyExtractor, NoOpMiddlewar
 
 /// Fully-pinned `GovernorLayer` type so callers can store it in a
 /// `Router::layer(...)` chain without wrestling with generics.
-pub type PeerIpGovernorLayer =
-    GovernorLayer<PeerIpKeyExtractor, NoOpMiddleware, axum::body::Body>;
+pub type PeerIpGovernorLayer = GovernorLayer<PeerIpKeyExtractor, NoOpMiddleware, axum::body::Body>;
 
 /// Build a rate limiter layer that enforces `rpm` requests per minute
 /// per peer IP, or `None` when rate limiting is disabled (rpm = 0).

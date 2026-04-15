@@ -2414,18 +2414,14 @@ fn init_mcp(
                     String::new()
                 };
 
-                let new_content = match merge_codex_ctxone_toml(
-                    &existing,
-                    &hub_bin,
-                    &db_path,
-                    &agent_id,
-                ) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("  \u{2717} {}: could not merge TOML config: {}", t.name, e);
-                        continue;
-                    }
-                };
+                let new_content =
+                    match merge_codex_ctxone_toml(&existing, &hub_bin, &db_path, &agent_id) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            eprintln!("  \u{2717} {}: could not merge TOML config: {}", t.name, e);
+                            continue;
+                        }
+                    };
 
                 if dry_run {
                     println!(
@@ -2782,8 +2778,8 @@ command = "figma-mcp"
     #[test]
     fn codex_merge_is_idempotent() {
         // First merge
-        let first = merge_codex_ctxone_toml("", "/bin/hub", "/db/main.db", "codex")
-            .expect("first merge");
+        let first =
+            merge_codex_ctxone_toml("", "/bin/hub", "/db/main.db", "codex").expect("first merge");
         // Second merge on the output of the first
         let second = merge_codex_ctxone_toml(&first, "/bin/hub", "/db/main.db", "codex")
             .expect("second merge");
@@ -2797,13 +2793,8 @@ command = "figma-mcp"
 command = "/old/path/ctxone-hub"
 args = ["--path", "/old/db"]
 "#;
-        let out = merge_codex_ctxone_toml(
-            existing,
-            "/new/path/ctxone-hub",
-            "/new/db",
-            "codex",
-        )
-        .expect("merge should succeed");
+        let out = merge_codex_ctxone_toml(existing, "/new/path/ctxone-hub", "/new/db", "codex")
+            .expect("merge should succeed");
         assert!(out.contains("/new/path/ctxone-hub"));
         assert!(out.contains("/new/db"));
         assert!(!out.contains("/old/path/ctxone-hub"));

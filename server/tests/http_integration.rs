@@ -602,7 +602,11 @@ async fn summarize_session_writes_key_points_and_decisions() {
         summary
     );
 
-    let (_, decisions) = call_json(router, get("/api/state/main?path=/sessions/abc123/decisions")).await;
+    let (_, decisions) = call_json(
+        router,
+        get("/api/state/main?path=/sessions/abc123/decisions"),
+    )
+    .await;
     // decisions are stored as a JSON array
     assert!(
         decisions.to_string().contains("ship v0.70"),
@@ -714,7 +718,11 @@ async fn why_did_we_returns_blame_traces_for_matching_decisions() {
 #[tokio::test]
 async fn why_did_we_returns_empty_for_unknown_decision() {
     let router = test_router();
-    let (status, body) = call_json(router, get("/api/memory/why_did_we?decision=nonexistent-xyz")).await;
+    let (status, body) = call_json(
+        router,
+        get("/api/memory/why_did_we?decision=nonexistent-xyz"),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["traces"].as_array().unwrap().len(), 0);
 }
@@ -864,7 +872,9 @@ async fn recall_with_session_header_creates_new_session() {
     let (_, body) = call_json(router, get("/api/stats/sessions")).await;
     let sessions = body.as_array().unwrap();
     assert!(
-        sessions.iter().any(|s| s["session_id"] == "alice@example.com"),
+        sessions
+            .iter()
+            .any(|s| s["session_id"] == "alice@example.com"),
         "expected 'alice@example.com' session, got: {:?}",
         sessions
     );
@@ -895,14 +905,15 @@ async fn recall_counts_toward_only_the_calling_session() {
     // use call_raw which doesn't expect JSON.
     let (status, bob) = call_raw(router.clone(), get("/api/stats/tokens/bob")).await;
     // bob's session was never created, so 404
-    assert_eq!(status, StatusCode::NOT_FOUND, "got unexpected body: {}", bob);
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "got unexpected body: {}",
+        bob
+    );
 
     // alice's session exists and has nonzero tokens_used
-    let (status, alice) = call_json(
-        router.clone(),
-        get("/api/stats/tokens/alice"),
-    )
-    .await;
+    let (status, alice) = call_json(router.clone(), get("/api/stats/tokens/alice")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(alice["session_id"], "alice");
     assert!(
@@ -939,8 +950,7 @@ async fn token_stats_returns_aggregate_across_sessions() {
     .await;
 
     // Check each session individually
-    let (_, alice) =
-        call_json(router.clone(), get("/api/stats/tokens/alice")).await;
+    let (_, alice) = call_json(router.clone(), get("/api/stats/tokens/alice")).await;
     let (_, bob) = call_json(router.clone(), get("/api/stats/tokens/bob")).await;
     let alice_used = alice["session_tokens_used"].as_u64().unwrap_or(0);
     let bob_used = bob["session_tokens_used"].as_u64().unwrap_or(0);
@@ -993,8 +1003,7 @@ async fn remember_with_session_header_does_not_leak_into_default() {
     // exist depending on whether some other code path already
     // created it. What we CAN test: after alice writes, default's
     // tokens_used is still 0 (writes don't record token usage).
-    let (_, default) =
-        call_json(router, get("/api/stats/tokens/default")).await;
+    let (_, default) = call_json(router, get("/api/stats/tokens/default")).await;
     assert_eq!(default["session_tokens_used"].as_u64().unwrap_or(99), 0);
 }
 

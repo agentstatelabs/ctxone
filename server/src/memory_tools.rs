@@ -5,8 +5,8 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -159,7 +159,10 @@ impl SessionRegistry {
         let mut map = HashMap::new();
         // Always pre-seed the "default" session so empty /api/stats/sessions
         // responses still show the baseline bucket instead of nothing.
-        map.insert(DEFAULT_SESSION_ID.to_string(), Arc::new(SessionStats::new()));
+        map.insert(
+            DEFAULT_SESSION_ID.to_string(),
+            Arc::new(SessionStats::new()),
+        );
         Self {
             sessions: RwLock::new(map),
         }
@@ -1048,8 +1051,16 @@ mod tests {
             ("Architecture".to_string(), "SQLite default".to_string()),
         ];
 
-        let result = run_prime(&repo, &session, "test-agent", "test", true, &sections, "main")
-            .expect("prime should succeed");
+        let result = run_prime(
+            &repo,
+            &session,
+            "test-agent",
+            "test",
+            true,
+            &sections,
+            "main",
+        )
+        .expect("prime should succeed");
 
         assert_eq!(result["status"], "ok");
         assert_eq!(result["sections_written"], 2);
@@ -1063,8 +1074,26 @@ mod tests {
         let session = Arc::new(SessionStats::new());
         let sections = vec![("Title".to_string(), "body".to_string())];
 
-        run_prime(&repo, &session, "test-agent", "src", false, &sections, "main").unwrap();
-        run_prime(&repo, &session, "test-agent", "src", false, &sections, "main").unwrap();
+        run_prime(
+            &repo,
+            &session,
+            "test-agent",
+            "src",
+            false,
+            &sections,
+            "main",
+        )
+        .unwrap();
+        run_prime(
+            &repo,
+            &session,
+            "test-agent",
+            "src",
+            false,
+            &sections,
+            "main",
+        )
+        .unwrap();
 
         // After two prime calls with the same source, there should still be
         // just one slug under /memory/primed/src
@@ -1098,7 +1127,16 @@ mod tests {
             ("First Section".to_string(), "first body".to_string()),
             ("Second Section".to_string(), "second body".to_string()),
         ];
-        run_prime(&repo, &session, "test-agent", "src", true, &sections, "main").unwrap();
+        run_prime(
+            &repo,
+            &session,
+            "test-agent",
+            "src",
+            true,
+            &sections,
+            "main",
+        )
+        .unwrap();
 
         let pinned = collect_pinned(&repo, "main");
         assert_eq!(pinned.len(), 2);
@@ -1347,7 +1385,10 @@ mod tests {
         ensure_flat_size(&repo, &session, "main");
 
         // Sentinel preserved because cache was considered fresh
-        assert_eq!(session.total_graph_size_chars.load(Ordering::Relaxed), 99999);
+        assert_eq!(
+            session.total_graph_size_chars.load(Ordering::Relaxed),
+            99999
+        );
     }
 
     // -------- with_stats --------

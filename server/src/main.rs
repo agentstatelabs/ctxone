@@ -67,8 +67,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Code, Cursor, Codex, etc.) passes --agent-id <its-name> so
     // every commit made via this MCP connection is attributed to
     // that tool in blame history. Defaults to "ctxone" when unset.
-    let mut agent_id: String = std::env::var("CTX_AGENT_ID")
-        .unwrap_or_else(|_| "ctxone".to_string());
+    let mut agent_id: String =
+        std::env::var("CTX_AGENT_ID").unwrap_or_else(|_| "ctxone".to_string());
 
     let mut i = 1;
     while i < args.len() {
@@ -273,10 +273,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .enable_all()
             .build()?
             .block_on(async {
-                let service =
-                    memory_tools::CtxOneServer::with_agent_id(repo, agent_id.clone())
-                        .serve(rmcp::transport::stdio())
-                        .await
+                let service = memory_tools::CtxOneServer::with_agent_id(repo, agent_id.clone())
+                    .serve(rmcp::transport::stdio())
+                    .await
                     .map_err(|e| {
                         error!(error = %e, "MCP server failed to start");
                         format!("MCP server error: {}", e)
