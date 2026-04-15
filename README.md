@@ -31,6 +31,9 @@ curl -sSL https://raw.githubusercontent.com/ctxone/ctxone/main/install.sh | sh
 iwr https://raw.githubusercontent.com/ctxone/ctxone/main/install.ps1 | iex
 ```
 
+Full Windows guide with background service setup, AI tool paths,
+updates, and troubleshooting: [docs/WINDOWS.md](docs/WINDOWS.md).
+
 **Docker** (any platform — image is multi-arch `linux/amd64` + `linux/arm64`):
 
 ```bash
@@ -111,6 +114,7 @@ ctxone/
 
 **Get started:**
 - [Quickstart](docs/QUICKSTART.md) — from nothing to live token savings in 5 minutes
+- [Windows guide](docs/WINDOWS.md) — full install, background service, and troubleshooting for Windows
 - [Architecture](docs/ARCHITECTURE.md) — the mental model (pinned vs primed, how recall ranks, why O(log n))
 - [Token Savings](docs/TOKEN_SAVINGS.md) — how the ratio is computed, how to read it, how to maximize it
 - [Cookbook](docs/COOKBOOK.md) — git hooks, cron jobs, shell prompts, team setups
