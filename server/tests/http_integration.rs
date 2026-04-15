@@ -14,14 +14,14 @@ use tower::ServiceExt;
 
 use agentstategraph::Repository;
 use agentstategraph_storage::MemoryStorage;
-use ctxone_hub::{http, memory_tools::SessionStats};
+use ctxone_hub::{http, memory_tools::SessionRegistry};
 
 /// Build a fresh in-memory Hub + router for each test.
 fn test_router() -> axum::Router {
     let repo = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
     repo.init().expect("repo init");
-    let session = Arc::new(SessionStats::new());
-    http::router(repo, session)
+    let sessions = Arc::new(SessionRegistry::new());
+    http::router(repo, sessions)
 }
 
 /// Helper: call the router and parse the JSON response body.
@@ -61,6 +61,27 @@ fn post_json(uri: &str, body: Value) -> Request<Body> {
         .uri(uri)
         .method("POST")
         .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap()
+}
+
+/// Build a GET with an `X-CtxOne-Session` header attached.
+fn get_with_session(uri: &str, session: &str) -> Request<Body> {
+    Request::builder()
+        .uri(uri)
+        .method("GET")
+        .header("x-ctxone-session", session)
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// Build a POST with an `X-CtxOne-Session` header attached.
+fn post_with_session(uri: &str, session: &str, body: Value) -> Request<Body> {
+    Request::builder()
+        .uri(uri)
+        .method("POST")
+        .header("content-type", "application/json")
+        .header("x-ctxone-session", session)
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
         .unwrap()
 }
@@ -788,6 +809,182 @@ async fn remember_missing_required_field_returns_422() {
     let resp = router.oneshot(req).await.unwrap();
     // axum returns 422 for missing fields during Json deserialization
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+// -------- Per-session token tracking --------
+
+#[tokio::test]
+async fn sessions_endpoint_includes_default_on_fresh_hub() {
+    let router = test_router();
+    let (status, body) = call_json(router, get("/api/stats/sessions")).await;
+    assert_eq!(status, StatusCode::OK);
+    let sessions = body.as_array().unwrap();
+    // New registry always has the "default" session baked in
+    assert!(
+        sessions.iter().any(|s| s["session_id"] == "default"),
+        "expected 'default' session in fresh registry, got: {:?}",
+        sessions
+    );
+}
+
+#[tokio::test]
+async fn recall_with_session_header_creates_new_session() {
+    let router = test_router();
+
+    // Seed a fact so recall has something to return
+    call_json(
+        router.clone(),
+        post_json(
+            "/api/memory/remember",
+            json!({"fact": "per-session test fact", "context": "test"}),
+        ),
+    )
+    .await;
+
+    // Recall with a custom session header
+    let (status, _) = call_json(
+        router.clone(),
+        get_with_session("/api/memory/recall?topic=fact", "alice@example.com"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // alice's session should now exist in the registry
+    let (_, body) = call_json(router, get("/api/stats/sessions")).await;
+    let sessions = body.as_array().unwrap();
+    assert!(
+        sessions.iter().any(|s| s["session_id"] == "alice@example.com"),
+        "expected 'alice@example.com' session, got: {:?}",
+        sessions
+    );
+}
+
+#[tokio::test]
+async fn recall_counts_toward_only_the_calling_session() {
+    let router = test_router();
+
+    // Seed a fact
+    call_json(
+        router.clone(),
+        post_json(
+            "/api/memory/remember",
+            json!({"fact": "isolation test fact with some content", "context": "test"}),
+        ),
+    )
+    .await;
+
+    // alice does a recall
+    call_json(
+        router.clone(),
+        get_with_session("/api/memory/recall?topic=isolation", "alice"),
+    )
+    .await;
+
+    // bob hasn't done anything yet — 404 body is plain text, so
+    // use call_raw which doesn't expect JSON.
+    let (status, bob) = call_raw(router.clone(), get("/api/stats/tokens/bob")).await;
+    // bob's session was never created, so 404
+    assert_eq!(status, StatusCode::NOT_FOUND, "got unexpected body: {}", bob);
+
+    // alice's session exists and has nonzero tokens_used
+    let (status, alice) = call_json(
+        router.clone(),
+        get("/api/stats/tokens/alice"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(alice["session_id"], "alice");
+    assert!(
+        alice["session_tokens_used"].as_u64().unwrap_or(0) > 0,
+        "expected alice's tokens_used > 0, got: {}",
+        alice
+    );
+}
+
+#[tokio::test]
+async fn token_stats_returns_aggregate_across_sessions() {
+    let router = test_router();
+
+    // Seed a fact
+    call_json(
+        router.clone(),
+        post_json(
+            "/api/memory/remember",
+            json!({"fact": "aggregate test fact content", "context": "test"}),
+        ),
+    )
+    .await;
+
+    // Two different sessions each do a recall
+    call_json(
+        router.clone(),
+        get_with_session("/api/memory/recall?topic=aggregate", "alice"),
+    )
+    .await;
+    call_json(
+        router.clone(),
+        get_with_session("/api/memory/recall?topic=aggregate", "bob"),
+    )
+    .await;
+
+    // Check each session individually
+    let (_, alice) =
+        call_json(router.clone(), get("/api/stats/tokens/alice")).await;
+    let (_, bob) = call_json(router.clone(), get("/api/stats/tokens/bob")).await;
+    let alice_used = alice["session_tokens_used"].as_u64().unwrap_or(0);
+    let bob_used = bob["session_tokens_used"].as_u64().unwrap_or(0);
+    assert!(alice_used > 0);
+    assert!(bob_used > 0);
+
+    // The aggregate endpoint should sum both
+    let (status, agg) = call_json(router, get("/api/stats/tokens")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(agg["session_id"], "_aggregate");
+    let agg_used = agg["session_tokens_used"].as_u64().unwrap_or(0);
+    assert!(
+        agg_used >= alice_used + bob_used,
+        "aggregate ({}) should be >= alice ({}) + bob ({})",
+        agg_used,
+        alice_used,
+        bob_used
+    );
+}
+
+#[tokio::test]
+async fn session_token_stats_missing_session_returns_404() {
+    let router = test_router();
+    let (status, _) = call_raw(router, get("/api/stats/tokens/ghost-session")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn remember_with_session_header_does_not_leak_into_default() {
+    let router = test_router();
+
+    // alice writes (but writes go through ensureFlat/mark_all_dirty
+    // and don't count into her tokens_used — only reads do)
+    call_json(
+        router.clone(),
+        post_with_session(
+            "/api/memory/remember",
+            "alice",
+            json!({"fact": "alice's fact", "context": "test"}),
+        ),
+    )
+    .await;
+
+    // Verify alice's session now exists (because the extractor
+    // always returns a session, and we resolved one inside the write
+    // handler via mark_all_dirty indirectly touching every session).
+    //
+    // Actually, remember() doesn't call session_for() currently — it
+    // only mark_all_dirty's. So alice's session may or may not
+    // exist depending on whether some other code path already
+    // created it. What we CAN test: after alice writes, default's
+    // tokens_used is still 0 (writes don't record token usage).
+    let (_, default) =
+        call_json(router, get("/api/stats/tokens/default")).await;
+    assert_eq!(default["session_tokens_used"].as_u64().unwrap_or(99), 0);
 }
 
 // -------- Token savings metadata --------

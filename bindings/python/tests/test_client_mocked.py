@@ -335,3 +335,71 @@ def test_is_reachable_false_on_connection_error():
     session.get.side_effect = req.ConnectionError("refused")
     hub = make_hub(session)
     assert hub.is_reachable() is False
+
+
+# -------- session_id (X-CtxOne-Session header) --------
+
+def test_session_id_defaults_to_none_and_sends_no_header():
+    session = MagicMock()
+    session.get.return_value = mock_response(json_body=[])
+    hub = make_hub(session)
+
+    hub.ls("/")
+    _, kwargs = session.get.call_args
+    headers = kwargs.get("headers") or {}
+    assert "X-CtxOne-Session" not in headers
+
+
+def test_session_id_sent_as_header_on_get():
+    session = MagicMock()
+    session.get.return_value = mock_response(json_body=[])
+    hub = Hub(
+        server="http://fake:3001", session=session, session_id="alice@example.com"
+    )
+
+    hub.ls("/")
+    _, kwargs = session.get.call_args
+    assert kwargs["headers"]["X-CtxOne-Session"] == "alice@example.com"
+
+
+def test_session_id_sent_as_header_on_post():
+    session = MagicMock()
+    session.post.return_value = mock_response(
+        json_body={
+            "status": "ok",
+            "ref": "main",
+            "path": "/memory/x",
+            "commit_id": "sg_abc",
+        }
+    )
+    hub = Hub(
+        server="http://fake:3001", session=session, session_id="bob@example.com"
+    )
+
+    hub.remember("fact")
+    _, kwargs = session.post.call_args
+    assert kwargs["headers"]["X-CtxOne-Session"] == "bob@example.com"
+
+
+def test_session_id_read_from_env_when_not_explicit(monkeypatch):
+    monkeypatch.setenv("CTX_SESSION_ID", "env-session")
+    session = MagicMock()
+    session.get.return_value = mock_response(json_body=[])
+    hub = Hub(server="http://fake:3001", session=session)
+
+    hub.ls("/")
+    _, kwargs = session.get.call_args
+    assert kwargs["headers"]["X-CtxOne-Session"] == "env-session"
+
+
+def test_explicit_session_id_overrides_env(monkeypatch):
+    monkeypatch.setenv("CTX_SESSION_ID", "env-session")
+    session = MagicMock()
+    session.get.return_value = mock_response(json_body=[])
+    hub = Hub(
+        server="http://fake:3001", session=session, session_id="explicit"
+    )
+
+    hub.ls("/")
+    _, kwargs = session.get.call_args
+    assert kwargs["headers"]["X-CtxOne-Session"] == "explicit"

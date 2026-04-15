@@ -23,15 +23,88 @@ use tracing::{debug, info, instrument, warn};
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::IntentCategory;
 
-use crate::memory_tools::{SessionStats, ensure_flat_size, run_prime, run_recall};
+use crate::memory_tools::{
+    DEFAULT_SESSION_ID, SessionRegistry, SessionSnapshot, SessionStats, ensure_flat_size,
+    run_prime, run_recall,
+};
+use crate::rate_limit;
+
+/// Hub-wide HTTP configuration.
+#[derive(Clone, Debug)]
+pub struct HubConfig {
+    /// Requests-per-minute per peer IP. `0` disables rate limiting.
+    ///
+    /// The library default is `0` (disabled) so in-process tests that
+    /// use `tower::ServiceExt::oneshot` (no real peer IP) work without
+    /// flakes. The Hub binary sets this explicitly from the
+    /// `--rate-limit-rpm` CLI flag (which defaults to 600 in
+    /// production).
+    pub rate_limit_rpm: u32,
+}
+
+impl Default for HubConfig {
+    fn default() -> Self {
+        Self { rate_limit_rpm: 0 }
+    }
+}
 
 #[derive(Clone)]
 pub struct HubState {
     pub repo: Arc<Repository>,
-    pub session: Arc<SessionStats>,
+    pub sessions: Arc<SessionRegistry>,
 }
 
-pub fn router(repo: Arc<Repository>, session: Arc<SessionStats>) -> Router {
+impl HubState {
+    /// Resolve the session for this request. Always returns a valid
+    /// `Arc<SessionStats>` — if the session didn't exist, it's
+    /// created on the fly.
+    fn session_for(&self, id: &SessionId) -> Arc<SessionStats> {
+        self.sessions.get_or_create(&id.0)
+    }
+}
+
+/// Extractor for the session identifier carried by the
+/// `X-CtxOne-Session` request header. Falls back to `"default"` when
+/// the header is absent or malformed.
+#[derive(Debug, Clone)]
+pub struct SessionId(pub String);
+
+impl<S> axum::extract::FromRequestParts<S> for SessionId
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let id = parts
+            .headers
+            .get("x-ctxone-session")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| DEFAULT_SESSION_ID.to_string());
+        Ok(SessionId(id))
+    }
+}
+
+/// Build the Hub router with default config.
+///
+/// Call sites typically construct an empty `SessionRegistry` via
+/// `Arc::new(SessionRegistry::new())`. The registry grows as
+/// requests arrive and each new `X-CtxOne-Session` header is seen.
+pub fn router(repo: Arc<Repository>, sessions: Arc<SessionRegistry>) -> Router {
+    router_with_config(repo, sessions, HubConfig::default())
+}
+
+/// Build the Hub router with explicit HTTP configuration.
+pub fn router_with_config(
+    repo: Arc<Repository>,
+    sessions: Arc<SessionRegistry>,
+    config: HubConfig,
+) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
@@ -42,12 +115,17 @@ pub fn router(repo: Arc<Repository>, session: Arc<SessionStats>) -> Router {
     // At `debug` you also get the request body, at `trace` the response body.
     let trace = TraceLayer::new_for_http();
 
-    let state = HubState { repo, session };
+    // Rate limiter — returns None when rpm=0 (disabled).
+    let governor = rate_limit::build_layer(config.rate_limit_rpm);
 
-    Router::new()
+    let state = HubState { repo, sessions };
+
+    let mut router = Router::new()
         // Health + stats
         .route("/api/health", get(health))
         .route("/api/stats/tokens", get(token_stats))
+        .route("/api/stats/tokens/{session_id}", get(session_token_stats))
+        .route("/api/stats/sessions", get(list_sessions))
         .route("/api/stats/{ref_name}", get(stats))
         // Read endpoints (for Lens)
         .route("/api/state/{ref_name}", get(get_state))
@@ -70,7 +148,20 @@ pub fn router(repo: Arc<Repository>, session: Arc<SessionStats>) -> Router {
         .route("/api/memory/why_did_we", get(why_did_we))
         .layer(trace)
         .layer(cors)
-        .with_state(state)
+        .with_state(state);
+
+    // Apply the rate limiter LAST so it runs FIRST in the request
+    // lifecycle (tower layers execute in reverse insertion order).
+    // tower_governor's GovernorLayer produces axum-native responses on
+    // its own — no HandleErrorLayer wrapping needed. When rpm=0, the
+    // build_layer call returns None and rate limiting is completely
+    // absent, which is what unit tests using `oneshot` rely on since
+    // they have no real peer IP to key against.
+    if let Some(layer) = governor {
+        router = router.layer(layer);
+    }
+
+    router
 }
 
 // -- Helpers --
@@ -103,34 +194,49 @@ async fn health() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok", "service": "ctxone-hub" }))
 }
 
-#[derive(Serialize)]
-struct TokenStatsResponse {
-    session_tokens_used: u64,
-    session_tokens_saved: u64,
-    total_graph_size_chars: u64,
-    total_graph_size_tokens: u64,
-    cumulative_ratio: f64,
+/// `GET /api/stats/tokens` — process-wide aggregate across every session.
+///
+/// For backward compat this endpoint keeps returning a single
+/// snapshot-shaped object. The shape matches `SessionSnapshot`, with
+/// `session_id = "_aggregate"` to make the roll-up obvious.
+async fn token_stats(State(s): State<HubState>) -> impl IntoResponse {
+    // Refresh the default session's flat-size cache. Since graph size
+    // is process-global we only need to populate one cache — the
+    // aggregate reads the max across sessions.
+    let default_session = s.sessions.get_or_create(DEFAULT_SESSION_ID);
+    ensure_flat_size(&s.repo, &default_session, "main");
+    Json(s.sessions.aggregate())
 }
 
-async fn token_stats(State(s): State<HubState>) -> impl IntoResponse {
-    ensure_flat_size(&s.repo, &s.session, "main");
-    let used = s.session.tokens_sent.load(Ordering::Relaxed);
-    let saved = s.session.tokens_saved.load(Ordering::Relaxed);
-    let graph_chars = s.session.total_graph_size_chars.load(Ordering::Relaxed);
-    let graph_tokens = graph_chars / 4;
-    let ratio = if used > 0 {
-        (used + saved) as f64 / used as f64
-    } else {
-        0.0
-    };
+/// `GET /api/stats/tokens/{session_id}` — stats for a specific session.
+///
+/// Returns 404 if the session hasn't written anything yet. (The
+/// registry auto-creates sessions on header read, so once a client
+/// has touched the Hub once, its ID is valid here.)
+async fn session_token_stats(
+    State(s): State<HubState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<SessionSnapshot>, (StatusCode, String)> {
+    // Refresh flat-size against the default session so the cache
+    // reflects current graph state; the max-across-sessions rule in
+    // aggregate() does not help a single-session read.
+    let default_session = s.sessions.get_or_create(DEFAULT_SESSION_ID);
+    ensure_flat_size(&s.repo, &default_session, "main");
 
-    Json(TokenStatsResponse {
-        session_tokens_used: used,
-        session_tokens_saved: saved,
-        total_graph_size_chars: graph_chars,
-        total_graph_size_tokens: graph_tokens,
-        cumulative_ratio: ratio,
-    })
+    match s.sessions.snapshot(&session_id) {
+        Some(snap) => Ok(Json(snap)),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            format!("session not found: {}", session_id),
+        )),
+    }
+}
+
+/// `GET /api/stats/sessions` — per-session breakdown.
+async fn list_sessions(State(s): State<HubState>) -> impl IntoResponse {
+    let default_session = s.sessions.get_or_create(DEFAULT_SESSION_ID);
+    ensure_flat_size(&s.repo, &default_session, "main");
+    Json(s.sessions.snapshot_all())
 }
 
 async fn stats(
@@ -332,7 +438,8 @@ async fn merge_refs(
 
     match s.repo.merge(&req.source, &req.target, opts) {
         Ok(commit_id) => {
-            s.session.mark_dirty();
+            // Graph size may have changed — invalidate every session's cache.
+            s.sessions.mark_all_dirty();
             Ok(Json(serde_json::json!({
                 "status": "ok",
                 "source": req.source,
@@ -414,7 +521,7 @@ async fn remember(
         .set_json(&req.ref_name, &path, &value, opts)
         .map_err(internal_error)?;
 
-    s.session.mark_dirty();
+    s.sessions.mark_all_dirty();
 
     Ok(Json(serde_json::json!({
         "status": "ok",
@@ -451,7 +558,7 @@ async fn forget(
         .delete(&req.ref_name, &req.path, opts)
         .map_err(internal_error)?;
 
-    s.session.mark_dirty();
+    s.sessions.mark_all_dirty();
 
     Ok(Json(serde_json::json!({
         "status": "ok",
@@ -469,13 +576,15 @@ struct RecallQuery {
     ref_name: String,
 }
 
-#[instrument(skip_all, fields(ref_name = %q.ref_name, budget = q.budget.unwrap_or(1500)))]
+#[instrument(skip_all, fields(ref_name = %q.ref_name, budget = q.budget.unwrap_or(1500), session = %session_id.0))]
 async fn recall(
     State(s): State<HubState>,
+    session_id: SessionId,
     Query(q): Query<RecallQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let budget = q.budget.unwrap_or(1500);
-    let result = run_recall(&s.repo, &s.session, &q.topic, budget, &q.ref_name);
+    let session = s.session_for(&session_id);
+    let result = run_recall(&s.repo, &session, &q.topic, budget, &q.ref_name);
     // Log savings inline — at info level this gives one line per recall
     // showing the topic and the ratio. Useful for seeing the memory layer
     // earning its keep in real time.
@@ -491,6 +600,7 @@ async fn recall(
         topic = %q.topic,
         tokens_sent,
         ratio = format!("{:.1}x", ratio),
+        session_id = %session_id.0,
         "recall"
     );
     Ok(Json(result))
@@ -504,16 +614,18 @@ struct ContextQuery {
 
 async fn context(
     State(s): State<HubState>,
+    session_id: SessionId,
     Path(project): Path<String>,
     Query(q): Query<ContextQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let path = format!("/memory/projects/{}", project);
     match s.repo.get_json(&q.ref_name, &path) {
         Ok(value) => {
-            ensure_flat_size(&s.repo, &s.session, &q.ref_name);
-            let flat_size = s.session.total_graph_size_chars.load(Ordering::Relaxed) as usize;
+            let session = s.session_for(&session_id);
+            ensure_flat_size(&s.repo, &session, &q.ref_name);
+            let flat_size = session.total_graph_size_chars.load(Ordering::Relaxed) as usize;
             let sent = serde_json::to_string(&value).unwrap_or_default().len();
-            s.session.record(sent, flat_size);
+            session.record(sent, flat_size);
             Ok(Json(serde_json::json!({
                 "project": project,
                 "ref": q.ref_name,
@@ -676,6 +788,7 @@ struct PrimeRequest {
 )]
 async fn prime(
     State(s): State<HubState>,
+    session_id: SessionId,
     Json(req): Json<PrimeRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let sections: Vec<(String, String)> = req
@@ -685,16 +798,21 @@ async fn prime(
         .collect();
     debug!(count = sections.len(), "priming sections");
 
-    run_prime(
+    let session = s.session_for(&session_id);
+    let result = run_prime(
         &s.repo,
-        &s.session,
+        &session,
         &req.source,
         req.pinned,
         &sections,
         &req.ref_name,
     )
-    .map(Json)
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    // Priming changes the graph, so every session's cached
+    // flat-size is now stale.
+    s.sessions.mark_all_dirty();
+    Ok(Json(result))
 }
 
 async fn list_pinned(

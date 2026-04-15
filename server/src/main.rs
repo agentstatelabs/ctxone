@@ -56,6 +56,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tenant_id = "default".to_string();
     let mut http_mode = false;
     let mut http_port: u16 = 3001;
+    // Default production rate limit: 600 req/min per peer IP.
+    // Overridable via --rate-limit-rpm or CTXONE_RATE_LIMIT_RPM.
+    // 0 disables rate limiting.
+    let mut rate_limit_rpm: u32 = std::env::var("CTXONE_RATE_LIMIT_RPM")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(600);
 
     let mut i = 1;
     while i < args.len() {
@@ -97,6 +104,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     http_port = args[i].parse().unwrap_or(3001);
                 }
             }
+            "--rate-limit-rpm" => {
+                i += 1;
+                if i < args.len() {
+                    rate_limit_rpm = args[i].parse().unwrap_or(600);
+                }
+            }
             "--help" | "-h" => {
                 // --help output stays as plain eprintln — it's the classic
                 // usage-on-stderr contract, not a log line.
@@ -119,6 +132,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "      --tenant <ID>     Tenant ID for multi-tenant Postgres (default: \"default\")"
                 );
                 eprintln!("      --port <PORT>     HTTP port (default: 3001, requires --http)");
+                eprintln!(
+                    "      --rate-limit-rpm <N>  Per-IP rate limit (default: 600 req/min; 0 disables)"
+                );
                 eprintln!("  -h, --help            Print help");
                 eprintln!();
                 eprintln!("LOGGING:");
@@ -195,19 +211,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if http_mode {
         let addr = format!("0.0.0.0:{}", http_port);
-        info!(port = http_port, addr = %addr, "HTTP API listening");
+        info!(
+            port = http_port,
+            addr = %addr,
+            rate_limit_rpm,
+            "HTTP API listening"
+        );
         info!("Try: curl http://localhost:{}/api/health", http_port);
 
-        // Session starts with a dirty flat-size; the first read will populate it lazily.
-        let session = Arc::new(memory_tools::SessionStats::new());
+        // Session registry holds per-session stats. The default
+        // session is auto-created with a dirty flat-size; new sessions
+        // get added as clients arrive with new X-CtxOne-Session headers.
+        let sessions = Arc::new(memory_tools::SessionRegistry::new());
+
+        let hub_config = http::HubConfig { rate_limit_rpm };
 
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?
             .block_on(async {
-                let app = http::router(repo.clone(), session);
+                let app = http::router_with_config(repo.clone(), sessions, hub_config);
                 let listener = tokio::net::TcpListener::bind(&addr).await?;
-                if let Err(e) = axum::serve(listener, app).await {
+                // `into_make_service_with_connect_info::<SocketAddr>()` attaches
+                // the peer IP to each request so the rate limiter's
+                // PeerIpKeyExtractor can actually see client addresses.
+                if let Err(e) = axum::serve(
+                    listener,
+                    app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                )
+                .await
+                {
                     error!(error = %e, "HTTP server error");
                     return Err::<(), Box<dyn std::error::Error>>(e.into());
                 }

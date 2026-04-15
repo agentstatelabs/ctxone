@@ -38,11 +38,12 @@ Used by `ctx status` and `ctx doctor`.
 
 ### `GET /api/stats/tokens`
 
-Cumulative session token savings.
+Cumulative token savings **aggregated across every session**.
 
 **Response (200):**
 ```json
 {
+  "session_id": "_aggregate",
   "session_tokens_used": 98,
   "session_tokens_saved": 1706,
   "total_graph_size_chars": 1804,
@@ -51,12 +52,53 @@ Cumulative session token savings.
 }
 ```
 
-- `session_tokens_used` — total tokens actually sent in responses this Hub
-  session
-- `session_tokens_saved` — `(number_of_recalls × flat_baseline) - used`
-- `total_graph_size_chars` — raw character count of the serialized graph
-- `total_graph_size_tokens` — chars ÷ 4 (rough estimate)
+- `session_id` — always `"_aggregate"` to signal this is a roll-up,
+  not a single-session snapshot
+- `session_tokens_used` — sum of tokens actually sent across all sessions
+- `session_tokens_saved` — sum of `(recalls × flat_baseline) - used`
+  across all sessions
+- `total_graph_size_chars` — **max** observed across sessions (graph
+  size is process-global, not summable)
+- `total_graph_size_tokens` — `chars ÷ 4`
 - `cumulative_ratio` — `(used + saved) / used`
+
+### `GET /api/stats/tokens/{session_id}`
+
+Stats for a single logical session. `session_id` is whatever clients
+pass in the `X-CtxOne-Session` header; absent clients roll up under
+`"default"`.
+
+**Response (200):**
+```json
+{
+  "session_id": "alice@example.com",
+  "session_tokens_used": 42,
+  "session_tokens_saved": 658,
+  "total_graph_size_chars": 1804,
+  "total_graph_size_tokens": 451,
+  "cumulative_ratio": 16.67
+}
+```
+
+Returns **404** if the session ID has never been seen. Sessions are
+created lazily the first time a read endpoint (`recall`, `context`)
+records token usage for them.
+
+### `GET /api/stats/sessions`
+
+List every known session with its current stats.
+
+**Response (200):**
+```json
+[
+  { "session_id": "alice@example.com", "session_tokens_used": 42, "session_tokens_saved": 658, "total_graph_size_chars": 1804, "total_graph_size_tokens": 451, "cumulative_ratio": 16.67 },
+  { "session_id": "bob@example.com",   "session_tokens_used": 120, "session_tokens_saved": 1200, "total_graph_size_chars": 1804, "total_graph_size_tokens": 451, "cumulative_ratio": 11.00 },
+  { "session_id": "default",           "session_tokens_used": 0,   "session_tokens_saved": 0,    "total_graph_size_chars": 1804, "total_graph_size_tokens": 451, "cumulative_ratio": 0.0 }
+]
+```
+
+Sorted by `session_id`. The `"default"` session is always present even
+on a fresh Hub.
 
 ### `GET /api/stats/{ref_name}`
 
@@ -426,11 +468,44 @@ The body is plain text, not JSON. Clients should log and retry on 5xx.
 
 ---
 
-## Rate limiting and auth
+## Rate limiting
 
-The HTTP API currently has **no authentication or rate limiting**. Run the
-Hub on a trusted network (loopback, VPN, or private subnet) or put a
-reverse proxy in front.
+The Hub enforces a **per-peer-IP token-bucket rate limit** in HTTP mode.
+Default: **600 requests/minute per IP** (permissive — catches runaway
+loops without bothering real agents).
+
+Clients that exceed the bucket get:
+
+```
+HTTP/1.1 429 Too Many Requests
+Retry-After: 3
+X-RateLimit-Limit: 600
+X-RateLimit-Remaining: 0
+```
+
+Configure via `--rate-limit-rpm <N>` or the `CTXONE_RATE_LIMIT_RPM` env
+var. `0` disables rate limiting entirely. See
+[docs/TROUBLESHOOTING.md#rate-limiting](TROUBLESHOOTING.md#rate-limiting)
+for details.
+
+## Per-session token tracking
+
+Send `X-CtxOne-Session: <id>` on any request to have its token usage
+counted under that session. Absent the header, usage rolls up under
+the `"default"` session. Per-session stats are exposed via:
+
+- `GET /api/stats/tokens/{session_id}` — single-session snapshot
+- `GET /api/stats/sessions` — all sessions
+- `GET /api/stats/tokens` — cross-session aggregate (backward-compat)
+
+The Python client accepts a `session_id` constructor arg or reads
+`CTX_SESSION_ID` from the environment.
+
+## Authentication
+
+The HTTP API currently has **no authentication**. Run the Hub on a
+trusted network (loopback, VPN, or private subnet) or put a reverse
+proxy in front with whatever auth layer you already use.
 
 Multi-tenant auth is tracked as future work — see the engine's
 `agentstategraph-mcp` binary, which supports `--auth` and `--keys-file`

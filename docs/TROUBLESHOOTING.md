@@ -311,6 +311,119 @@ In HTTP mode, every `recall` call emits an `info`-level line with the
 topic, tokens sent, and savings ratio — useful for watching memory earn
 its keep in real time. Writes log at `debug` level.
 
+## Rate limiting
+
+The Hub enforces a per-peer-IP token-bucket rate limit when running in
+HTTP mode. The default is **600 requests per minute per IP**, which is
+permissive enough that real agents and even heavy `ctx prime` imports
+stay well under the limit, but catches runaway loops and abuse.
+
+When a client exceeds the limit, the Hub returns:
+
+```
+HTTP/1.1 429 Too Many Requests
+Retry-After: <seconds>
+X-RateLimit-*: <headers>
+```
+
+Well-behaved clients should honor `Retry-After`. The Python client
+(`ctxone`) does this via `requests`, and the Rust CLI falls through
+to the normal error handler.
+
+### Changing the limit
+
+**CLI flag** (highest priority):
+
+```bash
+ctxone-hub --http --rate-limit-rpm 120    # 120 req/min per IP
+ctxone-hub --http --rate-limit-rpm 0      # disable entirely
+```
+
+**Environment variable** (used when no flag is given):
+
+```bash
+CTXONE_RATE_LIMIT_RPM=60 ctxone-hub --http
+```
+
+`0` disables rate limiting entirely — useful in trusted single-tenant
+deployments behind their own network ACLs, or when running in tests.
+
+### "I'm getting 429s on legitimate traffic"
+
+Usually it's one of three things:
+
+1. **Behind a reverse proxy that collapses client IPs to the proxy's
+   own IP.** The rate limiter sees every request as coming from one
+   client and throttles hard. Configure the proxy to forward the real
+   client IP via `X-Forwarded-For` (a future release will add support
+   for trusted forwarded headers — today you can disable rate limiting
+   and let the proxy handle it).
+2. **Running a parallel batch job** from a single IP. Bump the limit
+   with `--rate-limit-rpm 3000` or disable it with `--rate-limit-rpm 0`
+   during the batch.
+3. **Tests that hammer the endpoint.** The library default
+   (`HubConfig::default()`) is `0` specifically so in-process tests
+   don't get throttled. If you're writing your own Rust tests, build
+   the router via `http::router_with_config(..., HubConfig { rate_limit_rpm: 0 })`.
+
+## Per-session token tracking
+
+The Hub tracks tokens-used and tokens-saved **per session** when
+clients send the `X-CtxOne-Session` header. Without the header, all
+usage rolls up under the `"default"` session.
+
+### Endpoints
+
+| Endpoint | What it returns |
+|---|---|
+| `GET /api/stats/tokens` | Aggregate roll-up across every session (backward compat) |
+| `GET /api/stats/tokens/{session_id}` | Stats for a specific session, 404 if unknown |
+| `GET /api/stats/sessions` | List every known session with its stats |
+
+The aggregate endpoint uses `"_aggregate"` as the session ID in its
+response body so it's unambiguous that you're looking at a roll-up.
+Graph size (`total_graph_size_chars`) is **not** summed across
+sessions — it's the same graph for everyone, so the aggregate takes
+the maximum observed value.
+
+### Setting the session ID
+
+**Python client:**
+
+```python
+from ctxone import Hub
+
+hub = Hub(session_id="alice@example.com")
+hub.recall("licensing")  # counts toward alice's session
+```
+
+Or via environment:
+
+```bash
+export CTX_SESSION_ID=alice@example.com
+python my-agent.py
+```
+
+**Raw HTTP:**
+
+```bash
+curl -H "X-CtxOne-Session: alice@example.com" \
+     "http://localhost:3001/api/memory/recall?topic=licensing"
+```
+
+**Open WebUI plugin:** the `ctxone.integrations.openwebui` Tool and
+Filter automatically set `X-CtxOne-Session` to the Open WebUI user's
+email (or name/id), so a multi-user self-hosted install gets per-user
+stats for free.
+
+### "My session isn't showing up in /api/stats/sessions"
+
+Sessions are created lazily the first time a request with that header
+arrives at a read endpoint that records usage (`recall`, `context`).
+Write endpoints (`remember`, `forget`, `prime`) don't record tokens,
+so writing to a new session ID without ever reading from it leaves
+the session invisible to the registry. Do one `recall` to materialize it.
+
 ## Still stuck?
 
 - Run `ctx doctor` — it catches most infrastructure problems automatically.

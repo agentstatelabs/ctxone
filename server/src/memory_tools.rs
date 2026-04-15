@@ -3,8 +3,10 @@
 //! Higher-level memory operations built on top of AgentStateGraph primitives.
 //! Each tool includes token usage metadata (`_ctxone_stats`) for tracking savings.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::RwLock;
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -14,6 +16,9 @@ use serde::{Deserialize, Serialize};
 
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::IntentCategory;
+
+/// The session ID used when a request doesn't set `X-CtxOne-Session`.
+pub const DEFAULT_SESSION_ID: &str = "default";
 
 /// Token usage statistics for a single response.
 #[derive(Serialize)]
@@ -69,6 +74,179 @@ impl SessionStats {
     /// Mark the cached graph size as stale. Call after any write.
     pub fn mark_dirty(&self) {
         self.graph_size_dirty.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Snapshot of one session's accumulated token accounting.
+///
+/// Returned by `SessionRegistry::snapshot` and used by the HTTP
+/// stats endpoints. This is a plain data struct (not atomics) so it
+/// serializes cleanly as JSON.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct SessionSnapshot {
+    pub session_id: String,
+    pub session_tokens_used: u64,
+    pub session_tokens_saved: u64,
+    pub total_graph_size_chars: u64,
+    pub total_graph_size_tokens: u64,
+    pub cumulative_ratio: f64,
+}
+
+impl SessionSnapshot {
+    pub fn from_session(session_id: &str, stats: &SessionStats) -> Self {
+        let used = stats.tokens_sent.load(Ordering::Relaxed);
+        let saved = stats.tokens_saved.load(Ordering::Relaxed);
+        let graph_chars = stats.total_graph_size_chars.load(Ordering::Relaxed);
+        let graph_tokens = graph_chars / 4;
+        let ratio = if used > 0 {
+            (used + saved) as f64 / used as f64
+        } else {
+            0.0
+        };
+        Self {
+            session_id: session_id.to_string(),
+            session_tokens_used: used,
+            session_tokens_saved: saved,
+            total_graph_size_chars: graph_chars,
+            total_graph_size_tokens: graph_tokens,
+            cumulative_ratio: ratio,
+        }
+    }
+}
+
+/// A process-wide registry of per-session stats.
+///
+/// The Hub used to share a single `SessionStats` across every HTTP
+/// request — fine for single-tenant demos, but for real multi-agent
+/// use we want each logical session (identified by the
+/// `X-CtxOne-Session` header) to get its own counters.
+///
+/// ## Graph size caching
+///
+/// The cached flat-size (`total_graph_size_chars`) is a property of
+/// the underlying graph, not any particular session. When any session
+/// writes a fact, we mark **every** session's cache dirty via
+/// `mark_all_dirty()`. This keeps the per-session API correct without
+/// introducing a separate graph-size cache or a cross-session channel.
+///
+/// ## Concurrency
+///
+/// Sessions are stored in `RwLock<HashMap<_, _>>`. Reads take a read
+/// lock, missing-session creation takes a write lock briefly. Once a
+/// session exists, all subsequent `get_or_create` calls return the
+/// cloned `Arc` via the read path. This is fast enough for typical
+/// session counts (<100) — if that changes, swap for `DashMap`.
+pub struct SessionRegistry {
+    sessions: RwLock<HashMap<String, Arc<SessionStats>>>,
+}
+
+impl Default for SessionRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SessionRegistry {
+    pub fn new() -> Self {
+        let mut map = HashMap::new();
+        // Always pre-seed the "default" session so empty /api/stats/sessions
+        // responses still show the baseline bucket instead of nothing.
+        map.insert(DEFAULT_SESSION_ID.to_string(), Arc::new(SessionStats::new()));
+        Self {
+            sessions: RwLock::new(map),
+        }
+    }
+
+    /// Look up a session by ID, creating a new one if it doesn't exist.
+    pub fn get_or_create(&self, id: &str) -> Arc<SessionStats> {
+        // Fast path: shared read lock, clone out the Arc
+        {
+            let r = self.sessions.read().expect("sessions read lock");
+            if let Some(s) = r.get(id) {
+                return s.clone();
+            }
+        }
+        // Slow path: exclusive write lock to insert. Re-check in case
+        // another caller beat us to it between the read and write.
+        let mut w = self.sessions.write().expect("sessions write lock");
+        w.entry(id.to_string())
+            .or_insert_with(|| Arc::new(SessionStats::new()))
+            .clone()
+    }
+
+    /// Invalidate every session's cached flat-size. Call after any write.
+    pub fn mark_all_dirty(&self) {
+        let r = self.sessions.read().expect("sessions read lock");
+        for s in r.values() {
+            s.mark_dirty();
+        }
+    }
+
+    /// Return a sorted list of known session IDs.
+    pub fn list_ids(&self) -> Vec<String> {
+        let r = self.sessions.read().expect("sessions read lock");
+        let mut ids: Vec<String> = r.keys().cloned().collect();
+        ids.sort();
+        ids
+    }
+
+    /// Snapshot a single session by ID. Returns `None` if the session
+    /// doesn't exist. This reads the current atomic values — no
+    /// locking outside the registry itself.
+    pub fn snapshot(&self, id: &str) -> Option<SessionSnapshot> {
+        let r = self.sessions.read().expect("sessions read lock");
+        r.get(id).map(|s| SessionSnapshot::from_session(id, s))
+    }
+
+    /// Aggregate stats across every session.
+    ///
+    /// Used by the existing `/api/stats/tokens` endpoint which, for
+    /// backward compat, returns a roll-up instead of just the default
+    /// session's numbers. The `session_id` field on the snapshot is
+    /// set to `"_aggregate"` to make this unambiguous.
+    ///
+    /// The graph size is **not** summed — it's the same graph for all
+    /// sessions, so we take the max observed value (every session
+    /// should converge to the same number anyway).
+    pub fn aggregate(&self) -> SessionSnapshot {
+        let r = self.sessions.read().expect("sessions read lock");
+
+        let mut total_used = 0u64;
+        let mut total_saved = 0u64;
+        let mut graph_chars = 0u64;
+
+        for s in r.values() {
+            total_used += s.tokens_sent.load(Ordering::Relaxed);
+            total_saved += s.tokens_saved.load(Ordering::Relaxed);
+            graph_chars = graph_chars.max(s.total_graph_size_chars.load(Ordering::Relaxed));
+        }
+
+        let ratio = if total_used > 0 {
+            (total_used + total_saved) as f64 / total_used as f64
+        } else {
+            0.0
+        };
+
+        SessionSnapshot {
+            session_id: "_aggregate".to_string(),
+            session_tokens_used: total_used,
+            session_tokens_saved: total_saved,
+            total_graph_size_chars: graph_chars,
+            total_graph_size_tokens: graph_chars / 4,
+            cumulative_ratio: ratio,
+        }
+    }
+
+    /// Snapshot every session as a list. Sorted by session ID for
+    /// stable output.
+    pub fn snapshot_all(&self) -> Vec<SessionSnapshot> {
+        let r = self.sessions.read().expect("sessions read lock");
+        let mut snaps: Vec<SessionSnapshot> = r
+            .iter()
+            .map(|(id, s)| SessionSnapshot::from_session(id, s))
+            .collect();
+        snaps.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+        snaps
     }
 }
 
@@ -1193,5 +1371,117 @@ mod tests {
         // 1500 tokens ≈ a page of content — tight enough to force
         // pruning but loose enough to show something useful.
         assert_eq!(default_budget(), 1500);
+    }
+
+    // -------- SessionRegistry --------
+
+    #[test]
+    fn registry_new_pre_seeds_default_session() {
+        let registry = SessionRegistry::new();
+        let ids = registry.list_ids();
+        assert_eq!(ids, vec!["default".to_string()]);
+    }
+
+    #[test]
+    fn registry_get_or_create_returns_same_arc_for_same_id() {
+        let registry = SessionRegistry::new();
+        let a = registry.get_or_create("alice");
+        let b = registry.get_or_create("alice");
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "get_or_create should return the same Arc for the same ID"
+        );
+    }
+
+    #[test]
+    fn registry_creates_distinct_sessions_for_distinct_ids() {
+        let registry = SessionRegistry::new();
+        let alice = registry.get_or_create("alice");
+        let bob = registry.get_or_create("bob");
+        assert!(!Arc::ptr_eq(&alice, &bob));
+
+        alice.record(400, 4000); // 100 tokens
+        bob.record(800, 4000); // 200 tokens
+
+        let alice_snap = registry.snapshot("alice").unwrap();
+        let bob_snap = registry.snapshot("bob").unwrap();
+        assert_eq!(alice_snap.session_tokens_used, 100);
+        assert_eq!(bob_snap.session_tokens_used, 200);
+    }
+
+    #[test]
+    fn registry_snapshot_missing_returns_none() {
+        let registry = SessionRegistry::new();
+        assert!(registry.snapshot("never-created").is_none());
+    }
+
+    #[test]
+    fn registry_aggregate_sums_across_sessions() {
+        let registry = SessionRegistry::new();
+        let alice = registry.get_or_create("alice");
+        let bob = registry.get_or_create("bob");
+
+        alice.record(400, 4000); // 100 used, 900 saved
+        bob.record(800, 4000); // 200 used, 800 saved
+
+        let agg = registry.aggregate();
+        assert_eq!(agg.session_id, "_aggregate");
+        assert_eq!(agg.session_tokens_used, 300);
+        assert_eq!(agg.session_tokens_saved, 1700);
+    }
+
+    #[test]
+    fn registry_aggregate_graph_size_is_max_not_sum() {
+        let registry = SessionRegistry::new();
+        let alice = registry.get_or_create("alice");
+        let bob = registry.get_or_create("bob");
+
+        // Simulate two sessions having cached different graph sizes
+        // (e.g. bob refreshed more recently after a write).
+        alice.total_graph_size_chars.store(1000, Ordering::Relaxed);
+        bob.total_graph_size_chars.store(5000, Ordering::Relaxed);
+
+        let agg = registry.aggregate();
+        // Should take the MAX (graph size is process-global, not summable)
+        assert_eq!(agg.total_graph_size_chars, 5000);
+    }
+
+    #[test]
+    fn registry_mark_all_dirty_invalidates_every_session() {
+        let registry = SessionRegistry::new();
+        let alice = registry.get_or_create("alice");
+        let bob = registry.get_or_create("bob");
+
+        // Clear both dirty flags and set graph sizes
+        alice.graph_size_dirty.store(false, Ordering::Relaxed);
+        bob.graph_size_dirty.store(false, Ordering::Relaxed);
+
+        registry.mark_all_dirty();
+
+        assert!(alice.graph_size_dirty.load(Ordering::Relaxed));
+        assert!(bob.graph_size_dirty.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn registry_list_ids_is_sorted() {
+        let registry = SessionRegistry::new();
+        registry.get_or_create("charlie");
+        registry.get_or_create("alice");
+        registry.get_or_create("bob");
+
+        let ids = registry.list_ids();
+        // "default" is pre-seeded, then alice/bob/charlie alphabetical
+        assert_eq!(ids, vec!["alice", "bob", "charlie", "default"]);
+    }
+
+    #[test]
+    fn registry_snapshot_all_is_sorted_by_id() {
+        let registry = SessionRegistry::new();
+        registry.get_or_create("zebra");
+        registry.get_or_create("apple");
+
+        let snaps = registry.snapshot_all();
+        let ids: Vec<&str> = snaps.iter().map(|s| s.session_id.as_str()).collect();
+        assert_eq!(ids, vec!["apple", "default", "zebra"]);
     }
 }

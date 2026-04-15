@@ -39,6 +39,7 @@ class Hub:
         branch: str = "main",
         timeout: float = 30.0,
         session: requests.Session | None = None,
+        session_id: str | None = None,
     ) -> None:
         """Create a Hub client.
 
@@ -50,6 +51,12 @@ class Hub:
             timeout: HTTP request timeout in seconds.
             session: Optional `requests.Session` for connection pooling
                 and custom headers.
+            session_id: Logical session identifier sent as the
+                `X-CtxOne-Session` header on every request. The Hub
+                accounts tokens-used per session so agents sharing a
+                process can keep their stats separate. Defaults to the
+                `CTX_SESSION_ID` env var, or `None` (Hub falls back to
+                the `"default"` session).
         """
         self.server = (
             server
@@ -59,6 +66,7 @@ class Hub:
         self.branch = branch
         self.timeout = timeout
         self._session = session or requests.Session()
+        self.session_id = session_id or os.environ.get("CTX_SESSION_ID") or None
 
     # -- Health --------------------------------------------------------
 
@@ -406,10 +414,22 @@ class Hub:
 
     # -- HTTP helpers (private) ---------------------------------------
 
+    def _headers(self) -> dict[str, str]:
+        """Build the request header dict with X-CtxOne-Session attached."""
+        headers: dict[str, str] = {}
+        if self.session_id:
+            headers["X-CtxOne-Session"] = self.session_id
+        return headers
+
     def _get(self, path: str, params: dict[str, str] | None = None) -> Any:
         url = f"{self.server}{path}"
         try:
-            r = self._session.get(url, params=params, timeout=self.timeout)
+            r = self._session.get(
+                url,
+                params=params,
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
         except requests.ConnectionError as e:
             raise HubUnreachable(f"Hub unreachable at {self.server}: {e}") from e
         except requests.RequestException as e:
@@ -419,7 +439,12 @@ class Hub:
     def _post(self, path: str, body: Any) -> Any:
         url = f"{self.server}{path}"
         try:
-            r = self._session.post(url, json=body, timeout=self.timeout)
+            r = self._session.post(
+                url,
+                json=body,
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
         except requests.ConnectionError as e:
             raise HubUnreachable(f"Hub unreachable at {self.server}: {e}") from e
         except requests.RequestException as e:

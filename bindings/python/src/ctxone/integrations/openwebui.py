@@ -234,12 +234,16 @@ class Tools:
         """Build a Hub client for this request.
 
         The default branch is resolved per-user so private branches
-        stay private even when the tool is shared across chats.
+        stay private even when the tool is shared across chats. The
+        Hub's X-CtxOne-Session header is set to the user's email (or
+        name/id) so per-user token stats stay isolated on the Hub
+        side — visible via `GET /api/stats/tokens/<user-email>`.
         """
         return Hub(
             server=self.valves.hub_url,
             branch=_user_branch(user, self.valves.default_branch),
             timeout=self.valves.timeout_seconds,
+            session_id=_user_email(user),
         )
 
     # -- tool methods (exposed to the model) --
@@ -565,11 +569,16 @@ class Filter:
     # -- private --
 
     def _hub(self, user: Optional[dict] = None) -> Hub:
-        """Build a Hub client for this request, with the user's agent ID."""
+        """Build a Hub client for this request, with the user's agent ID.
+
+        Sets X-CtxOne-Session so the Hub's per-session token stats
+        show this user's usage separately from everyone else's.
+        """
         return Hub(
             server=self.valves.hub_url,
             branch=_user_branch(user, self.valves.default_branch),
             timeout=self.valves.timeout_seconds,
+            session_id=_user_email(user),
         )
 
     def _user_valves(self, user: Optional[dict]) -> "Filter.UserValves":
