@@ -124,6 +124,7 @@ ctxone/
 - [HTTP API](docs/HTTP_API.md) — REST endpoints exposed by the Hub
 - [MCP Tools](docs/MCP_TOOLS.md) — MCP tools exposed to agents
 - [Integrations](docs/INTEGRATIONS.md) — wiring into Claude Code, Cursor, VS Code, Codex
+- [Open WebUI](docs/OPENWEBUI.md) — native Tool + Filter plugins for Open WebUI
 - [Troubleshooting](docs/TROUBLESHOOTING.md) — top 10 errors and fixes
 
 **Runnable examples:** see [examples/](examples/)

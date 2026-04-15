@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ctxone"
-version = "0.65.0"
+version = "0.70.0"
 description = "Python client for CtxOne — persistent, searchable, accountable memory for AI agents"
 readme = "README.md"
 license = { text = "BUSL-1.1" }
@@ -34,7 +34,8 @@ Repository = "https://github.com/ctxone/ctxone"
 Issues = "https://github.com/ctxone/ctxone/issues"
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "pytest-cov>=4.0"]
+dev = ["pytest>=7.0", "pytest-cov>=4.0", "pydantic>=2"]
+openwebui = ["pydantic>=2"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

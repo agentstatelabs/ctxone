@@ -4,6 +4,11 @@ How to wire CtxOne into the common AI coding tools so every session starts
 with project context loaded. For details on what each MCP tool does, see
 [MCP_TOOLS.md](MCP_TOOLS.md).
 
+**Chat hosts (not coding tools):** for Open WebUI specifically, CtxOne
+ships native Tool and Filter plugins — see [OPENWEBUI.md](OPENWEBUI.md).
+The Filter auto-injects relevant memory into every turn, which works
+even with models that don't support tool-calling.
+
 ## The fastest path
 
 **Run `ctx init`.** It auto-detects every supported AI tool on your machine

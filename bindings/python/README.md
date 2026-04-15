@@ -165,6 +165,23 @@ session.headers["Authorization"] = "Bearer ..."
 hub = Hub(session=session)
 ```
 
+## Open WebUI integration
+
+The `ctxone.integrations.openwebui` module ships both a **Tool** (`remember`,
+`recall`, `forget`, `list_pinned`) and a **Filter** (auto-injects relevant
+memory into every chat turn via `inlet`, optionally captures assistant
+replies in `outlet`). Install with:
+
+```bash
+pip install "ctxone[openwebui]"
+```
+
+Or paste the whole
+[`src/ctxone/integrations/openwebui.py`](src/ctxone/integrations/openwebui.py)
+file into Open WebUI → Admin Panel → Functions — the docstring frontmatter
+handles auto-install. Full docs:
+[OPENWEBUI.md](https://github.com/ctxone/ctxone/blob/main/docs/OPENWEBUI.md).
+
 ## Development
 
 ```bash
