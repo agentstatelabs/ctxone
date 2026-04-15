@@ -321,6 +321,26 @@ def test_tools_hub_respects_user_branch_override(tools):
         assert kwargs["branch"] == "alice-private"
 
 
+def test_tools_hub_sets_session_and_agent_to_user_email(tools):
+    with patch("ctxone.integrations.openwebui.Hub") as mock_hub_class:
+        user = {"email": "alice@example.com"}
+        tools._hub(user)
+        _, kwargs = mock_hub_class.call_args
+        # Both session_id and agent_id should be the user's email so
+        # ctx blame shows who wrote each fact AND per-session stats
+        # stay isolated per user.
+        assert kwargs["session_id"] == "alice@example.com"
+        assert kwargs["agent_id"] == "alice@example.com"
+
+
+def test_tools_hub_falls_back_to_openwebui_when_no_user(tools):
+    with patch("ctxone.integrations.openwebui.Hub") as mock_hub_class:
+        tools._hub(None)
+        _, kwargs = mock_hub_class.call_args
+        assert kwargs["session_id"] == "openwebui"
+        assert kwargs["agent_id"] == "openwebui"
+
+
 # ---------------------------------------------------------------------------
 # Filter — inlet / outlet / stream
 # ---------------------------------------------------------------------------

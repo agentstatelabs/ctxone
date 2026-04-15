@@ -24,8 +24,8 @@ use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::IntentCategory;
 
 use crate::memory_tools::{
-    DEFAULT_SESSION_ID, SessionRegistry, SessionSnapshot, SessionStats, ensure_flat_size,
-    run_prime, run_recall,
+    DEFAULT_AGENT_ID, DEFAULT_SESSION_ID, SessionRegistry, SessionSnapshot, SessionStats,
+    ensure_flat_size, run_prime, run_recall,
 };
 use crate::rate_limit;
 
@@ -87,6 +87,35 @@ where
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| DEFAULT_SESSION_ID.to_string());
         Ok(SessionId(id))
+    }
+}
+
+/// Extractor for the agent identifier carried by the `X-CtxOne-Agent`
+/// request header. Falls back to `"ctxone"` when the header is absent
+/// or empty. The agent ID is what `ctx blame` displays in the "who"
+/// column, so setting it correctly is the cheapest way to answer the
+/// question "which tool wrote this fact?".
+#[derive(Debug, Clone)]
+pub struct AgentId(pub String);
+
+impl<S> axum::extract::FromRequestParts<S> for AgentId
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let id = parts
+            .headers
+            .get("x-ctxone-agent")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| DEFAULT_AGENT_ID.to_string());
+        Ok(AgentId(id))
     }
 }
 
@@ -426,12 +455,13 @@ fn default_merge_description() -> String {
     "Merge".to_string()
 }
 
-#[instrument(skip_all, fields(source = %req.source, target = %req.target))]
+#[instrument(skip_all, fields(source = %req.source, target = %req.target, agent = %agent_id.0))]
 async fn merge_refs(
     State(s): State<HubState>,
+    agent_id: AgentId,
     Json(req): Json<MergeRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let mut opts = CommitOptions::new("ctxone", IntentCategory::Merge, &req.description);
+    let mut opts = CommitOptions::new(&agent_id.0, IntentCategory::Merge, &req.description);
     if let Some(r) = req.reasoning {
         opts = opts.with_reasoning(r);
     }
@@ -493,10 +523,12 @@ fn default_ref() -> String {
         importance = %req.importance,
         ref_name = %req.ref_name,
         fact_len = req.fact.len(),
+        agent = %agent_id.0,
     )
 )]
 async fn remember(
     State(s): State<HubState>,
+    agent_id: AgentId,
     Json(req): Json<RememberRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let path = match &req.context {
@@ -506,7 +538,7 @@ async fn remember(
 
     let confidence = importance_to_confidence(&req.importance);
     let mut opts = CommitOptions::new(
-        "ctxone",
+        &agent_id.0,
         IntentCategory::Custom("Observe".to_string()),
         &req.fact,
     );
@@ -546,12 +578,13 @@ fn default_forget_reason() -> String {
     "forgotten by user".to_string()
 }
 
-#[instrument(skip_all, fields(path = %req.path, ref_name = %req.ref_name))]
+#[instrument(skip_all, fields(path = %req.path, ref_name = %req.ref_name, agent = %agent_id.0))]
 async fn forget(
     State(s): State<HubState>,
+    agent_id: AgentId,
     Json(req): Json<ForgetRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let opts = CommitOptions::new("ctxone", IntentCategory::Rollback, &req.reason);
+    let opts = CommitOptions::new(&agent_id.0, IntentCategory::Rollback, &req.reason);
 
     let commit_id = s
         .repo
@@ -652,11 +685,12 @@ struct SummarizeSessionRequest {
 
 async fn summarize_session(
     State(s): State<HubState>,
+    agent_id: AgentId,
     Json(req): Json<SummarizeSessionRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let summary = req.key_points.join(". ");
     let summary_opts = CommitOptions::new(
-        "ctxone",
+        &agent_id.0,
         IntentCategory::Checkpoint,
         format!("Session {} summary", req.session_id),
     )
@@ -675,7 +709,7 @@ async fn summarize_session(
     if !req.decisions.is_empty() {
         let decisions_val = serde_json::json!(req.decisions);
         let decisions_opts = CommitOptions::new(
-            "ctxone",
+            &agent_id.0,
             IntentCategory::Checkpoint,
             format!("Session {} decisions", req.session_id),
         )
@@ -789,6 +823,7 @@ struct PrimeRequest {
 async fn prime(
     State(s): State<HubState>,
     session_id: SessionId,
+    agent_id: AgentId,
     Json(req): Json<PrimeRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let sections: Vec<(String, String)> = req
@@ -796,12 +831,13 @@ async fn prime(
         .into_iter()
         .map(|s| (s.title, s.body))
         .collect();
-    debug!(count = sections.len(), "priming sections");
+    debug!(count = sections.len(), agent = %agent_id.0, "priming sections");
 
     let session = s.session_for(&session_id);
     let result = run_prime(
         &s.repo,
         &session,
+        &agent_id.0,
         &req.source,
         req.pinned,
         &sections,

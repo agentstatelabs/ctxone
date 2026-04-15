@@ -501,6 +501,23 @@ the `"default"` session. Per-session stats are exposed via:
 The Python client accepts a `session_id` constructor arg or reads
 `CTX_SESSION_ID` from the environment.
 
+## Per-tool agent IDs
+
+Send `X-CtxOne-Agent: <name>` on any write request
+(`remember`/`forget`/`prime`/`summarize_session`/`merge`) to stamp
+the commit with that agent ID. `ctx blame` and `/api/log/{ref}`
+responses surface this as `agent_id`, so you can tell which tool
+wrote each fact.
+
+Absent the header, commits are attributed to `"ctxone"`. The Python
+client accepts an `agent_id` constructor arg or reads `CTX_AGENT_ID`
+from the environment; the Hub binary accepts `--agent-id <name>`
+for MCP stdio mode (which is what `ctx init` wires into the
+generated `.mcp.json` / `.cursor/mcp.json` etc).
+
+See [docs/TROUBLESHOOTING.md#per-tool-agent-ids](TROUBLESHOOTING.md#per-tool-agent-ids)
+for the full resolution order and examples.
+
 ## Authentication
 
 The HTTP API currently has **no authentication**. Run the Hub on a

@@ -20,6 +20,14 @@ use agentstategraph_core::IntentCategory;
 /// The session ID used when a request doesn't set `X-CtxOne-Session`.
 pub const DEFAULT_SESSION_ID: &str = "default";
 
+/// The agent ID recorded on commits when no caller-specific agent is
+/// known. Clients identify themselves via the `X-CtxOne-Agent` header
+/// on HTTP writes, or via `--agent-id <name>` when they spawn the
+/// Hub as an MCP subprocess. Anything that falls through both paths
+/// gets attributed to plain `"ctxone"` so blame history always has a
+/// non-empty agent.
+pub const DEFAULT_AGENT_ID: &str = "ctxone";
+
 /// Token usage statistics for a single response.
 #[derive(Serialize)]
 pub struct TokenStats {
@@ -472,6 +480,7 @@ pub fn run_recall(
 pub fn run_prime(
     repo: &Repository,
     session: &SessionStats,
+    agent_id: &str,
     source: &str,
     pinned: bool,
     sections: &[(String, String)], // (title, body)
@@ -479,6 +488,12 @@ pub fn run_prime(
 ) -> Result<serde_json::Value, String> {
     let namespace = if pinned { "pinned" } else { "primed" };
     let mut written = Vec::new();
+
+    // Suffix the agent with "-prime" so blame history can tell
+    // priming apart from regular remember() commits without losing
+    // the caller's identity. For the legacy default "ctxone" this
+    // preserves the old "ctxone-prime" behavior.
+    let prime_agent = format!("{}-prime", agent_id);
 
     for (title, body) in sections {
         let slug = slugify(title);
@@ -488,7 +503,7 @@ pub fn run_prime(
         let path = format!("/memory/{}/{}/{}", namespace, source, slug);
 
         let opts = CommitOptions::new(
-            "ctxone-prime",
+            &prime_agent,
             IntentCategory::Checkpoint,
             format!("Prime: {}", title),
         )
@@ -681,6 +696,10 @@ fn timestamp_id() -> String {
 pub struct CtxOneServer {
     pub repo: Arc<Repository>,
     pub session: Arc<SessionStats>,
+    /// Agent identifier written to commits created through this MCP
+    /// server. Set via `ctxone-hub --agent-id <name>` when the tool
+    /// embedding the MCP server spawns it. Defaults to "ctxone".
+    pub agent_id: String,
     #[allow(dead_code)] // used by rmcp tool_router macro
     tool_router: ToolRouter<Self>,
 }
@@ -688,11 +707,19 @@ pub struct CtxOneServer {
 #[tool_router]
 impl CtxOneServer {
     pub fn new(repo: Arc<Repository>) -> Self {
+        Self::with_agent_id(repo, DEFAULT_AGENT_ID.to_string())
+    }
+
+    /// Construct a server that stamps every commit with a specific
+    /// agent ID. This is the MCP-side equivalent of the HTTP
+    /// `X-CtxOne-Agent` header.
+    pub fn with_agent_id(repo: Arc<Repository>, agent_id: String) -> Self {
         let session = Arc::new(SessionStats::new());
         // session starts dirty; first read will populate it.
         Self {
             repo,
             session,
+            agent_id,
             tool_router: Self::tool_router(),
         }
     }
@@ -709,7 +736,7 @@ impl CtxOneServer {
 
         let confidence = importance_to_confidence(&p.importance);
         let mut opts = CommitOptions::new(
-            "ctxone",
+            &self.agent_id,
             IntentCategory::Custom("Observe".to_string()),
             &p.fact,
         );
@@ -755,6 +782,7 @@ impl CtxOneServer {
         match run_prime(
             &self.repo,
             &self.session,
+            &self.agent_id,
             &p.source,
             p.pinned,
             &sections,
@@ -795,7 +823,7 @@ impl CtxOneServer {
         // Write summary
         let summary = p.key_points.join(". ");
         let summary_opts = CommitOptions::new(
-            "ctxone",
+            &self.agent_id,
             IntentCategory::Checkpoint,
             format!("Session {} summary", p.session_id),
         )
@@ -813,7 +841,7 @@ impl CtxOneServer {
         if !p.decisions.is_empty() {
             let decisions_val = serde_json::json!(p.decisions);
             let decisions_opts = CommitOptions::new(
-                "ctxone",
+                &self.agent_id,
                 IntentCategory::Checkpoint,
                 format!("Session {} decisions", p.session_id),
             )
@@ -830,7 +858,7 @@ impl CtxOneServer {
         // Write full details
         let details_val = serde_json::json!(p.key_points);
         let details_opts = CommitOptions::new(
-            "ctxone",
+            &self.agent_id,
             IntentCategory::Custom("Observe".to_string()),
             format!("Session {} details", p.session_id),
         );
@@ -1020,7 +1048,7 @@ mod tests {
             ("Architecture".to_string(), "SQLite default".to_string()),
         ];
 
-        let result = run_prime(&repo, &session, "test", true, &sections, "main")
+        let result = run_prime(&repo, &session, "test-agent", "test", true, &sections, "main")
             .expect("prime should succeed");
 
         assert_eq!(result["status"], "ok");
@@ -1035,8 +1063,8 @@ mod tests {
         let session = Arc::new(SessionStats::new());
         let sections = vec![("Title".to_string(), "body".to_string())];
 
-        run_prime(&repo, &session, "src", false, &sections, "main").unwrap();
-        run_prime(&repo, &session, "src", false, &sections, "main").unwrap();
+        run_prime(&repo, &session, "test-agent", "src", false, &sections, "main").unwrap();
+        run_prime(&repo, &session, "test-agent", "src", false, &sections, "main").unwrap();
 
         // After two prime calls with the same source, there should still be
         // just one slug under /memory/primed/src
@@ -1070,7 +1098,7 @@ mod tests {
             ("First Section".to_string(), "first body".to_string()),
             ("Second Section".to_string(), "second body".to_string()),
         ];
-        run_prime(&repo, &session, "src", true, &sections, "main").unwrap();
+        run_prime(&repo, &session, "test-agent", "src", true, &sections, "main").unwrap();
 
         let pinned = collect_pinned(&repo, "main");
         assert_eq!(pinned.len(), 2);
@@ -1117,6 +1145,7 @@ mod tests {
         run_prime(
             &repo,
             &session,
+            "test-agent",
             "src",
             true,
             &[("Vision".to_string(), "critical context".to_string())],

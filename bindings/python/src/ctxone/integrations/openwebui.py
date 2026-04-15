@@ -239,11 +239,13 @@ class Tools:
         name/id) so per-user token stats stay isolated on the Hub
         side — visible via `GET /api/stats/tokens/<user-email>`.
         """
+        email = _user_email(user)
         return Hub(
             server=self.valves.hub_url,
             branch=_user_branch(user, self.valves.default_branch),
             timeout=self.valves.timeout_seconds,
-            session_id=_user_email(user),
+            session_id=email,
+            agent_id=email,
         )
 
     # -- tool methods (exposed to the model) --
@@ -574,11 +576,13 @@ class Filter:
         Sets X-CtxOne-Session so the Hub's per-session token stats
         show this user's usage separately from everyone else's.
         """
+        email = _user_email(user)
         return Hub(
             server=self.valves.hub_url,
             branch=_user_branch(user, self.valves.default_branch),
             timeout=self.valves.timeout_seconds,
-            session_id=_user_email(user),
+            session_id=email,
+            agent_id=email,
         )
 
     def _user_valves(self, user: Optional[dict]) -> "Filter.UserValves":

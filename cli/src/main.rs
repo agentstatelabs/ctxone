@@ -2132,7 +2132,25 @@ fn canonical_db_path() -> String {
     }
 }
 
-fn mcp_server_entry() -> Value {
+/// Convert a display name like "Claude Code" into an agent-ID slug
+/// like "claude-code". Used to stamp ctx blame output with the
+/// originating AI tool.
+fn tool_slug(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut prev_dash = false;
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash && !out.is_empty() {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    out.trim_end_matches('-').to_string()
+}
+
+fn mcp_server_entry(agent_id: &str) -> Value {
     let hub_bin = find_hub_binary();
     let db_path = canonical_db_path();
 
@@ -2143,7 +2161,7 @@ fn mcp_server_entry() -> Value {
 
     serde_json::json!({
         "command": hub_bin,
-        "args": ["--path", db_path]
+        "args": ["--path", db_path, "--agent-id", agent_id]
     })
 }
 
@@ -2154,7 +2172,12 @@ fn mcp_server_entry() -> Value {
 /// entries (linear, figma, etc.) are left untouched.
 ///
 /// Returns the serialized TOML ready to write.
-fn merge_codex_ctxone_toml(existing: &str, hub_bin: &str, db_path: &str) -> Result<String, String> {
+fn merge_codex_ctxone_toml(
+    existing: &str,
+    hub_bin: &str,
+    db_path: &str,
+    agent_id: &str,
+) -> Result<String, String> {
     use toml::Value;
 
     // Parse existing content (or start with an empty table)
@@ -2183,6 +2206,8 @@ fn merge_codex_ctxone_toml(existing: &str, hub_bin: &str, db_path: &str) -> Resu
         Value::Array(vec![
             Value::String("--path".to_string()),
             Value::String(db_path.to_string()),
+            Value::String("--agent-id".to_string()),
+            Value::String(agent_id.to_string()),
         ]),
     );
 
@@ -2330,9 +2355,13 @@ fn init_mcp(
         return Ok(());
     }
 
-    let entry = mcp_server_entry();
-
     for t in &targets {
+        // Per-tool agent ID: a slug of the detected tool name
+        // (e.g. "Claude Code" → "claude-code"). This makes
+        // `ctx blame` show the originating tool for every commit.
+        let agent_id = tool_slug(t.name);
+        let entry = mcp_server_entry(&agent_id);
+
         match t.config_type {
             ConfigType::McpJson => {
                 let mut config: Value = if t.config_path.exists() {
@@ -2385,7 +2414,12 @@ fn init_mcp(
                     String::new()
                 };
 
-                let new_content = match merge_codex_ctxone_toml(&existing, &hub_bin, &db_path) {
+                let new_content = match merge_codex_ctxone_toml(
+                    &existing,
+                    &hub_bin,
+                    &db_path,
+                    &agent_id,
+                ) {
                     Ok(s) => s,
                     Err(e) => {
                         eprintln!("  \u{2717} {}: could not merge TOML config: {}", t.name, e);
@@ -2697,13 +2731,20 @@ mod tests {
 
     #[test]
     fn codex_merge_creates_entry_in_empty_config() {
-        let out =
-            merge_codex_ctxone_toml("", "/usr/local/bin/ctxone-hub", "/home/user/.ctxone/memory.db")
-                .expect("merge should succeed on empty input");
+        let out = merge_codex_ctxone_toml(
+            "",
+            "/usr/local/bin/ctxone-hub",
+            "/home/user/.ctxone/memory.db",
+            "codex",
+        )
+        .expect("merge should succeed on empty input");
         assert!(out.contains("[mcp_servers.ctxone]"));
         assert!(out.contains("command = \"/usr/local/bin/ctxone-hub\""));
         assert!(out.contains("--path"));
         assert!(out.contains("/home/user/.ctxone/memory.db"));
+        // New: agent-id flag should be passed through
+        assert!(out.contains("--agent-id"));
+        assert!(out.contains("\"codex\""));
     }
 
     #[test]
@@ -2713,7 +2754,7 @@ mod tests {
 command = "wsl"
 args = ["npx", "-y", "mcp-remote", "https://mcp.linear.app/sse"]
 "#;
-        let out = merge_codex_ctxone_toml(existing, "/bin/ctxone-hub", "/db")
+        let out = merge_codex_ctxone_toml(existing, "/bin/ctxone-hub", "/db", "codex")
             .expect("merge should succeed");
         assert!(out.contains("[mcp_servers.linear]"));
         assert!(out.contains("[mcp_servers.ctxone]"));
@@ -2730,7 +2771,7 @@ some_other_setting = 42
 [mcp_servers.figma]
 command = "figma-mcp"
 "#;
-        let out = merge_codex_ctxone_toml(existing, "/bin/ctxone-hub", "/db")
+        let out = merge_codex_ctxone_toml(existing, "/bin/ctxone-hub", "/db", "codex")
             .expect("merge should succeed");
         assert!(out.contains("project_trust_level = \"workspace-trusted\""));
         assert!(out.contains("some_other_setting = 42"));
@@ -2741,10 +2782,11 @@ command = "figma-mcp"
     #[test]
     fn codex_merge_is_idempotent() {
         // First merge
-        let first = merge_codex_ctxone_toml("", "/bin/hub", "/db/main.db").expect("first merge");
+        let first = merge_codex_ctxone_toml("", "/bin/hub", "/db/main.db", "codex")
+            .expect("first merge");
         // Second merge on the output of the first
-        let second =
-            merge_codex_ctxone_toml(&first, "/bin/hub", "/db/main.db").expect("second merge");
+        let second = merge_codex_ctxone_toml(&first, "/bin/hub", "/db/main.db", "codex")
+            .expect("second merge");
         assert_eq!(first, second);
     }
 
@@ -2755,8 +2797,13 @@ command = "figma-mcp"
 command = "/old/path/ctxone-hub"
 args = ["--path", "/old/db"]
 "#;
-        let out = merge_codex_ctxone_toml(existing, "/new/path/ctxone-hub", "/new/db")
-            .expect("merge should succeed");
+        let out = merge_codex_ctxone_toml(
+            existing,
+            "/new/path/ctxone-hub",
+            "/new/db",
+            "codex",
+        )
+        .expect("merge should succeed");
         assert!(out.contains("/new/path/ctxone-hub"));
         assert!(out.contains("/new/db"));
         assert!(!out.contains("/old/path/ctxone-hub"));
@@ -2766,7 +2813,46 @@ args = ["--path", "/old/db"]
     #[test]
     fn codex_merge_rejects_invalid_toml() {
         let broken = "this is { not valid toml }}";
-        assert!(merge_codex_ctxone_toml(broken, "/bin/hub", "/db").is_err());
+        assert!(merge_codex_ctxone_toml(broken, "/bin/hub", "/db", "codex").is_err());
+    }
+
+    // -------- tool_slug --------
+
+    #[test]
+    fn tool_slug_lowercases_and_dashes() {
+        assert_eq!(tool_slug("Claude Code"), "claude-code");
+        assert_eq!(tool_slug("VS Code"), "vs-code");
+        assert_eq!(tool_slug("Cursor"), "cursor");
+    }
+
+    #[test]
+    fn tool_slug_collapses_punctuation_and_runs_of_whitespace() {
+        assert_eq!(tool_slug("Claude  Code (beta)"), "claude-code-beta");
+    }
+
+    #[test]
+    fn tool_slug_handles_already_slugged_names() {
+        assert_eq!(tool_slug("codex"), "codex");
+        assert_eq!(tool_slug("my-tool"), "my-tool");
+    }
+
+    #[test]
+    fn tool_slug_trims_trailing_dashes() {
+        assert_eq!(tool_slug("Tool!"), "tool");
+    }
+
+    // -------- mcp_server_entry with agent_id --------
+
+    #[test]
+    fn mcp_server_entry_includes_agent_id() {
+        let entry = mcp_server_entry("claude-code");
+        let args = entry
+            .get("args")
+            .and_then(|v| v.as_array())
+            .expect("args should be an array");
+        let arg_strs: Vec<&str> = args.iter().filter_map(|v| v.as_str()).collect();
+        assert!(arg_strs.contains(&"--agent-id"));
+        assert!(arg_strs.contains(&"claude-code"));
     }
 
     #[test]

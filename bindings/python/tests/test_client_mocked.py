@@ -403,3 +403,87 @@ def test_explicit_session_id_overrides_env(monkeypatch):
     hub.ls("/")
     _, kwargs = session.get.call_args
     assert kwargs["headers"]["X-CtxOne-Session"] == "explicit"
+
+
+# -------- agent_id (X-CtxOne-Agent header) --------
+
+def test_agent_id_defaults_to_none_and_sends_no_header(monkeypatch):
+    # Guard against any CTX_AGENT_ID left in the environment
+    monkeypatch.delenv("CTX_AGENT_ID", raising=False)
+    session = MagicMock()
+    session.get.return_value = mock_response(json_body=[])
+    hub = make_hub(session)
+
+    hub.ls("/")
+    _, kwargs = session.get.call_args
+    headers = kwargs.get("headers") or {}
+    assert "X-CtxOne-Agent" not in headers
+
+
+def test_agent_id_sent_as_header_on_get(monkeypatch):
+    monkeypatch.delenv("CTX_AGENT_ID", raising=False)
+    session = MagicMock()
+    session.get.return_value = mock_response(json_body=[])
+    hub = Hub(server="http://fake:3001", session=session, agent_id="claude-code")
+
+    hub.ls("/")
+    _, kwargs = session.get.call_args
+    assert kwargs["headers"]["X-CtxOne-Agent"] == "claude-code"
+
+
+def test_agent_id_sent_as_header_on_post(monkeypatch):
+    monkeypatch.delenv("CTX_AGENT_ID", raising=False)
+    session = MagicMock()
+    session.post.return_value = mock_response(
+        json_body={
+            "status": "ok",
+            "ref": "main",
+            "path": "/memory/x",
+            "commit_id": "sg_abc",
+        }
+    )
+    hub = Hub(server="http://fake:3001", session=session, agent_id="cursor")
+
+    hub.remember("fact")
+    _, kwargs = session.post.call_args
+    assert kwargs["headers"]["X-CtxOne-Agent"] == "cursor"
+
+
+def test_agent_id_read_from_env_when_not_explicit(monkeypatch):
+    monkeypatch.setenv("CTX_AGENT_ID", "env-agent")
+    session = MagicMock()
+    session.get.return_value = mock_response(json_body=[])
+    hub = Hub(server="http://fake:3001", session=session)
+
+    hub.ls("/")
+    _, kwargs = session.get.call_args
+    assert kwargs["headers"]["X-CtxOne-Agent"] == "env-agent"
+
+
+def test_explicit_agent_id_overrides_env(monkeypatch):
+    monkeypatch.setenv("CTX_AGENT_ID", "env-agent")
+    session = MagicMock()
+    session.get.return_value = mock_response(json_body=[])
+    hub = Hub(server="http://fake:3001", session=session, agent_id="explicit-agent")
+
+    hub.ls("/")
+    _, kwargs = session.get.call_args
+    assert kwargs["headers"]["X-CtxOne-Agent"] == "explicit-agent"
+
+
+def test_both_session_and_agent_headers_sent_together(monkeypatch):
+    monkeypatch.delenv("CTX_AGENT_ID", raising=False)
+    monkeypatch.delenv("CTX_SESSION_ID", raising=False)
+    session = MagicMock()
+    session.get.return_value = mock_response(json_body=[])
+    hub = Hub(
+        server="http://fake:3001",
+        session=session,
+        session_id="alice@example.com",
+        agent_id="claude-code",
+    )
+
+    hub.ls("/")
+    _, kwargs = session.get.call_args
+    assert kwargs["headers"]["X-CtxOne-Session"] == "alice@example.com"
+    assert kwargs["headers"]["X-CtxOne-Agent"] == "claude-code"

@@ -40,6 +40,7 @@ class Hub:
         timeout: float = 30.0,
         session: requests.Session | None = None,
         session_id: str | None = None,
+        agent_id: str | None = None,
     ) -> None:
         """Create a Hub client.
 
@@ -57,6 +58,13 @@ class Hub:
                 process can keep their stats separate. Defaults to the
                 `CTX_SESSION_ID` env var, or `None` (Hub falls back to
                 the `"default"` session).
+            agent_id: Identity recorded on every commit this client
+                writes. The Hub stamps commits with this string so
+                ``ctx blame`` can show "who wrote this fact" — e.g.
+                ``"claude-code"``, ``"cursor"``, or a user email.
+                Sent as the ``X-CtxOne-Agent`` header. Defaults to the
+                ``CTX_AGENT_ID`` env var, or ``None`` (Hub falls back
+                to ``"ctxone"``).
         """
         self.server = (
             server
@@ -67,6 +75,7 @@ class Hub:
         self.timeout = timeout
         self._session = session or requests.Session()
         self.session_id = session_id or os.environ.get("CTX_SESSION_ID") or None
+        self.agent_id = agent_id or os.environ.get("CTX_AGENT_ID") or None
 
     # -- Health --------------------------------------------------------
 
@@ -415,10 +424,12 @@ class Hub:
     # -- HTTP helpers (private) ---------------------------------------
 
     def _headers(self) -> dict[str, str]:
-        """Build the request header dict with X-CtxOne-Session attached."""
+        """Build the request header dict with session/agent attached."""
         headers: dict[str, str] = {}
         if self.session_id:
             headers["X-CtxOne-Session"] = self.session_id
+        if self.agent_id:
+            headers["X-CtxOne-Agent"] = self.agent_id
         return headers
 
     def _get(self, path: str, params: dict[str, str] | None = None) -> Any:

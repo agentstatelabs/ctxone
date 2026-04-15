@@ -63,6 +63,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(600);
+    // MCP-mode agent ID. The tool that spawns ctxone-hub (Claude
+    // Code, Cursor, Codex, etc.) passes --agent-id <its-name> so
+    // every commit made via this MCP connection is attributed to
+    // that tool in blame history. Defaults to "ctxone" when unset.
+    let mut agent_id: String = std::env::var("CTX_AGENT_ID")
+        .unwrap_or_else(|_| "ctxone".to_string());
 
     let mut i = 1;
     while i < args.len() {
@@ -110,6 +116,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     rate_limit_rpm = args[i].parse().unwrap_or(600);
                 }
             }
+            "--agent-id" => {
+                i += 1;
+                if i < args.len() {
+                    agent_id = args[i].clone();
+                }
+            }
             "--help" | "-h" => {
                 // --help output stays as plain eprintln — it's the classic
                 // usage-on-stderr contract, not a log line.
@@ -134,6 +146,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("      --port <PORT>     HTTP port (default: 3001, requires --http)");
                 eprintln!(
                     "      --rate-limit-rpm <N>  Per-IP rate limit (default: 600 req/min; 0 disables)"
+                );
+                eprintln!(
+                    "      --agent-id <NAME>    Agent ID recorded on commits (default: \"ctxone\")"
                 );
                 eprintln!("  -h, --help            Print help");
                 eprintln!();
@@ -249,6 +264,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         info!(
             transport = "stdio",
+            agent_id = %agent_id,
             "MCP server waiting for client (tools: remember, recall, prime, context, \
              summarize_session, what_changed_since, why_did_we)"
         );
@@ -257,9 +273,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .enable_all()
             .build()?
             .block_on(async {
-                let service = memory_tools::CtxOneServer::new(repo)
-                    .serve(rmcp::transport::stdio())
-                    .await
+                let service =
+                    memory_tools::CtxOneServer::with_agent_id(repo, agent_id.clone())
+                        .serve(rmcp::transport::stdio())
+                        .await
                     .map_err(|e| {
                         error!(error = %e, "MCP server failed to start");
                         format!("MCP server error: {}", e)

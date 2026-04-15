@@ -424,6 +424,67 @@ Write endpoints (`remember`, `forget`, `prime`) don't record tokens,
 so writing to a new session ID without ever reading from it leaves
 the session invisible to the registry. Do one `recall` to materialize it.
 
+## Per-tool agent IDs
+
+`ctx blame` shows a "who" column for every fact in the graph — the
+agent ID that was stamped on the commit. By default that's
+`"ctxone"`, which is useful for "this came from CtxOne" but tells
+you nothing about *which* tool wrote it. T2 makes agent IDs
+per-tool so you can tell Claude Code's writes from Cursor's from
+Open WebUI's.
+
+### How the agent ID is resolved
+
+Highest priority wins:
+
+1. **HTTP request**: `X-CtxOne-Agent: <name>` header on the request
+2. **MCP stdio**: `--agent-id <name>` flag passed when spawning
+   `ctxone-hub` as a subprocess (or `CTX_AGENT_ID` env var)
+3. **Fallback**: `"ctxone"`
+
+### Setting the agent ID from clients
+
+**Python client:**
+
+```python
+from ctxone import Hub
+hub = Hub(agent_id="my-script")     # or CTX_AGENT_ID env var
+hub.remember("...")                 # blame shows "my-script"
+```
+
+**Raw HTTP:**
+
+```bash
+curl -H "X-CtxOne-Agent: my-script" \
+     -H "Content-Type: application/json" \
+     -d '{"fact":"..."}' \
+     http://localhost:3001/api/memory/remember
+```
+
+**MCP stdio (what AI coding tools use):** `ctx init` writes
+MCP config files like `.mcp.json` and `.cursor/mcp.json` with
+`--agent-id <slug>` already baked in — Claude Code writes show up
+as `claude-code`, Cursor as `cursor`, VS Code as `vs-code`, etc.
+If you have an old config that predates T2, re-run `ctx init` to
+upgrade it.
+
+**Open WebUI plugin:** the bundled Tool and Filter automatically
+set both `X-CtxOne-Agent` and `X-CtxOne-Session` to the user's
+email (or name/id/fallback), so a multi-user install gets per-user
+attribution for free.
+
+### "I ran `ctx init` a while ago and blame still shows `ctxone`"
+
+Your MCP configs predate T2. Re-run:
+
+```bash
+ctx init
+```
+
+which will rewrite `.mcp.json` / `.cursor/mcp.json` / `.vscode/mcp.json`
+/ Codex's `config.toml` etc. with `--agent-id <tool-slug>` in the
+args, then restart your AI tool so it picks up the new config.
+
 ## Still stuck?
 
 - Run `ctx doctor` — it catches most infrastructure problems automatically.

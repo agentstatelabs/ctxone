@@ -86,6 +86,17 @@ fn post_with_session(uri: &str, session: &str, body: Value) -> Request<Body> {
         .unwrap()
 }
 
+/// Build a POST with an `X-CtxOne-Agent` header attached.
+fn post_with_agent(uri: &str, agent: &str, body: Value) -> Request<Body> {
+    Request::builder()
+        .uri(uri)
+        .method("POST")
+        .header("content-type", "application/json")
+        .header("x-ctxone-agent", agent)
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap()
+}
+
 // -------- Health --------
 
 #[tokio::test]
@@ -985,6 +996,149 @@ async fn remember_with_session_header_does_not_leak_into_default() {
     let (_, default) =
         call_json(router, get("/api/stats/tokens/default")).await;
     assert_eq!(default["session_tokens_used"].as_u64().unwrap_or(99), 0);
+}
+
+// -------- Per-tool agent IDs (T2) --------
+
+#[tokio::test]
+async fn remember_without_agent_header_defaults_to_ctxone() {
+    let router = test_router();
+
+    // Write a fact without an X-CtxOne-Agent header
+    let (_, body) = call_json(
+        router.clone(),
+        post_json(
+            "/api/memory/remember",
+            json!({"fact": "default agent test", "context": "test"}),
+        ),
+    )
+    .await;
+    let path = body["path"].as_str().unwrap().to_string();
+
+    // Look at the log to confirm agent_id is "ctxone"
+    let (_, log) = call_json(router, get("/api/log/main?limit=5")).await;
+    let commits = log.as_array().unwrap();
+    let matching = commits.iter().find(|c| {
+        c["intent"]["description"]
+            .as_str()
+            .map(|d| d.contains("default agent test"))
+            .unwrap_or(false)
+    });
+    assert!(
+        matching.is_some(),
+        "expected a commit with our fact, got: {:?}",
+        commits
+    );
+    assert_eq!(
+        matching.unwrap()["agent_id"].as_str().unwrap(),
+        "ctxone",
+        "default agent should be 'ctxone', got commit: {:?}",
+        matching.unwrap()
+    );
+    // Silence unused-variable warning in the non-assertion path
+    let _ = path;
+}
+
+#[tokio::test]
+async fn remember_with_agent_header_is_recorded_in_blame() {
+    let router = test_router();
+
+    call_json(
+        router.clone(),
+        post_with_agent(
+            "/api/memory/remember",
+            "claude-code",
+            json!({"fact": "per-tool agent test", "context": "test"}),
+        ),
+    )
+    .await;
+
+    let (_, log) = call_json(router, get("/api/log/main?limit=5")).await;
+    let commits = log.as_array().unwrap();
+    let matching = commits.iter().find(|c| {
+        c["intent"]["description"]
+            .as_str()
+            .map(|d| d.contains("per-tool agent test"))
+            .unwrap_or(false)
+    });
+    assert!(matching.is_some(), "expected the commit to exist");
+    assert_eq!(
+        matching.unwrap()["agent_id"].as_str().unwrap(),
+        "claude-code",
+        "agent_id header should override default"
+    );
+}
+
+#[tokio::test]
+async fn forget_records_agent_id_on_rollback_commit() {
+    let router = test_router();
+
+    // Write a fact as cursor
+    let (_, body) = call_json(
+        router.clone(),
+        post_with_agent(
+            "/api/memory/remember",
+            "cursor",
+            json!({"fact": "cursor's fact", "context": "test"}),
+        ),
+    )
+    .await;
+    let path = body["path"].as_str().unwrap().to_string();
+
+    // Forget it as vscode — rollback should be attributed to vscode,
+    // NOT cursor, because agent_id is per-request.
+    call_json(
+        router.clone(),
+        post_with_agent(
+            "/api/memory/forget",
+            "vs-code",
+            json!({"path": path, "reason": "cleanup by vscode"}),
+        ),
+    )
+    .await;
+
+    let (_, log) = call_json(router, get("/api/log/main?limit=10")).await;
+    let commits = log.as_array().unwrap();
+
+    // Find the rollback commit
+    let rollback = commits
+        .iter()
+        .find(|c| c["intent"]["category"].as_str() == Some("Rollback"));
+    assert!(rollback.is_some(), "expected a Rollback commit");
+    assert_eq!(rollback.unwrap()["agent_id"].as_str().unwrap(), "vs-code");
+
+    // And the original write is still attributed to cursor
+    let original = commits
+        .iter()
+        .find(|c| c["intent"]["description"].as_str() == Some("cursor's fact"));
+    assert!(original.is_some(), "expected the original commit");
+    assert_eq!(original.unwrap()["agent_id"].as_str().unwrap(), "cursor");
+}
+
+#[tokio::test]
+async fn empty_agent_header_falls_back_to_default() {
+    let router = test_router();
+
+    // Empty/whitespace agent header should be ignored, not cause a failure
+    call_json(
+        router.clone(),
+        post_with_agent(
+            "/api/memory/remember",
+            "   ",
+            json!({"fact": "empty agent header test", "context": "test"}),
+        ),
+    )
+    .await;
+
+    let (_, log) = call_json(router, get("/api/log/main?limit=5")).await;
+    let commits = log.as_array().unwrap();
+    let matching = commits.iter().find(|c| {
+        c["intent"]["description"]
+            .as_str()
+            .map(|d| d.contains("empty agent header test"))
+            .unwrap_or(false)
+    });
+    assert_eq!(matching.unwrap()["agent_id"].as_str().unwrap(), "ctxone");
 }
 
 // -------- Token savings metadata --------
