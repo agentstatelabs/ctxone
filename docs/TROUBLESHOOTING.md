@@ -224,6 +224,64 @@ The Hub will create its tables on first run.
 
 ---
 
+## Schema migrations
+
+CtxOne tracks its own **schema version** separately from the underlying
+storage (SQLite / Postgres / in-memory). Whenever we change the *shape*
+of what CtxOne writes to the graph — path conventions, structured field
+layouts, session formats — the schema version is bumped and migrations
+run on Hub startup.
+
+### What happens on startup
+
+The Hub reads `/ctxone/schema_version` from the graph and compares it to
+the version baked into the running binary.
+
+- **Fresh graph:** writes the current version, no data to migrate.
+- **Graph at current version:** no-op (logged at `debug`).
+- **Graph behind current version:** runs each pending migration in order
+  and bumps the recorded version. Each migration logs at `info`.
+- **Graph ahead of current version:** Hub refuses to start. This protects
+  you from silent data corruption if you downgrade `ctxone-hub` but keep
+  an old graph.
+
+Example startup logs for a fresh install:
+
+```
+INFO ctxone_hub::migrations: fresh graph; initializing schema version to=1
+INFO ctxone_hub::migrations: migration 001: initialize schema version=1
+INFO ctxone_hub::migrations: migrations complete version=1
+```
+
+And for a re-boot against the same graph:
+
+```
+DEBUG ctxone_hub::migrations: schema version is current, no migrations needed version=1
+```
+
+### Hub refuses to start: "graph schema version X is newer than this Hub"
+
+You downgraded `ctxone-hub` but kept a graph written by a newer version.
+Options:
+
+1. **Upgrade back:** re-run `install.sh` or `install.ps1` to get the
+   latest Hub, or `docker pull ghcr.io/ctxone/ctxone:latest`.
+2. **Start fresh:** delete `~/.ctxone/memory.db` (or `%APPDATA%\ctxone\memory.db`
+   on Windows) and re-run. You lose the graph but get a clean start on
+   the old binary.
+3. **Keep both:** point the older Hub at a different `--path` so the
+   two graphs don't interfere.
+
+### Inspecting the schema version
+
+```bash
+ctx get /ctxone/schema_version
+```
+
+Outputs the integer version. The write is recorded under the
+`ctxone-migration` agent with a `Migrate` intent, so `ctx blame
+/ctxone/schema_version` shows exactly when each version bump happened.
+
 ## Enabling verbose logs
 
 The Hub uses the `tracing` crate. Set `RUST_LOG` before starting it to

@@ -13,7 +13,7 @@
 //!     RUST_LOG=ctxone_hub=trace ctxone-hub --http
 //! All logs go to stderr so they never corrupt the MCP stdio JSON stream.
 
-use ctxone_hub::{http, memory_tools};
+use ctxone_hub::{http, memory_tools, migrations};
 
 use std::sync::Arc;
 
@@ -184,6 +184,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     repo.init()?;
+
+    // Run CtxOne schema migrations. Refuses to start if the graph was
+    // written by a newer Hub binary (prevents silent data corruption on
+    // accidental downgrade).
+    if let Err(e) = migrations::run_migrations(&repo) {
+        error!(error = %e, "migration failed, aborting startup");
+        std::process::exit(1);
+    }
 
     if http_mode {
         let addr = format!("0.0.0.0:{}", http_port);
