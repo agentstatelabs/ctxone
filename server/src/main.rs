@@ -216,12 +216,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     repo.init()?;
 
-    // Run CtxOne schema migrations. Refuses to start if the graph was
+    // Run CTXone schema migrations. Refuses to start if the graph was
     // written by a newer Hub binary (prevents silent data corruption on
     // accidental downgrade).
     if let Err(e) = migrations::run_migrations(&repo) {
         error!(error = %e, "migration failed, aborting startup");
         std::process::exit(1);
+    }
+
+    // Report AGENTS.md presence so operators can see at a glance
+    // whether the Hub is serving pinned agent guidance. This is the
+    // disclosure surface for the `ctx agents install` flow — if the
+    // file is primed, it shows up here. If it isn't, the line tells
+    // the operator exactly how to prime it.
+    let agents_paths = repo
+        .list_paths("main", "/memory/pinned/ctxone-agents", Some(50))
+        .unwrap_or_default();
+    let agents_sections = agents_paths
+        .iter()
+        .filter(|p| p.ends_with("/title"))
+        .count();
+    if agents_sections > 0 {
+        info!(
+            sections = agents_sections,
+            path = "/memory/pinned/ctxone-agents",
+            "AGENTS.md: primed"
+        );
+    } else {
+        info!(
+            "AGENTS.md: not primed — run `ctx agents install` to pin the agent guidance"
+        );
     }
 
     if http_mode {

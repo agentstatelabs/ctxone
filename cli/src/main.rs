@@ -5,6 +5,19 @@ use std::path::PathBuf;
 
 // -- Exit codes (sysexits.h-style) --
 #[allow(dead_code)]
+/// The canonical AGENTS.md shipped with this build of `ctx`. Embedded
+/// at compile time so there's no "missing file" failure mode and no
+/// filesystem lookup on startup. The `ctx agents install` subcommand
+/// reads this (or a user-supplied override via `--file`), writes it to
+/// ~/.config/ctxone/AGENTS.md if no local copy exists, and then primes
+/// it into the Hub as pinned memory. See `docs/AGENTS.md` for the
+/// source of truth.
+const EMBEDDED_AGENTS_MD: &str = include_str!("../../docs/AGENTS.md");
+
+/// Source name used when priming AGENTS.md into the Hub. Sections of
+/// the file end up under `/memory/pinned/ctxone-agents/<slug>/`.
+const AGENTS_SOURCE: &str = "ctxone-agents";
+
 const EX_OK: i32 = 0;
 #[allow(dead_code)]
 const EX_USAGE: i32 = 64; // bad arguments (clap handles this)
@@ -370,7 +383,7 @@ enum Commands {
         #[command(subcommand)]
         action: ConfigAction,
     },
-    /// Auto-detect and configure AI tools with CtxOne MCP server
+    /// Auto-detect and configure AI tools with CTXone MCP server
     Init {
         /// Install globally (user-level config) vs project-only
         #[arg(long)]
@@ -389,7 +402,56 @@ enum Commands {
         /// Show what would be written without writing
         #[arg(long)]
         dry_run: bool,
+        /// Skip the interactive prompt to install AGENTS.md guidance.
+        /// Useful in scripts that want only the MCP config step.
+        #[arg(long)]
+        no_agents: bool,
     },
+    /// Manage the AGENTS.md guidance file — a short, pinned document
+    /// that teaches AI tools how to use CTXone effectively. See
+    /// `ctx agents show` for the full text. Nothing is installed
+    /// automatically; `install` always prompts unless `--yes` is passed.
+    Agents {
+        #[command(subcommand)]
+        action: AgentsAction,
+    },
+}
+
+/// Subcommands under `ctx agents`. Everything here operates on the
+/// user-editable `~/.config/ctxone/AGENTS.md` file and the pinned
+/// memory path `/memory/pinned/ctxone-agents/*`.
+#[derive(Subcommand)]
+enum AgentsAction {
+    /// Write AGENTS.md to disk (if not present) and prime it as
+    /// pinned memory in the Hub. Shows the full content first and
+    /// asks for confirmation, unless `--yes` is passed.
+    Install {
+        /// Use a custom AGENTS.md file instead of the embedded default.
+        /// Useful when you've already edited your copy and want to
+        /// re-prime after changes.
+        #[arg(long)]
+        file: Option<String>,
+        /// Skip the confirmation prompt. Required for non-interactive
+        /// scripts.
+        #[arg(long)]
+        yes: bool,
+        /// Show the file content and exit without priming.
+        #[arg(long)]
+        show: bool,
+    },
+    /// Print the current AGENTS.md content. If you've edited your
+    /// local copy at ~/.config/ctxone/AGENTS.md, prints that;
+    /// otherwise prints the embedded default.
+    Show,
+    /// Report whether AGENTS.md is primed in the Hub. Queries
+    /// /memory/pinned/ctxone-agents and reports section count + where
+    /// the disk copy lives.
+    Status,
+    /// Remove the primed AGENTS.md from the Hub's memory graph. Does
+    /// NOT delete the local file — use `rm ~/.config/ctxone/AGENTS.md`
+    /// for that. The `forget` call writes a rollback commit so the
+    /// prior content stays in blame history.
+    Remove,
 }
 
 // -- Output / error helpers --
@@ -1340,12 +1402,324 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tool,
             config_path,
             dry_run,
+            no_agents,
         } => {
+            // Grab the fields agents_install_prompt needs BEFORE the
+            // match consumes `cli.command` via destructuring. We only
+            // need server + branch + format for the Agents handlers,
+            // and the other arms don't touch them.
+            let server = cli.server.clone();
+            let branch = cli.branch.clone();
+            let format = cli.format;
             init_mcp(global, tool, config_path, dry_run)?;
+            // After MCP configs are written, optionally prime the
+            // AGENTS.md guidance into the Hub. Skipped in --dry-run
+            // (we don't want a dry run to actually write to the
+            // graph) and when the user passed --no-agents.
+            if !dry_run && !no_agents {
+                println!();
+                if let Err(e) = agents_install_prompt(&server, &branch, format).await {
+                    eprintln!("  \u{2717} agents: {}", e);
+                }
+            }
+        }
+        Commands::Agents { action } => {
+            let server = cli.server.clone();
+            let branch = cli.branch.clone();
+            let format = cli.format;
+            handle_agents(action, &server, &branch, format).await?;
         }
     }
 
     Ok(())
+}
+
+// -- Agents command implementation --
+
+/// Dispatch for `ctx agents <subcommand>`. Takes server/branch/format
+/// directly (not &Cli) so callers can grab these fields before the
+/// outer match consumes `cli.command`.
+async fn handle_agents(
+    action: AgentsAction,
+    server: &str,
+    branch: &str,
+    format: OutputFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match action {
+        AgentsAction::Show => agents_show()?,
+        AgentsAction::Status => agents_status(server, branch, format).await?,
+        AgentsAction::Remove => agents_remove(server, branch).await?,
+        AgentsAction::Install { file, yes, show } => {
+            agents_install(file, yes, show, server, branch).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Print the AGENTS.md content currently in effect — from disk if
+/// the user has edited their local copy, otherwise the embedded
+/// default — prefixed with which source it came from.
+fn agents_show() -> Result<(), Box<dyn std::error::Error>> {
+    let (content, display_source) = load_agents_md(None).map_err(|e| -> Box<dyn std::error::Error> {
+        e.into()
+    })?;
+    println!("# AGENTS.md source: {}", display_source);
+    println!();
+    println!("{}", content);
+    Ok(())
+}
+
+/// Report whether AGENTS.md has been primed in the Hub's memory graph.
+/// Queries `/api/state/<ref>/paths?prefix=/memory/pinned/ctxone-agents`
+/// and reports a section count and the local disk file path.
+async fn agents_status(
+    server: &str,
+    branch: &str,
+    format: OutputFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let disk_path = agents_md_path();
+    let disk_status = if disk_path.exists() {
+        format!("present at {}", disk_path.display())
+    } else {
+        "not written (will use embedded default)".to_string()
+    };
+
+    let url = format!(
+        "{}/api/state/{}/paths?prefix=/memory/pinned/{}",
+        server, branch, AGENTS_SOURCE
+    );
+    let resp = match reqwest::get(&url).await {
+        Ok(r) => r,
+        Err(e) => unreachable_exit(server, e),
+    };
+    if !resp.status().is_success() {
+        http_error_exit(resp, "status query failed").await;
+    }
+    let paths: Vec<String> = resp.json().await?;
+    let section_count = paths
+        .iter()
+        .filter(|p| p.ends_with("/title") || p.ends_with("/body"))
+        .count()
+        / 2;
+
+    emit(
+        format,
+        &serde_json::json!({
+            "disk_path": disk_path.display().to_string(),
+            "disk_exists": disk_path.exists(),
+            "primed_sections": section_count,
+            "ref": branch,
+            "source": AGENTS_SOURCE,
+        }),
+        |_| {
+            println!("AGENTS.md status");
+            println!("  Disk:     {}", disk_status);
+            if section_count > 0 {
+                println!(
+                    "  Primed:   {} sections under /memory/pinned/{}",
+                    section_count, AGENTS_SOURCE
+                );
+                println!("  Branch:   {}", branch);
+                println!();
+                println!("  Inspect:  ctx ls /memory/pinned/{}", AGENTS_SOURCE);
+                println!(
+                    "            ctx blame /memory/pinned/{}/<slug>/body",
+                    AGENTS_SOURCE
+                );
+            } else {
+                println!("  Primed:   NOT primed on branch {}", branch);
+                println!();
+                println!("  Run `ctx agents install` to prime the guidance.");
+            }
+        },
+    );
+    Ok(())
+}
+
+/// Remove the primed AGENTS.md from the Hub (via forget). Does not
+/// touch the local file. Blame history preserves the prior content.
+async fn agents_remove(
+    server: &str,
+    branch: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let paths_url = format!(
+        "{}/api/state/{}/paths?prefix=/memory/pinned/{}",
+        server, branch, AGENTS_SOURCE
+    );
+    let paths_resp = match reqwest::get(&paths_url).await {
+        Ok(r) => r,
+        Err(e) => unreachable_exit(server, e),
+    };
+    if !paths_resp.status().is_success() {
+        http_error_exit(paths_resp, "list paths failed").await;
+    }
+    let paths: Vec<String> = paths_resp.json().await?;
+
+    if paths.is_empty() {
+        println!(
+            "AGENTS.md is not primed on branch {}. Nothing to remove.",
+            branch
+        );
+        return Ok(());
+    }
+
+    let client = reqwest::Client::new();
+    let mut forgotten = 0usize;
+    for path in &paths {
+        let body = serde_json::json!({
+            "path": path,
+            "reason": "ctx agents remove",
+            "ref": branch,
+        });
+        let resp = client
+            .post(format!("{}/api/memory/forget", server))
+            .json(&body)
+            .send()
+            .await;
+        match resp {
+            Ok(r) if r.status().is_success() => forgotten += 1,
+            Ok(r) => {
+                eprintln!("  \u{2717} forget {}: HTTP {}", path, r.status());
+            }
+            Err(e) => unreachable_exit(server, e),
+        }
+    }
+
+    println!(
+        "Removed {} AGENTS.md path(s) from /memory/pinned/{} on branch {}.",
+        forgotten, AGENTS_SOURCE, branch
+    );
+    println!(
+        "The local file at {} is untouched.",
+        agents_md_path().display()
+    );
+    println!("Prior content is still in blame history.");
+    Ok(())
+}
+
+/// The interactive install flow. Writes the file to disk (if absent),
+/// shows the content unless `--yes`, prompts for confirmation, and
+/// primes the sections via the Hub's prime endpoint.
+async fn agents_install(
+    file: Option<String>,
+    yes: bool,
+    show: bool,
+    server: &str,
+    branch: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (content, source_desc) = load_agents_md(file.as_deref())
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+
+    if show {
+        // Preview mode — dump the content and exit without priming.
+        println!("# AGENTS.md preview");
+        println!("# Source: {}", source_desc);
+        println!("# (use `ctx agents install` without --show to prime it)");
+        println!();
+        println!("{}", content);
+        return Ok(());
+    }
+
+    // Persist to disk if the user doesn't already have a local copy,
+    // so subsequent `ctx agents show` reads from the editable file
+    // rather than the frozen embedded default.
+    let disk_path = write_agents_md_if_absent(&content)
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+
+    if !yes {
+        println!("CTXone ships a short guidance file that teaches AI tools how");
+        println!("to use the Hub effectively. It will be pinned to your memory");
+        println!("graph so every recall response includes it.");
+        println!();
+        println!("  File:          {}", disk_path.display());
+        println!("  Primed under:  /memory/pinned/{}", AGENTS_SOURCE);
+        println!("  Branch:        {}", branch);
+        println!("  Visible in:    ctx ls /memory/pinned/{}", AGENTS_SOURCE);
+        println!("                 ctx blame <path>");
+        println!("                 CTXone Lens browse view");
+        println!("  Removable:     ctx agents remove");
+        println!();
+        print!("Prime AGENTS.md now? [Y/n/show] ");
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        let answer = input.trim().to_lowercase();
+        match answer.as_str() {
+            "" | "y" | "yes" => {}
+            "show" => {
+                println!();
+                println!("--- AGENTS.md ---");
+                println!("{}", content);
+                println!("--- end ---");
+                println!();
+                print!("Prime AGENTS.md now? [Y/n] ");
+                std::io::stdout().flush().ok();
+                let mut again = String::new();
+                std::io::stdin().read_line(&mut again)?;
+                let a = again.trim().to_lowercase();
+                if !(a.is_empty() || a == "y" || a == "yes") {
+                    println!("Skipped. Run `ctx agents install` later to prime.");
+                    return Ok(());
+                }
+            }
+            _ => {
+                println!("Skipped. Run `ctx agents install` later to prime.");
+                return Ok(());
+            }
+        }
+    }
+
+    // Parse into sections and prime.
+    let sections = parse_markdown_sections(&content);
+    if sections.is_empty() {
+        eprintln!("AGENTS.md has no H1/H2 sections — nothing to prime.");
+        std::process::exit(EX_DATAERR);
+    }
+
+    let body = serde_json::json!({
+        "source": AGENTS_SOURCE,
+        "pinned": true,
+        "sections": sections,
+        "ref": branch,
+    });
+
+    let resp = match reqwest::Client::new()
+        .post(format!("{}/api/memory/prime", server))
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => unreachable_exit(server, e),
+    };
+    if !resp.status().is_success() {
+        http_error_exit(resp, "prime failed").await;
+    }
+    let parsed: Value = resp.json().await?;
+    let count = parsed
+        .get("sections_written")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+
+    println!("\u{2713} Primed {} AGENTS.md sections under /memory/pinned/{}", count, AGENTS_SOURCE);
+    println!("  Disk file: {}", disk_path.display());
+    println!("  Edit the file then re-run `ctx agents install` to update.");
+    Ok(())
+}
+
+/// Called from the end of `ctx init` to optionally prime AGENTS.md.
+/// Wraps `agents_install` in a brief summary header so the user knows
+/// why the prompt is showing up after the MCP config step.
+async fn agents_install_prompt(
+    server: &str,
+    branch: &str,
+    _format: OutputFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("---");
+    println!();
+    agents_install(None, false, false, server, branch).await
 }
 
 fn urlencoding(s: &str) -> String {
@@ -2104,7 +2478,63 @@ fn parse_markdown_sections(content: &str) -> Vec<Section> {
     sections
 }
 
-/// Canonical path where CtxOne stores its default memory database.
+/// Path where the user's editable AGENTS.md lives.
+///
+/// On Unix this is `~/.config/ctxone/AGENTS.md`. On Windows this is
+/// `%APPDATA%\ctxone\AGENTS.md`. Falls back to `./AGENTS.md` only if
+/// the dirs crate can't resolve a config dir, which should never
+/// happen in practice.
+fn agents_md_path() -> PathBuf {
+    let base = if cfg!(target_os = "windows") {
+        dirs::config_dir().or_else(dirs::data_dir)
+    } else {
+        dirs::config_dir()
+    };
+    match base {
+        Some(dir) => dir.join("ctxone").join("AGENTS.md"),
+        None => PathBuf::from("./AGENTS.md"),
+    }
+}
+
+/// Read AGENTS.md from disk if it exists, otherwise return the
+/// compile-time embedded default. The disk file takes precedence
+/// so user edits survive upgrades — the only way to revert to the
+/// embedded default is to delete the local file.
+fn load_agents_md(override_path: Option<&str>) -> Result<(String, String), String> {
+    let path = match override_path {
+        Some(p) => PathBuf::from(p),
+        None => agents_md_path(),
+    };
+
+    if path.exists() {
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+        Ok((content, path.display().to_string()))
+    } else {
+        Ok((
+            EMBEDDED_AGENTS_MD.to_string(),
+            format!("(embedded default — will be written to {})", path.display()),
+        ))
+    }
+}
+
+/// Write AGENTS.md to disk if no local copy exists yet. Does NOT
+/// overwrite an existing file — user edits are sacred.
+fn write_agents_md_if_absent(content: &str) -> Result<PathBuf, String> {
+    let path = agents_md_path();
+    if path.exists() {
+        return Ok(path);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("mkdir {}: {}", parent.display(), e))?;
+    }
+    std::fs::write(&path, content)
+        .map_err(|e| format!("write {}: {}", path.display(), e))?;
+    Ok(path)
+}
+
+/// Canonical path where CTXone stores its default memory database.
 ///
 /// On Unix this is `~/.ctxone/memory.db`. On Windows this is
 /// `%APPDATA%\ctxone\memory.db` (typically

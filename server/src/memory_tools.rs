@@ -728,7 +728,11 @@ impl CtxOneServer {
     }
 
     #[tool(
-        description = "Store a fact, preference, or decision in agent memory. Facts are searchable and carry confidence scores based on importance."
+        description = "Store a fact, preference, or decision in long-term agent memory so it survives sessions, branches, and tool switches. \
+        \
+        CALL THIS PROACTIVELY whenever the user tells you something worth keeping: an architectural decision (\"we use SQLite, not Postgres\"), a team convention (\"BSL-1.1 for new repos\"), a personal preference (\"tabs, not spaces\"), a constraint (\"migrations need backups\"), or a reason behind a choice (\"we picked X because Y\"). You do not need to ask permission — if the user said it, it's worth remembering. \
+        \
+        Importance maps to confidence: 'high' (0.95) for explicit decisions and policies, 'medium' (0.7, default) for conventions and preferences, 'low' (0.4) for trivia and speculation. When unsure, save it. `remember` is cheap; forgetting something the user already told you is expensive."
     )]
     async fn remember(&self, params: Parameters<RememberParams>) -> String {
         let p = params.0;
@@ -766,7 +770,11 @@ impl CtxOneServer {
     }
 
     #[tool(
-        description = "Retrieve relevant memories for a topic. Always includes pinned context first, then topic-matched facts, respecting a token budget. Response is JSON including token savings metadata."
+        description = "Retrieve relevant memories for a topic. Always includes pinned context first, then topic-matched facts, capped at a token budget. Response is JSON including token savings metadata. \
+        \
+        CALL THIS AT THE START OF ANY SUBSTANTIAL TASK to load prior context the user already established: decisions, conventions, architectural choices, preferences, rules. Recall is budget-capped and near-free — it costs tokens in the low hundreds — so there is essentially zero downside to calling it before writing substantial code. \
+        \
+        Pass a SPECIFIC topic, not 'context'. Good topics are domain words ('authentication', 'deployment', 'billing'), module names, or decision words from the user's prompt ('licensing', 'database schema'). Every response includes `ctx_savings_ratio`; if it's below 2× your topic was too broad — try a narrower one."
     )]
     async fn recall(&self, params: Parameters<RecallParams>) -> String {
         let p = params.0;
@@ -775,7 +783,9 @@ impl CtxOneServer {
     }
 
     #[tool(
-        description = "Load markdown sections as pinned or primed memories. Pinned memories are always included in every recall response (critical context). Sections should be pre-parsed — each entry has a title and body."
+        description = "Load pre-parsed markdown sections as pinned or primed memories. Pinned memories are always included in every `recall` response — use pinning for critical, always-relevant context like licensing rules, architectural decisions, or coding conventions. Primed (non-pinned) memories are searchable like normal facts. \
+        \
+        CALL THIS WHEN the user points you at a README, an ARCHITECTURE doc, a style guide, or any substantial markdown file whose contents should influence every future decision. Sections should be pre-parsed — each entry has a title (the H1/H2 heading) and body (the content below it). Reuse the same `source` name when re-priming updated content; sections are keyed by source+slug so updates are idempotent."
     )]
     async fn prime(&self, params: Parameters<PrimeParams>) -> String {
         let p = params.0;
@@ -799,7 +809,9 @@ impl CtxOneServer {
     }
 
     #[tool(
-        description = "Load the full context tree for a specific project or domain. Returns all stored state under that project path."
+        description = "Load the full context tree for a specific project or domain. Returns every stored value under `/memory/projects/<project>/` as a structured blob. \
+        \
+        CALL THIS WHEN you're starting work on a project you've touched before and want the full picture at once — not a budget-capped slice. This is a heavier alternative to `recall`: it returns EVERYTHING under the project path, no token budget applied. Use it sparingly — for a fresh session on a mature project, prefer `recall(topic=<project>)` which costs a fraction of the tokens. Reach for `context` only when the user explicitly asks for the full project state or when recall is giving you too narrow a view."
     )]
     async fn context(&self, params: Parameters<ContextParams>) -> String {
         let p = params.0;
@@ -818,7 +830,9 @@ impl CtxOneServer {
     }
 
     #[tool(
-        description = "End-of-session commit capturing what was learned and decided. Call this before closing a session to persist its knowledge."
+        description = "End-of-session commit capturing what was learned and decided across a substantial working session. Stores key points (observed facts), decisions (choices made), and a summary, all attributable via blame. \
+        \
+        CALL THIS AT THE END of any real working session where the user and you figured something out together — a debugging run, an architectural discussion, a multi-step refactor. Don't call it for quick Q&A or trivial lookups; only for sessions where genuine learning happened. Unlike individual `remember` calls, this produces a single cohesive snapshot that a future session can `recall` as a unit. If you skip this, the detailed context evaporates when the session ends."
     )]
     async fn summarize_session(&self, params: Parameters<SummarizeSessionParams>) -> String {
         let p = params.0;
@@ -886,7 +900,9 @@ impl CtxOneServer {
     }
 
     #[tool(
-        description = "See what has changed in the memory graph since a given date. Shows recent commits and their intents."
+        description = "See what has changed in the memory graph since a given ISO-8601 date. Returns recent commits filtered by timestamp, with their intent category and confidence. \
+        \
+        CALL THIS WHEN the user asks 'what did we work on yesterday?', 'what changed since the last time we talked?', or when you want to catch up on facts added while you were away. Useful at the start of a session to see what happened in other sessions since your last interaction. Pass the date from the user's prompt when they say 'since Monday' — don't make one up."
     )]
     async fn what_changed_since(&self, params: Parameters<WhatChangedSinceParams>) -> String {
         let p = params.0;
@@ -921,7 +937,9 @@ impl CtxOneServer {
     }
 
     #[tool(
-        description = "Trace the reasoning behind a past decision. Searches for the decision and returns its full provenance chain (blame)."
+        description = "Trace the reasoning behind a past decision. Searches for a decision phrase in the memory graph and returns its full provenance chain via blame — who wrote it, when, at what confidence, with what reasoning. \
+        \
+        CALL THIS WHEN the user or you wonder 'why did we do it this way?' — before reversing a decision, before debating an approach the team has already settled, or when a stored fact contradicts what you're about to do. Don't act on a fact whose provenance you can't verify, especially for security, licensing, or deployment choices. If `why_did_we` returns nothing, say so — don't invent a reason."
     )]
     async fn why_did_we(&self, params: Parameters<WhyDidWeParams>) -> String {
         let p = params.0;
