@@ -17,19 +17,33 @@ Persistent, searchable, accountable memory for AI agents. Eliminate context anxi
 **See the [5-minute quickstart](docs/QUICKSTART.md)** — from nothing to live
 token savings in 5 minutes.
 
-### Install (curl)
+### Install
+
+**macOS / Linux** (one-liner):
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/ctxone/ctxone/main/install.sh | sh
 ```
 
-### Install (Docker)
+**Windows** (PowerShell, one-liner):
 
-```bash
-docker compose up -d
+```powershell
+iwr https://raw.githubusercontent.com/ctxone/ctxone/main/install.ps1 | iex
 ```
 
-### Install (from source)
+**Docker** (any platform — image is multi-arch `linux/amd64` + `linux/arm64`):
+
+```bash
+docker run -p 3001:3001 -v ctxone-data:/data ghcr.io/ctxone/ctxone:latest
+```
+
+**Python**:
+
+```bash
+pip install ctxone
+```
+
+**From source**:
 
 ```bash
 git clone --recursive https://github.com/ctxone/ctxone.git

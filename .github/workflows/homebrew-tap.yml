@@ -1,0 +1,125 @@
+name: Homebrew Tap
+
+# Runs after a tag push that triggers the Release workflow. Waits for the
+# release binaries to be published, then renders packaging/homebrew/ctxone.rb.template
+# with the real URLs and sha256 sums and commits it to the ctxone/homebrew-tap repo.
+#
+# Requirements:
+#   - A `ctxone/homebrew-tap` repository exists with a `Formula/` directory.
+#   - A PAT with repo write access to that repo is stored as HOMEBREW_TAP_TOKEN.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g., v0.60.0)'
+        required: true
+
+jobs:
+  update-tap:
+    name: Render and push formula
+    runs-on: ubuntu-latest
+    if: ${{ !contains(github.event.release.tag_name || github.event.inputs.tag, 'alpha') && !contains(github.event.release.tag_name || github.event.inputs.tag, 'beta') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute release metadata
+        id: meta
+        shell: bash
+        run: |
+          TAG="${{ github.event.release.tag_name || github.event.inputs.tag }}"
+          VERSION="${TAG#v}"
+          BASE_URL="https://github.com/${{ github.repository }}/releases/download/$TAG"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "base_url=$BASE_URL" >> $GITHUB_OUTPUT
+
+      - name: Download release tarballs
+        shell: bash
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          BASE_URL: ${{ steps.meta.outputs.base_url }}
+        run: |
+          mkdir -p dist
+          cd dist
+          for target in \
+            aarch64-apple-darwin \
+            x86_64-apple-darwin \
+            x86_64-unknown-linux-gnu \
+            aarch64-unknown-linux-gnu; do
+            FNAME="ctxone-${TAG}-${target}.tar.gz"
+            URL="${BASE_URL}/${FNAME}"
+            echo "Downloading $URL"
+            curl -fsSL -o "$FNAME" "$URL"
+          done
+          sha256sum *.tar.gz
+
+      - name: Render formula
+        id: render
+        shell: bash
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          BASE_URL: ${{ steps.meta.outputs.base_url }}
+        run: |
+          cd dist
+          SHA_DARWIN_ARM64=$(sha256sum "ctxone-${TAG}-aarch64-apple-darwin.tar.gz" | awk '{print $1}')
+          SHA_DARWIN_X86_64=$(sha256sum "ctxone-${TAG}-x86_64-apple-darwin.tar.gz" | awk '{print $1}')
+          SHA_LINUX_X86_64=$(sha256sum "ctxone-${TAG}-x86_64-unknown-linux-gnu.tar.gz" | awk '{print $1}')
+          SHA_LINUX_ARM64=$(sha256sum "ctxone-${TAG}-aarch64-unknown-linux-gnu.tar.gz" | awk '{print $1}')
+
+          URL_DARWIN_ARM64="${BASE_URL}/ctxone-${TAG}-aarch64-apple-darwin.tar.gz"
+          URL_DARWIN_X86_64="${BASE_URL}/ctxone-${TAG}-x86_64-apple-darwin.tar.gz"
+          URL_LINUX_X86_64="${BASE_URL}/ctxone-${TAG}-x86_64-unknown-linux-gnu.tar.gz"
+          URL_LINUX_ARM64="${BASE_URL}/ctxone-${TAG}-aarch64-unknown-linux-gnu.tar.gz"
+
+          cd ..
+          cp packaging/homebrew/ctxone.rb.template ctxone.rb
+          sed -i "s|{{VERSION}}|${VERSION}|g" ctxone.rb
+          sed -i "s|{{URL_DARWIN_ARM64}}|${URL_DARWIN_ARM64}|g" ctxone.rb
+          sed -i "s|{{SHA_DARWIN_ARM64}}|${SHA_DARWIN_ARM64}|g" ctxone.rb
+          sed -i "s|{{URL_DARWIN_X86_64}}|${URL_DARWIN_X86_64}|g" ctxone.rb
+          sed -i "s|{{SHA_DARWIN_X86_64}}|${SHA_DARWIN_X86_64}|g" ctxone.rb
+          sed -i "s|{{URL_LINUX_X86_64}}|${URL_LINUX_X86_64}|g" ctxone.rb
+          sed -i "s|{{SHA_LINUX_X86_64}}|${SHA_LINUX_X86_64}|g" ctxone.rb
+          sed -i "s|{{URL_LINUX_ARM64}}|${URL_LINUX_ARM64}|g" ctxone.rb
+          sed -i "s|{{SHA_LINUX_ARM64}}|${SHA_LINUX_ARM64}|g" ctxone.rb
+
+          echo "--- rendered formula ---"
+          cat ctxone.rb
+
+      - name: Check out tap repo
+        uses: actions/checkout@v4
+        with:
+          repository: ctxone/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+        # If the secret or the tap repo doesn't exist yet, skip gracefully
+        # rather than failing the release workflow.
+        continue-on-error: true
+
+      - name: Commit and push formula
+        shell: bash
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          if [ ! -d tap ]; then
+            echo "ctxone/homebrew-tap not checked out (missing repo or token)."
+            echo "Formula rendered but not published. Create the tap repo and"
+            echo "HOMEBREW_TAP_TOKEN secret, then re-run this workflow."
+            exit 0
+          fi
+          mkdir -p tap/Formula
+          cp ctxone.rb tap/Formula/ctxone.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/ctxone.rb
+          if git diff --cached --quiet; then
+            echo "No changes to publish."
+            exit 0
+          fi
+          git commit -m "ctxone ${VERSION}"
+          git push

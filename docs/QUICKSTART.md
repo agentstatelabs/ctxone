@@ -4,6 +4,8 @@ From nothing to seeing live token savings in about five minutes.
 
 ## 1. Install
 
+**macOS / Linux:**
+
 ```bash
 curl -sSL https://raw.githubusercontent.com/ctxone/ctxone/main/install.sh | sh
 ```
@@ -15,11 +17,21 @@ your `PATH`, add it:
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Verify:
+**Windows (PowerShell):**
+
+```powershell
+iwr https://raw.githubusercontent.com/ctxone/ctxone/main/install.ps1 | iex
+```
+
+This drops `ctx.exe` and `ctxone-hub.exe` in `%LOCALAPPDATA%\ctxone\bin` and
+adds that directory to your user PATH. Open a **new** PowerShell window after
+install for the PATH change to take effect.
+
+**Verify:**
 
 ```bash
 ctx --version
-# ctx 0.5.0
+# ctx 0.60.0
 ```
 
 ## 2. Start the Hub

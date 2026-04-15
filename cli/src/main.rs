@@ -86,9 +86,19 @@ struct CtxConfig {
 impl CtxConfig {
     /// Path to the config file. Separate from the db path so devs can wipe
     /// the graph without losing their preferred server URL.
+    ///
+    /// Unix: `~/.ctxone/config.toml`
+    /// Windows: `%APPDATA%\ctxone\config.toml`
     fn path() -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_default();
-        PathBuf::from(format!("{}/.ctxone/config.toml", home))
+        if cfg!(target_os = "windows") {
+            dirs::config_dir()
+                .map(|d| d.join("ctxone").join("config.toml"))
+                .unwrap_or_else(|| PathBuf::from("./ctxone-config.toml"))
+        } else {
+            dirs::home_dir()
+                .map(|h| h.join(".ctxone").join("config.toml"))
+                .unwrap_or_else(|| PathBuf::from("./ctxone-config.toml"))
+        }
     }
 
     fn load() -> Self {
@@ -1345,25 +1355,47 @@ fn urlencoding(s: &str) -> String {
 }
 
 fn find_hub_binary() -> String {
-    // Check common locations
-    let candidates = [
-        // Same directory as ctx
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("ctxone-hub")))
-            .unwrap_or_default(),
-        PathBuf::from("/usr/local/bin/ctxone-hub"),
-        PathBuf::from(format!(
-            "{}/.local/bin/ctxone-hub",
-            std::env::var("HOME").unwrap_or_default()
-        )),
-        // Also check for the engine binary directly
-        PathBuf::from("/usr/local/bin/agentstategraph-mcp"),
-        PathBuf::from(format!(
-            "{}/.local/bin/agentstategraph-mcp",
-            std::env::var("HOME").unwrap_or_default()
-        )),
-    ];
+    let exe_suffix = if cfg!(target_os = "windows") {
+        ".exe"
+    } else {
+        ""
+    };
+    let hub_name = format!("ctxone-hub{}", exe_suffix);
+    let engine_name = format!("agentstategraph-mcp{}", exe_suffix);
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    // 1. Same directory as the current `ctx` executable.
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        candidates.push(dir.join(&hub_name));
+    }
+
+    // 2. User-local install dirs (cross-platform via dirs crate).
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join(".local").join("bin").join(&hub_name));
+        candidates.push(home.join(".local").join("bin").join(&engine_name));
+    }
+    if let Some(exe_dir) = dirs::executable_dir() {
+        // On Windows this is typically %LOCALAPPDATA%\Microsoft\WindowsApps
+        // which isn't useful for self-installed binaries, but harmless to
+        // check.
+        candidates.push(exe_dir.join(&hub_name));
+    }
+
+    // 3. Platform system install dirs.
+    #[cfg(unix)]
+    {
+        candidates.push(PathBuf::from("/usr/local/bin").join(&hub_name));
+        candidates.push(PathBuf::from("/usr/local/bin").join(&engine_name));
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(program_files) = std::env::var("ProgramFiles") {
+            candidates.push(PathBuf::from(program_files).join("ctxone").join(&hub_name));
+        }
+    }
 
     for c in &candidates {
         if c.exists() {
@@ -1371,8 +1403,8 @@ fn find_hub_binary() -> String {
         }
     }
 
-    // Fall back to PATH lookup
-    "ctxone-hub".to_string()
+    // Fall back to PATH lookup — the OS will find it if it's there.
+    hub_name
 }
 
 // -- MCP Init --
@@ -1391,44 +1423,71 @@ enum ConfigType {
     Toml,
 }
 
+/// Cross-platform "user data dir for app X".
+///
+/// On Linux: `~/.config/<app>` or `~/.<app>` depending on the tool
+/// (we use `dirs::config_dir()` which is XDG-aware).
+/// On macOS: `~/Library/Application Support/<app>`.
+/// On Windows: `%APPDATA%\<app>`.
+fn app_data_dir(app: &str) -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join(app))
+}
+
+/// Cross-platform "dotfile dir" — `~/.<name>` on every platform.
+/// Tools like Cursor, Gemini, Grok, Codex use this convention regardless
+/// of OS because they predate or ignore XDG/AppData.
+fn dotfile_dir(name: &str) -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(format!(".{}", name)))
+}
+
 fn detect_tools(global: bool) -> Vec<AiTool> {
-    let home = std::env::var("HOME").unwrap_or_default();
     let cwd = std::env::current_dir().unwrap_or_default();
+    let mut tools: Vec<AiTool> = Vec::new();
 
-    let mut tools = vec![];
-
-    // Claude Code — project-level .mcp.json
-    let claude_path = if global {
-        PathBuf::from(format!("{}/.claude/settings.json", home))
+    // ---- Claude Code ----
+    // Project-level .mcp.json by default, user-level settings.json with
+    // --global. Works the same on every platform.
+    let claude_code_path = if global {
+        dotfile_dir("claude")
+            .map(|d| d.join("settings.json"))
+            .unwrap_or_else(|| cwd.join(".mcp.json"))
     } else {
         cwd.join(".mcp.json")
     };
     tools.push(AiTool {
         name: "Claude Code",
-        detected: true, // Always available
-        config_path: claude_path,
+        detected: true, // always available as a target
+        config_path: claude_code_path,
         config_type: ConfigType::McpJson,
     });
 
-    // Claude Desktop
-    let claude_desktop = PathBuf::from(format!(
-        "{}/Library/Application Support/Claude/claude_desktop_config.json",
-        home
-    ));
-    tools.push(AiTool {
-        name: "Claude Desktop",
-        detected: claude_desktop.exists(),
-        config_path: claude_desktop,
-        config_type: ConfigType::McpJson,
-    });
+    // ---- Claude Desktop ----
+    // macOS: ~/Library/Application Support/Claude/claude_desktop_config.json
+    // Windows: %APPDATA%\Claude\claude_desktop_config.json
+    // Linux: ~/.config/Claude/claude_desktop_config.json (if they ever
+    // release a Linux build; currently a no-op but future-proof)
+    let claude_desktop = app_data_dir("Claude").map(|d| d.join("claude_desktop_config.json"));
+    if let Some(path) = claude_desktop {
+        tools.push(AiTool {
+            name: "Claude Desktop",
+            detected: path.exists(),
+            config_path: path,
+            config_type: ConfigType::McpJson,
+        });
+    }
 
-    // Cursor
+    // ---- Cursor ----
+    // ~/.cursor/mcp.json (global) or .cursor/mcp.json (project).
+    let cursor_global_dir = dotfile_dir("cursor");
     let cursor_path = if global {
-        PathBuf::from(format!("{}/.cursor/mcp.json", home))
+        cursor_global_dir
+            .as_ref()
+            .map(|d| d.join("mcp.json"))
+            .unwrap_or_else(|| cwd.join(".cursor/mcp.json"))
     } else {
         cwd.join(".cursor/mcp.json")
     };
-    let cursor_detected = PathBuf::from(format!("{}/.cursor", home)).exists();
+    let cursor_detected = cursor_global_dir.as_ref().is_some_and(|d| d.exists());
     tools.push(AiTool {
         name: "Cursor",
         detected: cursor_detected,
@@ -1436,17 +1495,22 @@ fn detect_tools(global: bool) -> Vec<AiTool> {
         config_type: ConfigType::McpJson,
     });
 
-    // VS Code
+    // ---- VS Code ----
+    // Project: .vscode/mcp.json
+    // Global: platform-specific user settings.json
+    //   macOS:   ~/Library/Application Support/Code/User/settings.json
+    //   Windows: %APPDATA%\Code\User\settings.json
+    //   Linux:   ~/.config/Code/User/settings.json
+    let vscode_app_dir = app_data_dir("Code");
     let vscode_path = if global {
-        PathBuf::from(format!(
-            "{}/Library/Application Support/Code/User/settings.json",
-            home
-        ))
+        vscode_app_dir
+            .as_ref()
+            .map(|d| d.join("User").join("settings.json"))
+            .unwrap_or_else(|| cwd.join(".vscode/mcp.json"))
     } else {
         cwd.join(".vscode/mcp.json")
     };
-    let vscode_detected =
-        PathBuf::from(format!("{}/Library/Application Support/Code", home)).exists();
+    let vscode_detected = vscode_app_dir.as_ref().is_some_and(|d| d.exists());
     tools.push(AiTool {
         name: "VS Code",
         detected: vscode_detected,
@@ -1454,43 +1518,53 @@ fn detect_tools(global: bool) -> Vec<AiTool> {
         config_type: ConfigType::McpJson,
     });
 
-    // Codex
-    let codex_path = PathBuf::from(format!("{}/.codex", home));
-    tools.push(AiTool {
-        name: "Codex",
-        detected: codex_path.exists(),
-        config_path: codex_path.join("config.toml"),
-        config_type: ConfigType::Toml,
-    });
+    // ---- Codex (OpenAI CLI) ----
+    // ~/.codex/config.toml on every platform
+    let codex_dir = dotfile_dir("codex");
+    if let Some(dir) = codex_dir {
+        tools.push(AiTool {
+            name: "Codex",
+            detected: dir.exists(),
+            config_path: dir.join("config.toml"),
+            config_type: ConfigType::Toml,
+        });
+    }
 
-    // Gemini CLI (Google)
-    // Settings live in ~/.gemini/settings.json with an mcpServers object
-    // (same shape as Claude Code / Cursor).
-    let gemini_dir = PathBuf::from(format!("{}/.gemini", home));
+    // ---- Gemini CLI (Google) ----
+    // ~/.gemini/settings.json (global) or .gemini/settings.json (project).
+    // JSON shape with mcpServers (same as Claude).
+    let gemini_global = dotfile_dir("gemini");
     let gemini_path = if global {
-        gemini_dir.join("settings.json")
+        gemini_global
+            .as_ref()
+            .map(|d| d.join("settings.json"))
+            .unwrap_or_else(|| cwd.join(".gemini/settings.json"))
     } else {
         cwd.join(".gemini/settings.json")
     };
+    let gemini_detected = gemini_global.as_ref().is_some_and(|d| d.exists());
     tools.push(AiTool {
         name: "Gemini",
-        detected: gemini_dir.exists(),
+        detected: gemini_detected,
         config_path: gemini_path,
         config_type: ConfigType::McpJson,
     });
 
-    // Grok CLI (xAI / superagent-ai/grok-cli)
-    // Settings live in ~/.grok/settings.json with an mcpServers object
-    // (same JSON shape as Claude / Gemini / Cursor).
-    let grok_dir = PathBuf::from(format!("{}/.grok", home));
+    // ---- Grok CLI (xAI / superagent-ai/grok-cli) ----
+    // Same pattern as Gemini.
+    let grok_global = dotfile_dir("grok");
     let grok_path = if global {
-        grok_dir.join("settings.json")
+        grok_global
+            .as_ref()
+            .map(|d| d.join("settings.json"))
+            .unwrap_or_else(|| cwd.join(".grok/settings.json"))
     } else {
         cwd.join(".grok/settings.json")
     };
+    let grok_detected = grok_global.as_ref().is_some_and(|d| d.exists());
     tools.push(AiTool {
         name: "Grok",
-        detected: grok_dir.exists(),
+        detected: grok_detected,
         config_path: grok_path,
         config_type: ConfigType::McpJson,
     });
@@ -2030,9 +2104,32 @@ fn parse_markdown_sections(content: &str) -> Vec<Section> {
     sections
 }
 
+/// Canonical path where CtxOne stores its default memory database.
+///
+/// On Unix this is `~/.ctxone/memory.db`. On Windows this is
+/// `%APPDATA%\ctxone\memory.db` (typically
+/// `C:\Users\<you>\AppData\Roaming\ctxone\memory.db`).
+///
+/// Falls back to `./ctxone.db` if we can't determine a home directory,
+/// which should never happen in practice.
 fn canonical_db_path() -> String {
-    let home = std::env::var("HOME").unwrap_or_default();
-    format!("{}/.ctxone/memory.db", home)
+    let base = if cfg!(target_os = "windows") {
+        dirs::data_dir()
+    } else {
+        dirs::home_dir().map(|h| h.join(".ctxone"))
+    };
+
+    match base {
+        Some(dir) => {
+            let p = if cfg!(target_os = "windows") {
+                dir.join("ctxone").join("memory.db")
+            } else {
+                dir.join("memory.db")
+            };
+            p.to_string_lossy().into_owned()
+        }
+        None => "./ctxone.db".to_string(),
+    }
 }
 
 fn mcp_server_entry() -> Value {
@@ -2442,13 +2539,22 @@ mod tests {
     // -------- canonical_db_path --------
 
     #[test]
-    fn canonical_db_path_uses_home() {
-        // Set HOME to a known value so the test is deterministic
-        // SAFETY: tests are single-threaded by default in Rust; this is only a concern
-        // if tests are explicitly run with --test-threads that mutate env vars.
-        unsafe { std::env::set_var("HOME", "/tmp/test-home") };
+    fn canonical_db_path_ends_with_memory_db() {
+        // The exact path varies by platform (Unix: ~/.ctxone/memory.db,
+        // Windows: %APPDATA%\ctxone\memory.db), so we only check the
+        // suffix and that we got a non-empty path.
         let p = canonical_db_path();
-        assert_eq!(p, "/tmp/test-home/.ctxone/memory.db");
+        assert!(!p.is_empty());
+        assert!(
+            p.ends_with("memory.db"),
+            "canonical db path should end with memory.db, got: {}",
+            p
+        );
+        assert!(
+            p.contains("ctxone"),
+            "canonical db path should contain 'ctxone', got: {}",
+            p
+        );
     }
 
     // -------- CtxConfig --------

@@ -1,0 +1,68 @@
+# frozen_string_literal: true
+
+# CtxOne Homebrew formula template.
+#
+# The release workflow renders this template for each tag by substituting:
+#
+#   {{VERSION}}               — the release version (e.g., 0.60.0)
+#   {{URL_DARWIN_ARM64}}      — macOS arm64 tarball URL
+#   {{SHA_DARWIN_ARM64}}      — macOS arm64 tarball sha256
+#   {{URL_DARWIN_X86_64}}     — macOS x86_64 tarball URL
+#   {{SHA_DARWIN_X86_64}}     — macOS x86_64 tarball sha256
+#   {{URL_LINUX_X86_64}}      — Linux x86_64 tarball URL
+#   {{SHA_LINUX_X86_64}}      — Linux x86_64 tarball sha256
+#   {{URL_LINUX_ARM64}}       — Linux arm64 tarball URL
+#   {{SHA_LINUX_ARM64}}       — Linux arm64 tarball sha256
+#
+# The rendered output goes to ctxone/homebrew-tap/Formula/ctxone.rb.
+
+class Ctxone < Formula
+  desc "Persistent, searchable, accountable memory for AI agents"
+  homepage "https://github.com/ctxone/ctxone"
+  version "{{VERSION}}"
+  license "BUSL-1.1"
+
+  on_macos do
+    on_arm do
+      url "{{URL_DARWIN_ARM64}}"
+      sha256 "{{SHA_DARWIN_ARM64}}"
+    end
+    on_intel do
+      url "{{URL_DARWIN_X86_64}}"
+      sha256 "{{SHA_DARWIN_X86_64}}"
+    end
+  end
+
+  on_linux do
+    on_intel do
+      url "{{URL_LINUX_X86_64}}"
+      sha256 "{{SHA_LINUX_X86_64}}"
+    end
+    on_arm do
+      url "{{URL_LINUX_ARM64}}"
+      sha256 "{{SHA_LINUX_ARM64}}"
+    end
+  end
+
+  def install
+    bin.install "ctx"
+    bin.install "ctxone-hub"
+  end
+
+  def caveats
+    <<~EOS
+      CtxOne is installed. Next steps:
+
+        ctx init          # Auto-configure your AI tools (Claude Code, Cursor, etc.)
+        ctx serve --http  # Start the Hub (port 3001)
+        ctx demo          # Seed demo data and see live token savings
+
+      Docs: https://github.com/ctxone/ctxone#readme
+    EOS
+  end
+
+  test do
+    # The binary should at least report its version
+    assert_match "ctx", shell_output("#{bin}/ctx --version")
+  end
+end

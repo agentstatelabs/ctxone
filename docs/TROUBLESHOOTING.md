@@ -30,10 +30,10 @@ Or pass `--server` explicitly.
 
 ## 2. `ctx: command not found`
 
-**Cause:** `~/.local/bin` isn't on your `PATH`, or the install script
-didn't run to completion.
+**Cause (macOS / Linux):** `~/.local/bin` isn't on your `PATH`, or the
+install script didn't run to completion.
 
-**Fix:**
+**Fix (macOS / Linux):**
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
@@ -44,6 +44,22 @@ Verify the binary exists:
 
 ```bash
 ls -la ~/.local/bin/ctx
+```
+
+**Cause (Windows):** PATH changes made by the installer only take effect
+in **new** PowerShell windows. Your current shell still has the old PATH.
+
+**Fix (Windows):** close your PowerShell window and open a fresh one.
+Or manually add to the current session:
+
+```powershell
+$env:Path += ";$env:LOCALAPPDATA\ctxone\bin"
+```
+
+Verify the binary exists:
+
+```powershell
+Get-Item "$env:LOCALAPPDATA\ctxone\bin\ctx.exe"
 ```
 
 If missing, re-run the installer:
