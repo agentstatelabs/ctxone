@@ -6,6 +6,14 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
+# Multi-arch builds take 10-20 minutes because of QEMU arm64 emulation.
+# If several commits land in quick succession, cancel the older in-flight
+# runs so we don't burn CI minutes on stale content. Tag pushes keep their
+# own group so a new commit on main never cancels a release build.
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
