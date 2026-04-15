@@ -46,7 +46,7 @@ jobs:
             archive_ext: zip
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
 
@@ -105,14 +105,14 @@ jobs:
           Copy-Item "target/${{ matrix.target }}/release/ctxone-hub.exe" "ctxone-hub-${{ matrix.target }}.exe"
 
       - name: Upload archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: archive-${{ matrix.target }}
           path: ${{ env.ARCHIVE }}
 
       - name: Upload bare binaries (Unix)
         if: runner.os != 'Windows'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: binaries-${{ matrix.target }}
           path: |
@@ -121,7 +121,7 @@ jobs:
 
       - name: Upload bare binaries (Windows)
         if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: binaries-${{ matrix.target }}
           path: |
@@ -133,10 +133,10 @@ jobs:
     needs: [build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: artifacts
 

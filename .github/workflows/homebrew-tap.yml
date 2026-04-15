@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ !contains(github.event.release.tag_name || github.event.inputs.tag, 'alpha') && !contains(github.event.release.tag_name || github.event.inputs.tag, 'beta') }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Compute release metadata
         id: meta
@@ -91,7 +91,7 @@ jobs:
           cat ctxone.rb
 
       - name: Check out tap repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ctxone/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
