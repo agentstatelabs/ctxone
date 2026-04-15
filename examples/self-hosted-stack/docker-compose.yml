@@ -1,0 +1,194 @@
+# CtxOne self-hosted stack
+#
+# One file that stands up a complete local AI environment:
+#
+#   - ctxone-hub    : memory layer  (HTTP API on :3001, MCP over stdio)
+#   - ctxone-lens   : web UI        (:5173 → memory browser, blame, diff)
+#   - ollama        : local LLM     (:11434 → model server)
+#   - open-webui    : chat UI       (:8080  → ships with the CtxOne plugin
+#                                             for native tool/filter access)
+#
+# Plus a commented-out `threadweaver` service you can uncomment and point
+# at your own image once TW ships with MCP client support — until then
+# Open WebUI is the turnkey chat UI that works with CtxOne out of the box.
+#
+# Run:
+#   cd examples/self-hosted-stack
+#   cp .env.example .env
+#   docker compose up -d
+#
+# Then:
+#   - Open WebUI   → http://localhost:8080
+#   - CtxOne Lens  → http://localhost:5173
+#   - Hub health   → http://localhost:3001/api/health
+#
+# See README.md for the full walkthrough, including how to wire the CtxOne
+# plugin into Open WebUI and how to seed the Hub with the files in ./prime/.
+
+name: ctxone-stack
+
+services:
+
+  # ------------------------------------------------------------------
+  # CtxOne Hub — the memory layer.
+  # ------------------------------------------------------------------
+  hub:
+    image: ghcr.io/ctxone/ctxone:latest
+    container_name: ctxone-hub
+    command: ["ctxone-hub", "--http", "--port", "3001", "--path", "/data/ctxone.db"]
+    ports:
+      - "${HUB_PORT:-3001}:3001"
+    volumes:
+      - hub-data:/data
+      # Mount the prime/ directory read-only so the one-shot seeder
+      # service below can reach it without another volume definition.
+      - ./prime:/prime:ro
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+    networks:
+      - ctxone
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3001/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ------------------------------------------------------------------
+  # CtxOne Lens — the web UI.
+  # ------------------------------------------------------------------
+  # VITE_CTXONE_API_URL is what the browser (running on the host) uses
+  # to reach the Hub. It MUST be the address you can hit from your
+  # laptop, not an in-network hostname — Lens is a client-side app, so
+  # the browser does the fetching.
+  lens:
+    build:
+      context: ../../web
+      dockerfile: Dockerfile
+      args:
+        VITE_CTXONE_API_URL: ${CTXONE_API_URL_PUBLIC:-http://localhost:3001}
+    container_name: ctxone-lens
+    ports:
+      - "${LENS_PORT:-5173}:3000"
+    depends_on:
+      hub:
+        condition: service_healthy
+    networks:
+      - ctxone
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # Seed — one-shot container that primes the Hub from ./prime/*.md on
+  # first startup. Re-running docker compose up is idempotent because
+  # `ctx prime` with the same source name replaces the prior entries.
+  # ------------------------------------------------------------------
+  seed:
+    image: ghcr.io/ctxone/ctxone:latest
+    container_name: ctxone-seed
+    depends_on:
+      hub:
+        condition: service_healthy
+    environment:
+      CTX_SERVER: http://hub:3001
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        echo "Priming Hub from /prime/*.md..."
+        for f in /prime/*.md; do
+          name=$$(basename "$$f" .md)
+          ctx prime --source "$$name" --pinned "$$f" || echo "skipped $$f"
+        done
+        echo "Seed complete."
+    volumes:
+      - ./prime:/prime:ro
+    networks:
+      - ctxone
+    restart: "no"
+
+  # ------------------------------------------------------------------
+  # Ollama — local LLM runtime.
+  # ------------------------------------------------------------------
+  # After the stack is up, pull a model from your host:
+  #     docker exec -it ollama ollama pull llama3.2
+  # Or from inside Open WebUI: Settings → Models → "Pull a model".
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - ctxone
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # Open WebUI — the chat UI.
+  # ------------------------------------------------------------------
+  # - OLLAMA_BASE_URL points at the ollama container by its service name.
+  # - ENABLE_PIP_INSTALL_FRONTMATTER_REQUIREMENTS=true lets you paste
+  #   CtxOne's openwebui.py into Admin Panel → Functions and have the
+  #   `ctxone` pip package auto-installed.
+  # - WEBUI_SECRET_KEY should be replaced with a random string in .env.
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    ports:
+      - "${OPEN_WEBUI_PORT:-8080}:8080"
+    volumes:
+      - open-webui-data:/app/backend/data
+      # Expose the CtxOne plugin file inside the container so you can
+      # point OpenWebUI at /app/functions/openwebui.py if you prefer the
+      # filesystem import path over pasting.
+      - ../../bindings/python/src/ctxone/integrations/openwebui.py:/app/ctxone-plugin.py:ro
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      ENABLE_PIP_INSTALL_FRONTMATTER_REQUIREMENTS: "true"
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:-change-me-in-env}
+      # Tell the CtxOne plugin where the Hub is. Open WebUI exposes env
+      # vars to function Valves if you want to centralize config.
+      CTXONE_HUB_URL: http://hub:3001
+    depends_on:
+      hub:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    networks:
+      - ctxone
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # ThreadWeaver (OPTIONAL — uncomment when your image is ready).
+  # ------------------------------------------------------------------
+  # ThreadWeaver is a self-hosted chat tool. Until it ships native MCP
+  # client support, wire it to CtxOne via the HTTP API
+  # (http://hub:3001/api/memory/recall etc). See README.md for the
+  # current integration pattern.
+  #
+  # threadweaver:
+  #   image: ghcr.io/YOUR-ORG/threadweaver:latest
+  #   container_name: threadweaver
+  #   ports:
+  #     - "${THREADWEAVER_PORT:-4000}:4000"
+  #   environment:
+  #     CTXONE_HUB_URL: http://hub:3001
+  #     OLLAMA_BASE_URL: http://ollama:11434
+  #   depends_on:
+  #     hub:
+  #       condition: service_healthy
+  #     ollama:
+  #       condition: service_started
+  #   networks:
+  #     - ctxone
+  #   restart: unless-stopped
+
+volumes:
+  hub-data:
+  ollama-data:
+  open-webui-data:
+
+networks:
+  ctxone:
+    driver: bridge
