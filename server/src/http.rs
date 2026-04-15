@@ -30,22 +30,16 @@ use crate::memory_tools::{
 use crate::rate_limit;
 
 /// Hub-wide HTTP configuration.
-#[derive(Clone, Debug)]
+///
+/// The `Default` impl is derived — the zero value for `rate_limit_rpm`
+/// (disabled) is deliberately the library default so in-process tests
+/// using `tower::ServiceExt::oneshot` (no real peer IP) work without
+/// flakes. The Hub binary sets this explicitly from the
+/// `--rate-limit-rpm` CLI flag (which defaults to 600 in production).
+#[derive(Clone, Debug, Default)]
 pub struct HubConfig {
     /// Requests-per-minute per peer IP. `0` disables rate limiting.
-    ///
-    /// The library default is `0` (disabled) so in-process tests that
-    /// use `tower::ServiceExt::oneshot` (no real peer IP) work without
-    /// flakes. The Hub binary sets this explicitly from the
-    /// `--rate-limit-rpm` CLI flag (which defaults to 600 in
-    /// production).
     pub rate_limit_rpm: u32,
-}
-
-impl Default for HubConfig {
-    fn default() -> Self {
-        Self { rate_limit_rpm: 0 }
-    }
 }
 
 #[derive(Clone)]
