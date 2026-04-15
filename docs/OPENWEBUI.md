@@ -42,7 +42,7 @@ You need a running CtxOne Hub somewhere Open WebUI can reach. The
 1. In Open WebUI: **Admin Panel → Functions → +**
 2. Paste the entire contents of
    [`bindings/python/src/ctxone/integrations/openwebui.py`](../bindings/python/src/ctxone/integrations/openwebui.py)
-3. Save. Open WebUI reads the `requirements: ctxone>=0.70.0` line in
+3. Save. Open WebUI reads the `requirements: ctxone>=0.71.0` line in
    the docstring frontmatter and auto-installs the client into its
    Python environment (make sure
    `ENABLE_PIP_INSTALL_FRONTMATTER_REQUIREMENTS=true` is set in your

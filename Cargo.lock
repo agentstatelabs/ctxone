@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agentstategraph"
-version = "0.70.0"
+version = "0.71.0"
 dependencies = [
  "agentstategraph-core",
  "agentstategraph-storage",
@@ -17,7 +17,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-core"
-version = "0.70.0"
+version = "0.71.0"
 dependencies = [
  "blake3",
  "chrono",
@@ -29,7 +29,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-storage"
-version = "0.70.0"
+version = "0.71.0"
 dependencies = [
  "agentstategraph-core",
  "deadpool-postgres",
@@ -436,7 +436,7 @@ dependencies = [
 
 [[package]]
 name = "ctx"
-version = "0.70.0"
+version = "0.71.0"
 dependencies = [
  "clap",
  "clap_complete",
@@ -451,7 +451,7 @@ dependencies = [
 
 [[package]]
 name = "ctxone-hub"
-version = "0.70.0"
+version = "0.71.0"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
