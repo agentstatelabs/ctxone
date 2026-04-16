@@ -29,7 +29,19 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          submodules: recursive
+          submodules: false
+
+      - name: Checkout submodules with PAT
+        # The engine/ submodule points at agentstatelabs/agentstategraph, which
+        # is a private repo in a different org from this one. The default
+        # GITHUB_TOKEN can't reach it. SUBMODULE_TOKEN is a fine-grained
+        # PAT scoped to read access on the ASG repo. Configure git to use
+        # it via x-access-token for HTTPS clones, then init submodules.
+        # Once ASG moves to the same org as CTXone this step collapses
+        # back to actions/checkout@v5 with submodules: recursive.
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.SUBMODULE_TOKEN }}@github.com/".insteadOf "https://github.com/"
+          git submodule update --init --recursive
 
       - name: Set up QEMU
         # Needed to build linux/arm64 on an x86_64 runner.
