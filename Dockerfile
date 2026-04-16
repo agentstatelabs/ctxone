@@ -19,6 +19,11 @@ COPY cli/ cli/
 COPY server/ server/
 COPY engine/ engine/
 
+# The cli crate embeds docs/AGENTS.md via include_str!("../../docs/AGENTS.md"),
+# so the docs file must be present at build time even though it isn't inside
+# any crate. Copy just that file to keep the build context tight.
+COPY docs/AGENTS.md docs/AGENTS.md
+
 # Build just the two binaries we ship, not the whole workspace
 RUN cargo build --release -p ctx -p ctxone-hub \
     && strip target/release/ctx target/release/ctxone-hub
