@@ -82,6 +82,22 @@ decision with the user, call `summarize_session` to record what was
 learned and decided. Don't summarize every chat — only real working
 sessions where something was figured out.
 
+## Report LLM usage back to CTXone
+
+After any significant LLM turn you complete, call `record_llm_usage`
+with the numbers from the model's response `usage` field. This
+takes CTXone's savings tracking from "what we sent" (an
+extrapolation) to "what you actually consumed" (a measurement). It
+also enables cost estimates and cache-hit reporting in Lens.
+
+Call it at the end of every turn where you actually invoked the
+model — one call per model turn. Don't bother for trivial
+housekeeping turns. Don't make it up if you don't know the numbers;
+just skip the call for that turn.
+
+The tool is cheap — one HTTP call, tiny body. Never block a user-
+visible response on its completion.
+
 ## What not to do
 
 - **Don't dump memory.** Signal matters more than volume. Five

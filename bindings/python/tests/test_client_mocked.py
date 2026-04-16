@@ -487,3 +487,201 @@ def test_both_session_and_agent_headers_sent_together(monkeypatch):
     _, kwargs = session.get.call_args
     assert kwargs["headers"]["X-CTXone-Session"] == "alice@example.com"
     assert kwargs["headers"]["X-CTXone-Agent"] == "claude-code"
+
+
+# -------- record_usage (LLM usage capture) --------
+
+def _snapshot_body(**overrides):
+    """Build a SessionSnapshot-shaped JSON body with sensible defaults."""
+    body = {
+        "session_id": "default",
+        "session_tokens_used": 0,
+        "session_tokens_saved": 0,
+        "total_graph_size_chars": 0,
+        "total_graph_size_tokens": 0,
+        "cumulative_ratio": 0.0,
+        "llm_input_tokens": 0,
+        "llm_output_tokens": 0,
+        "llm_cache_read_tokens": 0,
+        "llm_cache_create_tokens": 0,
+        "llm_call_count": 0,
+        "last_model": None,
+        "last_provider": None,
+    }
+    body.update(overrides)
+    return body
+
+
+def test_record_usage_posts_to_llm_usage_endpoint():
+    session = MagicMock()
+    session.post.return_value = mock_response(
+        json_body=_snapshot_body(
+            llm_input_tokens=100, llm_output_tokens=50, llm_call_count=1
+        )
+    )
+    hub = make_hub(session)
+
+    snap = hub.record_usage(input_tokens=100, output_tokens=50)
+
+    args, kwargs = session.post.call_args
+    assert args[0] == "http://fake:3001/api/stats/llm_usage"
+    body = kwargs["json"]
+    assert body["input_tokens"] == 100
+    assert body["output_tokens"] == 50
+    # Defaults present on the wire so the Hub doesn't have to infer
+    assert body["cache_read_tokens"] == 0
+    assert body["cache_create_tokens"] == 0
+    # Optional model/provider omitted when not provided
+    assert "model" not in body
+    assert "provider" not in body
+
+    assert snap.llm_input_tokens == 100
+    assert snap.llm_output_tokens == 50
+    assert snap.llm_call_count == 1
+
+
+def test_record_usage_includes_cache_and_model_when_provided():
+    session = MagicMock()
+    session.post.return_value = mock_response(
+        json_body=_snapshot_body(
+            llm_input_tokens=2400,
+            llm_output_tokens=450,
+            llm_cache_read_tokens=1800,
+            llm_cache_create_tokens=600,
+            llm_call_count=1,
+            last_model="claude-sonnet-4.5",
+            last_provider="anthropic",
+        )
+    )
+    hub = make_hub(session)
+
+    snap = hub.record_usage(
+        input_tokens=2400,
+        output_tokens=450,
+        cache_read_tokens=1800,
+        cache_create_tokens=600,
+        model="claude-sonnet-4.5",
+        provider="anthropic",
+    )
+
+    body = session.post.call_args.kwargs["json"]
+    assert body["cache_read_tokens"] == 1800
+    assert body["cache_create_tokens"] == 600
+    assert body["model"] == "claude-sonnet-4.5"
+    assert body["provider"] == "anthropic"
+
+    assert snap.last_model == "claude-sonnet-4.5"
+    assert snap.last_provider == "anthropic"
+    assert snap.llm_cache_read_tokens == 1800
+
+
+def test_record_usage_sends_session_header():
+    session = MagicMock()
+    session.post.return_value = mock_response(
+        json_body=_snapshot_body(session_id="alice@example.com")
+    )
+    hub = Hub(
+        server="http://fake:3001",
+        session=session,
+        session_id="alice@example.com",
+    )
+
+    hub.record_usage(input_tokens=10, output_tokens=5)
+
+    _, kwargs = session.post.call_args
+    assert kwargs["headers"]["X-CTXone-Session"] == "alice@example.com"
+
+
+def test_record_usage_from_anthropic_pulls_usage_fields():
+    session = MagicMock()
+    session.post.return_value = mock_response(
+        json_body=_snapshot_body(
+            llm_input_tokens=1200,
+            llm_output_tokens=300,
+            llm_cache_read_tokens=800,
+            llm_cache_create_tokens=100,
+            llm_call_count=1,
+            last_model="claude-sonnet-4.5",
+            last_provider="anthropic",
+        )
+    )
+    hub = make_hub(session)
+
+    # Fake Anthropic usage object
+    usage = MagicMock()
+    usage.input_tokens = 1200
+    usage.output_tokens = 300
+    usage.cache_read_input_tokens = 800
+    usage.cache_creation_input_tokens = 100
+
+    snap = hub.record_usage_from_anthropic(usage, model="claude-sonnet-4.5")
+
+    body = session.post.call_args.kwargs["json"]
+    assert body["input_tokens"] == 1200
+    assert body["output_tokens"] == 300
+    assert body["cache_read_tokens"] == 800
+    assert body["cache_create_tokens"] == 100
+    assert body["model"] == "claude-sonnet-4.5"
+    assert body["provider"] == "anthropic"
+
+    assert snap.last_provider == "anthropic"
+
+
+def test_record_usage_from_anthropic_handles_missing_cache_fields():
+    """Old-style Anthropic usage objects without cache fields should
+    still work — getattr returns 0, None coalesces to 0."""
+    session = MagicMock()
+    session.post.return_value = mock_response(
+        json_body=_snapshot_body(llm_input_tokens=50, llm_output_tokens=25)
+    )
+    hub = make_hub(session)
+
+    class BareUsage:
+        input_tokens = 50
+        output_tokens = 25
+        # No cache_read_input_tokens / cache_creation_input_tokens
+
+    hub.record_usage_from_anthropic(BareUsage())
+
+    body = session.post.call_args.kwargs["json"]
+    assert body["input_tokens"] == 50
+    assert body["output_tokens"] == 25
+    assert body["cache_read_tokens"] == 0
+    assert body["cache_create_tokens"] == 0
+
+
+def test_record_usage_from_anthropic_coerces_none_cache_fields_to_zero():
+    """The Anthropic SDK sometimes returns None for cache fields when
+    caching wasn't used — we should turn those into 0, not crash."""
+    session = MagicMock()
+    session.post.return_value = mock_response(
+        json_body=_snapshot_body(llm_input_tokens=50, llm_output_tokens=25)
+    )
+    hub = make_hub(session)
+
+    usage = MagicMock()
+    usage.input_tokens = 50
+    usage.output_tokens = 25
+    usage.cache_read_input_tokens = None
+    usage.cache_creation_input_tokens = None
+
+    hub.record_usage_from_anthropic(usage)
+
+    body = session.post.call_args.kwargs["json"]
+    assert body["cache_read_tokens"] == 0
+    assert body["cache_create_tokens"] == 0
+
+
+def test_record_usage_returns_default_snapshot_on_empty_response():
+    """Defensive: a response that somehow omits LLM fields should
+    still produce a SessionSnapshot with zeros instead of throwing."""
+    session = MagicMock()
+    session.post.return_value = mock_response(
+        json_body={"session_id": "sparse"}
+    )
+    hub = make_hub(session)
+
+    snap = hub.record_usage(input_tokens=1, output_tokens=1)
+    assert snap.session_id == "sparse"
+    assert snap.llm_input_tokens == 0
+    assert snap.last_model is None

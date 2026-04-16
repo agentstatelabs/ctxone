@@ -1180,6 +1180,288 @@ fn urlencoding(s: &str) -> String {
     s.replace('/', "%2F")
 }
 
+// -------- LLM usage capture --------
+
+#[tokio::test]
+async fn llm_usage_minimal_body_updates_snapshot() {
+    let router = test_router();
+    let (status, body) = call_json(
+        router,
+        post_json(
+            "/api/stats/llm_usage",
+            json!({
+                "input_tokens": 100,
+                "output_tokens": 50,
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["session_id"], "default");
+    assert_eq!(body["llm_input_tokens"], 100);
+    assert_eq!(body["llm_output_tokens"], 50);
+    assert_eq!(body["llm_cache_read_tokens"], 0);
+    assert_eq!(body["llm_cache_create_tokens"], 0);
+    assert_eq!(body["llm_call_count"], 1);
+}
+
+#[tokio::test]
+async fn llm_usage_full_body_updates_all_fields() {
+    let router = test_router();
+    let (status, body) = call_json(
+        router,
+        post_json(
+            "/api/stats/llm_usage",
+            json!({
+                "input_tokens": 2400,
+                "output_tokens": 450,
+                "cache_read_tokens": 1800,
+                "cache_create_tokens": 600,
+                "model": "claude-sonnet-4.5",
+                "provider": "anthropic",
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["llm_input_tokens"], 2400);
+    assert_eq!(body["llm_output_tokens"], 450);
+    assert_eq!(body["llm_cache_read_tokens"], 1800);
+    assert_eq!(body["llm_cache_create_tokens"], 600);
+    assert_eq!(body["llm_call_count"], 1);
+    assert_eq!(body["last_model"], "claude-sonnet-4.5");
+    assert_eq!(body["last_provider"], "anthropic");
+}
+
+#[tokio::test]
+async fn llm_usage_missing_input_tokens_returns_400() {
+    let router = test_router();
+    // Missing input_tokens — axum's Json extractor returns 422 for
+    // schema violations. Some axum versions return 400. Accept either
+    // as "bad input" per the design spec.
+    let req = Request::builder()
+        .uri("/api/stats/llm_usage")
+        .method("POST")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"output_tokens": 50}"#))
+        .unwrap();
+    let resp = router.oneshot(req).await.unwrap();
+    assert!(
+        resp.status() == StatusCode::BAD_REQUEST
+            || resp.status() == StatusCode::UNPROCESSABLE_ENTITY,
+        "expected 400 or 422 for missing input_tokens, got {}",
+        resp.status()
+    );
+}
+
+#[tokio::test]
+async fn llm_usage_missing_output_tokens_returns_400() {
+    let router = test_router();
+    let req = Request::builder()
+        .uri("/api/stats/llm_usage")
+        .method("POST")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"input_tokens": 100}"#))
+        .unwrap();
+    let resp = router.oneshot(req).await.unwrap();
+    assert!(
+        resp.status() == StatusCode::BAD_REQUEST
+            || resp.status() == StatusCode::UNPROCESSABLE_ENTITY,
+        "expected 400 or 422 for missing output_tokens, got {}",
+        resp.status()
+    );
+}
+
+#[tokio::test]
+async fn llm_usage_negative_values_rejected() {
+    let router = test_router();
+    let req = Request::builder()
+        .uri("/api/stats/llm_usage")
+        .method("POST")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"input_tokens": -10, "output_tokens": 5}"#,
+        ))
+        .unwrap();
+    let resp = router.oneshot(req).await.unwrap();
+    // Negative u64 values fail at JSON parse time — expect 4xx
+    assert!(
+        resp.status().is_client_error(),
+        "expected 4xx for negative tokens, got {}",
+        resp.status()
+    );
+}
+
+#[tokio::test]
+async fn llm_usage_accumulates_across_calls() {
+    let router = test_router();
+
+    call_json(
+        router.clone(),
+        post_json(
+            "/api/stats/llm_usage",
+            json!({"input_tokens": 100, "output_tokens": 50}),
+        ),
+    )
+    .await;
+
+    let (_, body) = call_json(
+        router.clone(),
+        post_json(
+            "/api/stats/llm_usage",
+            json!({"input_tokens": 200, "output_tokens": 75}),
+        ),
+    )
+    .await;
+
+    assert_eq!(body["llm_input_tokens"], 300);
+    assert_eq!(body["llm_output_tokens"], 125);
+    assert_eq!(body["llm_call_count"], 2);
+}
+
+#[tokio::test]
+async fn llm_usage_respects_session_header() {
+    let router = test_router();
+
+    // alice reports usage
+    call_json(
+        router.clone(),
+        post_with_session(
+            "/api/stats/llm_usage",
+            "alice@example.com",
+            json!({"input_tokens": 100, "output_tokens": 50}),
+        ),
+    )
+    .await;
+
+    // bob reports different usage
+    call_json(
+        router.clone(),
+        post_with_session(
+            "/api/stats/llm_usage",
+            "bob@example.com",
+            json!({"input_tokens": 999, "output_tokens": 111}),
+        ),
+    )
+    .await;
+
+    // alice's snapshot shows only her numbers
+    let (_, alice) = call_json(
+        router.clone(),
+        get("/api/stats/tokens/alice@example.com"),
+    )
+    .await;
+    assert_eq!(alice["llm_input_tokens"], 100);
+    assert_eq!(alice["llm_output_tokens"], 50);
+    assert_eq!(alice["llm_call_count"], 1);
+
+    // bob's too
+    let (_, bob) = call_json(router.clone(), get("/api/stats/tokens/bob@example.com")).await;
+    assert_eq!(bob["llm_input_tokens"], 999);
+    assert_eq!(bob["llm_output_tokens"], 111);
+
+    // Aggregate sums both
+    let (_, agg) = call_json(router, get("/api/stats/tokens")).await;
+    assert_eq!(agg["llm_input_tokens"], 1099);
+    assert_eq!(agg["llm_output_tokens"], 161);
+    assert_eq!(agg["llm_call_count"], 2);
+}
+
+#[tokio::test]
+async fn llm_usage_auto_creates_session() {
+    let router = test_router();
+
+    // Fresh session ID — never seen before
+    call_json(
+        router.clone(),
+        post_with_session(
+            "/api/stats/llm_usage",
+            "fresh-session-xyz",
+            json!({"input_tokens": 10, "output_tokens": 5}),
+        ),
+    )
+    .await;
+
+    // Session now exists in the registry
+    let (status, body) = call_json(
+        router,
+        get("/api/stats/tokens/fresh-session-xyz"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["session_id"], "fresh-session-xyz");
+    assert_eq!(body["llm_input_tokens"], 10);
+}
+
+#[tokio::test]
+async fn recall_response_omits_session_llm_stats_without_report() {
+    let router = test_router();
+
+    // Seed a fact to recall
+    call_json(
+        router.clone(),
+        post_json(
+            "/api/memory/remember",
+            json!({"fact": "recall-no-llm-stats test fact", "context": "test"}),
+        ),
+    )
+    .await;
+
+    let (_, body) = call_json(router, get("/api/memory/recall?topic=recall")).await;
+    assert!(
+        body.get("session_llm_stats").is_none(),
+        "recall shouldn't include session_llm_stats before any usage reported: {}",
+        body
+    );
+}
+
+#[tokio::test]
+async fn recall_response_includes_session_llm_stats_after_report() {
+    let router = test_router();
+
+    // Seed a fact
+    call_json(
+        router.clone(),
+        post_with_session(
+            "/api/memory/remember",
+            "alice",
+            json!({"fact": "alice recall llm-stats fact", "context": "test"}),
+        ),
+    )
+    .await;
+
+    // alice reports LLM usage
+    call_json(
+        router.clone(),
+        post_with_session(
+            "/api/stats/llm_usage",
+            "alice",
+            json!({
+                "input_tokens": 1200,
+                "output_tokens": 300,
+                "cache_read_tokens": 800,
+                "cache_create_tokens": 100,
+            }),
+        ),
+    )
+    .await;
+
+    // alice's recall now carries session_llm_stats
+    let (_, body) = call_json(
+        router,
+        get_with_session("/api/memory/recall?topic=recall", "alice"),
+    )
+    .await;
+    let stats = body
+        .get("session_llm_stats")
+        .expect("session_llm_stats missing");
+    assert_eq!(stats["input_tokens_total"], 1200);
+    assert_eq!(stats["output_tokens_total"], 300);
+    assert_eq!(stats["cache_read_tokens_total"], 800);
+    assert_eq!(stats["cache_create_tokens_total"], 100);
+    assert_eq!(stats["call_count"], 1);
+}
+
 // -------- Pinned list --------
 
 #[tokio::test]

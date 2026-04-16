@@ -149,6 +149,7 @@ pub fn router_with_config(
         .route("/api/stats/tokens", get(token_stats))
         .route("/api/stats/tokens/{session_id}", get(session_token_stats))
         .route("/api/stats/sessions", get(list_sessions))
+        .route("/api/stats/llm_usage", post(record_llm_usage))
         .route("/api/stats/{ref_name}", get(stats))
         // Read endpoints (for Lens)
         .route("/api/state/{ref_name}", get(get_state))
@@ -260,6 +261,69 @@ async fn list_sessions(State(s): State<HubState>) -> impl IntoResponse {
     let default_session = s.sessions.get_or_create(DEFAULT_SESSION_ID);
     ensure_flat_size(&s.repo, &default_session, "main");
     Json(s.sessions.snapshot_all())
+}
+
+#[derive(Deserialize)]
+struct LlmUsageRequest {
+    input_tokens: u64,
+    output_tokens: u64,
+    #[serde(default)]
+    cache_read_tokens: u64,
+    #[serde(default)]
+    cache_create_tokens: u64,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+}
+
+/// `POST /api/stats/llm_usage` — record one LLM turn's token usage
+/// against the caller's session.
+///
+/// Agents call this after each significant LLM turn with the numbers
+/// copied straight from the provider's `usage` field. The Hub
+/// accumulates per-session counters and returns the updated
+/// `SessionSnapshot` so callers can see the running totals in one
+/// round trip.
+///
+/// The session is resolved via `X-CTXone-Session` (same mechanism as
+/// every other endpoint). Unknown sessions are auto-created.
+///
+/// Returns **400** when the JSON body fails to deserialize (axum's
+/// extractor surfaces this automatically). `input_tokens` and
+/// `output_tokens` are required; cache tokens, model, and provider
+/// are optional. All numeric fields are `u64`, so negative values
+/// are rejected by the JSON parser.
+#[instrument(skip_all, fields(session = %session_id.0, model = req.model.as_deref().unwrap_or("")))]
+async fn record_llm_usage(
+    State(s): State<HubState>,
+    session_id: SessionId,
+    Json(req): Json<LlmUsageRequest>,
+) -> Result<Json<SessionSnapshot>, (StatusCode, String)> {
+    let session = s.session_for(&session_id);
+    session.record_llm_usage(
+        req.input_tokens,
+        req.output_tokens,
+        req.cache_read_tokens,
+        req.cache_create_tokens,
+        req.model.clone(),
+        req.provider.clone(),
+    );
+
+    // Refresh the flat-size cache so the returned snapshot's
+    // graph-size fields aren't stale — cheap, one walk at worst.
+    ensure_flat_size(&s.repo, &session, "main");
+
+    let snap = SessionSnapshot::from_session(&session_id.0, &session);
+    info!(
+        input = req.input_tokens,
+        output = req.output_tokens,
+        cache_read = req.cache_read_tokens,
+        cache_create = req.cache_create_tokens,
+        session = %session_id.0,
+        "llm_usage"
+    );
+    Ok(Json(snap))
 }
 
 async fn stats(

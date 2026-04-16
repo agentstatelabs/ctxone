@@ -1,6 +1,6 @@
 # MCP Tools Reference
 
-The CTXone Hub exposes 7 MCP tools over the stdio transport. Any
+The CTXone Hub exposes 8 MCP tools over the stdio transport. Any
 MCP-compatible agent (Claude Code, Cursor, VS Code Copilot with MCP,
 Codex, etc.) can call these directly.
 
@@ -215,6 +215,45 @@ history showing who/when/why).
 
 **When to call:** when the user asks "why did we decide X?" or the agent
 needs to justify a past choice to the user.
+
+---
+
+### `record_llm_usage`
+
+Report the LLM turn's token usage to CTXone.
+
+**Description:**
+> Report LLM token usage to CTXone for metrics and cost accounting.
+> Call this after any significant LLM turn — pass the numbers
+> straight from the model's response `usage` field.
+
+**Parameters:**
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `input_tokens` | integer | yes | — | Tokens the model consumed as input |
+| `output_tokens` | integer | yes | — | Tokens the model generated |
+| `cache_read_tokens` | integer | no | `0` | Tokens served from prompt cache (Anthropic) |
+| `cache_create_tokens` | integer | no | `0` | Tokens written to prompt cache (Anthropic) |
+| `model` | string | no | — | Model identifier for display (e.g. `claude-sonnet-4.5`) |
+| `provider` | string | no | — | Provider identifier (`anthropic`, `openai`, `gemini`, …) |
+
+**Response:** JSON object with the updated per-session totals
+(`llm_input_tokens`, `llm_output_tokens`, `llm_cache_read_tokens`,
+`llm_cache_create_tokens`, `llm_call_count`, `last_model`,
+`last_provider`).
+
+**When to call:** after every LLM turn where you actually invoked a
+model. The agent just copies numbers out of the provider response's
+`usage` field into the call parameters. Don't invent numbers, and
+don't call for trivial housekeeping turns.
+
+**Why it matters:** CTXone's internal savings ratio is computed from
+what the Hub itself sent in recall responses — an extrapolation.
+This tool gives Lens ground-truth measurements of actual model
+consumption, cache hit ratios, and real dollar cost. Sessions that
+report LLM usage render with real numbers in Lens; sessions that
+don't fall back to the CTXone-side view only.
 
 ---
 

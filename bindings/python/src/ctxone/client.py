@@ -14,6 +14,7 @@ from .types import (
     PrimeResult,
     RecallResult,
     RememberResult,
+    SessionSnapshot,
     Stats,
     TokenStats,
 )
@@ -419,6 +420,89 @@ class Hub:
             agents=data.get("agents", []),
             categories=data.get("categories", []),
             raw=data,
+        )
+
+    # -- LLM usage reporting ------------------------------------------
+
+    def record_usage(
+        self,
+        input_tokens: int,
+        output_tokens: int,
+        cache_read_tokens: int = 0,
+        cache_create_tokens: int = 0,
+        model: str | None = None,
+        provider: str | None = None,
+    ) -> SessionSnapshot:
+        """Report LLM token usage for the current session.
+
+        Updates the Hub's per-session LLM-observed counters so Lens can
+        show measured numbers instead of CTXone-side extrapolations.
+        Returns the updated `SessionSnapshot` in a single round trip so
+        callers can display running totals without a second request.
+
+        Typical usage with the Anthropic SDK:
+
+            resp = anthropic_client.messages.create(...)
+            hub.record_usage(
+                input_tokens=resp.usage.input_tokens,
+                output_tokens=resp.usage.output_tokens,
+                cache_read_tokens=resp.usage.cache_read_input_tokens or 0,
+                cache_create_tokens=resp.usage.cache_creation_input_tokens or 0,
+                model="claude-sonnet-4.5",
+                provider="anthropic",
+            )
+
+        For Anthropic SDK responses there's an even shorter form, see
+        `record_usage_from_anthropic`.
+        """
+        body: dict[str, Any] = {
+            "input_tokens": int(input_tokens),
+            "output_tokens": int(output_tokens),
+            "cache_read_tokens": int(cache_read_tokens),
+            "cache_create_tokens": int(cache_create_tokens),
+        }
+        if model:
+            body["model"] = model
+        if provider:
+            body["provider"] = provider
+        data = self._post("/api/stats/llm_usage", body)
+        return SessionSnapshot(
+            session_id=data.get("session_id", self.session_id or "default"),
+            session_tokens_used=data.get("session_tokens_used", 0),
+            session_tokens_saved=data.get("session_tokens_saved", 0),
+            total_graph_size_chars=data.get("total_graph_size_chars", 0),
+            total_graph_size_tokens=data.get("total_graph_size_tokens", 0),
+            cumulative_ratio=data.get("cumulative_ratio", 0.0),
+            llm_input_tokens=data.get("llm_input_tokens", 0),
+            llm_output_tokens=data.get("llm_output_tokens", 0),
+            llm_cache_read_tokens=data.get("llm_cache_read_tokens", 0),
+            llm_cache_create_tokens=data.get("llm_cache_create_tokens", 0),
+            llm_call_count=data.get("llm_call_count", 0),
+            last_model=data.get("last_model"),
+            last_provider=data.get("last_provider"),
+        )
+
+    def record_usage_from_anthropic(
+        self,
+        usage: Any,
+        model: str | None = None,
+    ) -> SessionSnapshot:
+        """One-liner helper for Anthropic SDK responses.
+
+            hub.record_usage_from_anthropic(response.usage, model="claude-sonnet-4.5")
+
+        Pulls `input_tokens`, `output_tokens`,
+        `cache_read_input_tokens`, and `cache_creation_input_tokens`
+        off the `usage` object. Missing cache fields default to 0.
+        Provider is hardcoded to `"anthropic"`.
+        """
+        return self.record_usage(
+            input_tokens=getattr(usage, "input_tokens", 0),
+            output_tokens=getattr(usage, "output_tokens", 0),
+            cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
+            cache_create_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
+            model=model,
+            provider="anthropic",
         )
 
     # -- HTTP helpers (private) ---------------------------------------

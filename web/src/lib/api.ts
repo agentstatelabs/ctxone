@@ -19,6 +19,22 @@ export interface TokenStats {
 	total_graph_size_chars: number;
 	total_graph_size_tokens: number;
 	cumulative_ratio: number;
+	/** LLM-observed fields, populated by agent usage reports. All
+	 * optional for back-compat with older Hubs that don't serialize
+	 * them, though current Hubs always include them (zeros until an
+	 * agent reports).
+	 */
+	llm_input_tokens?: number;
+	llm_output_tokens?: number;
+	llm_cache_read_tokens?: number;
+	llm_cache_create_tokens?: number;
+	llm_call_count?: number;
+	last_model?: string | null;
+	last_provider?: string | null;
+}
+
+export interface SessionSnapshot extends TokenStats {
+	session_id: string;
 }
 
 export interface CommitEntry {
@@ -78,6 +94,14 @@ export async function getStats(ref_name = 'main'): Promise<StatsResponse> {
 
 export async function getTokenStats(): Promise<TokenStats> {
 	return fetchJson('/api/stats/tokens');
+}
+
+export async function getSessions(): Promise<SessionSnapshot[]> {
+	return fetchJson('/api/stats/sessions');
+}
+
+export async function getSessionTokenStats(sessionId: string): Promise<SessionSnapshot> {
+	return fetchJson(`/api/stats/tokens/${encodeURIComponent(sessionId)}`);
 }
 
 export async function getState(ref_name = 'main', path = '/'): Promise<unknown> {

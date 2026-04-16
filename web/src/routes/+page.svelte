@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { getHealth, getStats, getLog, getTokenStats, remember } from '$lib/api';
-	import type { StatsResponse, CommitEntry, TokenStats } from '$lib/api';
+	import type { StatsResponse, CommitEntry, TokenStats, SessionSnapshot } from '$lib/api';
+	import LlmConsumptionPanel from '$lib/LlmConsumptionPanel.svelte';
 
 	let connected = $state(false);
 	let stats: StatsResponse | null = $state(null);
@@ -139,6 +140,10 @@
 			<span class="savings-value ratio">{tokenStats.cumulative_ratio.toFixed(1)}x</span>
 		</div>
 	</div>
+{/if}
+
+{#if tokenStats}
+	<LlmConsumptionPanel snapshot={{ session_id: '_aggregate', ...tokenStats } as SessionSnapshot} />
 {/if}
 
 {#if recentCommits.length > 0}

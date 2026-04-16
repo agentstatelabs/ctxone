@@ -99,3 +99,31 @@ class Stats:
     agents: list[str]
     categories: list[str]
     raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class SessionSnapshot:
+    """A snapshot of one session's cumulative counters.
+
+    Returned by `Hub.record_usage()` so callers can see the running
+    totals in one round trip. Also the shape of
+    `GET /api/stats/tokens/{session_id}` responses.
+
+    The `llm_*` fields and `last_model`/`last_provider` are the
+    LLM-observed counters populated by `record_usage` — they stay at
+    `0` / `None` until an agent reports usage for the session.
+    """
+
+    session_id: str
+    session_tokens_used: int = 0
+    session_tokens_saved: int = 0
+    total_graph_size_chars: int = 0
+    total_graph_size_tokens: int = 0
+    cumulative_ratio: float = 0.0
+    llm_input_tokens: int = 0
+    llm_output_tokens: int = 0
+    llm_cache_read_tokens: int = 0
+    llm_cache_create_tokens: int = 0
+    llm_call_count: int = 0
+    last_model: str | None = None
+    last_provider: str | None = None

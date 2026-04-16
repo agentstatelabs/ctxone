@@ -100,6 +100,89 @@ List every known session with its current stats.
 Sorted by `session_id`. The `"default"` session is always present even
 on a fresh Hub.
 
+### `POST /api/stats/llm_usage`
+
+Record one LLM turn's token usage against the caller's session.
+Agents call this after each significant LLM turn with numbers copied
+straight from the provider response's `usage` field. Returns the
+updated `SessionSnapshot` so callers see running totals in one round
+trip.
+
+The session is resolved via `X-CTXone-Session` (same mechanism as
+every other endpoint). Unknown sessions are auto-created.
+
+**Request body:**
+```json
+{
+  "input_tokens": 2400,
+  "output_tokens": 450,
+  "cache_read_tokens": 1800,
+  "cache_create_tokens": 600,
+  "model": "claude-sonnet-4.5",
+  "provider": "anthropic"
+}
+```
+
+- `input_tokens` (required) — tokens the model consumed as input
+- `output_tokens` (required) — tokens the model generated
+- `cache_read_tokens` — tokens served from the prompt cache (Anthropic), default `0`
+- `cache_create_tokens` — tokens written to the prompt cache (Anthropic), default `0`
+- `model` — human-readable model identifier for display, optional
+- `provider` — provider identifier (`anthropic`, `openai`, `gemini`, …), optional
+
+All token fields are `u64`; negative or malformed values are rejected
+by the JSON parser.
+
+**Response (200):**
+```json
+{
+  "session_id": "alice@example.com",
+  "session_tokens_used": 12,
+  "session_tokens_saved": 340,
+  "total_graph_size_chars": 1804,
+  "total_graph_size_tokens": 451,
+  "cumulative_ratio": 29.33,
+  "llm_input_tokens": 2400,
+  "llm_output_tokens": 450,
+  "llm_cache_read_tokens": 1800,
+  "llm_cache_create_tokens": 600,
+  "llm_call_count": 1,
+  "last_model": "claude-sonnet-4.5",
+  "last_provider": "anthropic"
+}
+```
+
+**Error responses:**
+- `400 Bad Request` (or `422 Unprocessable Entity`, depending on
+  axum's extractor) when `input_tokens` or `output_tokens` are
+  missing, non-numeric, or negative.
+
+**Recall integration:** once a session has reported LLM usage at
+least once, every subsequent `GET /api/memory/recall` from the same
+session carries a `session_llm_stats` sub-object so agents see the
+running totals alongside the results:
+
+```json
+{
+  "results": [...],
+  "ctx_tokens_sent": 300,
+  "ctx_tokens_estimated_flat": 1500,
+  "ctx_savings_ratio": 5.0,
+  "pinned_count": 2,
+  "topic_matches": 3,
+  "session_llm_stats": {
+    "input_tokens_total": 12500,
+    "output_tokens_total": 3200,
+    "cache_read_tokens_total": 8900,
+    "cache_create_tokens_total": 450,
+    "call_count": 17
+  }
+}
+```
+
+The field is only present for sessions that have reported usage —
+sessions that haven't see the same shape they've always seen.
+
 ### `GET /api/stats/{ref_name}`
 
 Structural stats for a branch.

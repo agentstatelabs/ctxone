@@ -45,11 +45,31 @@ pub struct TokenStats {
 /// and the next read that needs the size calls `ensure_flat_size` to
 /// refresh it. This means a batch of writes only pays the full-walk
 /// cost once, on the next read that cares.
+///
+/// ## LLM-observed counters
+///
+/// The `llm_*` fields are populated by agents reporting token usage
+/// back via `record_llm_usage` (MCP) or `POST /api/stats/llm_usage`.
+/// They give us ground-truth measurements — "what the model actually
+/// consumed" — to complement the CTXone-side counters, which only
+/// know "what CTXone sent." These two views together produce the
+/// measured savings ratio you see in Lens.
 pub struct SessionStats {
     pub tokens_sent: AtomicU64,
     pub tokens_saved: AtomicU64,
     pub total_graph_size_chars: AtomicU64,
     graph_size_dirty: AtomicBool,
+
+    // LLM-observed fields, populated by agent reports.
+    pub llm_input_tokens: AtomicU64,
+    pub llm_output_tokens: AtomicU64,
+    pub llm_cache_read_tokens: AtomicU64,
+    pub llm_cache_create_tokens: AtomicU64,
+    pub llm_call_count: AtomicU64,
+
+    // Last-observed metadata for display.
+    last_model: RwLock<Option<String>>,
+    last_provider: RwLock<Option<String>>,
 }
 
 impl Default for SessionStats {
@@ -65,6 +85,13 @@ impl SessionStats {
             tokens_saved: AtomicU64::new(0),
             total_graph_size_chars: AtomicU64::new(0),
             graph_size_dirty: AtomicBool::new(true),
+            llm_input_tokens: AtomicU64::new(0),
+            llm_output_tokens: AtomicU64::new(0),
+            llm_cache_read_tokens: AtomicU64::new(0),
+            llm_cache_create_tokens: AtomicU64::new(0),
+            llm_call_count: AtomicU64::new(0),
+            last_model: RwLock::new(None),
+            last_provider: RwLock::new(None),
         }
     }
 
@@ -83,6 +110,52 @@ impl SessionStats {
     pub fn mark_dirty(&self) {
         self.graph_size_dirty.store(true, Ordering::Relaxed);
     }
+
+    /// Record an LLM turn's reported token usage. Accumulates atomic
+    /// counters and updates the last-observed model/provider for
+    /// display in Lens. Called from both the MCP tool
+    /// (`record_llm_usage`) and the HTTP handler
+    /// (`POST /api/stats/llm_usage`).
+    pub fn record_llm_usage(
+        &self,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_tokens: u64,
+        cache_create_tokens: u64,
+        model: Option<String>,
+        provider: Option<String>,
+    ) {
+        self.llm_input_tokens
+            .fetch_add(input_tokens, Ordering::Relaxed);
+        self.llm_output_tokens
+            .fetch_add(output_tokens, Ordering::Relaxed);
+        self.llm_cache_read_tokens
+            .fetch_add(cache_read_tokens, Ordering::Relaxed);
+        self.llm_cache_create_tokens
+            .fetch_add(cache_create_tokens, Ordering::Relaxed);
+        self.llm_call_count.fetch_add(1, Ordering::Relaxed);
+
+        if let Some(m) = model
+            && let Ok(mut w) = self.last_model.write()
+        {
+            *w = Some(m);
+        }
+        if let Some(p) = provider
+            && let Ok(mut w) = self.last_provider.write()
+        {
+            *w = Some(p);
+        }
+    }
+
+    /// Read the last-observed model, if any.
+    pub fn last_model(&self) -> Option<String> {
+        self.last_model.read().ok().and_then(|g| g.clone())
+    }
+
+    /// Read the last-observed provider, if any.
+    pub fn last_provider(&self) -> Option<String> {
+        self.last_provider.read().ok().and_then(|g| g.clone())
+    }
 }
 
 /// Snapshot of one session's accumulated token accounting.
@@ -90,7 +163,12 @@ impl SessionStats {
 /// Returned by `SessionRegistry::snapshot` and used by the HTTP
 /// stats endpoints. This is a plain data struct (not atomics) so it
 /// serializes cleanly as JSON.
-#[derive(Serialize, Clone, Debug, PartialEq)]
+///
+/// All `llm_*` fields and `last_model` / `last_provider` carry
+/// `#[serde(default)]` so snapshots produced by older Hub versions
+/// (before LLM usage capture) deserialize cleanly here — missing
+/// fields default to `0` / `None`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct SessionSnapshot {
     pub session_id: String,
     pub session_tokens_used: u64,
@@ -98,6 +176,21 @@ pub struct SessionSnapshot {
     pub total_graph_size_chars: u64,
     pub total_graph_size_tokens: u64,
     pub cumulative_ratio: f64,
+
+    #[serde(default)]
+    pub llm_input_tokens: u64,
+    #[serde(default)]
+    pub llm_output_tokens: u64,
+    #[serde(default)]
+    pub llm_cache_read_tokens: u64,
+    #[serde(default)]
+    pub llm_cache_create_tokens: u64,
+    #[serde(default)]
+    pub llm_call_count: u64,
+    #[serde(default)]
+    pub last_model: Option<String>,
+    #[serde(default)]
+    pub last_provider: Option<String>,
 }
 
 impl SessionSnapshot {
@@ -118,6 +211,13 @@ impl SessionSnapshot {
             total_graph_size_chars: graph_chars,
             total_graph_size_tokens: graph_tokens,
             cumulative_ratio: ratio,
+            llm_input_tokens: stats.llm_input_tokens.load(Ordering::Relaxed),
+            llm_output_tokens: stats.llm_output_tokens.load(Ordering::Relaxed),
+            llm_cache_read_tokens: stats.llm_cache_read_tokens.load(Ordering::Relaxed),
+            llm_cache_create_tokens: stats.llm_cache_create_tokens.load(Ordering::Relaxed),
+            llm_call_count: stats.llm_call_count.load(Ordering::Relaxed),
+            last_model: stats.last_model(),
+            last_provider: stats.last_provider(),
         }
     }
 }
@@ -225,11 +325,21 @@ impl SessionRegistry {
         let mut total_used = 0u64;
         let mut total_saved = 0u64;
         let mut graph_chars = 0u64;
+        let mut llm_input = 0u64;
+        let mut llm_output = 0u64;
+        let mut llm_cache_read = 0u64;
+        let mut llm_cache_create = 0u64;
+        let mut llm_calls = 0u64;
 
         for s in r.values() {
             total_used += s.tokens_sent.load(Ordering::Relaxed);
             total_saved += s.tokens_saved.load(Ordering::Relaxed);
             graph_chars = graph_chars.max(s.total_graph_size_chars.load(Ordering::Relaxed));
+            llm_input += s.llm_input_tokens.load(Ordering::Relaxed);
+            llm_output += s.llm_output_tokens.load(Ordering::Relaxed);
+            llm_cache_read += s.llm_cache_read_tokens.load(Ordering::Relaxed);
+            llm_cache_create += s.llm_cache_create_tokens.load(Ordering::Relaxed);
+            llm_calls += s.llm_call_count.load(Ordering::Relaxed);
         }
 
         let ratio = if total_used > 0 {
@@ -245,6 +355,15 @@ impl SessionRegistry {
             total_graph_size_chars: graph_chars,
             total_graph_size_tokens: graph_chars / 4,
             cumulative_ratio: ratio,
+            llm_input_tokens: llm_input,
+            llm_output_tokens: llm_output,
+            llm_cache_read_tokens: llm_cache_read,
+            llm_cache_create_tokens: llm_cache_create,
+            llm_call_count: llm_calls,
+            // The aggregate doesn't track per-session model/provider
+            // metadata — it's a roll-up, not a single session's view.
+            last_model: None,
+            last_provider: None,
         }
     }
 
@@ -467,7 +586,7 @@ pub fn run_recall(
     let flat_size = session.total_graph_size_chars.load(Ordering::Relaxed) as usize;
     session.record(total, flat_size);
 
-    serde_json::json!({
+    let mut result = serde_json::json!({
         "topic": topic,
         "ref": ref_name,
         "results": out,
@@ -476,7 +595,29 @@ pub fn run_recall(
         "ctx_tokens_sent": total / 4,
         "ctx_tokens_estimated_flat": flat_size / 4,
         "ctx_savings_ratio": if total > 0 { flat_size as f64 / total as f64 } else { 0.0 },
-    })
+    });
+
+    // Extend the recall response with the session's live LLM usage
+    // when the agent has reported at least one turn. Sessions that
+    // never report stay quiet (field absent) so old consumers see the
+    // same shape they've always seen.
+    let llm_calls = session.llm_call_count.load(Ordering::Relaxed);
+    if llm_calls > 0
+        && let Some(obj) = result.as_object_mut()
+    {
+        obj.insert(
+            "session_llm_stats".to_string(),
+            serde_json::json!({
+                "input_tokens_total": session.llm_input_tokens.load(Ordering::Relaxed),
+                "output_tokens_total": session.llm_output_tokens.load(Ordering::Relaxed),
+                "cache_read_tokens_total": session.llm_cache_read_tokens.load(Ordering::Relaxed),
+                "cache_create_tokens_total": session.llm_cache_create_tokens.load(Ordering::Relaxed),
+                "call_count": llm_calls,
+            }),
+        );
+    }
+
+    result
 }
 
 /// Shared prime implementation: write sections under /memory/{pinned|primed}/{source}/{slug}.
@@ -651,6 +792,32 @@ pub struct PrimeSectionParam {
     pub title: String,
     /// Section body (markdown or plain text).
     pub body: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct RecordLlmUsageParams {
+    /// Tokens the model consumed as input for this turn. Copy from the
+    /// provider response's `usage.input_tokens` (Anthropic),
+    /// `prompt_tokens` (OpenAI), etc.
+    pub input_tokens: u64,
+    /// Tokens the model generated in response. Copy from
+    /// `usage.output_tokens` (Anthropic) or `completion_tokens` (OpenAI).
+    pub output_tokens: u64,
+    /// Tokens served from the prompt cache (Anthropic). Defaults to 0
+    /// when the provider doesn't report this or the call didn't hit
+    /// the cache.
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    /// Tokens written to the prompt cache on this turn (Anthropic).
+    /// Defaults to 0.
+    #[serde(default)]
+    pub cache_create_tokens: u64,
+    /// Human-readable model identifier for display (e.g.
+    /// `"claude-sonnet-4.5"`). Optional.
+    pub model: Option<String>,
+    /// Provider identifier (e.g. `"anthropic"`, `"openai"`, `"gemini"`).
+    /// Optional.
+    pub provider: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -934,6 +1101,50 @@ impl CtxOneServer {
             }
             Err(e) => format!("Error: {}", e),
         }
+    }
+
+    #[tool(
+        description = "Report LLM token usage to CTXone for metrics and \
+    cost accounting. CALL THIS AFTER any significant LLM turn — pass \
+    the numbers straight from the model's response `usage` field. \
+    Required: input_tokens and output_tokens. Optional: \
+    cache_read_tokens and cache_create_tokens (Anthropic prompt \
+    caching), plus model and provider strings for labeling.
+
+    Why call this: CTXone's internal savings ratio is computed from \
+    what IT sent in recall responses. To get ground-truth \
+    measurements of actual model consumption, cache hit ratios, and \
+    real dollar cost, the agent needs to report what the LLM \
+    actually reported back. Sessions that report LLM usage show up \
+    in Lens with real numbers; sessions that don't show only the \
+    CTXone-side view.
+
+    Cost: nearly free. One HTTP call with a tiny JSON body. Not in \
+    the critical path of anything."
+    )]
+    async fn record_llm_usage(&self, params: Parameters<RecordLlmUsageParams>) -> String {
+        let p = params.0;
+        self.session.record_llm_usage(
+            p.input_tokens,
+            p.output_tokens,
+            p.cache_read_tokens,
+            p.cache_create_tokens,
+            p.model.clone(),
+            p.provider.clone(),
+        );
+
+        let snap = SessionSnapshot::from_session("mcp", &self.session);
+        serde_json::json!({
+            "status": "ok",
+            "llm_input_tokens": snap.llm_input_tokens,
+            "llm_output_tokens": snap.llm_output_tokens,
+            "llm_cache_read_tokens": snap.llm_cache_read_tokens,
+            "llm_cache_create_tokens": snap.llm_cache_create_tokens,
+            "llm_call_count": snap.llm_call_count,
+            "last_model": snap.last_model,
+            "last_provider": snap.last_provider,
+        })
+        .to_string()
     }
 
     #[tool(
@@ -1289,6 +1500,197 @@ mod tests {
         // 25 tokens used, 75 saved (flat_tokens 100 - sent_tokens 25)
         assert_eq!(session.tokens_sent.load(Ordering::Relaxed), 25);
         assert_eq!(session.tokens_saved.load(Ordering::Relaxed), 75);
+    }
+
+    // -------- SessionStats: LLM-observed fields --------
+
+    #[test]
+    fn session_stats_llm_fields_default_to_zero() {
+        let session = SessionStats::new();
+        assert_eq!(session.llm_input_tokens.load(Ordering::Relaxed), 0);
+        assert_eq!(session.llm_output_tokens.load(Ordering::Relaxed), 0);
+        assert_eq!(session.llm_cache_read_tokens.load(Ordering::Relaxed), 0);
+        assert_eq!(session.llm_cache_create_tokens.load(Ordering::Relaxed), 0);
+        assert_eq!(session.llm_call_count.load(Ordering::Relaxed), 0);
+        assert!(session.last_model().is_none());
+        assert!(session.last_provider().is_none());
+    }
+
+    #[test]
+    fn session_stats_record_llm_usage_accumulates() {
+        let session = SessionStats::new();
+        session.record_llm_usage(
+            100,
+            50,
+            20,
+            5,
+            Some("claude-sonnet-4.5".to_string()),
+            Some("anthropic".to_string()),
+        );
+        assert_eq!(session.llm_input_tokens.load(Ordering::Relaxed), 100);
+        assert_eq!(session.llm_output_tokens.load(Ordering::Relaxed), 50);
+        assert_eq!(session.llm_cache_read_tokens.load(Ordering::Relaxed), 20);
+        assert_eq!(session.llm_cache_create_tokens.load(Ordering::Relaxed), 5);
+        assert_eq!(session.llm_call_count.load(Ordering::Relaxed), 1);
+        assert_eq!(session.last_model().as_deref(), Some("claude-sonnet-4.5"));
+        assert_eq!(session.last_provider().as_deref(), Some("anthropic"));
+
+        // Second call accumulates
+        session.record_llm_usage(10, 5, 0, 0, None, None);
+        assert_eq!(session.llm_input_tokens.load(Ordering::Relaxed), 110);
+        assert_eq!(session.llm_output_tokens.load(Ordering::Relaxed), 55);
+        assert_eq!(session.llm_call_count.load(Ordering::Relaxed), 2);
+        // None model/provider keeps the previous values
+        assert_eq!(session.last_model().as_deref(), Some("claude-sonnet-4.5"));
+        assert_eq!(session.last_provider().as_deref(), Some("anthropic"));
+    }
+
+    #[test]
+    fn session_stats_record_llm_usage_is_atomic_under_concurrency() {
+        use std::thread;
+
+        let session = Arc::new(SessionStats::new());
+        let mut handles = Vec::new();
+        // 10 threads × 100 iterations × (1 input + 2 output tokens) each.
+        for _ in 0..10 {
+            let s = session.clone();
+            handles.push(thread::spawn(move || {
+                for _ in 0..100 {
+                    s.record_llm_usage(1, 2, 0, 0, None, None);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(session.llm_input_tokens.load(Ordering::Relaxed), 1000);
+        assert_eq!(session.llm_output_tokens.load(Ordering::Relaxed), 2000);
+        assert_eq!(session.llm_call_count.load(Ordering::Relaxed), 1000);
+    }
+
+    #[test]
+    fn session_snapshot_includes_llm_fields() {
+        let session = SessionStats::new();
+        session.record_llm_usage(
+            2400,
+            450,
+            1800,
+            600,
+            Some("claude-sonnet-4.5".to_string()),
+            Some("anthropic".to_string()),
+        );
+        let snap = SessionSnapshot::from_session("alice", &session);
+        assert_eq!(snap.llm_input_tokens, 2400);
+        assert_eq!(snap.llm_output_tokens, 450);
+        assert_eq!(snap.llm_cache_read_tokens, 1800);
+        assert_eq!(snap.llm_cache_create_tokens, 600);
+        assert_eq!(snap.llm_call_count, 1);
+        assert_eq!(snap.last_model.as_deref(), Some("claude-sonnet-4.5"));
+        assert_eq!(snap.last_provider.as_deref(), Some("anthropic"));
+    }
+
+    #[test]
+    fn session_snapshot_serializes_and_deserializes_with_llm_fields() {
+        let session = SessionStats::new();
+        session.record_llm_usage(
+            10,
+            5,
+            0,
+            0,
+            Some("gpt-4o".to_string()),
+            Some("openai".to_string()),
+        );
+        let snap = SessionSnapshot::from_session("alice", &session);
+        let json = serde_json::to_string(&snap).expect("serialize");
+        let round: SessionSnapshot = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(round, snap);
+    }
+
+    #[test]
+    fn session_snapshot_deserializes_without_llm_fields_backcompat() {
+        // Snapshot from an older Hub version: no llm_* fields present.
+        // Should deserialize with zeros/None, not fail.
+        let legacy = r#"{
+            "session_id": "old",
+            "session_tokens_used": 10,
+            "session_tokens_saved": 5,
+            "total_graph_size_chars": 100,
+            "total_graph_size_tokens": 25,
+            "cumulative_ratio": 1.5
+        }"#;
+        let snap: SessionSnapshot = serde_json::from_str(legacy).expect("deserialize legacy");
+        assert_eq!(snap.session_id, "old");
+        assert_eq!(snap.llm_input_tokens, 0);
+        assert_eq!(snap.llm_output_tokens, 0);
+        assert_eq!(snap.llm_cache_read_tokens, 0);
+        assert_eq!(snap.llm_cache_create_tokens, 0);
+        assert_eq!(snap.llm_call_count, 0);
+        assert!(snap.last_model.is_none());
+        assert!(snap.last_provider.is_none());
+    }
+
+    #[test]
+    fn registry_aggregate_sums_llm_fields() {
+        let registry = SessionRegistry::new();
+        let alice = registry.get_or_create("alice");
+        let bob = registry.get_or_create("bob");
+
+        alice.record_llm_usage(100, 50, 20, 5, None, None);
+        bob.record_llm_usage(200, 75, 40, 10, None, None);
+
+        let agg = registry.aggregate();
+        assert_eq!(agg.llm_input_tokens, 300);
+        assert_eq!(agg.llm_output_tokens, 125);
+        assert_eq!(agg.llm_cache_read_tokens, 60);
+        assert_eq!(agg.llm_cache_create_tokens, 15);
+        assert_eq!(agg.llm_call_count, 2);
+        // Aggregate intentionally omits per-session metadata
+        assert!(agg.last_model.is_none());
+        assert!(agg.last_provider.is_none());
+    }
+
+    #[test]
+    fn run_recall_includes_session_llm_stats_after_report() {
+        let repo = fresh_repo();
+        let session = Arc::new(SessionStats::new());
+
+        // Seed something to recall
+        let opts = CommitOptions::new(
+            "test",
+            IntentCategory::Custom("Observe".to_string()),
+            "seed",
+        );
+        repo.set_json(
+            "main",
+            "/memory/test/one",
+            &serde_json::Value::String("BSL licensing".to_string()),
+            opts,
+        )
+        .unwrap();
+
+        // Before any LLM usage is reported, recall response omits
+        // session_llm_stats (opt-in extension)
+        let pre = run_recall(&repo, &session, "licensing", 1500, "main");
+        assert!(pre.get("session_llm_stats").is_none());
+
+        // After reporting, it's present
+        session.record_llm_usage(
+            2400,
+            450,
+            1800,
+            600,
+            Some("claude".to_string()),
+            Some("anthropic".to_string()),
+        );
+        let post = run_recall(&repo, &session, "licensing", 1500, "main");
+        let llm_stats = post
+            .get("session_llm_stats")
+            .expect("recall should include session_llm_stats after usage report");
+        assert_eq!(llm_stats["input_tokens_total"], 2400);
+        assert_eq!(llm_stats["output_tokens_total"], 450);
+        assert_eq!(llm_stats["cache_read_tokens_total"], 1800);
+        assert_eq!(llm_stats["cache_create_tokens_total"], 600);
+        assert_eq!(llm_stats["call_count"], 1);
     }
 
     #[test]

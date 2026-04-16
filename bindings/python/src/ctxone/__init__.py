@@ -24,6 +24,7 @@ from .types import (
     PrimeResult,
     RecallResult,
     RememberResult,
+    SessionSnapshot,
     Stats,
     TokenStats,
 )
@@ -41,6 +42,7 @@ __all__ = [
     "PrimeResult",
     "RecallResult",
     "RememberResult",
+    "SessionSnapshot",
     "Stats",
     "TokenStats",
     "__version__",
