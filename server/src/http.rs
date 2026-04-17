@@ -1057,28 +1057,17 @@ async fn list_plans(
     Query(q): Query<PlanListQuery>,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
     let store = plan_tools::make_store(s.repo.clone(), DEFAULT_AGENT_ID);
-    let plans = store
-        .list_plans(&q.ref_name)
-        .map_err(substrate_error_to_response)?;
     let filter = q
         .status
         .as_deref()
         .and_then(plan_tools::plan_status_from_str);
+    let plans = store
+        .list_plans_by_status(&q.ref_name, filter)
+        .map_err(substrate_error_to_response)?;
     let mut out = Vec::new();
     for plan in plans {
-        if let Some(f) = filter
-            && plan.status != f
-        {
-            continue;
-        }
         let tasks = store.list_tasks(&q.ref_name, &plan.name).unwrap_or_default();
-        let assignments = plan_tools::read_assignments(&s.repo, &q.ref_name, &plan.name);
-        out.push(plan_tools::plan_to_json(
-            &plan,
-            &tasks,
-            &assignments,
-            false,
-        ));
+        out.push(plan_tools::plan_to_json(&plan, &tasks, false));
     }
     Ok(Json(out))
 }
@@ -1093,12 +1082,7 @@ async fn create_plan(
     let plan = plan_tools::create_plan(&store, &req.ref_name, &req.name, req.description)
         .map_err(plan_error_to_response)?;
     s.sessions.mark_all_dirty();
-    let body = plan_tools::plan_to_json(
-        &plan,
-        &[],
-        &std::collections::BTreeMap::new(),
-        false,
-    );
+    let body = plan_tools::plan_to_json(&plan, &[], false);
     Ok((StatusCode::CREATED, Json(body)))
 }
 
@@ -1113,13 +1097,7 @@ async fn get_plan(
         .get_plan(&q.ref_name, &name)
         .map_err(substrate_error_to_response)?;
     let tasks = store.list_tasks(&q.ref_name, &name).unwrap_or_default();
-    let assignments = plan_tools::read_assignments(&s.repo, &q.ref_name, &name);
-    Ok(Json(plan_tools::plan_to_json(
-        &plan,
-        &tasks,
-        &assignments,
-        true,
-    )))
+    Ok(Json(plan_tools::plan_to_json(&plan, &tasks, true)))
 }
 
 #[instrument(skip_all, fields(name = %name, ref_name = %q.ref_name, agent = %agent_id.0))]
@@ -1151,13 +1129,7 @@ async fn list_plan_tasks(
     let tasks = store
         .list_tasks(&q.ref_name, &name)
         .map_err(substrate_error_to_response)?;
-    let assignments = plan_tools::read_assignments(&s.repo, &q.ref_name, &name);
-    let out: Vec<serde_json::Value> = tasks
-        .iter()
-        .map(|t| {
-            plan_tools::task_to_json(t, assignments.get(t.id.as_str()).map(|s| s.as_str()))
-        })
-        .collect();
+    let out: Vec<serde_json::Value> = tasks.iter().map(plan_tools::task_to_json).collect();
     Ok(Json(out))
 }
 
@@ -1169,9 +1141,8 @@ async fn add_plan_task(
     Json(req): Json<CreateTaskRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
     let store = plan_tools::make_store(s.repo.clone(), &agent_id.0);
-    let (task, assigned_to) = plan_tools::add_task(
+    let task = plan_tools::add_task(
         &store,
-        &s.repo,
         &req.ref_name,
         &name,
         &req.title,
@@ -1180,13 +1151,12 @@ async fn add_plan_task(
         req.parent_id.as_deref(),
         req.assigned_to.as_deref(),
         req.blocked_by,
-        &agent_id.0,
     )
     .map_err(plan_error_to_response)?;
     s.sessions.mark_all_dirty();
     Ok((
         StatusCode::CREATED,
-        Json(plan_tools::task_to_json(&task, assigned_to.as_deref())),
+        Json(plan_tools::task_to_json(&task)),
     ))
 }
 
@@ -1201,11 +1171,7 @@ async fn get_plan_task(
     let task = store
         .get_task(&q.ref_name, &name, &TaskId(task_id))
         .map_err(substrate_error_to_response)?;
-    let assignments = plan_tools::read_assignments(&s.repo, &q.ref_name, &name);
-    Ok(Json(plan_tools::task_to_json(
-        &task,
-        assignments.get(task.id.as_str()).map(|s| s.as_str()),
-    )))
+    Ok(Json(plan_tools::task_to_json(&task)))
 }
 
 #[instrument(skip_all, fields(name = %name, task_id = %task_id, agent = %agent_id.0))]
@@ -1222,11 +1188,7 @@ async fn start_plan_task(
         .start_task(&req.ref_name, &name, &TaskId(task_id))
         .map_err(substrate_error_to_response)?;
     s.sessions.mark_all_dirty();
-    let assignments = plan_tools::read_assignments(&s.repo, &req.ref_name, &name);
-    Ok(Json(plan_tools::task_to_json(
-        &task,
-        assignments.get(task.id.as_str()).map(|s| s.as_str()),
-    )))
+    Ok(Json(plan_tools::task_to_json(&task)))
 }
 
 #[instrument(skip_all, fields(name = %name, task_id = %task_id, agent = %agent_id.0))]
@@ -1245,11 +1207,7 @@ async fn complete_plan_task(
         .complete_task(&req.ref_name, &name, &TaskId(task_id), proof)
         .map_err(substrate_error_to_response)?;
     s.sessions.mark_all_dirty();
-    let assignments = plan_tools::read_assignments(&s.repo, &req.ref_name, &name);
-    Ok(Json(plan_tools::task_to_json(
-        &task,
-        assignments.get(task.id.as_str()).map(|s| s.as_str()),
-    )))
+    Ok(Json(plan_tools::task_to_json(&task)))
 }
 
 #[instrument(skip_all, fields(name = %name, task_id = %task_id, agent = %agent_id.0))]
@@ -1265,11 +1223,7 @@ async fn abandon_plan_task(
         .abandon_task(&req.ref_name, &name, &TaskId(task_id), &req.reason)
         .map_err(substrate_error_to_response)?;
     s.sessions.mark_all_dirty();
-    let assignments = plan_tools::read_assignments(&s.repo, &req.ref_name, &name);
-    Ok(Json(plan_tools::task_to_json(
-        &task,
-        assignments.get(task.id.as_str()).map(|s| s.as_str()),
-    )))
+    Ok(Json(plan_tools::task_to_json(&task)))
 }
 
 #[instrument(skip_all, fields(name = %name, ref_name = %q.ref_name, assigned_to = q.assigned_to.as_deref().unwrap_or("")))]
@@ -1285,27 +1239,16 @@ async fn next_plan_task(
         Some(x) if !x.is_empty() => Some(x.to_string()),
         _ => None,
     };
-    let task = plan_tools::next_pickable_task(
-        &store,
-        &s.repo,
-        &q.ref_name,
-        &name,
-        assignee.as_deref(),
-        q.include_unassigned,
-        q.assigned_only,
-    )
-    .map_err(plan_error_to_response)?;
+    // Substrate's next_task_for takes a single include_unassigned flag.
+    // Preserve CTXone's historical semantics: assigned_only=true forces
+    // unassigned tasks out regardless of include_unassigned.
+    let include_unassigned = q.include_unassigned && !q.assigned_only;
+    let task = store
+        .next_task_for(&q.ref_name, &name, assignee.as_deref(), include_unassigned)
+        .map_err(substrate_error_to_response)?;
     let body = match task {
         None => serde_json::json!({ "task": null }),
-        Some(t) => {
-            let assignments = plan_tools::read_assignments(&s.repo, &q.ref_name, &name);
-            serde_json::json!({
-                "task": plan_tools::task_to_json(
-                    &t,
-                    assignments.get(t.id.as_str()).map(|s| s.as_str()),
-                )
-            })
-        }
+        Some(t) => serde_json::json!({ "task": plan_tools::task_to_json(&t) }),
     };
     Ok(Json(body))
 }
@@ -1322,12 +1265,7 @@ async fn archive_plan(
         .archive_plan(&q.ref_name, &name)
         .map_err(substrate_error_to_response)?;
     s.sessions.mark_all_dirty();
-    Ok(Json(plan_tools::plan_to_json(
-        &plan,
-        &[],
-        &std::collections::BTreeMap::new(),
-        false,
-    )))
+    Ok(Json(plan_tools::plan_to_json(&plan, &[], false)))
 }
 
 #[cfg(test)]

@@ -1165,13 +1165,8 @@ impl CtxOneServer {
         match pt::create_plan(&store, &p.ref_name, &p.name, p.description) {
             Ok(plan) => {
                 self.session.mark_dirty();
-                serde_json::to_string(&pt::plan_to_json(
-                    &plan,
-                    &[],
-                    &std::collections::BTreeMap::new(),
-                    false,
-                ))
-                .unwrap_or_else(|_| "{}".into())
+                serde_json::to_string(&pt::plan_to_json(&plan, &[], false))
+                    .unwrap_or_else(|_| "{}".into())
             }
             Err(e) => pt::err_json(e),
         }
@@ -1188,7 +1183,6 @@ impl CtxOneServer {
         let store = pt::make_store(self.repo.clone(), &self.agent_id);
         match pt::add_task(
             &store,
-            &self.repo,
             &p.ref_name,
             &p.plan_id,
             &p.title,
@@ -1197,11 +1191,10 @@ impl CtxOneServer {
             p.parent_id.as_deref(),
             p.assigned_to.as_deref(),
             p.blocked_by,
-            &self.agent_id,
         ) {
-            Ok((task, assigned_to)) => {
+            Ok(task) => {
                 self.session.mark_dirty();
-                serde_json::to_string(&pt::task_to_json(&task, assigned_to.as_deref()))
+                serde_json::to_string(&pt::task_to_json(&task))
                     .unwrap_or_else(|_| "{}".into())
             }
             Err(e) => pt::err_json(e),
@@ -1222,12 +1215,8 @@ impl CtxOneServer {
         match store.start_task(&p.ref_name, &p.plan_id, &id) {
             Ok(task) => {
                 self.session.mark_dirty();
-                let assignments = pt::read_assignments(&self.repo, &p.ref_name, &p.plan_id);
-                serde_json::to_string(&pt::task_to_json(
-                    &task,
-                    assignments.get(task.id.as_str()).map(|s| s.as_str()),
-                ))
-                .unwrap_or_else(|_| "{}".into())
+                serde_json::to_string(&pt::task_to_json(&task))
+                    .unwrap_or_else(|_| "{}".into())
             }
             Err(e) => pt::err_json(e),
         }
@@ -1254,12 +1243,8 @@ impl CtxOneServer {
         match store.complete_task(&p.ref_name, &p.plan_id, &id, proof) {
             Ok(task) => {
                 self.session.mark_dirty();
-                let assignments = pt::read_assignments(&self.repo, &p.ref_name, &p.plan_id);
-                serde_json::to_string(&pt::task_to_json(
-                    &task,
-                    assignments.get(task.id.as_str()).map(|s| s.as_str()),
-                ))
-                .unwrap_or_else(|_| "{}".into())
+                serde_json::to_string(&pt::task_to_json(&task))
+                    .unwrap_or_else(|_| "{}".into())
             }
             Err(e) => pt::err_json(e),
         }
@@ -1282,12 +1267,8 @@ impl CtxOneServer {
         match store.abandon_task(&p.ref_name, &p.plan_id, &id, &p.reason) {
             Ok(task) => {
                 self.session.mark_dirty();
-                let assignments = pt::read_assignments(&self.repo, &p.ref_name, &p.plan_id);
-                serde_json::to_string(&pt::task_to_json(
-                    &task,
-                    assignments.get(task.id.as_str()).map(|s| s.as_str()),
-                ))
-                .unwrap_or_else(|_| "{}".into())
+                serde_json::to_string(&pt::task_to_json(&task))
+                    .unwrap_or_else(|_| "{}".into())
             }
             Err(e) => pt::err_json(e),
         }
@@ -1307,24 +1288,20 @@ impl CtxOneServer {
             Some(s) if !s.is_empty() => Some(s.to_string()),
             _ => None,
         };
-        match pt::next_pickable_task(
-            &store,
-            &self.repo,
+        // Substrate's next_task_for takes a single include_unassigned flag.
+        // CTXone's wire API keeps the historical assigned_only override: if
+        // assigned_only=true, unassigned tasks are excluded regardless of
+        // include_unassigned.
+        let include_unassigned = p.include_unassigned && !p.assigned_only;
+        match store.next_task_for(
             &p.ref_name,
             &p.plan_id,
             assignee.as_deref(),
-            p.include_unassigned,
-            p.assigned_only,
+            include_unassigned,
         ) {
             Ok(None) => "null".to_string(),
-            Ok(Some(task)) => {
-                let assignments = pt::read_assignments(&self.repo, &p.ref_name, &p.plan_id);
-                serde_json::to_string(&pt::task_to_json(
-                    &task,
-                    assignments.get(task.id.as_str()).map(|s| s.as_str()),
-                ))
-                .unwrap_or_else(|_| "{}".into())
-            }
+            Ok(Some(task)) => serde_json::to_string(&pt::task_to_json(&task))
+                .unwrap_or_else(|_| "{}".into()),
             Err(e) => pt::err_json(e),
         }
     }
@@ -1338,21 +1315,15 @@ impl CtxOneServer {
         use crate::plan_tools as pt;
         let p = params.0;
         let store = pt::make_store(self.repo.clone(), &self.agent_id);
-        let plans = match store.list_plans(&p.ref_name) {
+        let filter = p.status_filter.as_deref().and_then(pt::plan_status_from_str);
+        let plans = match store.list_plans_by_status(&p.ref_name, filter) {
             Ok(v) => v,
             Err(e) => return pt::err_json(e),
         };
-        let filter = p.status_filter.as_deref().and_then(pt::plan_status_from_str);
         let mut out = Vec::new();
         for plan in plans {
-            if let Some(f) = filter
-                && plan.status != f
-            {
-                continue;
-            }
             let tasks = store.list_tasks(&p.ref_name, &plan.name).unwrap_or_default();
-            let assignments = pt::read_assignments(&self.repo, &p.ref_name, &plan.name);
-            out.push(pt::plan_to_json(&plan, &tasks, &assignments, false));
+            out.push(pt::plan_to_json(&plan, &tasks, false));
         }
         serde_json::to_string(&out).unwrap_or_else(|_| "[]".into())
     }
@@ -1371,8 +1342,7 @@ impl CtxOneServer {
             Err(e) => return pt::err_json(e),
         };
         let tasks = store.list_tasks(&p.ref_name, &p.plan_id).unwrap_or_default();
-        let assignments = pt::read_assignments(&self.repo, &p.ref_name, &p.plan_id);
-        serde_json::to_string(&pt::plan_to_json(&plan, &tasks, &assignments, true))
+        serde_json::to_string(&pt::plan_to_json(&plan, &tasks, true))
             .unwrap_or_else(|_| "{}".into())
     }
 
@@ -1391,13 +1361,8 @@ impl CtxOneServer {
         match store.archive_plan(&p.ref_name, &p.plan_id) {
             Ok(plan) => {
                 self.session.mark_dirty();
-                serde_json::to_string(&pt::plan_to_json(
-                    &plan,
-                    &[],
-                    &std::collections::BTreeMap::new(),
-                    false,
-                ))
-                .unwrap_or_else(|_| "{}".into())
+                serde_json::to_string(&pt::plan_to_json(&plan, &[], false))
+                    .unwrap_or_else(|_| "{}".into())
             }
             Err(e) => pt::err_json(e),
         }
@@ -1416,11 +1381,7 @@ impl CtxOneServer {
             Ok(v) => v,
             Err(e) => return pt::err_json(e),
         };
-        let assignments = pt::read_assignments(&self.repo, &p.ref_name, &p.plan_id);
-        let out: Vec<serde_json::Value> = tasks
-            .iter()
-            .map(|t| pt::task_to_json(t, assignments.get(t.id.as_str()).map(|s| s.as_str())))
-            .collect();
+        let out: Vec<serde_json::Value> = tasks.iter().map(pt::task_to_json).collect();
         serde_json::to_string(&out).unwrap_or_else(|_| "[]".into())
     }
 
