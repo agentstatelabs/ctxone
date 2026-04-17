@@ -27,6 +27,7 @@ use crate::memory_tools::{
     DEFAULT_AGENT_ID, DEFAULT_SESSION_ID, SessionRegistry, SessionSnapshot, SessionStats,
     ensure_flat_size, run_prime, run_recall,
 };
+use crate::plan_tools;
 use crate::rate_limit;
 
 /// Hub-wide HTTP configuration.
@@ -170,6 +171,16 @@ pub fn router_with_config(
         .route("/api/memory/summarize_session", post(summarize_session))
         .route("/api/memory/what_changed_since", get(what_changed_since))
         .route("/api/memory/why_did_we", get(why_did_we))
+        // Plan endpoints
+        .route("/api/plans", get(list_plans).post(create_plan))
+        .route("/api/plans/{name}", get(get_plan).delete(delete_plan))
+        .route("/api/plans/{name}/tasks", get(list_plan_tasks).post(add_plan_task))
+        .route("/api/plans/{name}/tasks/{task_id}", get(get_plan_task))
+        .route("/api/plans/{name}/tasks/{task_id}/start", post(start_plan_task))
+        .route("/api/plans/{name}/tasks/{task_id}/complete", post(complete_plan_task))
+        .route("/api/plans/{name}/tasks/{task_id}/abandon", post(abandon_plan_task))
+        .route("/api/plans/{name}/next", get(next_plan_task))
+        .route("/api/plans/{name}/archive", post(archive_plan))
         .layer(trace)
         .layer(cors)
         .with_state(state);
@@ -928,6 +939,395 @@ async fn list_pinned(
         }
     }
     Ok(Json(out))
+}
+
+// -- Plan endpoints --------------------------------------------------
+//
+// Thin wrappers around `plan_tools::*` + `TaskStore` calls. Each
+// endpoint honors `X-CTXone-Agent` for blame attribution and
+// `X-CTXone-Session` for stats accounting.
+
+#[derive(Deserialize)]
+struct RefQuery {
+    #[serde(default = "default_ref", rename = "ref")]
+    ref_name: String,
+}
+
+#[derive(Deserialize)]
+struct PlanListQuery {
+    #[serde(default = "default_ref", rename = "ref")]
+    ref_name: String,
+    #[serde(default)]
+    status: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CreatePlanRequest {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default = "default_ref", rename = "ref")]
+    ref_name: String,
+}
+
+#[derive(Deserialize)]
+struct CreateTaskRequest {
+    title: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    priority: Option<String>,
+    #[serde(default)]
+    parent_id: Option<String>,
+    #[serde(default)]
+    assigned_to: Option<String>,
+    #[serde(default)]
+    blocked_by: Vec<String>,
+    #[serde(default = "default_ref", rename = "ref")]
+    ref_name: String,
+}
+
+#[derive(Deserialize)]
+struct StartTaskRequest {
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default = "default_ref", rename = "ref")]
+    ref_name: String,
+}
+
+#[derive(Deserialize)]
+struct CompleteTaskRequest {
+    proof: plan_tools::ProofParam,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default = "default_ref", rename = "ref")]
+    ref_name: String,
+}
+
+#[derive(Deserialize)]
+struct AbandonTaskRequest {
+    reason: String,
+    #[serde(default = "default_ref", rename = "ref")]
+    ref_name: String,
+}
+
+#[derive(Deserialize)]
+struct NextTaskQuery {
+    #[serde(default = "default_ref", rename = "ref")]
+    ref_name: String,
+    #[serde(default)]
+    assigned_to: Option<String>,
+    #[serde(default = "default_true")]
+    include_unassigned: bool,
+    #[serde(default)]
+    assigned_only: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn plan_error_to_response(err: plan_tools::PlanToolError) -> (StatusCode, String) {
+    use agentstategraph_tasks::TaskStoreError as TE;
+    let status = match &err {
+        plan_tools::PlanToolError::Substrate(TE::PlanNotFound(_)) => StatusCode::NOT_FOUND,
+        plan_tools::PlanToolError::Substrate(TE::TaskNotFound { .. }) => StatusCode::NOT_FOUND,
+        plan_tools::PlanToolError::Substrate(TE::PlanAlreadyExists(_)) => StatusCode::CONFLICT,
+        plan_tools::PlanToolError::Substrate(TE::Blocked { .. }) => StatusCode::CONFLICT,
+        plan_tools::PlanToolError::Substrate(TE::BlockerNotFound { .. }) => StatusCode::CONFLICT,
+        plan_tools::PlanToolError::Substrate(TE::InvalidTransition { .. }) => StatusCode::CONFLICT,
+        plan_tools::PlanToolError::Substrate(TE::ProofRequired) => StatusCode::BAD_REQUEST,
+        plan_tools::PlanToolError::Substrate(TE::ReasonRequired) => StatusCode::BAD_REQUEST,
+        plan_tools::PlanToolError::Substrate(TE::ParentNotFound(_)) => StatusCode::NOT_FOUND,
+        plan_tools::PlanToolError::Substrate(TE::ParentIsSubtask(_)) => StatusCode::BAD_REQUEST,
+        plan_tools::PlanToolError::InvalidProof(_) => StatusCode::BAD_REQUEST,
+        plan_tools::PlanToolError::InvalidPriority(_) => StatusCode::BAD_REQUEST,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (status, err.to_string())
+}
+
+fn substrate_error_to_response(err: agentstategraph_tasks::TaskStoreError) -> (StatusCode, String) {
+    plan_error_to_response(plan_tools::PlanToolError::Substrate(err))
+}
+
+#[instrument(skip_all, fields(ref_name = %q.ref_name, status = q.status.as_deref().unwrap_or("")))]
+async fn list_plans(
+    State(s): State<HubState>,
+    Query(q): Query<PlanListQuery>,
+) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+    let store = plan_tools::make_store(s.repo.clone(), DEFAULT_AGENT_ID);
+    let plans = store
+        .list_plans(&q.ref_name)
+        .map_err(substrate_error_to_response)?;
+    let filter = q
+        .status
+        .as_deref()
+        .and_then(plan_tools::plan_status_from_str);
+    let mut out = Vec::new();
+    for plan in plans {
+        if let Some(f) = filter
+            && plan.status != f
+        {
+            continue;
+        }
+        let tasks = store.list_tasks(&q.ref_name, &plan.name).unwrap_or_default();
+        let assignments = plan_tools::read_assignments(&s.repo, &q.ref_name, &plan.name);
+        out.push(plan_tools::plan_to_json(
+            &plan,
+            &tasks,
+            &assignments,
+            false,
+        ));
+    }
+    Ok(Json(out))
+}
+
+#[instrument(skip_all, fields(name = %req.name, ref_name = %req.ref_name, agent = %agent_id.0))]
+async fn create_plan(
+    State(s): State<HubState>,
+    agent_id: AgentId,
+    Json(req): Json<CreatePlanRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
+    let store = plan_tools::make_store(s.repo.clone(), &agent_id.0);
+    let plan = plan_tools::create_plan(&store, &req.ref_name, &req.name, req.description)
+        .map_err(plan_error_to_response)?;
+    s.sessions.mark_all_dirty();
+    let body = plan_tools::plan_to_json(
+        &plan,
+        &[],
+        &std::collections::BTreeMap::new(),
+        false,
+    );
+    Ok((StatusCode::CREATED, Json(body)))
+}
+
+#[instrument(skip_all, fields(name = %name, ref_name = %q.ref_name))]
+async fn get_plan(
+    State(s): State<HubState>,
+    Path(name): Path<String>,
+    Query(q): Query<RefQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = plan_tools::make_store(s.repo.clone(), DEFAULT_AGENT_ID);
+    let plan = store
+        .get_plan(&q.ref_name, &name)
+        .map_err(substrate_error_to_response)?;
+    let tasks = store.list_tasks(&q.ref_name, &name).unwrap_or_default();
+    let assignments = plan_tools::read_assignments(&s.repo, &q.ref_name, &name);
+    Ok(Json(plan_tools::plan_to_json(
+        &plan,
+        &tasks,
+        &assignments,
+        true,
+    )))
+}
+
+#[instrument(skip_all, fields(name = %name, ref_name = %q.ref_name, agent = %agent_id.0))]
+async fn delete_plan(
+    State(s): State<HubState>,
+    agent_id: AgentId,
+    Path(name): Path<String>,
+    Query(q): Query<RefQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = plan_tools::make_store(s.repo.clone(), &agent_id.0);
+    store
+        .delete_plan(&q.ref_name, &name)
+        .map_err(substrate_error_to_response)?;
+    s.sessions.mark_all_dirty();
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "name": name,
+        "ref": q.ref_name,
+    })))
+}
+
+#[instrument(skip_all, fields(name = %name, ref_name = %q.ref_name))]
+async fn list_plan_tasks(
+    State(s): State<HubState>,
+    Path(name): Path<String>,
+    Query(q): Query<RefQuery>,
+) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+    let store = plan_tools::make_store(s.repo.clone(), DEFAULT_AGENT_ID);
+    let tasks = store
+        .list_tasks(&q.ref_name, &name)
+        .map_err(substrate_error_to_response)?;
+    let assignments = plan_tools::read_assignments(&s.repo, &q.ref_name, &name);
+    let out: Vec<serde_json::Value> = tasks
+        .iter()
+        .map(|t| {
+            plan_tools::task_to_json(t, assignments.get(t.id.as_str()).map(|s| s.as_str()))
+        })
+        .collect();
+    Ok(Json(out))
+}
+
+#[instrument(skip_all, fields(name = %name, title = %req.title, agent = %agent_id.0))]
+async fn add_plan_task(
+    State(s): State<HubState>,
+    agent_id: AgentId,
+    Path(name): Path<String>,
+    Json(req): Json<CreateTaskRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
+    let store = plan_tools::make_store(s.repo.clone(), &agent_id.0);
+    let (task, assigned_to) = plan_tools::add_task(
+        &store,
+        &s.repo,
+        &req.ref_name,
+        &name,
+        &req.title,
+        req.description.as_deref(),
+        req.priority.as_deref(),
+        req.parent_id.as_deref(),
+        req.assigned_to.as_deref(),
+        req.blocked_by,
+        &agent_id.0,
+    )
+    .map_err(plan_error_to_response)?;
+    s.sessions.mark_all_dirty();
+    Ok((
+        StatusCode::CREATED,
+        Json(plan_tools::task_to_json(&task, assigned_to.as_deref())),
+    ))
+}
+
+#[instrument(skip_all, fields(name = %name, task_id = %task_id, ref_name = %q.ref_name))]
+async fn get_plan_task(
+    State(s): State<HubState>,
+    Path((name, task_id)): Path<(String, String)>,
+    Query(q): Query<RefQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    use agentstategraph_tasks::TaskId;
+    let store = plan_tools::make_store(s.repo.clone(), DEFAULT_AGENT_ID);
+    let task = store
+        .get_task(&q.ref_name, &name, &TaskId(task_id))
+        .map_err(substrate_error_to_response)?;
+    let assignments = plan_tools::read_assignments(&s.repo, &q.ref_name, &name);
+    Ok(Json(plan_tools::task_to_json(
+        &task,
+        assignments.get(task.id.as_str()).map(|s| s.as_str()),
+    )))
+}
+
+#[instrument(skip_all, fields(name = %name, task_id = %task_id, agent = %agent_id.0))]
+async fn start_plan_task(
+    State(s): State<HubState>,
+    agent_id: AgentId,
+    Path((name, task_id)): Path<(String, String)>,
+    Json(req): Json<StartTaskRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    use agentstategraph_tasks::TaskId;
+    let _ = req.reason; // reserved for future richer blame (annotation)
+    let store = plan_tools::make_store(s.repo.clone(), &agent_id.0);
+    let task = store
+        .start_task(&req.ref_name, &name, &TaskId(task_id))
+        .map_err(substrate_error_to_response)?;
+    s.sessions.mark_all_dirty();
+    let assignments = plan_tools::read_assignments(&s.repo, &req.ref_name, &name);
+    Ok(Json(plan_tools::task_to_json(
+        &task,
+        assignments.get(task.id.as_str()).map(|s| s.as_str()),
+    )))
+}
+
+#[instrument(skip_all, fields(name = %name, task_id = %task_id, agent = %agent_id.0))]
+async fn complete_plan_task(
+    State(s): State<HubState>,
+    agent_id: AgentId,
+    Path((name, task_id)): Path<(String, String)>,
+    Json(req): Json<CompleteTaskRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    use agentstategraph_tasks::TaskId;
+    let _ = req.reason;
+    let proof = plan_tools::parse_proof(&req.proof.kind, &req.proof.value, req.proof.note)
+        .map_err(plan_error_to_response)?;
+    let store = plan_tools::make_store(s.repo.clone(), &agent_id.0);
+    let task = store
+        .complete_task(&req.ref_name, &name, &TaskId(task_id), proof)
+        .map_err(substrate_error_to_response)?;
+    s.sessions.mark_all_dirty();
+    let assignments = plan_tools::read_assignments(&s.repo, &req.ref_name, &name);
+    Ok(Json(plan_tools::task_to_json(
+        &task,
+        assignments.get(task.id.as_str()).map(|s| s.as_str()),
+    )))
+}
+
+#[instrument(skip_all, fields(name = %name, task_id = %task_id, agent = %agent_id.0))]
+async fn abandon_plan_task(
+    State(s): State<HubState>,
+    agent_id: AgentId,
+    Path((name, task_id)): Path<(String, String)>,
+    Json(req): Json<AbandonTaskRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    use agentstategraph_tasks::TaskId;
+    let store = plan_tools::make_store(s.repo.clone(), &agent_id.0);
+    let task = store
+        .abandon_task(&req.ref_name, &name, &TaskId(task_id), &req.reason)
+        .map_err(substrate_error_to_response)?;
+    s.sessions.mark_all_dirty();
+    let assignments = plan_tools::read_assignments(&s.repo, &req.ref_name, &name);
+    Ok(Json(plan_tools::task_to_json(
+        &task,
+        assignments.get(task.id.as_str()).map(|s| s.as_str()),
+    )))
+}
+
+#[instrument(skip_all, fields(name = %name, ref_name = %q.ref_name, assigned_to = q.assigned_to.as_deref().unwrap_or("")))]
+async fn next_plan_task(
+    State(s): State<HubState>,
+    agent_id: AgentId,
+    Path(name): Path<String>,
+    Query(q): Query<NextTaskQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = plan_tools::make_store(s.repo.clone(), DEFAULT_AGENT_ID);
+    let assignee = match q.assigned_to.as_deref() {
+        Some("me") => Some(agent_id.0.clone()),
+        Some(x) if !x.is_empty() => Some(x.to_string()),
+        _ => None,
+    };
+    let task = plan_tools::next_pickable_task(
+        &store,
+        &s.repo,
+        &q.ref_name,
+        &name,
+        assignee.as_deref(),
+        q.include_unassigned,
+        q.assigned_only,
+    )
+    .map_err(plan_error_to_response)?;
+    let body = match task {
+        None => serde_json::json!({ "task": null }),
+        Some(t) => {
+            let assignments = plan_tools::read_assignments(&s.repo, &q.ref_name, &name);
+            serde_json::json!({
+                "task": plan_tools::task_to_json(
+                    &t,
+                    assignments.get(t.id.as_str()).map(|s| s.as_str()),
+                )
+            })
+        }
+    };
+    Ok(Json(body))
+}
+
+#[instrument(skip_all, fields(name = %name, ref_name = %q.ref_name, agent = %agent_id.0))]
+async fn archive_plan(
+    State(s): State<HubState>,
+    agent_id: AgentId,
+    Path(name): Path<String>,
+    Query(q): Query<RefQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = plan_tools::make_store(s.repo.clone(), &agent_id.0);
+    let plan = store
+        .archive_plan(&q.ref_name, &name)
+        .map_err(substrate_error_to_response)?;
+    s.sessions.mark_all_dirty();
+    Ok(Json(plan_tools::plan_to_json(
+        &plan,
+        &[],
+        &std::collections::BTreeMap::new(),
+        false,
+    )))
 }
 
 #[cfg(test)]
