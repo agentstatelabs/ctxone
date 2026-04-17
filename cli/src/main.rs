@@ -18,6 +18,7 @@ const EMBEDDED_AGENTS_MD: &str = include_str!("../../docs/AGENTS.md");
 /// the file end up under `/memory/pinned/ctxone-agents/<slug>/`.
 const AGENTS_SOURCE: &str = "ctxone-agents";
 
+#[allow(dead_code)]
 const EX_OK: i32 = 0;
 #[allow(dead_code)]
 const EX_USAGE: i32 = 64; // bad arguments (clap handles this)
@@ -414,6 +415,127 @@ enum Commands {
     Agents {
         #[command(subcommand)]
         action: AgentsAction,
+    },
+    /// Manage plans — a container of tasks that survives across sessions.
+    /// Plans are the CTXone cure for "plan rot": unstructured markdown
+    /// todos that drift from reality the moment work starts.
+    Plan {
+        #[command(subcommand)]
+        action: PlanAction,
+    },
+}
+
+/// Proof specifier — `kind:value[:note]`. Kind is one of commit|file|test|text.
+fn parse_proof_spec(raw: &str) -> Result<(String, String, Option<String>), String> {
+    let parts: Vec<&str> = raw.splitn(3, ':').collect();
+    if parts.len() < 2 {
+        return Err(format!(
+            "expected <kind>:<value>[:<note>] (e.g. 'commit:abc123'), got '{}'",
+            raw
+        ));
+    }
+    let kind = parts[0].to_string();
+    let value = parts[1].to_string();
+    let note = parts.get(2).map(|s| s.to_string());
+    match kind.as_str() {
+        "commit" | "file" | "test" | "text" => Ok((kind, value, note)),
+        _ => Err(format!(
+            "unknown proof kind '{}' (expected commit|file|test|text)",
+            kind
+        )),
+    }
+}
+
+#[derive(Subcommand)]
+enum PlanAction {
+    /// Create a new plan
+    New {
+        /// Plan name (kebab-case, no spaces)
+        name: String,
+        /// Optional description
+        #[arg(long, short)]
+        description: Option<String>,
+    },
+    /// Add a task to a plan
+    Add {
+        /// Plan name
+        plan_id: String,
+        /// Task title (imperative sentence)
+        title: String,
+        /// Longer-form description (appended to title)
+        #[arg(long, short)]
+        description: Option<String>,
+        /// Priority: low|medium|high|critical
+        #[arg(long, default_value = "medium")]
+        priority: String,
+        /// Make this a subtask of another task
+        #[arg(long)]
+        parent: Option<String>,
+        /// Agent id this task is intended for (e.g. 'claude-code',
+        /// 'codex', a user email). Enables multi-agent orchestration
+        /// via `ctx plan next --me`.
+        #[arg(long = "assigned-to")]
+        assigned_to: Option<String>,
+        /// Task that must be `done` before this one can start. May be
+        /// passed multiple times.
+        #[arg(long = "blocks", short = 'b')]
+        blocks: Vec<String>,
+    },
+    /// Mark a task in-progress
+    Start {
+        plan_id: String,
+        task_id: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Mark a task done (requires proof)
+    Done {
+        plan_id: String,
+        task_id: String,
+        /// Proof spec: kind:value[:note]. Kind is commit|file|test|text.
+        #[arg(long, short)]
+        proof: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Mark a task abandoned (requires reason)
+    Abandon {
+        plan_id: String,
+        task_id: String,
+        /// Why this task is being abandoned. Shows up in blame.
+        #[arg(long, short)]
+        reason: String,
+    },
+    /// Show the next pickable task
+    Next {
+        plan_id: String,
+        /// Filter to tasks assigned to this agent id. Mutually exclusive with --me.
+        #[arg(long = "assigned-to")]
+        assigned_to: Option<String>,
+        /// Shortcut for --assigned-to <session-agent>. Uses X-CTXone-Agent
+        /// (CTX_AGENT_ID env or the config default).
+        #[arg(long)]
+        me: bool,
+        /// Include unassigned tasks alongside assigned ones (default true)
+        #[arg(long = "include-unassigned", default_value_t = true)]
+        include_unassigned: bool,
+        /// Restrict strictly to tasks explicitly assigned
+        #[arg(long = "assigned-only")]
+        assigned_only: bool,
+    },
+    /// List plans
+    List {
+        /// Filter by status: active|completed|archived
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Show a plan with its tasks
+    Show {
+        plan_id: String,
+    },
+    /// Archive a plan (soft — task data preserved)
+    Archive {
+        plan_id: String,
     },
 }
 
@@ -1428,6 +1550,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let branch = cli.branch.clone();
             let format = cli.format;
             handle_agents(action, &server, &branch, format).await?;
+        }
+        Commands::Plan { action } => {
+            let server = cli.server.clone();
+            let branch = cli.branch.clone();
+            let format = cli.format;
+            handle_plan(action, &server, &branch, format).await?;
         }
     }
 
@@ -2880,6 +3008,454 @@ fn init_mcp(
     println!();
     println!("CtxOne is ready. Try: \"remember that we use BSL-1.1 licensing\"");
 
+    Ok(())
+}
+
+// -- Plan command implementation ------------------------------------
+
+/// Render the task status with a compact glyph for TTY output.
+fn status_glyph(status: &str) -> &'static str {
+    match status {
+        "done" => "[x]",
+        "in_progress" => "[>]",
+        "abandoned" => "[!]",
+        _ => "[ ]",
+    }
+}
+
+fn priority_tag(priority: &str) -> &'static str {
+    match priority {
+        "critical" => "[CR]",
+        "high" => "[HI]",
+        "medium" => "[ME]",
+        "low" => "[LO]",
+        _ => "[??]",
+    }
+}
+
+async fn handle_plan(
+    action: PlanAction,
+    server: &str,
+    branch: &str,
+    format: OutputFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let client = reqwest::Client::new();
+    let agent_id = std::env::var("CTX_AGENT_ID").unwrap_or_else(|_| "ctx-cli".to_string());
+
+    match action {
+        PlanAction::New { name, description } => {
+            let mut body = serde_json::json!({
+                "name": name.clone(),
+                "ref": branch,
+            });
+            if let Some(d) = description {
+                body["description"] = serde_json::json!(d);
+            }
+            let resp = match client
+                .post(format!("{}/api/plans", server))
+                .header("X-CTXone-Agent", &agent_id)
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "plan new failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(format, &parsed, |v| {
+                println!("Plan created: {}", v["name"].as_str().unwrap_or(""));
+                if let Some(s) = v["status"].as_str() {
+                    println!("  status: {}", s);
+                }
+            });
+        }
+        PlanAction::Add {
+            plan_id,
+            title,
+            description,
+            priority,
+            parent,
+            assigned_to,
+            blocks,
+        } => {
+            let mut body = serde_json::json!({
+                "title": title,
+                "priority": priority,
+                "ref": branch,
+            });
+            if let Some(d) = description {
+                body["description"] = serde_json::json!(d);
+            }
+            if let Some(p) = parent {
+                body["parent_id"] = serde_json::json!(p);
+            }
+            if let Some(a) = assigned_to {
+                body["assigned_to"] = serde_json::json!(a);
+            }
+            if !blocks.is_empty() {
+                body["blocked_by"] = serde_json::json!(blocks);
+            }
+            let url = format!("{}/api/plans/{}/tasks", server, urlencoding(&plan_id));
+            let resp = match client
+                .post(&url)
+                .header("X-CTXone-Agent", &agent_id)
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "plan add failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(format, &parsed, |v| {
+                let id = v["id"].as_str().unwrap_or("?");
+                let title = v["title"].as_str().unwrap_or("");
+                let pri = v["priority"].as_str().unwrap_or("medium");
+                println!("Added {} {} {}", id, priority_tag(pri), title);
+                if let Some(a) = v["assigned_to"].as_str() {
+                    println!("  assigned to: {}", a);
+                }
+                if let Some(blockers) = v["blocked_by"].as_array()
+                    && !blockers.is_empty()
+                {
+                    let list: Vec<String> = blockers
+                        .iter()
+                        .filter_map(|b| b.as_str().map(String::from))
+                        .collect();
+                    println!("  blocked by: {}", list.join(", "));
+                }
+            });
+        }
+        PlanAction::Start {
+            plan_id,
+            task_id,
+            reason,
+        } => {
+            let body = match reason {
+                Some(r) => serde_json::json!({"reason": r, "ref": branch}),
+                None => serde_json::json!({"ref": branch}),
+            };
+            let url = format!(
+                "{}/api/plans/{}/tasks/{}/start",
+                server,
+                urlencoding(&plan_id),
+                urlencoding(&task_id),
+            );
+            let resp = match client
+                .post(&url)
+                .header("X-CTXone-Agent", &agent_id)
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "plan start failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(format, &parsed, |v| {
+                println!(
+                    "Started {}: {}",
+                    v["id"].as_str().unwrap_or(""),
+                    v["title"].as_str().unwrap_or("")
+                );
+                println!("  status: {}", v["status"].as_str().unwrap_or("?"));
+            });
+        }
+        PlanAction::Done {
+            plan_id,
+            task_id,
+            proof,
+            reason,
+        } => {
+            let (kind, value, note) = match parse_proof_spec(&proof) {
+                Ok(triple) => triple,
+                Err(e) => {
+                    eprintln!("plan done: {}", e);
+                    std::process::exit(EX_DATAERR);
+                }
+            };
+            let mut proof_obj = serde_json::json!({"kind": kind, "value": value});
+            if let Some(n) = note {
+                proof_obj["note"] = serde_json::json!(n);
+            }
+            let mut body = serde_json::json!({"proof": proof_obj, "ref": branch});
+            if let Some(r) = reason {
+                body["reason"] = serde_json::json!(r);
+            }
+            let url = format!(
+                "{}/api/plans/{}/tasks/{}/complete",
+                server,
+                urlencoding(&plan_id),
+                urlencoding(&task_id),
+            );
+            let resp = match client
+                .post(&url)
+                .header("X-CTXone-Agent", &agent_id)
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "plan done failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(format, &parsed, |v| {
+                println!(
+                    "Marked {} done: {}",
+                    v["id"].as_str().unwrap_or(""),
+                    v["title"].as_str().unwrap_or("")
+                );
+                if let Some(p) = v.get("proof") {
+                    let kind = p["kind"].as_str().unwrap_or("?");
+                    let val = p["value"].as_str().unwrap_or("");
+                    println!("  proof: {} {}", kind, val);
+                }
+            });
+        }
+        PlanAction::Abandon {
+            plan_id,
+            task_id,
+            reason,
+        } => {
+            let body = serde_json::json!({"reason": reason, "ref": branch});
+            let url = format!(
+                "{}/api/plans/{}/tasks/{}/abandon",
+                server,
+                urlencoding(&plan_id),
+                urlencoding(&task_id),
+            );
+            let resp = match client
+                .post(&url)
+                .header("X-CTXone-Agent", &agent_id)
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "plan abandon failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(format, &parsed, |v| {
+                println!(
+                    "Abandoned {}: {}",
+                    v["id"].as_str().unwrap_or(""),
+                    v["title"].as_str().unwrap_or("")
+                );
+                println!("  reason: {}", v["abandoned_reason"].as_str().unwrap_or(""));
+            });
+        }
+        PlanAction::Next {
+            plan_id,
+            assigned_to,
+            me,
+            include_unassigned,
+            assigned_only,
+        } => {
+            let mut parts = vec![format!("ref={}", urlencoding(branch))];
+            let assignee = if me {
+                Some(agent_id.clone())
+            } else {
+                assigned_to
+            };
+            if let Some(a) = assignee {
+                parts.push(format!("assigned_to={}", urlencoding(&a)));
+            }
+            parts.push(format!("include_unassigned={}", include_unassigned));
+            if assigned_only {
+                parts.push("assigned_only=true".to_string());
+            }
+            let url = format!(
+                "{}/api/plans/{}/next?{}",
+                server,
+                urlencoding(&plan_id),
+                parts.join("&"),
+            );
+            let resp = match client
+                .get(&url)
+                .header("X-CTXone-Agent", &agent_id)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "plan next failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(format, &parsed, |v| match v.get("task") {
+                Some(t) if !t.is_null() => {
+                    let pri = t["priority"].as_str().unwrap_or("");
+                    println!(
+                        "Next: {} {} {}",
+                        t["id"].as_str().unwrap_or(""),
+                        priority_tag(pri),
+                        t["title"].as_str().unwrap_or("")
+                    );
+                    if let Some(a) = t["assigned_to"].as_str() {
+                        println!("  assigned to: {}", a);
+                    }
+                }
+                _ => {
+                    println!("No pickable tasks.");
+                }
+            });
+        }
+        PlanAction::List { status } => {
+            let mut url = format!("{}/api/plans?ref={}", server, urlencoding(branch));
+            if let Some(s) = status {
+                url.push_str(&format!("&status={}", urlencoding(&s)));
+            }
+            let resp = match client
+                .get(&url)
+                .header("X-CTXone-Agent", &agent_id)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "plan list failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(format, &parsed, |v| {
+                let empty = vec![];
+                let arr = v.as_array().unwrap_or(&empty);
+                if arr.is_empty() {
+                    println!("No plans.");
+                    return;
+                }
+                for plan in arr {
+                    let name = plan["name"].as_str().unwrap_or("");
+                    let status = plan["status"].as_str().unwrap_or("?");
+                    let counts = &plan["task_counts"];
+                    let done = counts["done"].as_u64().unwrap_or(0);
+                    let in_progress = counts["in_progress"].as_u64().unwrap_or(0);
+                    let pending = counts["pending"].as_u64().unwrap_or(0);
+                    let total = counts["total"].as_u64().unwrap_or(0);
+                    println!(
+                        "{:<24} {:<10} {} tasks [{}✓ {}→ {} ]",
+                        name, status, total, done, in_progress, pending
+                    );
+                }
+            });
+        }
+        PlanAction::Show { plan_id } => {
+            let url = format!(
+                "{}/api/plans/{}?ref={}",
+                server,
+                urlencoding(&plan_id),
+                urlencoding(branch)
+            );
+            let resp = match client
+                .get(&url)
+                .header("X-CTXone-Agent", &agent_id)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "plan show failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(format, &parsed, |v| {
+                let name = v["name"].as_str().unwrap_or("");
+                let status = v["status"].as_str().unwrap_or("?");
+                let desc = v["description"].as_str().unwrap_or("");
+                println!("Plan: {} — {}", name, desc);
+                println!("  status: {}", status);
+                let empty = vec![];
+                let tasks = v["tasks"].as_array().unwrap_or(&empty);
+                if tasks.is_empty() {
+                    println!("  (no tasks)");
+                    return;
+                }
+                println!();
+                for task in tasks {
+                    let id = task["id"].as_str().unwrap_or("");
+                    let title = task["title"].as_str().unwrap_or("");
+                    let status = task["status"].as_str().unwrap_or("");
+                    let pri = task["priority"].as_str().unwrap_or("");
+                    let assigned = task["assigned_to"].as_str();
+                    let mut line = format!(
+                        "  {} {} {} {}",
+                        status_glyph(status),
+                        id,
+                        priority_tag(pri),
+                        title
+                    );
+                    if let Some(a) = assigned {
+                        line.push_str(&format!(" @{}", a));
+                    }
+                    println!("{}", line);
+                    if let Some(proof) = task.get("proof")
+                        && !proof.is_null()
+                    {
+                        let kind = proof["kind"].as_str().unwrap_or("?");
+                        let val = proof["value"].as_str().unwrap_or("");
+                        println!("      proof: {} {}", kind, val);
+                    }
+                    if status == "abandoned"
+                        && let Some(reason) = task["abandoned_reason"].as_str()
+                    {
+                        println!("      reason: {}", reason);
+                    }
+                    let blockers: Vec<&str> = task["blocked_by"]
+                        .as_array()
+                        .map(|arr| arr.iter().filter_map(|b| b.as_str()).collect())
+                        .unwrap_or_default();
+                    if !blockers.is_empty() {
+                        println!("      blocked by: {}", blockers.join(", "));
+                    }
+                }
+            });
+        }
+        PlanAction::Archive { plan_id } => {
+            let url = format!(
+                "{}/api/plans/{}/archive",
+                server,
+                urlencoding(&plan_id),
+            );
+            let resp = match client
+                .post(&url)
+                .header("X-CTXone-Agent", &agent_id)
+                .json(&serde_json::json!({"ref": branch}))
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "plan archive failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(format, &parsed, |v| {
+                println!(
+                    "Archived plan {}",
+                    v["name"].as_str().unwrap_or("")
+                );
+            });
+        }
+    }
     Ok(())
 }
 
