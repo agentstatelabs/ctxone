@@ -63,6 +63,8 @@ dependencies = [
  "agentstategraph-core",
  "agentstategraph-storage",
  "chrono",
+ "once_cell",
+ "regex",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

@@ -1054,6 +1054,8 @@ fn plan_error_to_response(err: plan_tools::PlanToolError) -> (StatusCode, String
         plan_tools::PlanToolError::Substrate(TE::ParentIsSubtask(_)) => StatusCode::BAD_REQUEST,
         plan_tools::PlanToolError::InvalidProof(_) => StatusCode::BAD_REQUEST,
         plan_tools::PlanToolError::InvalidPriority(_) => StatusCode::BAD_REQUEST,
+        plan_tools::PlanToolError::InvalidInput(_) => StatusCode::BAD_REQUEST,
+        plan_tools::PlanToolError::Substrate(TE::InvalidBlockerId(_)) => StatusCode::BAD_REQUEST,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
     (status, err.to_string())
