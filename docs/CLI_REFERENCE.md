@@ -437,6 +437,101 @@ Command-line flags always override environment variables.
 
 ---
 
+## `ctx plan` — multi-step work tracked across sessions
+
+Plans are CTXone's cure for **plan rot** — the decay that happens
+when task state lives in unstructured markdown files. Every plan
+operation writes a blameable commit; proofs are required to close
+tasks; branches carry their own plans.
+
+### `ctx plan new <name>`
+
+Create a new plan. Name should be kebab-case.
+
+```
+$ ctx plan new website-v2 --description "Brand pivot"
+Plan created: website-v2
+  status: active
+```
+
+### `ctx plan add <plan> "<title>"`
+
+Add a task to an existing plan.
+
+```
+$ ctx plan add website-v2 "Rewrite hero" \
+    --priority high \
+    --assigned-to claude-code \
+    --blocks t-001
+```
+
+Options:
+
+- `--description <text>` — longer-form, appended to title.
+- `--priority low|medium|high|critical` (default `medium`)
+- `--parent <task-id>` — nest as subtask (one level only)
+- `--assigned-to <agent>` — address the task to a specific agent
+- `--blocks <task-id>` — task that must be `done` first, repeatable
+
+### `ctx plan start <plan> <task-id>`
+
+Transition `pending → in_progress`. Refuses if any blocker isn't
+done yet; error lists the blocking tasks.
+
+### `ctx plan done <plan> <task-id> --proof <spec>`
+
+Transition `in_progress → done`. **Requires** `--proof`.
+
+Proof spec: `kind:value[:note]`. `kind` is one of
+`commit` / `file` / `test` / `text`. Examples:
+
+```
+--proof "commit:ef6ce63"
+--proof "file:src/foo.rs:refactor for clarity"
+--proof "test:test_hero_renders"
+--proof "text:confirmed in chat"
+```
+
+Completing the last open task auto-promotes the plan to `completed`.
+
+### `ctx plan abandon <plan> <task-id> --reason "<text>"`
+
+Record the task as abandoned. `--reason` is required.
+
+### `ctx plan next <plan>`
+
+Show the next pickable task.
+
+Options:
+
+- `--assigned-to <agent>` — filter to tasks addressed to this agent
+- `--me` — shortcut for `--assigned-to <session-agent>` (uses
+  `CTX_AGENT_ID` or the config default)
+- `--include-unassigned` — include unowned tasks alongside assigned
+  ones (default on)
+- `--assigned-only` — restrict strictly to explicitly assigned tasks
+
+With `--me`, two agents sharing one plan each pick up their own tasks
+without stepping on each other. This is **state-driven orchestration**
+— the plan IS the orchestration layer. No framework, no DAG runtime.
+
+### `ctx plan list`
+
+List plans on the current branch.
+
+Options: `--status active|completed|archived` — filter.
+
+### `ctx plan show <plan>`
+
+Render a plan as a tree with tasks, statuses, proofs, assignments,
+and blockers.
+
+### `ctx plan archive <plan>`
+
+Soft-archive. Task data preserved.
+
+---
+
 ## See also
 
 - [QUICKSTART.md](QUICKSTART.md) — 5-minute get-running guide

@@ -82,6 +82,63 @@ decision with the user, call `summarize_session` to record what was
 learned and decided. Don't summarize every chat — only real working
 sessions where something was figured out.
 
+## Plans — use them for multi-step work
+
+When the user asks for something that takes more than one step, create
+a plan and add tasks to it BEFORE starting execution. Plans are how
+CTXone cures **plan rot** — the trust decay that happens when task
+state lives in unstructured markdown files.
+
+- `plan_new("<name>")` — create a plan when you recognize a
+  multi-step task.
+- `plan_add("<name>", "<title>")` — add a task for each step. Set
+  priority: `high` for blockers-of-other-work, `medium` for default,
+  `low` for nice-to-haves, `critical` only for emergencies.
+- `plan_start(<plan>, <id>)` — mark a task in-progress when you
+  begin. If it refuses because of a blocker, respect that — don't
+  work around.
+- `plan_complete(<plan>, <id>, proof=...)` — mark done with PROOF
+  when finished. A commit SHA is the strongest proof. A file path is
+  next. A test name after that. Never use `text:` unless no other
+  proof is available.
+- `plan_abandon(<plan>, <id>, reason=...)` — record that a task
+  became unnecessary. Reasons are required; they show up in blame.
+
+At the start of any session, call `plan_list` (no args) to see what's
+in flight. If you're resuming a plan, call `plan_get` to see the full
+task tree, or `plan_next` to continue from the highest-priority
+pending task.
+
+### Multi-agent orchestration via `assigned_to`
+
+When a plan has tasks addressed to specific agents via `assigned_to`,
+the pattern is:
+
+1. Each agent, at session start, calls
+   `plan_next(plan_id=..., assigned_to="me")`. The Hub maps `"me"` to
+   the caller's `X-CTXone-Agent` value.
+2. The agent gets the highest-priority pending task assigned to it
+   (or unassigned, unless `assigned_only=true`), whose blockers are
+   done.
+3. Agent picks it up (`plan_start`), does the work, completes with
+   proof (`plan_complete`). Blame records which agent did each step.
+4. Next agent, next task, same loop.
+
+This is **state-driven orchestration**: the plan IS the
+orchestration layer. No framework, no DAG runtime. Agents coordinate
+through shared state the way a team coordinates through a shared
+ticket tracker.
+
+Composes naturally with cross-LLM critique: assign a "critique this
+design" task to a different agent than the one who created the
+design. Assign "arbitrate this disagreement" to a third. Every step
+is blameable, every output is persistent, and it all happens via
+the same MCP tools agents already use.
+
+Do NOT ask the user for permission to create plans. If the work is
+multi-step, plan it. The user will thank you for treating their time
+as worth structuring.
+
 ## Report LLM usage back to CTXone
 
 After any significant LLM turn you complete, call `record_llm_usage`
@@ -107,6 +164,12 @@ visible response on its completion.
 - **Don't use `forget` to hide failures.** Use blame honestly.
 - **Don't ignore the savings ratio.** It tells you if you're using the
   system well.
+- **Don't treat the plan file as truth.** Markdown plan files drift
+  from reality the moment work starts. The graph is the source of
+  truth. When in doubt, query with `plan_list` / `plan_get`, not the
+  file.
+- **Don't mark anything done without proof.** `plan_complete`
+  requires `proof`. If you can't produce one, the task isn't done.
 
 ## This file is not hidden
 

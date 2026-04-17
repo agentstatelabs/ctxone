@@ -601,6 +601,108 @@ generated `.mcp.json` / `.cursor/mcp.json` etc).
 See [docs/TROUBLESHOOTING.md#per-tool-agent-ids](TROUBLESHOOTING.md#per-tool-agent-ids)
 for the full resolution order and examples.
 
+## Plan endpoints
+
+All plan endpoints live under `/api/plans/*` and honor
+`X-CTXone-Agent` for blame attribution + `X-CTXone-Session` for stats.
+A `ref` query parameter selects the branch (default `main`).
+
+### `POST /api/plans`
+
+Create a plan.
+
+```
+POST /api/plans
+{
+  "name": "website-v2",
+  "description": "Brand pivot",
+  "ref": "main"
+}
+→ 201 Created
+{
+  "name": "website-v2",
+  "description": "Brand pivot",
+  "status": "active",
+  "created_by": "claude-code",
+  "created_at": "2026-04-16T…",
+  "task_counts": { "pending": 0, "in_progress": 0, "done": 0, "abandoned": 0, "total": 0 }
+}
+→ 409 Conflict  (plan already exists)
+```
+
+### `GET /api/plans?ref=main&status=active`
+
+List plans on a branch, optionally filtered by status. Response body
+is a JSON array of plan objects.
+
+### `GET /api/plans/{name}?ref=main`
+
+Fetch one plan with its full `tasks[]` list.
+
+### `DELETE /api/plans/{name}?ref=main`
+
+Remove a plan destructively. Use `POST /api/plans/{name}/archive` for
+a soft, reversible alternative.
+
+### `POST /api/plans/{name}/tasks`
+
+Add a task. Body fields:
+
+| Field | Type | Required |
+|-------|------|----------|
+| `title` | string | yes |
+| `description` | string | no |
+| `priority` | `low`/`medium`/`high`/`critical` | no |
+| `parent_id` | string | no (subtask support) |
+| `assigned_to` | string | no — agent id |
+| `blocked_by` | string[] | no |
+| `ref` | string | no |
+
+Returns the created task on `201`.
+
+### `GET /api/plans/{name}/tasks?ref=main`
+
+List tasks in a plan, flat.
+
+### `GET /api/plans/{name}/tasks/{task_id}?ref=main`
+
+Fetch a single task.
+
+### `POST /api/plans/{name}/tasks/{task_id}/start`
+
+Transition `pending → in_progress`. Returns the updated task. Returns
+`409 Conflict` if blockers aren't done.
+
+### `POST /api/plans/{name}/tasks/{task_id}/complete`
+
+Transition `in_progress → done` with a proof:
+
+```
+{ "proof": { "kind": "commit", "value": "ef6ce63" } }
+```
+
+Proof `kind` is one of `commit` / `file` / `test` / `text`. Returns
+`400 Bad Request` when the proof value is empty or the kind is
+unknown.
+
+### `POST /api/plans/{name}/tasks/{task_id}/abandon`
+
+Body: `{ "reason": "superseded" }`. Reason is required (empty
+reasons return `400`).
+
+### `POST /api/plans/{name}/archive`
+
+Soft-archive a plan.
+
+### `GET /api/plans/{name}/next?ref=main&assigned_to=me&include_unassigned=true&assigned_only=false`
+
+Return the highest-priority pickable task wrapped as
+`{ "task": { … } }` or `{ "task": null }`. Pass `assigned_to=me` to
+filter to tasks assigned to the agent carried by `X-CTXone-Agent` —
+this is the state-driven orchestration primitive.
+
+---
+
 ## Authentication
 
 The HTTP API currently has **no authentication**. Run the Hub on a

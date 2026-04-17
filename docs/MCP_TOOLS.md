@@ -1,8 +1,9 @@
 # MCP Tools Reference
 
-The CTXone Hub exposes 8 MCP tools over the stdio transport. Any
-MCP-compatible agent (Claude Code, Cursor, VS Code Copilot with MCP,
-Codex, etc.) can call these directly.
+The CTXone Hub exposes its memory primitives and the plan primitives
+as MCP tools over the stdio transport. Any MCP-compatible agent
+(Claude Code, Cursor, VS Code Copilot with MCP, Codex, etc.) can call
+these directly.
 
 For setup instructions, see [INTEGRATIONS.md](INTEGRATIONS.md).
 For the underlying concepts, see [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -286,8 +287,165 @@ unambiguous.
 
 ---
 
+## Plan tools
+
+Ten MCP tools wrap the plan primitives from the
+`agentstategraph-tasks` crate and surface them with proactive
+"CALL THIS WHEN" descriptions. Plans persist under `/plans/<name>/`
+and survive session boundaries — the same plan can be picked up by
+another agent or by you tomorrow.
+
+### `plan_new`
+
+Create a plan.
+
+**When to call:** the user describes a multi-step task. Don't ask
+permission — if the work is multi-step, plan it.
+
+**Parameters:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | yes | Kebab-case plan name |
+| `description` | string | no | One or two sentences |
+| `ref` | string | no | Branch, default `main` |
+
+Returns the created plan as JSON.
+
+---
+
+### `plan_add`
+
+Add a task to a plan.
+
+**When to call:** enumerating the steps of a multi-step task — add
+every step as a task before you start executing.
+
+**Parameters:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `plan_id` | string | yes | Plan name |
+| `title` | string | yes | Imperative sentence |
+| `description` | string | no | Longer-form (appended to title) |
+| `priority` | enum | no | `low` / `medium` / `high` / `critical` |
+| `parent_id` | string | no | Parent task id for a subtask |
+| `assigned_to` | string | no | Agent id (e.g. `claude-code`, `codex`) |
+| `blocked_by` | string[] | no | Task ids that must be done first |
+| `ref` | string | no | Branch, default `main` |
+
+Passing `assigned_to` enables the state-driven orchestration pattern —
+see `plan_next` below.
+
+---
+
+### `plan_start`
+
+Transition `pending → in_progress`.
+
+**When to call:** you begin working on a task. Refuses with an error
+listing the blockers if any entry in `blocked_by` is not yet `done`.
+
+**Parameters:** `plan_id`, `task_id`, `reason?`, `ref?`.
+
+---
+
+### `plan_complete`
+
+Transition `in_progress → done`. Requires a proof.
+
+**When to call:** you finish a task. Proof kinds in order of
+preference:
+
+- `commit` — a git SHA (strongest)
+- `file` — a path you created or edited
+- `test` — a test name that now exists or passes
+- `text` — human-attested last-resort
+
+**Parameters:** `plan_id`, `task_id`, `proof` ({kind, value, note?}),
+`reason?`, `ref?`.
+
+Completing the last open task in a plan auto-promotes the plan to
+`completed`.
+
+---
+
+### `plan_abandon`
+
+Mark a task as abandoned. Requires a reason.
+
+**When to call:** a task turns out to be unnecessary, superseded, or
+no longer wanted. Legal from both `pending` and `in_progress`.
+
+**Parameters:** `plan_id`, `task_id`, `reason`, `ref?`.
+
+---
+
+### `plan_next`
+
+Return the highest-priority pickable task.
+
+**When to call:** you need to know what to work on next.
+
+**Parameters:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `plan_id` | string | yes | Plan name |
+| `assigned_to` | string | no | Agent id, or `"me"` |
+| `include_unassigned` | bool | no | Default `true` |
+| `assigned_only` | bool | no | Default `false` |
+| `ref` | string | no | Branch |
+
+Pass `assigned_to="me"` to filter to tasks addressed to you. This is
+the state-driven orchestration primitive: two agents with different
+agent ids each call `plan_next(assigned_to="me")` and pick up their
+own work without stepping on each other. Without `assigned_to`, any
+agent sees any pickable task.
+
+Returns the task object or `null`.
+
+---
+
+### `plan_list`
+
+List plans on the branch.
+
+**When to call:** at the start of any session where you might be
+resuming prior work.
+
+**Parameters:** `status_filter?` (`active` / `completed` / `archived`),
+`ref?`.
+
+---
+
+### `plan_get`
+
+Fetch a plan with its full task list.
+
+**Parameters:** `plan_id`, `ref?`.
+
+---
+
+### `plan_tasks`
+
+List the tasks of a plan, flat.
+
+**Parameters:** `plan_id`, `ref?`.
+
+---
+
+### `plan_archive`
+
+Set plan status to `archived`. Soft — task data is preserved.
+
+**Parameters:** `plan_id`, `ref?`.
+
+---
+
 ## See also
 
 - [HTTP_API.md](HTTP_API.md) — same logic exposed over REST
 - [INTEGRATIONS.md](INTEGRATIONS.md) — how to wire these tools into specific AI clients
 - [ARCHITECTURE.md](ARCHITECTURE.md) — the underlying graph model
+- [AGENTS.md](AGENTS.md) — guidance on when to reach for plans vs. inline work
