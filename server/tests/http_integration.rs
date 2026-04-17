@@ -1279,9 +1279,7 @@ async fn llm_usage_negative_values_rejected() {
         .uri("/api/stats/llm_usage")
         .method("POST")
         .header("content-type", "application/json")
-        .body(Body::from(
-            r#"{"input_tokens": -10, "output_tokens": 5}"#,
-        ))
+        .body(Body::from(r#"{"input_tokens": -10, "output_tokens": 5}"#))
         .unwrap();
     let resp = router.oneshot(req).await.unwrap();
     // Negative u64 values fail at JSON parse time — expect 4xx
@@ -1346,11 +1344,7 @@ async fn llm_usage_respects_session_header() {
     .await;
 
     // alice's snapshot shows only her numbers
-    let (_, alice) = call_json(
-        router.clone(),
-        get("/api/stats/tokens/alice@example.com"),
-    )
-    .await;
+    let (_, alice) = call_json(router.clone(), get("/api/stats/tokens/alice@example.com")).await;
     assert_eq!(alice["llm_input_tokens"], 100);
     assert_eq!(alice["llm_output_tokens"], 50);
     assert_eq!(alice["llm_call_count"], 1);
@@ -1383,11 +1377,7 @@ async fn llm_usage_auto_creates_session() {
     .await;
 
     // Session now exists in the registry
-    let (status, body) = call_json(
-        router,
-        get("/api/stats/tokens/fresh-session-xyz"),
-    )
-    .await;
+    let (status, body) = call_json(router, get("/api/stats/tokens/fresh-session-xyz")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["session_id"], "fresh-session-xyz");
     assert_eq!(body["llm_input_tokens"], 10);

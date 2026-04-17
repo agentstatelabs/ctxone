@@ -96,11 +96,7 @@ pub fn plan_status_from_str(s: &str) -> Option<PlanStatus> {
 }
 
 /// Build a `Proof` from `(kind, value, note?)`.
-pub fn parse_proof(
-    kind: &str,
-    value: &str,
-    note: Option<String>,
-) -> Result<Proof, PlanToolError> {
+pub fn parse_proof(kind: &str, value: &str, note: Option<String>) -> Result<Proof, PlanToolError> {
     if value.trim().is_empty() {
         return Err(PlanToolError::InvalidProof(
             "proof value must be non-empty".into(),
@@ -405,8 +401,9 @@ pub fn add_task(
 ) -> Result<Task, PlanToolError> {
     let pri = match priority {
         None => Priority::Medium,
-        Some(s) => priority_from_str(s)
-            .ok_or_else(|| PlanToolError::InvalidPriority(s.to_string()))?,
+        Some(s) => {
+            priority_from_str(s).ok_or_else(|| PlanToolError::InvalidPriority(s.to_string()))?
+        }
     };
 
     let parent = parent_id.map(|s| TaskId(s.to_string()));
@@ -419,9 +416,7 @@ pub fn add_task(
         _ => title.to_string(),
     };
 
-    let assigned = assigned_to
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
+    let assigned = assigned_to.filter(|s| !s.is_empty()).map(|s| s.to_string());
     Ok(store.add_task(ref_name, plan, &full_title, pri, parent, blockers, assigned)?)
 }
 
@@ -515,7 +510,15 @@ mod tests {
         let (_repo, store) = fresh_store();
         create_plan(&store, "main", "p1", None).unwrap();
         let task = add_task(
-            &store, "main", "p1", "Do the thing", None, None, None, None, vec![],
+            &store,
+            "main",
+            "p1",
+            "Do the thing",
+            None,
+            None,
+            None,
+            None,
+            vec![],
         )
         .unwrap();
         assert!(task.assigned_to.is_none());
@@ -526,7 +529,15 @@ mod tests {
         let (_repo, store) = fresh_store();
         create_plan(&store, "main", "p1", None).unwrap();
         let task = add_task(
-            &store, "main", "p1", "t", None, None, None, Some(""), vec![],
+            &store,
+            "main",
+            "p1",
+            "t",
+            None,
+            None,
+            None,
+            Some(""),
+            vec![],
         )
         .unwrap();
         assert!(task.assigned_to.is_none());
@@ -537,7 +548,15 @@ mod tests {
         let (_repo, store) = fresh_store();
         create_plan(&store, "main", "p1", None).unwrap();
         add_task(
-            &store, "main", "p1", "for codex", None, Some("high"), None, Some("codex"), vec![],
+            &store,
+            "main",
+            "p1",
+            "for codex",
+            None,
+            Some("high"),
+            None,
+            Some("codex"),
+            vec![],
         )
         .unwrap();
         add_task(
@@ -553,7 +572,15 @@ mod tests {
         )
         .unwrap();
         add_task(
-            &store, "main", "p1", "unassigned", None, Some("low"), None, None, vec![],
+            &store,
+            "main",
+            "p1",
+            "unassigned",
+            None,
+            Some("low"),
+            None,
+            None,
+            vec![],
         )
         .unwrap();
 
@@ -579,7 +606,9 @@ mod tests {
         assert_eq!(next.title, "unassigned");
 
         // Unknown agent with include_unassigned=false sees nothing.
-        let next = store.next_task_for("main", "p1", Some("other"), false).unwrap();
+        let next = store
+            .next_task_for("main", "p1", Some("other"), false)
+            .unwrap();
         assert!(next.is_none());
     }
 
@@ -604,7 +633,10 @@ mod tests {
             value.get("assigned_to").and_then(|v| v.as_str()),
             Some("claude-code")
         );
-        assert_eq!(value.get("status").and_then(|v| v.as_str()), Some("pending"));
+        assert_eq!(
+            value.get("status").and_then(|v| v.as_str()),
+            Some("pending")
+        );
     }
 
     #[test]

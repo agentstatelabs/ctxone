@@ -49,6 +49,8 @@ jobs:
       - uses: actions/checkout@v5
         with:
           submodules: recursive
+          # SUBMODULE_TOKEN — see ci.yml for details. Same PAT.
+          token: ${{ secrets.SUBMODULE_TOKEN || github.token }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:

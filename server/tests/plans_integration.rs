@@ -164,11 +164,7 @@ async fn get_plan_includes_tasks() {
     .await;
     let _ = call_json(
         router.clone(),
-        post_json_with_agent(
-            "/api/plans/p1/tasks",
-            "test",
-            json!({"title": "first"}),
-        ),
+        post_json_with_agent("/api/plans/p1/tasks", "test", json!({"title": "first"})),
     )
     .await;
 
@@ -184,10 +180,7 @@ async fn get_plan_includes_tasks() {
 #[tokio::test]
 async fn get_plan_unknown_returns_404() {
     let router = test_router();
-    let resp = router
-        .oneshot(get("/api/plans/ghost"))
-        .await
-        .unwrap();
+    let resp = router.oneshot(get("/api/plans/ghost")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -229,11 +222,7 @@ async fn start_task_then_complete_with_commit_proof() {
     .await;
     let (_, task_body) = call_json(
         router.clone(),
-        post_json_with_agent(
-            "/api/plans/p1/tasks",
-            "alice",
-            json!({"title": "do it"}),
-        ),
+        post_json_with_agent("/api/plans/p1/tasks", "alice", json!({"title": "do it"})),
     )
     .await;
     let id = task_body["id"].as_str().unwrap().to_string();
@@ -277,11 +266,7 @@ async fn complete_without_proof_returns_400() {
     .await;
     let (_, task_body) = call_json(
         router.clone(),
-        post_json_with_agent(
-            "/api/plans/p1/tasks",
-            "test",
-            json!({"title": "do it"}),
-        ),
+        post_json_with_agent("/api/plans/p1/tasks", "test", json!({"title": "do it"})),
     )
     .await;
     let id = task_body["id"].as_str().unwrap().to_string();
@@ -409,11 +394,7 @@ async fn get_task_by_id() {
     .await;
     let (_, t) = call_json(
         router.clone(),
-        post_json_with_agent(
-            "/api/plans/p1/tasks",
-            "test",
-            json!({"title": "hello"}),
-        ),
+        post_json_with_agent("/api/plans/p1/tasks", "test", json!({"title": "hello"})),
     )
     .await;
     let id = t["id"].as_str().unwrap();
@@ -540,11 +521,7 @@ async fn parent_task_with_subtask_rolls_up() {
     .await;
     let (_, parent) = call_json(
         router.clone(),
-        post_json_with_agent(
-            "/api/plans/p1/tasks",
-            "test",
-            json!({"title": "parent"}),
-        ),
+        post_json_with_agent("/api/plans/p1/tasks", "test", json!({"title": "parent"})),
     )
     .await;
     let parent_id = parent["id"].as_str().unwrap().to_string();
@@ -608,11 +585,7 @@ async fn completing_last_task_promotes_plan_to_completed() {
     .await;
     let (_, t) = call_json(
         router.clone(),
-        post_json_with_agent(
-            "/api/plans/p1/tasks",
-            "test",
-            json!({"title": "only one"}),
-        ),
+        post_json_with_agent("/api/plans/p1/tasks", "test", json!({"title": "only one"})),
     )
     .await;
     let id = t["id"].as_str().unwrap().to_string();

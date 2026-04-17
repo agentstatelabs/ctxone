@@ -174,11 +174,23 @@ pub fn router_with_config(
         // Plan endpoints
         .route("/api/plans", get(list_plans).post(create_plan))
         .route("/api/plans/{name}", get(get_plan).delete(delete_plan))
-        .route("/api/plans/{name}/tasks", get(list_plan_tasks).post(add_plan_task))
+        .route(
+            "/api/plans/{name}/tasks",
+            get(list_plan_tasks).post(add_plan_task),
+        )
         .route("/api/plans/{name}/tasks/{task_id}", get(get_plan_task))
-        .route("/api/plans/{name}/tasks/{task_id}/start", post(start_plan_task))
-        .route("/api/plans/{name}/tasks/{task_id}/complete", post(complete_plan_task))
-        .route("/api/plans/{name}/tasks/{task_id}/abandon", post(abandon_plan_task))
+        .route(
+            "/api/plans/{name}/tasks/{task_id}/start",
+            post(start_plan_task),
+        )
+        .route(
+            "/api/plans/{name}/tasks/{task_id}/complete",
+            post(complete_plan_task),
+        )
+        .route(
+            "/api/plans/{name}/tasks/{task_id}/abandon",
+            post(abandon_plan_task),
+        )
         .route("/api/plans/{name}/next", get(next_plan_task))
         .route("/api/plans/{name}/archive", post(archive_plan))
         .layer(trace)
@@ -1066,7 +1078,9 @@ async fn list_plans(
         .map_err(substrate_error_to_response)?;
     let mut out = Vec::new();
     for plan in plans {
-        let tasks = store.list_tasks(&q.ref_name, &plan.name).unwrap_or_default();
+        let tasks = store
+            .list_tasks(&q.ref_name, &plan.name)
+            .unwrap_or_default();
         out.push(plan_tools::plan_to_json(&plan, &tasks, false));
     }
     Ok(Json(out))
@@ -1154,10 +1168,7 @@ async fn add_plan_task(
     )
     .map_err(plan_error_to_response)?;
     s.sessions.mark_all_dirty();
-    Ok((
-        StatusCode::CREATED,
-        Json(plan_tools::task_to_json(&task)),
-    ))
+    Ok((StatusCode::CREATED, Json(plan_tools::task_to_json(&task))))
 }
 
 #[instrument(skip_all, fields(name = %name, task_id = %task_id, ref_name = %q.ref_name))]

@@ -1103,8 +1103,7 @@ impl CtxOneServer {
         }
     }
 
-    #[tool(
-        description = "Report LLM token usage to CTXone for metrics and \
+    #[tool(description = "Report LLM token usage to CTXone for metrics and \
     cost accounting. CALL THIS AFTER any significant LLM turn — pass \
     the numbers straight from the model's response `usage` field. \
     Required: input_tokens and output_tokens. Optional: \
@@ -1120,8 +1119,7 @@ impl CtxOneServer {
     CTXone-side view.
 
     Cost: nearly free. One HTTP call with a tiny JSON body. Not in \
-    the critical path of anything."
-    )]
+    the critical path of anything.")]
     async fn record_llm_usage(&self, params: Parameters<RecordLlmUsageParams>) -> String {
         let p = params.0;
         self.session.record_llm_usage(
@@ -1172,11 +1170,9 @@ impl CtxOneServer {
         }
     }
 
-    #[tool(
-        description = "Add a task to a plan. \
+    #[tool(description = "Add a task to a plan. \
         \
-        CALL THIS WHEN enumerating the steps of a multi-step task — add every step as a task before you start executing. Pass `assigned_to` to address the work to a specific agent (e.g. 'claude-code', 'codex', a user email) — other agents sharing the plan can then fetch it via `plan_next(assigned_to='me')`. Omit `assigned_to` for tasks any agent can pick up. Blockers must already exist in the plan when passed. Subtasks via `parent_id` are limited to one level of nesting."
-    )]
+        CALL THIS WHEN enumerating the steps of a multi-step task — add every step as a task before you start executing. Pass `assigned_to` to address the work to a specific agent (e.g. 'claude-code', 'codex', a user email) — other agents sharing the plan can then fetch it via `plan_next(assigned_to='me')`. Omit `assigned_to` for tasks any agent can pick up. Blockers must already exist in the plan when passed. Subtasks via `parent_id` are limited to one level of nesting.")]
     async fn plan_add(&self, params: Parameters<crate::plan_tools::PlanAddParams>) -> String {
         use crate::plan_tools as pt;
         let p = params.0;
@@ -1194,18 +1190,15 @@ impl CtxOneServer {
         ) {
             Ok(task) => {
                 self.session.mark_dirty();
-                serde_json::to_string(&pt::task_to_json(&task))
-                    .unwrap_or_else(|_| "{}".into())
+                serde_json::to_string(&pt::task_to_json(&task)).unwrap_or_else(|_| "{}".into())
             }
             Err(e) => pt::err_json(e),
         }
     }
 
-    #[tool(
-        description = "Transition a task from `pending` to `in_progress`. \
+    #[tool(description = "Transition a task from `pending` to `in_progress`. \
         \
-        CALL THIS WHEN you begin working on a task. Refuses with an error listing the blockers if any entry in `blocked_by` is not yet `done`. The task's `started_at` and `started_by` are stamped automatically from the session's agent id."
-    )]
+        CALL THIS WHEN you begin working on a task. Refuses with an error listing the blockers if any entry in `blocked_by` is not yet `done`. The task's `started_at` and `started_by` are stamped automatically from the session's agent id.")]
     async fn plan_start(&self, params: Parameters<crate::plan_tools::PlanStartParams>) -> String {
         use crate::plan_tools as pt;
         use agentstategraph_tasks::TaskId;
@@ -1215,8 +1208,7 @@ impl CtxOneServer {
         match store.start_task(&p.ref_name, &p.plan_id, &id) {
             Ok(task) => {
                 self.session.mark_dirty();
-                serde_json::to_string(&pt::task_to_json(&task))
-                    .unwrap_or_else(|_| "{}".into())
+                serde_json::to_string(&pt::task_to_json(&task)).unwrap_or_else(|_| "{}".into())
             }
             Err(e) => pt::err_json(e),
         }
@@ -1243,8 +1235,7 @@ impl CtxOneServer {
         match store.complete_task(&p.ref_name, &p.plan_id, &id, proof) {
             Ok(task) => {
                 self.session.mark_dirty();
-                serde_json::to_string(&pt::task_to_json(&task))
-                    .unwrap_or_else(|_| "{}".into())
+                serde_json::to_string(&pt::task_to_json(&task)).unwrap_or_else(|_| "{}".into())
             }
             Err(e) => pt::err_json(e),
         }
@@ -1267,8 +1258,7 @@ impl CtxOneServer {
         match store.abandon_task(&p.ref_name, &p.plan_id, &id, &p.reason) {
             Ok(task) => {
                 self.session.mark_dirty();
-                serde_json::to_string(&pt::task_to_json(&task))
-                    .unwrap_or_else(|_| "{}".into())
+                serde_json::to_string(&pt::task_to_json(&task)).unwrap_or_else(|_| "{}".into())
             }
             Err(e) => pt::err_json(e),
         }
@@ -1300,8 +1290,9 @@ impl CtxOneServer {
             include_unassigned,
         ) {
             Ok(None) => "null".to_string(),
-            Ok(Some(task)) => serde_json::to_string(&pt::task_to_json(&task))
-                .unwrap_or_else(|_| "{}".into()),
+            Ok(Some(task)) => {
+                serde_json::to_string(&pt::task_to_json(&task)).unwrap_or_else(|_| "{}".into())
+            }
             Err(e) => pt::err_json(e),
         }
     }
@@ -1315,14 +1306,19 @@ impl CtxOneServer {
         use crate::plan_tools as pt;
         let p = params.0;
         let store = pt::make_store(self.repo.clone(), &self.agent_id);
-        let filter = p.status_filter.as_deref().and_then(pt::plan_status_from_str);
+        let filter = p
+            .status_filter
+            .as_deref()
+            .and_then(pt::plan_status_from_str);
         let plans = match store.list_plans_by_status(&p.ref_name, filter) {
             Ok(v) => v,
             Err(e) => return pt::err_json(e),
         };
         let mut out = Vec::new();
         for plan in plans {
-            let tasks = store.list_tasks(&p.ref_name, &plan.name).unwrap_or_default();
+            let tasks = store
+                .list_tasks(&p.ref_name, &plan.name)
+                .unwrap_or_default();
             out.push(pt::plan_to_json(&plan, &tasks, false));
         }
         serde_json::to_string(&out).unwrap_or_else(|_| "[]".into())
@@ -1341,7 +1337,9 @@ impl CtxOneServer {
             Ok(v) => v,
             Err(e) => return pt::err_json(e),
         };
-        let tasks = store.list_tasks(&p.ref_name, &p.plan_id).unwrap_or_default();
+        let tasks = store
+            .list_tasks(&p.ref_name, &p.plan_id)
+            .unwrap_or_default();
         serde_json::to_string(&pt::plan_to_json(&plan, &tasks, true))
             .unwrap_or_else(|_| "{}".into())
     }

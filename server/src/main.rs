@@ -225,7 +225,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // for operators who want to gate the apply step.
     {
         use agentstategraph_migrate::{
-            binary_version, check, exit as asg_exit, CheckResult, Registry, RunMode,
+            CheckResult, Registry, RunMode, binary_version, check, exit as asg_exit,
         };
         let asg_registry = Registry::builtin();
         let asg_target = binary_version();
@@ -247,17 +247,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 error!(error = %msg, "ASG /_meta is corrupt; refusing to start");
                 std::process::exit(asg_exit::CORRUPT_META);
             }
-            Ok(
-                CheckResult::UpgradeAvailable { .. } | CheckResult::Unversioned { .. },
-            ) => {
+            Ok(CheckResult::UpgradeAvailable { .. } | CheckResult::Unversioned { .. }) => {
                 if policy == "never" {
                     error!(policy = %policy, "ASG migration required but policy=never");
                     std::process::exit(asg_exit::UPGRADE_REQUIRED);
                 }
                 info!(policy = %policy, "running ASG schema migrations");
-                if let Err(e) =
-                    asg_registry.run(&repo, "main", &asg_target, RunMode::Apply)
-                {
+                if let Err(e) = asg_registry.run(&repo, "main", &asg_target, RunMode::Apply) {
                     error!(error = %e, "ASG migration failed");
                     std::process::exit(asg_exit::MIGRATION_FAILED);
                 }
@@ -297,9 +293,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "AGENTS.md: primed"
         );
     } else {
-        info!(
-            "AGENTS.md: not primed — run `ctx agents install` to pin the agent guidance"
-        );
+        info!("AGENTS.md: not primed — run `ctx agents install` to pin the agent guidance");
     }
 
     if http_mode {

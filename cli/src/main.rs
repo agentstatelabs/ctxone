@@ -530,13 +530,9 @@ enum PlanAction {
         status: Option<String>,
     },
     /// Show a plan with its tasks
-    Show {
-        plan_id: String,
-    },
+    Show { plan_id: String },
     /// Archive a plan (soft — task data preserved)
-    Archive {
-        plan_id: String,
-    },
+    Archive { plan_id: String },
 }
 
 /// Subcommands under `ctx agents`. Everything here operates on the
@@ -1588,9 +1584,8 @@ async fn handle_agents(
 /// the user has edited their local copy, otherwise the embedded
 /// default — prefixed with which source it came from.
 fn agents_show() -> Result<(), Box<dyn std::error::Error>> {
-    let (content, display_source) = load_agents_md(None).map_err(|e| -> Box<dyn std::error::Error> {
-        e.into()
-    })?;
+    let (content, display_source) =
+        load_agents_md(None).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     println!("# AGENTS.md source: {}", display_source);
     println!();
     println!("{}", content);
@@ -1666,10 +1661,7 @@ async fn agents_status(
 
 /// Remove the primed AGENTS.md from the Hub (via forget). Does not
 /// touch the local file. Blame history preserves the prior content.
-async fn agents_remove(
-    server: &str,
-    branch: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn agents_remove(server: &str, branch: &str) -> Result<(), Box<dyn std::error::Error>> {
     let paths_url = format!(
         "{}/api/state/{}/paths?prefix=/memory/pinned/{}",
         server, branch, AGENTS_SOURCE
@@ -1735,8 +1727,8 @@ async fn agents_install(
     server: &str,
     branch: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (content, source_desc) = load_agents_md(file.as_deref())
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let (content, source_desc) =
+        load_agents_md(file.as_deref()).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
     if show {
         // Preview mode — dump the content and exit without priming.
@@ -1831,7 +1823,10 @@ async fn agents_install(
         .and_then(|x| x.as_u64())
         .unwrap_or(0);
 
-    println!("\u{2713} Primed {} AGENTS.md sections under /memory/pinned/{}", count, AGENTS_SOURCE);
+    println!(
+        "\u{2713} Primed {} AGENTS.md sections under /memory/pinned/{}",
+        count, AGENTS_SOURCE
+    );
     println!("  Disk file: {}", disk_path.display());
     println!("  Edit the file then re-run `ctx agents install` to update.");
     Ok(())
@@ -2657,8 +2652,7 @@ fn write_agents_md_if_absent(content: &str) -> Result<PathBuf, String> {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("mkdir {}: {}", parent.display(), e))?;
     }
-    std::fs::write(&path, content)
-        .map_err(|e| format!("write {}: {}", path.display(), e))?;
+    std::fs::write(&path, content).map_err(|e| format!("write {}: {}", path.display(), e))?;
     Ok(path)
 }
 
@@ -3429,11 +3423,7 @@ async fn handle_plan(
             });
         }
         PlanAction::Archive { plan_id } => {
-            let url = format!(
-                "{}/api/plans/{}/archive",
-                server,
-                urlencoding(&plan_id),
-            );
+            let url = format!("{}/api/plans/{}/archive", server, urlencoding(&plan_id),);
             let resp = match client
                 .post(&url)
                 .header("X-CTXone-Agent", &agent_id)
@@ -3449,10 +3439,7 @@ async fn handle_plan(
             }
             let parsed: Value = resp.json().await?;
             emit(format, &parsed, |v| {
-                println!(
-                    "Archived plan {}",
-                    v["name"].as_str().unwrap_or("")
-                );
+                println!("Archived plan {}", v["name"].as_str().unwrap_or(""));
             });
         }
     }
