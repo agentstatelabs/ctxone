@@ -28,6 +28,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentstategraph-migrate"
+version = "0.74.0"
+dependencies = [
+ "agentstategraph",
+ "agentstategraph-core",
+ "agentstategraph-storage",
+ "agentstategraph-tasks",
+ "semver",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "agentstategraph-storage"
 version = "0.74.0"
 dependencies = [
@@ -480,6 +494,7 @@ version = "0.74.0"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
+ "agentstategraph-migrate",
  "agentstategraph-storage",
  "agentstategraph-tasks",
  "axum",

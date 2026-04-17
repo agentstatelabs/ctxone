@@ -18,6 +18,7 @@ agentstategraph = { path = "engine/crates/agentstategraph" }
 agentstategraph-core = { path = "engine/crates/agentstategraph-core" }
 agentstategraph-storage = { path = "engine/crates/agentstategraph-storage", features = ["postgres"] }
 agentstategraph-tasks = { path = "engine/crates/agentstategraph-tasks" }
+agentstategraph-migrate = { path = "engine/crates/agentstategraph-migrate" }
 
 # Engine's workspace deps (required because engine crates inherit from workspace)
 blake3 = "1"

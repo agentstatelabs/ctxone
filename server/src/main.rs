@@ -216,6 +216,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     repo.init()?;
 
+    // Run ASG-level schema migrations first — the substrate's
+    // /_meta/schema_version must be current before CTXone starts
+    // reading or writing plan/task state.
+    //
+    // Policy: auto-migrate on UpgradeAvailable / Unversioned; refuse
+    // startup on Downgrade or Corrupt. Respect ASG_MIGRATE=prompt|never|auto
+    // for operators who want to gate the apply step.
+    {
+        use agentstategraph_migrate::{
+            binary_version, check, exit as asg_exit, CheckResult, Registry, RunMode,
+        };
+        let asg_registry = Registry::builtin();
+        let asg_target = binary_version();
+        let policy = std::env::var("ASG_MIGRATE").unwrap_or_else(|_| "auto".into());
+
+        match check(&repo, "main", &asg_target, &asg_registry) {
+            Ok(CheckResult::UpToDate { version }) => {
+                info!(schema_version = %version, "ASG schema up to date");
+            }
+            Ok(CheckResult::Downgrade { db, binary }) => {
+                error!(
+                    db_schema = %db,
+                    binary_schema = %binary,
+                    "ASG db schema is newer than this binary; refusing to start"
+                );
+                std::process::exit(asg_exit::DOWNGRADE_REFUSED);
+            }
+            Ok(CheckResult::Corrupt(msg)) => {
+                error!(error = %msg, "ASG /_meta is corrupt; refusing to start");
+                std::process::exit(asg_exit::CORRUPT_META);
+            }
+            Ok(
+                CheckResult::UpgradeAvailable { .. } | CheckResult::Unversioned { .. },
+            ) => {
+                if policy == "never" {
+                    error!(policy = %policy, "ASG migration required but policy=never");
+                    std::process::exit(asg_exit::UPGRADE_REQUIRED);
+                }
+                info!(policy = %policy, "running ASG schema migrations");
+                if let Err(e) =
+                    asg_registry.run(&repo, "main", &asg_target, RunMode::Apply)
+                {
+                    error!(error = %e, "ASG migration failed");
+                    std::process::exit(asg_exit::MIGRATION_FAILED);
+                }
+                info!(schema_version = %asg_target, "ASG schema migrations complete");
+            }
+            Err(e) => {
+                error!(error = %e, "ASG check failed");
+                std::process::exit(asg_exit::MIGRATION_FAILED);
+            }
+        }
+    }
+
     // Run CTXone schema migrations. Refuses to start if the graph was
     // written by a newer Hub binary (prevents silent data corruption on
     // accidental downgrade).
