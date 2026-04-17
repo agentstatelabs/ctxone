@@ -6,7 +6,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.73.0"
+version = "0.74.0"
 edition = "2024"
 authors = ["Craig Brown"]
 license = "BSL-1.1"
@@ -17,6 +17,7 @@ repository = "https://github.com/ctxone/ctxone"
 agentstategraph = { path = "engine/crates/agentstategraph" }
 agentstategraph-core = { path = "engine/crates/agentstategraph-core" }
 agentstategraph-storage = { path = "engine/crates/agentstategraph-storage", features = ["postgres"] }
+agentstategraph-tasks = { path = "engine/crates/agentstategraph-tasks" }
 
 # Engine's workspace deps (required because engine crates inherit from workspace)
 blake3 = "1"

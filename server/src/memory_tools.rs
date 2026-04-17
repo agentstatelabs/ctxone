@@ -1147,6 +1147,283 @@ impl CtxOneServer {
         .to_string()
     }
 
+    // -- Plan tools ----------------------------------------------------
+    //
+    // These wrap `agentstategraph-tasks` via helpers in `plan_tools.rs`.
+    // Each tool's description teaches the model when to reach for it —
+    // same proactive voice as the memory tools above.
+
+    #[tool(
+        description = "Create a new plan to track a multi-step piece of work across sessions. \
+        \
+        CALL THIS WHEN the user describes a multi-step task to break down. Plans persist in the state graph, so work survives session boundaries — the same plan can be picked up by another agent or by you tomorrow. Name should be kebab-case (e.g. 'website-v2'). Returns the created Plan object. Fails if a plan with that name already exists on the branch."
+    )]
+    async fn plan_new(&self, params: Parameters<crate::plan_tools::PlanNewParams>) -> String {
+        use crate::plan_tools as pt;
+        let p = params.0;
+        let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        match pt::create_plan(&store, &p.ref_name, &p.name, p.description) {
+            Ok(plan) => {
+                self.session.mark_dirty();
+                serde_json::to_string(&pt::plan_to_json(
+                    &plan,
+                    &[],
+                    &std::collections::BTreeMap::new(),
+                    false,
+                ))
+                .unwrap_or_else(|_| "{}".into())
+            }
+            Err(e) => pt::err_json(e),
+        }
+    }
+
+    #[tool(
+        description = "Add a task to a plan. \
+        \
+        CALL THIS WHEN enumerating the steps of a multi-step task — add every step as a task before you start executing. Pass `assigned_to` to address the work to a specific agent (e.g. 'claude-code', 'codex', a user email) — other agents sharing the plan can then fetch it via `plan_next(assigned_to='me')`. Omit `assigned_to` for tasks any agent can pick up. Blockers must already exist in the plan when passed. Subtasks via `parent_id` are limited to one level of nesting."
+    )]
+    async fn plan_add(&self, params: Parameters<crate::plan_tools::PlanAddParams>) -> String {
+        use crate::plan_tools as pt;
+        let p = params.0;
+        let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        match pt::add_task(
+            &store,
+            &self.repo,
+            &p.ref_name,
+            &p.plan_id,
+            &p.title,
+            p.description.as_deref(),
+            p.priority.as_deref(),
+            p.parent_id.as_deref(),
+            p.assigned_to.as_deref(),
+            p.blocked_by,
+            &self.agent_id,
+        ) {
+            Ok((task, assigned_to)) => {
+                self.session.mark_dirty();
+                serde_json::to_string(&pt::task_to_json(&task, assigned_to.as_deref()))
+                    .unwrap_or_else(|_| "{}".into())
+            }
+            Err(e) => pt::err_json(e),
+        }
+    }
+
+    #[tool(
+        description = "Transition a task from `pending` to `in_progress`. \
+        \
+        CALL THIS WHEN you begin working on a task. Refuses with an error listing the blockers if any entry in `blocked_by` is not yet `done`. The task's `started_at` and `started_by` are stamped automatically from the session's agent id."
+    )]
+    async fn plan_start(&self, params: Parameters<crate::plan_tools::PlanStartParams>) -> String {
+        use crate::plan_tools as pt;
+        use agentstategraph_tasks::TaskId;
+        let p = params.0;
+        let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        let id = TaskId(p.task_id);
+        match store.start_task(&p.ref_name, &p.plan_id, &id) {
+            Ok(task) => {
+                self.session.mark_dirty();
+                let assignments = pt::read_assignments(&self.repo, &p.ref_name, &p.plan_id);
+                serde_json::to_string(&pt::task_to_json(
+                    &task,
+                    assignments.get(task.id.as_str()).map(|s| s.as_str()),
+                ))
+                .unwrap_or_else(|_| "{}".into())
+            }
+            Err(e) => pt::err_json(e),
+        }
+    }
+
+    #[tool(
+        description = "Transition a task from `in_progress` to `done`. REQUIRES a proof object. \
+        \
+        CALL THIS WHEN you finish a task. Proof kinds in order of preference: `commit` (a git SHA — strongest), `file` (a path you created/edited), `test` (a test that now exists or passes), `text` (human-attested last-resort). The proof is stored but not verified at call time. Completing the last open task in the plan automatically promotes the plan to `completed`."
+    )]
+    async fn plan_complete(
+        &self,
+        params: Parameters<crate::plan_tools::PlanCompleteParams>,
+    ) -> String {
+        use crate::plan_tools as pt;
+        use agentstategraph_tasks::TaskId;
+        let p = params.0;
+        let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        let id = TaskId(p.task_id);
+        let proof = match pt::parse_proof(&p.proof.kind, &p.proof.value, p.proof.note) {
+            Ok(pr) => pr,
+            Err(e) => return pt::err_json(e),
+        };
+        match store.complete_task(&p.ref_name, &p.plan_id, &id, proof) {
+            Ok(task) => {
+                self.session.mark_dirty();
+                let assignments = pt::read_assignments(&self.repo, &p.ref_name, &p.plan_id);
+                serde_json::to_string(&pt::task_to_json(
+                    &task,
+                    assignments.get(task.id.as_str()).map(|s| s.as_str()),
+                ))
+                .unwrap_or_else(|_| "{}".into())
+            }
+            Err(e) => pt::err_json(e),
+        }
+    }
+
+    #[tool(
+        description = "Mark a task as `abandoned`. Requires a reason — abandonment is a first-class outcome, not deletion, and the reason is recorded in blame. \
+        \
+        CALL THIS WHEN a task turns out to be unnecessary, superseded, or no longer wanted. Legal from both `pending` and `in_progress`. If this is the last open task, the plan is promoted to `completed` in the same commit (the invariant 'plan is completed iff every task is terminal' always holds)."
+    )]
+    async fn plan_abandon(
+        &self,
+        params: Parameters<crate::plan_tools::PlanAbandonParams>,
+    ) -> String {
+        use crate::plan_tools as pt;
+        use agentstategraph_tasks::TaskId;
+        let p = params.0;
+        let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        let id = TaskId(p.task_id);
+        match store.abandon_task(&p.ref_name, &p.plan_id, &id, &p.reason) {
+            Ok(task) => {
+                self.session.mark_dirty();
+                let assignments = pt::read_assignments(&self.repo, &p.ref_name, &p.plan_id);
+                serde_json::to_string(&pt::task_to_json(
+                    &task,
+                    assignments.get(task.id.as_str()).map(|s| s.as_str()),
+                ))
+                .unwrap_or_else(|_| "{}".into())
+            }
+            Err(e) => pt::err_json(e),
+        }
+    }
+
+    #[tool(
+        description = "Return the highest-priority `pending` task whose blockers are all `done`. \
+        \
+        CALL THIS WHEN you need to know what to work on next. Pass `assigned_to='me'` (or your agent id) to filter to tasks addressed to you — this is the state-driven orchestration primitive. Without that, any agent sees any pickable task. `include_unassigned` (default true) lets assigned agents also pick up unowned work; set `assigned_only=true` to restrict strictly. Returns `null` if nothing is pickable."
+    )]
+    async fn plan_next(&self, params: Parameters<crate::plan_tools::PlanNextParams>) -> String {
+        use crate::plan_tools as pt;
+        let p = params.0;
+        let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        let assignee = match p.assigned_to.as_deref() {
+            Some("me") => Some(self.agent_id.clone()),
+            Some(s) if !s.is_empty() => Some(s.to_string()),
+            _ => None,
+        };
+        match pt::next_pickable_task(
+            &store,
+            &self.repo,
+            &p.ref_name,
+            &p.plan_id,
+            assignee.as_deref(),
+            p.include_unassigned,
+            p.assigned_only,
+        ) {
+            Ok(None) => "null".to_string(),
+            Ok(Some(task)) => {
+                let assignments = pt::read_assignments(&self.repo, &p.ref_name, &p.plan_id);
+                serde_json::to_string(&pt::task_to_json(
+                    &task,
+                    assignments.get(task.id.as_str()).map(|s| s.as_str()),
+                ))
+                .unwrap_or_else(|_| "{}".into())
+            }
+            Err(e) => pt::err_json(e),
+        }
+    }
+
+    #[tool(
+        description = "List plans on the branch, optionally filtered by status. \
+        \
+        CALL THIS AT THE START OF ANY SESSION where you might be resuming prior work. No filter shows every plan including completed and archived ones; pass `status_filter='active'` for just the in-flight work."
+    )]
+    async fn plan_list(&self, params: Parameters<crate::plan_tools::PlanListParams>) -> String {
+        use crate::plan_tools as pt;
+        let p = params.0;
+        let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        let plans = match store.list_plans(&p.ref_name) {
+            Ok(v) => v,
+            Err(e) => return pt::err_json(e),
+        };
+        let filter = p.status_filter.as_deref().and_then(pt::plan_status_from_str);
+        let mut out = Vec::new();
+        for plan in plans {
+            if let Some(f) = filter
+                && plan.status != f
+            {
+                continue;
+            }
+            let tasks = store.list_tasks(&p.ref_name, &plan.name).unwrap_or_default();
+            let assignments = pt::read_assignments(&self.repo, &p.ref_name, &plan.name);
+            out.push(pt::plan_to_json(&plan, &tasks, &assignments, false));
+        }
+        serde_json::to_string(&out).unwrap_or_else(|_| "[]".into())
+    }
+
+    #[tool(
+        description = "Fetch a single plan with full task list and per-task assignment data. \
+        \
+        CALL THIS when you need the complete picture of a plan — its tasks, their statuses, their proofs, who's assigned to what. Cheaper than `list_plans` + N `plan_tasks` calls."
+    )]
+    async fn plan_get(&self, params: Parameters<crate::plan_tools::PlanGetParams>) -> String {
+        use crate::plan_tools as pt;
+        let p = params.0;
+        let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        let plan = match store.get_plan(&p.ref_name, &p.plan_id) {
+            Ok(v) => v,
+            Err(e) => return pt::err_json(e),
+        };
+        let tasks = store.list_tasks(&p.ref_name, &p.plan_id).unwrap_or_default();
+        let assignments = pt::read_assignments(&self.repo, &p.ref_name, &p.plan_id);
+        serde_json::to_string(&pt::plan_to_json(&plan, &tasks, &assignments, true))
+            .unwrap_or_else(|_| "{}".into())
+    }
+
+    #[tool(
+        description = "Archive a plan — set status to `archived` and stamp `archived_at`. Soft, reversible. Task data is preserved. \
+        \
+        CALL THIS WHEN a plan is no longer active but you want to keep its history browsable."
+    )]
+    async fn plan_archive(
+        &self,
+        params: Parameters<crate::plan_tools::PlanArchiveParams>,
+    ) -> String {
+        use crate::plan_tools as pt;
+        let p = params.0;
+        let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        match store.archive_plan(&p.ref_name, &p.plan_id) {
+            Ok(plan) => {
+                self.session.mark_dirty();
+                serde_json::to_string(&pt::plan_to_json(
+                    &plan,
+                    &[],
+                    &std::collections::BTreeMap::new(),
+                    false,
+                ))
+                .unwrap_or_else(|_| "{}".into())
+            }
+            Err(e) => pt::err_json(e),
+        }
+    }
+
+    #[tool(
+        description = "List every task in a plan, including `assigned_to` per task. \
+        \
+        CALL THIS when you want the flat task list without plan metadata. `plan_get` returns the same tasks plus the plan envelope if you need that too."
+    )]
+    async fn plan_tasks(&self, params: Parameters<crate::plan_tools::PlanTasksParams>) -> String {
+        use crate::plan_tools as pt;
+        let p = params.0;
+        let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        let tasks = match store.list_tasks(&p.ref_name, &p.plan_id) {
+            Ok(v) => v,
+            Err(e) => return pt::err_json(e),
+        };
+        let assignments = pt::read_assignments(&self.repo, &p.ref_name, &p.plan_id);
+        let out: Vec<serde_json::Value> = tasks
+            .iter()
+            .map(|t| pt::task_to_json(t, assignments.get(t.id.as_str()).map(|s| s.as_str())))
+            .collect();
+        serde_json::to_string(&out).unwrap_or_else(|_| "[]".into())
+    }
+
     #[tool(
         description = "Trace the reasoning behind a past decision. Searches for a decision phrase in the memory graph and returns its full provenance chain via blame — who wrote it, when, at what confidence, with what reasoning. \
         \
