@@ -102,6 +102,168 @@ class Stats:
 
 
 @dataclass
+class Proof:
+    """Evidence attached to a `done` task."""
+
+    kind: str  # commit | file | test | text
+    value: str
+    note: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {"kind": self.kind, "value": self.value}
+        if self.note is not None:
+            d["note"] = self.note
+        return d
+
+
+@dataclass
+class ProofKind:
+    """String constants for proof kinds. Convenience for callers who
+    don't want to memorise the strings."""
+
+    COMMIT: str = "commit"
+    FILE: str = "file"
+    TEST: str = "test"
+    TEXT: str = "text"
+
+
+@dataclass
+class TaskStatus:
+    """String constants for task status values."""
+
+    PENDING: str = "pending"
+    IN_PROGRESS: str = "in_progress"
+    DONE: str = "done"
+    ABANDONED: str = "abandoned"
+
+
+@dataclass
+class PlanStatus:
+    """String constants for plan status values."""
+
+    ACTIVE: str = "active"
+    COMPLETED: str = "completed"
+    ARCHIVED: str = "archived"
+
+
+@dataclass
+class Priority:
+    """String constants for task priority values."""
+
+    LOW: str = "low"
+    MEDIUM: str = "medium"
+    HIGH: str = "high"
+    CRITICAL: str = "critical"
+
+
+@dataclass
+class Task:
+    """A unit of work inside a plan, mirroring the Hub's JSON shape."""
+
+    id: str
+    title: str
+    status: str
+    priority: str
+    parent_id: str | None = None
+    blocked_by: list[str] = field(default_factory=list)
+    assigned_to: str | None = None
+    created_at: str | None = None
+    created_by: str | None = None
+    started_at: str | None = None
+    started_by: str | None = None
+    completed_at: str | None = None
+    completed_by: str | None = None
+    abandoned_at: str | None = None
+    abandoned_reason: str | None = None
+    proof: Proof | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "Task":
+        proof_data = data.get("proof")
+        proof = (
+            Proof(
+                kind=proof_data.get("kind", ""),
+                value=proof_data.get("value", ""),
+                note=proof_data.get("note"),
+            )
+            if isinstance(proof_data, dict)
+            else None
+        )
+        return cls(
+            id=data.get("id", ""),
+            title=data.get("title", ""),
+            status=data.get("status", ""),
+            priority=data.get("priority", "medium"),
+            parent_id=data.get("parent_id"),
+            blocked_by=list(data.get("blocked_by", []) or []),
+            assigned_to=data.get("assigned_to"),
+            created_at=data.get("created_at"),
+            created_by=data.get("created_by"),
+            started_at=data.get("started_at"),
+            started_by=data.get("started_by"),
+            completed_at=data.get("completed_at"),
+            completed_by=data.get("completed_by"),
+            abandoned_at=data.get("abandoned_at"),
+            abandoned_reason=data.get("abandoned_reason"),
+            proof=proof,
+            raw=data,
+        )
+
+
+@dataclass
+class TaskCounts:
+    """Counts of tasks keyed by status."""
+
+    pending: int = 0
+    in_progress: int = 0
+    done: int = 0
+    abandoned: int = 0
+    total: int = 0
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "TaskCounts":
+        return cls(
+            pending=int(data.get("pending", 0)),
+            in_progress=int(data.get("in_progress", 0)),
+            done=int(data.get("done", 0)),
+            abandoned=int(data.get("abandoned", 0)),
+            total=int(data.get("total", 0)),
+        )
+
+
+@dataclass
+class Plan:
+    """A plan — named container of tasks."""
+
+    name: str
+    status: str
+    description: str | None = None
+    created_at: str | None = None
+    created_by: str | None = None
+    archived_at: str | None = None
+    task_counts: TaskCounts = field(default_factory=TaskCounts)
+    tasks: list[Task] = field(default_factory=list)
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "Plan":
+        counts = TaskCounts.from_dict(data.get("task_counts", {}))
+        tasks = [Task.from_dict(t) for t in data.get("tasks", []) or []]
+        return cls(
+            name=data.get("name", ""),
+            status=data.get("status", "active"),
+            description=data.get("description"),
+            created_at=data.get("created_at"),
+            created_by=data.get("created_by"),
+            archived_at=data.get("archived_at"),
+            task_counts=counts,
+            tasks=tasks,
+            raw=data,
+        )
+
+
+@dataclass
 class SessionSnapshot:
     """A snapshot of one session's cumulative counters.
 

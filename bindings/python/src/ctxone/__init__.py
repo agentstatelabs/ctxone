@@ -21,15 +21,23 @@ from .exceptions import CtxOneError, HubUnreachable, MergeConflict, NotFound
 from .types import (
     Commit,
     MemoryEntry,
+    Plan,
+    PlanStatus,
     PrimeResult,
+    Priority,
+    Proof,
+    ProofKind,
     RecallResult,
     RememberResult,
     SessionSnapshot,
     Stats,
+    Task,
+    TaskCounts,
+    TaskStatus,
     TokenStats,
 )
 
-__version__ = "0.73.0"
+__version__ = "0.74.0"
 
 __all__ = [
     "Hub",
@@ -39,11 +47,19 @@ __all__ = [
     "NotFound",
     "Commit",
     "MemoryEntry",
+    "Plan",
+    "PlanStatus",
     "PrimeResult",
+    "Priority",
+    "Proof",
+    "ProofKind",
     "RecallResult",
     "RememberResult",
     "SessionSnapshot",
     "Stats",
+    "Task",
+    "TaskCounts",
+    "TaskStatus",
     "TokenStats",
     "__version__",
 ]

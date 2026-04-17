@@ -11,11 +11,14 @@ from .exceptions import CtxOneError, HubUnreachable, MergeConflict, NotFound
 from .types import (
     Commit,
     MemoryEntry,
+    Plan,
     PrimeResult,
+    Proof,
     RecallResult,
     RememberResult,
     SessionSnapshot,
     Stats,
+    Task,
     TokenStats,
 )
 
@@ -505,6 +508,194 @@ class Hub:
             provider="anthropic",
         )
 
+    # -- Plans --------------------------------------------------------
+
+    def plan_new(
+        self,
+        name: str,
+        description: str | None = None,
+        *,
+        ref: str | None = None,
+    ) -> Plan:
+        """Create a new plan.
+
+        Args:
+            name: Kebab-case plan name (e.g. 'website-v2').
+            description: Optional free-text description.
+            ref: Branch to write to. Defaults to ``self.branch``.
+
+        Returns:
+            The created :class:`Plan`.
+        """
+        body: dict[str, Any] = {"name": name, "ref": ref or self.branch}
+        if description is not None:
+            body["description"] = description
+        data = self._post("/api/plans", body)
+        return Plan.from_dict(data)
+
+    def plan_add(
+        self,
+        plan_id: str,
+        title: str,
+        *,
+        description: str | None = None,
+        priority: str | None = None,
+        parent_id: str | None = None,
+        assigned_to: str | None = None,
+        blocked_by: list[str] | None = None,
+        ref: str | None = None,
+    ) -> Task:
+        """Add a task to an existing plan.
+
+        Pass ``assigned_to`` to address the task to a specific agent;
+        other agents sharing the plan can then fetch it via
+        ``plan_next(assigned_to='me')``.
+        """
+        body: dict[str, Any] = {"title": title, "ref": ref or self.branch}
+        if description is not None:
+            body["description"] = description
+        if priority is not None:
+            body["priority"] = priority
+        if parent_id is not None:
+            body["parent_id"] = parent_id
+        if assigned_to is not None:
+            body["assigned_to"] = assigned_to
+        if blocked_by:
+            body["blocked_by"] = list(blocked_by)
+        data = self._post(f"/api/plans/{plan_id}/tasks", body)
+        return Task.from_dict(data)
+
+    def plan_start(
+        self,
+        plan_id: str,
+        task_id: str,
+        *,
+        reason: str | None = None,
+        ref: str | None = None,
+    ) -> Task:
+        """Transition a task from ``pending`` to ``in_progress``."""
+        body: dict[str, Any] = {"ref": ref or self.branch}
+        if reason is not None:
+            body["reason"] = reason
+        data = self._post(
+            f"/api/plans/{plan_id}/tasks/{task_id}/start", body
+        )
+        return Task.from_dict(data)
+
+    def plan_complete(
+        self,
+        plan_id: str,
+        task_id: str,
+        proof: Proof | dict[str, Any],
+        *,
+        reason: str | None = None,
+        ref: str | None = None,
+    ) -> Task:
+        """Transition a task from ``in_progress`` to ``done`` with a proof.
+
+        ``proof`` can be a :class:`Proof` or a raw dict with keys
+        ``kind`` / ``value`` / optional ``note``.
+        """
+        if isinstance(proof, Proof):
+            proof_body = proof.to_dict()
+        else:
+            proof_body = dict(proof)
+        body: dict[str, Any] = {"proof": proof_body, "ref": ref or self.branch}
+        if reason is not None:
+            body["reason"] = reason
+        data = self._post(
+            f"/api/plans/{plan_id}/tasks/{task_id}/complete", body
+        )
+        return Task.from_dict(data)
+
+    def plan_abandon(
+        self,
+        plan_id: str,
+        task_id: str,
+        reason: str,
+        *,
+        ref: str | None = None,
+    ) -> Task:
+        """Transition a task to ``abandoned``. Reason is required."""
+        body: dict[str, Any] = {"reason": reason, "ref": ref or self.branch}
+        data = self._post(
+            f"/api/plans/{plan_id}/tasks/{task_id}/abandon", body
+        )
+        return Task.from_dict(data)
+
+    def plan_next(
+        self,
+        plan_id: str,
+        *,
+        assigned_to: str | None = None,
+        include_unassigned: bool = True,
+        assigned_only: bool = False,
+        ref: str | None = None,
+    ) -> Task | None:
+        """Return the highest-priority pickable task or ``None``.
+
+        Pass ``assigned_to='me'`` to resolve to the client's configured
+        ``agent_id`` via the ``X-CTXone-Agent`` header. When paired with
+        that header, this is the state-driven orchestration primitive
+        that lets multiple agents share one plan.
+        """
+        params: dict[str, str] = {"ref": ref or self.branch}
+        if assigned_to is not None:
+            params["assigned_to"] = assigned_to
+        params["include_unassigned"] = "true" if include_unassigned else "false"
+        if assigned_only:
+            params["assigned_only"] = "true"
+        data = self._get(f"/api/plans/{plan_id}/next", params=params)
+        task_data = data.get("task") if isinstance(data, dict) else None
+        if task_data is None:
+            return None
+        return Task.from_dict(task_data)
+
+    def plan_list(
+        self,
+        status: str | None = None,
+        *,
+        ref: str | None = None,
+    ) -> list[Plan]:
+        """List plans on the branch, optionally filtered by status."""
+        params: dict[str, str] = {"ref": ref or self.branch}
+        if status is not None:
+            params["status"] = status
+        data = self._get("/api/plans", params=params)
+        if not isinstance(data, list):
+            return []
+        return [Plan.from_dict(p) for p in data]
+
+    def plan_get(self, plan_id: str, *, ref: str | None = None) -> Plan:
+        """Fetch a plan with its full task list."""
+        params = {"ref": ref or self.branch}
+        data = self._get(f"/api/plans/{plan_id}", params=params)
+        return Plan.from_dict(data)
+
+    def plan_tasks(
+        self,
+        plan_id: str,
+        *,
+        ref: str | None = None,
+    ) -> list[Task]:
+        """Return the flat task list for a plan."""
+        params = {"ref": ref or self.branch}
+        data = self._get(f"/api/plans/{plan_id}/tasks", params=params)
+        if not isinstance(data, list):
+            return []
+        return [Task.from_dict(t) for t in data]
+
+    def plan_archive(self, plan_id: str, *, ref: str | None = None) -> Plan:
+        """Archive a plan. Soft — task data is preserved."""
+        body = {"ref": ref or self.branch}
+        data = self._post(f"/api/plans/{plan_id}/archive", body)
+        return Plan.from_dict(data)
+
+    def plan_delete(self, plan_id: str, *, ref: str | None = None) -> None:
+        """Delete a plan. Destructive — use :meth:`plan_archive` if you
+        want the plan to stay browsable."""
+        self._delete(f"/api/plans/{plan_id}", params={"ref": ref or self.branch})
+
     # -- HTTP helpers (private) ---------------------------------------
 
     def _headers(self) -> dict[str, str]:
@@ -537,6 +728,21 @@ class Hub:
             r = self._session.post(
                 url,
                 json=body,
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
+        except requests.ConnectionError as e:
+            raise HubUnreachable(f"Hub unreachable at {self.server}: {e}") from e
+        except requests.RequestException as e:
+            raise CtxOneError(f"request failed: {e}") from e
+        return self._parse_response(r)
+
+    def _delete(self, path: str, params: dict[str, str] | None = None) -> Any:
+        url = f"{self.server}{path}"
+        try:
+            r = self._session.delete(
+                url,
+                params=params,
                 headers=self._headers(),
                 timeout=self.timeout,
             )

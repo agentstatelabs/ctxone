@@ -685,3 +685,298 @@ def test_record_usage_returns_default_snapshot_on_empty_response():
     assert snap.session_id == "sparse"
     assert snap.llm_input_tokens == 0
     assert snap.last_model is None
+
+
+# -------- plans --------
+
+def _plan_body(name="p1", **overrides):
+    body = {
+        "name": name,
+        "description": None,
+        "status": "active",
+        "created_at": "2026-04-15T18:32:00Z",
+        "created_by": "test",
+        "archived_at": None,
+        "task_counts": {
+            "pending": 0,
+            "in_progress": 0,
+            "done": 0,
+            "abandoned": 0,
+            "total": 0,
+        },
+    }
+    body.update(overrides)
+    return body
+
+
+def _task_body(id="t-001", **overrides):
+    body = {
+        "id": id,
+        "title": "hello",
+        "status": "pending",
+        "priority": "medium",
+        "parent_id": None,
+        "blocked_by": [],
+        "assigned_to": None,
+        "created_at": "2026-04-15T18:32:00Z",
+        "created_by": "test",
+        "started_at": None,
+        "started_by": None,
+        "completed_at": None,
+        "completed_by": None,
+        "abandoned_at": None,
+        "abandoned_reason": None,
+        "proof": None,
+    }
+    body.update(overrides)
+    return body
+
+
+def test_plan_new_posts_body():
+    session = MagicMock()
+    session.post.return_value = mock_response(
+        status_code=201, json_body=_plan_body(name="website-v2")
+    )
+    hub = make_hub(session)
+
+    plan = hub.plan_new("website-v2", description="pivot")
+
+    args, kwargs = session.post.call_args
+    assert args[0] == "http://fake:3001/api/plans"
+    assert kwargs["json"]["name"] == "website-v2"
+    assert kwargs["json"]["description"] == "pivot"
+    assert kwargs["json"]["ref"] == "main"
+    assert plan.name == "website-v2"
+    assert plan.status == "active"
+
+
+def test_plan_add_posts_body_with_assignment():
+    session = MagicMock()
+    session.post.return_value = mock_response(
+        status_code=201,
+        json_body=_task_body(
+            id="t-005",
+            priority="high",
+            assigned_to="codex",
+        ),
+    )
+    hub = make_hub(session)
+
+    task = hub.plan_add(
+        "website-v2",
+        "Rewrite hero",
+        priority="high",
+        assigned_to="codex",
+        blocked_by=["t-001"],
+    )
+
+    args, kwargs = session.post.call_args
+    assert args[0] == "http://fake:3001/api/plans/website-v2/tasks"
+    body = kwargs["json"]
+    assert body["title"] == "Rewrite hero"
+    assert body["priority"] == "high"
+    assert body["assigned_to"] == "codex"
+    assert body["blocked_by"] == ["t-001"]
+    assert task.id == "t-005"
+    assert task.assigned_to == "codex"
+
+
+def test_plan_start_posts_body():
+    session = MagicMock()
+    session.post.return_value = mock_response(
+        json_body=_task_body(status="in_progress", started_by="alice"),
+    )
+    hub = make_hub(session)
+
+    task = hub.plan_start("p1", "t-001", reason="picking up")
+
+    args, kwargs = session.post.call_args
+    assert args[0] == "http://fake:3001/api/plans/p1/tasks/t-001/start"
+    assert kwargs["json"]["reason"] == "picking up"
+    assert task.status == "in_progress"
+    assert task.started_by == "alice"
+
+
+def test_plan_complete_with_proof_object():
+    from ctxone import Proof
+
+    session = MagicMock()
+    session.post.return_value = mock_response(
+        json_body=_task_body(
+            status="done",
+            completed_by="alice",
+            proof={"kind": "commit", "value": "abc123", "note": None},
+        )
+    )
+    hub = make_hub(session)
+
+    proof = Proof(kind="commit", value="abc123")
+    task = hub.plan_complete("p1", "t-001", proof)
+
+    args, kwargs = session.post.call_args
+    assert args[0] == "http://fake:3001/api/plans/p1/tasks/t-001/complete"
+    assert kwargs["json"]["proof"] == {"kind": "commit", "value": "abc123"}
+    assert task.status == "done"
+    assert task.proof.kind == "commit"
+    assert task.proof.value == "abc123"
+
+
+def test_plan_complete_with_proof_dict():
+    session = MagicMock()
+    session.post.return_value = mock_response(
+        json_body=_task_body(
+            status="done",
+            proof={"kind": "file", "value": "src/foo.rs", "note": "wrote it"},
+        )
+    )
+    hub = make_hub(session)
+
+    hub.plan_complete(
+        "p1",
+        "t-001",
+        {"kind": "file", "value": "src/foo.rs", "note": "wrote it"},
+    )
+
+    body = session.post.call_args.kwargs["json"]
+    assert body["proof"]["kind"] == "file"
+    assert body["proof"]["note"] == "wrote it"
+
+
+def test_plan_abandon_sends_reason():
+    session = MagicMock()
+    session.post.return_value = mock_response(
+        json_body=_task_body(
+            status="abandoned",
+            abandoned_reason="superseded",
+        )
+    )
+    hub = make_hub(session)
+
+    task = hub.plan_abandon("p1", "t-001", "superseded")
+
+    body = session.post.call_args.kwargs["json"]
+    assert body["reason"] == "superseded"
+    assert task.status == "abandoned"
+    assert task.abandoned_reason == "superseded"
+
+
+def test_plan_next_returns_task():
+    session = MagicMock()
+    session.get.return_value = mock_response(
+        json_body={"task": _task_body(id="t-007", priority="critical")}
+    )
+    hub = make_hub(session, )
+
+    task = hub.plan_next(
+        "p1",
+        assigned_to="me",
+        include_unassigned=True,
+        assigned_only=False,
+    )
+
+    url = session.get.call_args.args[0]
+    assert url == "http://fake:3001/api/plans/p1/next"
+    params = session.get.call_args.kwargs["params"]
+    assert params["assigned_to"] == "me"
+    assert params["include_unassigned"] == "true"
+    assert "assigned_only" not in params
+    assert task is not None
+    assert task.id == "t-007"
+    assert task.priority == "critical"
+
+
+def test_plan_next_returns_none_when_null():
+    session = MagicMock()
+    session.get.return_value = mock_response(json_body={"task": None})
+    hub = make_hub(session)
+    assert hub.plan_next("p1") is None
+
+
+def test_plan_list_filters_by_status():
+    session = MagicMock()
+    session.get.return_value = mock_response(
+        json_body=[
+            _plan_body(name="a", status="active"),
+            _plan_body(name="b", status="active"),
+        ]
+    )
+    hub = make_hub(session)
+
+    plans = hub.plan_list(status="active")
+
+    args, kwargs = session.get.call_args
+    assert args[0] == "http://fake:3001/api/plans"
+    assert kwargs["params"]["status"] == "active"
+    assert [p.name for p in plans] == ["a", "b"]
+
+
+def test_plan_get_parses_nested_tasks():
+    session = MagicMock()
+    session.get.return_value = mock_response(
+        json_body=_plan_body(
+            name="p1",
+            tasks=[_task_body(id="t-001"), _task_body(id="t-002", priority="high")],
+            task_counts={
+                "pending": 2,
+                "in_progress": 0,
+                "done": 0,
+                "abandoned": 0,
+                "total": 2,
+            },
+        )
+    )
+    hub = make_hub(session)
+
+    plan = hub.plan_get("p1")
+    assert plan.name == "p1"
+    assert plan.task_counts.total == 2
+    assert len(plan.tasks) == 2
+    assert plan.tasks[1].priority == "high"
+
+
+def test_plan_tasks_returns_list():
+    session = MagicMock()
+    session.get.return_value = mock_response(
+        json_body=[_task_body(id="t-001"), _task_body(id="t-002")]
+    )
+    hub = make_hub(session)
+
+    tasks = hub.plan_tasks("p1")
+    assert [t.id for t in tasks] == ["t-001", "t-002"]
+
+
+def test_plan_archive_sets_status():
+    session = MagicMock()
+    session.post.return_value = mock_response(
+        json_body=_plan_body(status="archived", archived_at="2026-04-15T20:00:00Z")
+    )
+    hub = make_hub(session)
+
+    plan = hub.plan_archive("p1")
+    assert plan.status == "archived"
+    assert plan.archived_at == "2026-04-15T20:00:00Z"
+
+
+def test_plan_delete_calls_delete():
+    session = MagicMock()
+    session.delete.return_value = mock_response(json_body={"status": "ok"})
+    hub = make_hub(session)
+
+    hub.plan_delete("p1")
+    args, kwargs = session.delete.call_args
+    assert args[0] == "http://fake:3001/api/plans/p1"
+    assert kwargs["params"]["ref"] == "main"
+
+
+def test_plan_new_sends_agent_header_when_configured():
+    session = MagicMock()
+    session.post.return_value = mock_response(
+        status_code=201, json_body=_plan_body()
+    )
+    hub = Hub(server="http://fake:3001", session=session, agent_id="claude-code")
+
+    hub.plan_new("p1")
+
+    headers = session.post.call_args.kwargs["headers"]
+    assert headers.get("X-CTXone-Agent") == "claude-code"
+
