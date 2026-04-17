@@ -85,6 +85,7 @@
 
 		<ul>
 			<li><a href="/">Dashboard</a></li>
+			<li><a href="/plans">Plans</a></li>
 			<li><a href="/pinned">Pinned</a></li>
 			<li><a href="/browse">Browse</a></li>
 			<li><a href="/search">Search</a></li>

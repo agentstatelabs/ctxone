@@ -2,12 +2,14 @@
 	import { onMount } from 'svelte';
 	import { getHealth, getStats, getLog, getTokenStats, remember } from '$lib/api';
 	import type { StatsResponse, CommitEntry, TokenStats, SessionSnapshot } from '$lib/api';
+	import { listPlans, type Plan } from '$lib/plansApi';
 	import LlmConsumptionPanel from '$lib/LlmConsumptionPanel.svelte';
 
 	let connected = $state(false);
 	let stats: StatsResponse | null = $state(null);
 	let tokenStats: TokenStats | null = $state(null);
 	let recentCommits: CommitEntry[] = $state([]);
+	let plans: Plan[] = $state([]);
 	let error: string | null = $state(null);
 
 	// Remember form state
@@ -22,9 +24,22 @@
 			stats = await getStats();
 			tokenStats = await getTokenStats();
 			recentCommits = await getLog('main', 5);
+			plans = await listPlans('main');
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Unknown error';
 		}
+	}
+
+	function planSummary(all: Plan[]) {
+		let active = 0;
+		let pending = 0;
+		let inProgress = 0;
+		for (const p of all) {
+			if (p.status === 'active') active += 1;
+			pending += p.task_counts.pending;
+			inProgress += p.task_counts.in_progress;
+		}
+		return { active, pending, inProgress };
 	}
 
 	onMount(async () => {
@@ -146,6 +161,25 @@
 	<LlmConsumptionPanel snapshot={{ session_id: '_aggregate', ...tokenStats } as SessionSnapshot} />
 {/if}
 
+{#if connected}
+	<h3>Plans <a class="see-all" href="/plans">see all</a></h3>
+	{@const summary = planSummary(plans)}
+	<div class="stats-grid plans-grid">
+		<div class="stat-card">
+			<div class="stat-value">{summary.active}</div>
+			<div class="stat-label">Active plans</div>
+		</div>
+		<div class="stat-card">
+			<div class="stat-value">{summary.pending}</div>
+			<div class="stat-label">Pending tasks</div>
+		</div>
+		<div class="stat-card">
+			<div class="stat-value">{summary.inProgress}</div>
+			<div class="stat-label">In-progress tasks</div>
+		</div>
+	</div>
+{/if}
+
 {#if recentCommits.length > 0}
 	<h3>Recent Activity</h3>
 	<div class="commits">
@@ -183,6 +217,20 @@
 		grid-template-columns: repeat(4, 1fr);
 		gap: 1rem;
 		margin-bottom: 2rem;
+	}
+
+	.plans-grid {
+		grid-template-columns: repeat(3, 1fr);
+	}
+
+	.see-all {
+		font-size: 0.75rem;
+		color: #666;
+		font-weight: normal;
+		margin-left: 0.5rem;
+	}
+	.see-all:hover {
+		color: #93c5fd;
 	}
 
 	.stat-card {

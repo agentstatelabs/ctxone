@@ -1,0 +1,738 @@
+<script lang="ts">
+	import { onMount } from 'svelte';
+	import { branchStore } from '$lib/branchStore.svelte';
+	import {
+		listPlans,
+		getPlan,
+		createPlan,
+		addTask,
+		startTask,
+		completeTask,
+		abandonTask,
+		archivePlan,
+		type Plan,
+		type Task,
+		type Priority,
+		type ProofKind
+	} from '$lib/plansApi';
+
+	let plans: Plan[] = $state([]);
+	let selectedName: string | null = $state(null);
+	let selectedPlan: Plan | null = $state(null);
+	let selectedTask: Task | null = $state(null);
+	let error: string | null = $state(null);
+
+	// Create-plan form
+	let showCreate = $state(false);
+	let newPlanName = $state('');
+	let newPlanDesc = $state('');
+
+	// Add-task form
+	let showAddTask = $state(false);
+	let newTaskTitle = $state('');
+	let newTaskPriority: Priority = $state('medium');
+	let newTaskAssigned = $state('');
+
+	// Proof modal for Done
+	let proofOpen = $state(false);
+	let proofKind: ProofKind = $state('commit');
+	let proofValue = $state('');
+	let proofNote = $state('');
+
+	// Abandon modal
+	let abandonOpen = $state(false);
+	let abandonReason = $state('');
+
+	async function loadPlans() {
+		error = null;
+		try {
+			plans = await listPlans(branchStore.current);
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+			plans = [];
+		}
+	}
+
+	async function selectPlan(name: string) {
+		selectedName = name;
+		selectedTask = null;
+		try {
+			selectedPlan = await getPlan(name, branchStore.current);
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+			selectedPlan = null;
+		}
+	}
+
+	async function refreshSelected() {
+		if (selectedName) await selectPlan(selectedName);
+	}
+
+	onMount(loadPlans);
+
+	$effect(() => {
+		void branchStore.current;
+		selectedName = null;
+		selectedPlan = null;
+		selectedTask = null;
+		loadPlans();
+	});
+
+	async function handleCreate(e: Event) {
+		e.preventDefault();
+		if (!newPlanName.trim()) return;
+		try {
+			await createPlan(
+				newPlanName.trim(),
+				newPlanDesc.trim() || null,
+				branchStore.current
+			);
+			newPlanName = '';
+			newPlanDesc = '';
+			showCreate = false;
+			await loadPlans();
+		} catch (err) {
+			error = err instanceof Error ? err.message : String(err);
+		}
+	}
+
+	async function handleAddTask(e: Event) {
+		e.preventDefault();
+		if (!selectedName || !newTaskTitle.trim()) return;
+		try {
+			await addTask(
+				selectedName,
+				{
+					title: newTaskTitle.trim(),
+					priority: newTaskPriority,
+					assigned_to: newTaskAssigned.trim() || undefined
+				},
+				branchStore.current
+			);
+			newTaskTitle = '';
+			newTaskAssigned = '';
+			newTaskPriority = 'medium';
+			showAddTask = false;
+			await refreshSelected();
+		} catch (err) {
+			error = err instanceof Error ? err.message : String(err);
+		}
+	}
+
+	async function handleStart(task: Task) {
+		if (!selectedName) return;
+		try {
+			await startTask(selectedName, task.id, branchStore.current);
+			await refreshSelected();
+		} catch (err) {
+			error = err instanceof Error ? err.message : String(err);
+		}
+	}
+
+	function openProof(task: Task) {
+		selectedTask = task;
+		proofKind = 'commit';
+		proofValue = '';
+		proofNote = '';
+		proofOpen = true;
+	}
+
+	async function submitProof(e: Event) {
+		e.preventDefault();
+		if (!selectedName || !selectedTask) return;
+		if (!proofValue.trim()) return;
+		try {
+			await completeTask(
+				selectedName,
+				selectedTask.id,
+				{
+					kind: proofKind,
+					value: proofValue.trim(),
+					note: proofNote.trim() || null
+				},
+				branchStore.current
+			);
+			proofOpen = false;
+			selectedTask = null;
+			await refreshSelected();
+		} catch (err) {
+			error = err instanceof Error ? err.message : String(err);
+		}
+	}
+
+	function openAbandon(task: Task) {
+		selectedTask = task;
+		abandonReason = '';
+		abandonOpen = true;
+	}
+
+	async function submitAbandon(e: Event) {
+		e.preventDefault();
+		if (!selectedName || !selectedTask) return;
+		if (!abandonReason.trim()) return;
+		try {
+			await abandonTask(
+				selectedName,
+				selectedTask.id,
+				abandonReason.trim(),
+				branchStore.current
+			);
+			abandonOpen = false;
+			selectedTask = null;
+			await refreshSelected();
+		} catch (err) {
+			error = err instanceof Error ? err.message : String(err);
+		}
+	}
+
+	async function handleArchive() {
+		if (!selectedName) return;
+		if (!confirm(`Archive plan "${selectedName}"? It stays browsable.`)) return;
+		try {
+			await archivePlan(selectedName, branchStore.current);
+			await loadPlans();
+			await refreshSelected();
+		} catch (err) {
+			error = err instanceof Error ? err.message : String(err);
+		}
+	}
+
+	function statusGlyph(status: string): string {
+		switch (status) {
+			case 'done':
+				return '\u2713';
+			case 'in_progress':
+				return '>';
+			case 'abandoned':
+				return '!';
+			default:
+				return ' ';
+		}
+	}
+
+	function priorityClass(p: string): string {
+		switch (p) {
+			case 'critical':
+				return 'pri-critical';
+			case 'high':
+				return 'pri-high';
+			case 'low':
+				return 'pri-low';
+			default:
+				return 'pri-medium';
+		}
+	}
+
+	function statusClass(s: string): string {
+		switch (s) {
+			case 'done':
+				return 'task-done';
+			case 'in_progress':
+				return 'task-progress';
+			case 'abandoned':
+				return 'task-abandoned';
+			default:
+				return 'task-pending';
+		}
+	}
+</script>
+
+<h2>
+	Plans <span class="branch-label">on {branchStore.current}</span>
+	<button class="btn-sm" onclick={() => (showCreate = !showCreate)}>
+		{showCreate ? 'Cancel' : '+ New plan'}
+	</button>
+</h2>
+
+{#if error}
+	<p class="error">{error}</p>
+{/if}
+
+{#if showCreate}
+	<form class="create-form" onsubmit={handleCreate}>
+		<input
+			type="text"
+			bind:value={newPlanName}
+			placeholder="plan-name (kebab-case)"
+			required
+		/>
+		<input
+			type="text"
+			bind:value={newPlanDesc}
+			placeholder="description (optional)"
+		/>
+		<button type="submit">Create</button>
+	</form>
+{/if}
+
+<div class="layout">
+	<aside class="plan-list">
+		{#if plans.length === 0}
+			<p class="empty">No plans yet.</p>
+		{/if}
+		{#each plans as plan}
+			<button
+				class="plan-row"
+				class:selected={plan.name === selectedName}
+				onclick={() => selectPlan(plan.name)}
+			>
+				<div class="plan-name">{plan.name}</div>
+				<div class="plan-meta">
+					<span class="plan-status plan-status-{plan.status}">{plan.status}</span>
+					<span class="plan-counts">
+						{plan.task_counts.done}&check;
+						{plan.task_counts.in_progress}&gt;
+						{plan.task_counts.pending}&middot;
+					</span>
+				</div>
+			</button>
+		{/each}
+	</aside>
+
+	<section class="plan-detail">
+		{#if !selectedPlan}
+			<p class="empty">Select a plan to see its tasks.</p>
+		{:else}
+			<header class="plan-header">
+				<div>
+					<h3>{selectedPlan.name}</h3>
+					{#if selectedPlan.description}
+						<p class="plan-desc">{selectedPlan.description}</p>
+					{/if}
+				</div>
+				<div class="plan-actions">
+					<button onclick={() => (showAddTask = !showAddTask)}>
+						{showAddTask ? 'Cancel' : '+ Add task'}
+					</button>
+					{#if selectedPlan.status !== 'archived'}
+						<button class="btn-secondary" onclick={handleArchive}>Archive</button>
+					{/if}
+				</div>
+			</header>
+
+			{#if showAddTask}
+				<form class="add-task-form" onsubmit={handleAddTask}>
+					<input
+						type="text"
+						bind:value={newTaskTitle}
+						placeholder="task title (imperative)"
+						required
+					/>
+					<select bind:value={newTaskPriority}>
+						<option value="low">Low</option>
+						<option value="medium">Medium</option>
+						<option value="high">High</option>
+						<option value="critical">Critical</option>
+					</select>
+					<input
+						type="text"
+						bind:value={newTaskAssigned}
+						placeholder="assign to (e.g. claude-code) — optional"
+					/>
+					<button type="submit">Add</button>
+				</form>
+			{/if}
+
+			{#if selectedPlan.tasks && selectedPlan.tasks.length > 0}
+				<ul class="task-list">
+					{#each selectedPlan.tasks as task}
+						<li class="task-row {statusClass(task.status)}">
+							<span class="task-glyph">[{statusGlyph(task.status)}]</span>
+							<span class="task-id">{task.id}</span>
+							<span class="pri-tag {priorityClass(task.priority)}">
+								{task.priority.slice(0, 2).toUpperCase()}
+							</span>
+							<span class="task-title">{task.title}</span>
+							{#if task.assigned_to}
+								<span class="assigned">@{task.assigned_to}</span>
+							{/if}
+							<span class="task-actions">
+								{#if task.status === 'pending'}
+									<button class="btn-xs" onclick={() => handleStart(task)}>
+										Start
+									</button>
+									<button class="btn-xs btn-secondary" onclick={() => openAbandon(task)}>
+										Abandon
+									</button>
+								{:else if task.status === 'in_progress'}
+									<button class="btn-xs" onclick={() => openProof(task)}>
+										Done
+									</button>
+									<button class="btn-xs btn-secondary" onclick={() => openAbandon(task)}>
+										Abandon
+									</button>
+								{/if}
+							</span>
+							{#if task.proof}
+								<div class="task-proof">
+									proof: {task.proof.kind} {task.proof.value}
+									{#if task.proof.note}
+										&mdash; {task.proof.note}
+									{/if}
+								</div>
+							{/if}
+							{#if task.status === 'abandoned' && task.abandoned_reason}
+								<div class="task-proof">reason: {task.abandoned_reason}</div>
+							{/if}
+							{#if task.blocked_by.length > 0}
+								<div class="task-proof">
+									blocked by: {task.blocked_by.join(', ')}
+								</div>
+							{/if}
+						</li>
+					{/each}
+				</ul>
+			{:else}
+				<p class="empty">No tasks in this plan yet.</p>
+			{/if}
+		{/if}
+	</section>
+</div>
+
+{#if proofOpen}
+	<div class="modal-backdrop" onclick={() => (proofOpen = false)}>
+		<div class="modal" onclick={(e) => e.stopPropagation()}>
+			<h3>Mark task {selectedTask?.id} done</h3>
+			<p class="hint">
+				A proof is required — a commit SHA is strongest, then a file path,
+				then a test name, then free text.
+			</p>
+			<form onsubmit={submitProof}>
+				<label>
+					Kind
+					<select bind:value={proofKind}>
+						<option value="commit">commit</option>
+						<option value="file">file</option>
+						<option value="test">test</option>
+						<option value="text">text</option>
+					</select>
+				</label>
+				<label>
+					Value
+					<input
+						type="text"
+						bind:value={proofValue}
+						placeholder={
+							proofKind === 'commit'
+								? 'git SHA (e.g. ef6ce63)'
+								: proofKind === 'file'
+									? 'path/to/file'
+									: proofKind === 'test'
+										? 'test_function_name'
+										: 'free-text description'
+						}
+						required
+					/>
+				</label>
+				<label>
+					Note (optional)
+					<input type="text" bind:value={proofNote} />
+				</label>
+				<div class="modal-actions">
+					<button type="submit">Mark done</button>
+					<button type="button" class="btn-secondary" onclick={() => (proofOpen = false)}>
+						Cancel
+					</button>
+				</div>
+			</form>
+		</div>
+	</div>
+{/if}
+
+{#if abandonOpen}
+	<div class="modal-backdrop" onclick={() => (abandonOpen = false)}>
+		<div class="modal" onclick={(e) => e.stopPropagation()}>
+			<h3>Abandon task {selectedTask?.id}</h3>
+			<form onsubmit={submitAbandon}>
+				<label>
+					Reason
+					<input
+						type="text"
+						bind:value={abandonReason}
+						placeholder="why is this task being dropped?"
+						required
+					/>
+				</label>
+				<div class="modal-actions">
+					<button type="submit">Abandon</button>
+					<button type="button" class="btn-secondary" onclick={() => (abandonOpen = false)}>
+						Cancel
+					</button>
+				</div>
+			</form>
+		</div>
+	</div>
+{/if}
+
+<style>
+	h2 {
+		display: flex;
+		align-items: center;
+		gap: 1rem;
+		margin-bottom: 1rem;
+	}
+	.branch-label {
+		color: #666;
+		font-family: monospace;
+		font-weight: normal;
+		font-size: 0.9rem;
+	}
+	.error {
+		background: #2a1515;
+		border: 1px solid #663030;
+		color: #ef9999;
+		padding: 0.6rem;
+		border-radius: 4px;
+	}
+	.empty {
+		color: #666;
+		font-style: italic;
+	}
+	.create-form,
+	.add-task-form {
+		display: flex;
+		gap: 0.5rem;
+		flex-wrap: wrap;
+		margin-bottom: 1rem;
+	}
+	.create-form input,
+	.add-task-form input,
+	.add-task-form select {
+		background: #0a0a0a;
+		border: 1px solid #333;
+		color: #e0e0e0;
+		padding: 0.4rem 0.6rem;
+		border-radius: 4px;
+		flex: 1 1 12rem;
+		font-family: monospace;
+	}
+	button {
+		background: #1e3a5f;
+		border: 1px solid #2a4a7a;
+		color: #93c5fd;
+		padding: 0.4rem 0.8rem;
+		border-radius: 4px;
+		cursor: pointer;
+		font-size: 0.9rem;
+	}
+	button:hover {
+		background: #264e80;
+	}
+	.btn-secondary {
+		background: #222;
+		border-color: #444;
+		color: #aaa;
+	}
+	.btn-sm {
+		padding: 0.25rem 0.6rem;
+		font-size: 0.8rem;
+	}
+	.btn-xs {
+		padding: 0.15rem 0.5rem;
+		font-size: 0.75rem;
+	}
+	.layout {
+		display: grid;
+		grid-template-columns: 280px 1fr;
+		gap: 1rem;
+		align-items: start;
+	}
+	.plan-list {
+		border: 1px solid #222;
+		border-radius: 6px;
+		padding: 0.4rem;
+		background: #0d0d0d;
+	}
+	.plan-row {
+		width: 100%;
+		text-align: left;
+		background: transparent;
+		border: 0;
+		padding: 0.5rem;
+		border-radius: 4px;
+		color: #e0e0e0;
+		cursor: pointer;
+		display: block;
+	}
+	.plan-row:hover {
+		background: #1a1a1a;
+	}
+	.plan-row.selected {
+		background: #1e3a5f;
+	}
+	.plan-name {
+		font-family: monospace;
+		font-weight: 600;
+	}
+	.plan-meta {
+		display: flex;
+		gap: 0.6rem;
+		font-size: 0.75rem;
+		color: #888;
+		margin-top: 0.2rem;
+	}
+	.plan-status {
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+	}
+	.plan-status-active {
+		color: #7fd484;
+	}
+	.plan-status-completed {
+		color: #93c5fd;
+	}
+	.plan-status-archived {
+		color: #888;
+	}
+	.plan-detail {
+		border: 1px solid #222;
+		border-radius: 6px;
+		padding: 1rem;
+		background: #0d0d0d;
+	}
+	.plan-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: flex-start;
+		gap: 1rem;
+		margin-bottom: 1rem;
+	}
+	.plan-header h3 {
+		margin: 0;
+		font-family: monospace;
+	}
+	.plan-desc {
+		color: #aaa;
+		margin: 0.25rem 0 0 0;
+		font-size: 0.9rem;
+	}
+	.plan-actions {
+		display: flex;
+		gap: 0.4rem;
+	}
+	.task-list {
+		list-style: none;
+		padding: 0;
+		margin: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.4rem;
+	}
+	.task-row {
+		display: grid;
+		grid-template-columns: 2.2rem 4rem 2.4rem 1fr auto auto;
+		gap: 0.4rem;
+		align-items: center;
+		padding: 0.45rem 0.6rem;
+		background: #131313;
+		border: 1px solid #1f1f1f;
+		border-radius: 4px;
+		font-family: monospace;
+	}
+	.task-row.task-done {
+		color: #7fd484;
+	}
+	.task-row.task-progress {
+		border-left: 3px solid #3b82f6;
+	}
+	.task-row.task-abandoned {
+		color: #b08040;
+		text-decoration: line-through;
+	}
+	.task-glyph {
+		color: #888;
+	}
+	.task-id {
+		color: #888;
+		font-size: 0.85rem;
+	}
+	.task-title {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.pri-tag {
+		font-size: 0.7rem;
+		padding: 0.1rem 0.35rem;
+		border-radius: 3px;
+		background: #1f1f1f;
+	}
+	.pri-critical {
+		background: #5a1515;
+		color: #ff8888;
+	}
+	.pri-high {
+		background: #4d3a15;
+		color: #f0b060;
+	}
+	.pri-low {
+		background: #1a1a1a;
+		color: #888;
+	}
+	.pri-medium {
+		background: #15304d;
+		color: #93c5fd;
+	}
+	.assigned {
+		color: #b0a8e6;
+		font-size: 0.8rem;
+	}
+	.task-actions {
+		display: flex;
+		gap: 0.25rem;
+	}
+	.task-proof {
+		grid-column: 1 / -1;
+		color: #888;
+		font-size: 0.75rem;
+		padding-left: 2.5rem;
+	}
+	.modal-backdrop {
+		position: fixed;
+		inset: 0;
+		background: rgba(0, 0, 0, 0.7);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		z-index: 100;
+	}
+	.modal {
+		background: #0d0d0d;
+		border: 1px solid #333;
+		border-radius: 8px;
+		padding: 1.5rem;
+		min-width: 360px;
+		max-width: 90vw;
+	}
+	.modal h3 {
+		margin-top: 0;
+	}
+	.modal .hint {
+		color: #888;
+		font-size: 0.85rem;
+	}
+	.modal label {
+		display: block;
+		font-size: 0.85rem;
+		color: #aaa;
+		margin-top: 0.7rem;
+	}
+	.modal input,
+	.modal select {
+		width: 100%;
+		box-sizing: border-box;
+		margin-top: 0.2rem;
+		background: #0a0a0a;
+		border: 1px solid #333;
+		color: #e0e0e0;
+		padding: 0.4rem 0.6rem;
+		border-radius: 4px;
+		font-family: monospace;
+	}
+	.modal-actions {
+		display: flex;
+		justify-content: flex-end;
+		gap: 0.4rem;
+		margin-top: 1rem;
+	}
+</style>
