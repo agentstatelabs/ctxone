@@ -20,13 +20,20 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          submodules: recursive
-          # SUBMODULE_TOKEN is a fine-grained PAT with `contents: read`
-          # on agentstatelabs/agentstategraph (the private engine submodule's
-          # source). Same secret used by docker.yml and release.yml. If
-          # unset the clone falls back to GITHUB_TOKEN, which can't reach
-          # the cross-org private repo — expect "Repository not found".
-          token: ${{ secrets.SUBMODULE_TOKEN || github.token }}
+          # Check out CTXone with the default GITHUB_TOKEN, skipping
+          # submodules — the engine submodule lives in a different org
+          # (agentstatelabs/agentstategraph) and needs a cross-org token.
+          submodules: false
+
+      - name: Checkout engine submodule with PAT
+        # SUBMODULE_TOKEN is a fine-grained PAT scoped to read access on
+        # agentstatelabs/agentstategraph. Same pattern and secret as
+        # docker.yml. Once ASG moves to the same org this collapses back
+        # to `submodules: recursive` on the checkout above.
+        shell: bash
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.SUBMODULE_TOKEN }}@github.com/".insteadOf "https://github.com/"
+          git submodule update --init --recursive
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -86,13 +93,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          submodules: recursive
-          # SUBMODULE_TOKEN is a fine-grained PAT with `contents: read`
-          # on agentstatelabs/agentstategraph (the private engine submodule's
-          # source). Same secret used by docker.yml and release.yml. If
-          # unset the clone falls back to GITHUB_TOKEN, which can't reach
-          # the cross-org private repo — expect "Repository not found".
-          token: ${{ secrets.SUBMODULE_TOKEN || github.token }}
+          submodules: false
+
+      - name: Checkout engine submodule with PAT
+        shell: bash
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.SUBMODULE_TOKEN }}@github.com/".insteadOf "https://github.com/"
+          git submodule update --init --recursive
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2

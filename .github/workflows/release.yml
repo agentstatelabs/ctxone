@@ -48,9 +48,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          submodules: recursive
-          # SUBMODULE_TOKEN — see ci.yml for details. Same PAT.
-          token: ${{ secrets.SUBMODULE_TOKEN || github.token }}
+          submodules: false
+
+      - name: Checkout engine submodule with PAT
+        shell: bash
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.SUBMODULE_TOKEN }}@github.com/".insteadOf "https://github.com/"
+          git submodule update --init --recursive
 
       - uses: dtolnay/rust-toolchain@stable
         with:
