@@ -35,6 +35,71 @@ pub const DEFAULT_AGENT_ID: &str = "ctxone";
 /// structured sections via `prime`, not stuffed into a single fact.
 pub const MAX_FACT_LEN: usize = 64 * 1024;
 
+/// Max length (bytes) of the `context` param on `remember`. `context`
+/// becomes a path segment (`/memory/<context>/<id>`) so it must be
+/// small and printable. Values that exceed are REJECTED (not truncated)
+/// because a silently mangled path is worse than a clear error.
+pub const MAX_CONTEXT_LEN: usize = 128;
+
+/// Max tags per `remember` call.
+pub const MAX_TAGS: usize = 16;
+
+/// Max length (bytes) per tag.
+pub const MAX_TAG_LEN: usize = 64;
+
+/// Returns true if `s` contains any ASCII/Unicode control character
+/// other than horizontal tab, or a Unicode line/paragraph separator.
+/// Mirrors `plan_tools::has_control_chars`; kept local so the memory
+/// module has no cross-module dependency on input-validation helpers.
+fn has_control_chars(s: &str) -> bool {
+    s.chars()
+        .any(|c| (c.is_control() && c != '\t') || c == '\u{2028}' || c == '\u{2029}')
+}
+
+/// Validate the non-`fact` fields on a `remember` call. Returns the
+/// human-readable error message on rejection; the handler wraps it into
+/// a JSON `{"error": ...}` response. Kept as a pure function so tests
+/// can exercise it without an async runtime or a live `CtxOneServer`.
+pub fn validate_remember_params(p: &RememberParams) -> Result<(), String> {
+    if let Some(ctx) = p.context.as_ref() {
+        if ctx.len() > MAX_CONTEXT_LEN {
+            return Err(format!(
+                "context exceeds maximum length ({} bytes; max {MAX_CONTEXT_LEN})",
+                ctx.len()
+            ));
+        }
+        // `context` becomes a path component (`/memory/<ctx>/<id>`); a
+        // `/` would smuggle the write into an unrelated subtree, and
+        // control chars poison any downstream renderer.
+        if ctx.contains('/') {
+            return Err("context must not contain '/' (path-injection)".to_string());
+        }
+        if has_control_chars(ctx) {
+            return Err("context contains control characters".to_string());
+        }
+    }
+    if let Some(tags) = p.tags.as_ref() {
+        if tags.len() > MAX_TAGS {
+            return Err(format!(
+                "tags exceeds maximum count ({}; max {MAX_TAGS})",
+                tags.len()
+            ));
+        }
+        for tag in tags {
+            if tag.len() > MAX_TAG_LEN {
+                return Err(format!(
+                    "tag exceeds maximum length ({} bytes; max {MAX_TAG_LEN})",
+                    tag.len()
+                ));
+            }
+            if has_control_chars(tag) {
+                return Err("tag contains control characters".to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Maximum length in bytes for a primed section's title.
 pub const MAX_SECTION_TITLE_LEN: usize = 512;
 
@@ -999,6 +1064,14 @@ impl CtxOneServer {
     )]
     async fn remember(&self, params: Parameters<RememberParams>) -> String {
         let p = params.0;
+
+        // Reject overlong / path-smuggling `context` and unbounded
+        // `tags` before we construct the path or CommitOptions. These
+        // flow into `/memory/<ctx>/<id>` and `CommitOptions::with_tags`
+        // respectively — see `spec/SECURITY-THREAT-MODEL.md §4 (H3)`.
+        if let Err(msg) = validate_remember_params(&p) {
+            return serde_json::json!({ "error": msg }).to_string();
+        }
 
         // Cap fact length to prevent unbounded payload storage. The cap is
         // generous (64 KB) but closes a DoS + recall-dominating vector
@@ -2401,6 +2474,55 @@ mod tests {
         // And the envelope guidance is always present.
         assert!(scoped["replay_guidance"].as_str().unwrap().contains("data"));
         assert_eq!(scoped["scope"].as_str(), Some("/memory/projects/app-a"));
+    }
+
+    // -------- remember input validation (H3) --------
+
+    fn remember_params(context: Option<String>, tags: Option<Vec<String>>) -> RememberParams {
+        RememberParams {
+            fact: "f".to_string(),
+            importance: "medium".to_string(),
+            context,
+            tags,
+            ref_name: "main".to_string(),
+        }
+    }
+
+    #[test]
+    fn remember_rejects_overlong_context() {
+        let p = remember_params(Some("x".repeat(200)), None);
+        let err = validate_remember_params(&p).unwrap_err();
+        assert!(err.contains("context"), "got {err:?}");
+    }
+
+    #[test]
+    fn remember_rejects_slash_in_context() {
+        let p = remember_params(Some("../_meta/schema_version".to_string()), None);
+        let err = validate_remember_params(&p).unwrap_err();
+        assert!(err.contains("'/'"), "got {err:?}");
+    }
+
+    #[test]
+    fn remember_rejects_too_many_tags() {
+        let tags: Vec<String> = (0..(MAX_TAGS + 1)).map(|i| format!("t{i}")).collect();
+        let p = remember_params(None, Some(tags));
+        let err = validate_remember_params(&p).unwrap_err();
+        assert!(err.contains("tags"), "got {err:?}");
+    }
+
+    #[test]
+    fn remember_rejects_overlong_tag() {
+        let p = remember_params(None, Some(vec!["x".repeat(MAX_TAG_LEN + 1)]));
+        let err = validate_remember_params(&p).unwrap_err();
+        assert!(err.contains("tag"), "got {err:?}");
+    }
+
+    #[test]
+    fn remember_accepts_at_limit_context_and_tags() {
+        let ctx = "x".repeat(MAX_CONTEXT_LEN);
+        let tags: Vec<String> = (0..MAX_TAGS).map(|_| "y".repeat(MAX_TAG_LEN)).collect();
+        let p = remember_params(Some(ctx), Some(tags));
+        assert!(validate_remember_params(&p).is_ok());
     }
 
     #[test]

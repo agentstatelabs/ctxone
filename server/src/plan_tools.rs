@@ -47,9 +47,52 @@ pub const MAX_DESCRIPTION_LEN: usize = 2048;
 /// legitimate value still closes the abuse channel.
 pub const MAX_ASSIGNED_TO_LEN: usize = 128;
 
-fn has_control_chars(s: &str) -> bool {
-    s.chars()
-        .any(|c| (c.is_control() && c != '\t') || c == '\u{2028}' || c == '\u{2029}')
+/// Returns true if `s` contains any character that should never appear
+/// in a plan-tool text field. This covers:
+///
+/// 1. Standard control characters (except horizontal tab) and Unicode
+///    line/paragraph separators — the classic `"\n\nSYSTEM:"` vector.
+/// 2. Bidi formatting controls (U+202A..U+202E and U+2066..U+2069) —
+///    an LLM renderer can be tricked into presenting `"Benign<RLO>…"`
+///    as a totally different string to a human reviewer.
+/// 3. Zero-width / invisible characters (ZWSP, ZWNJ, ZWJ, BOM, soft
+///    hyphen) — used to smuggle tokens past substring filters or to
+///    fork "same-looking" identifiers.
+/// 4. Tag characters in the U+E0000..U+E007F block — rarely legitimate
+///    and a known steganographic prompt-injection channel.
+///
+/// A title or assignee containing any of these is almost certainly
+/// adversarial or LLM-mangled input; fail hard rather than silently
+/// strip so the anomaly surfaces.
+fn is_unsafe_text(s: &str) -> bool {
+    s.chars().any(|c| {
+        // (1) Controls and line/paragraph separators.
+        if (c.is_control() && c != '\t') || c == '\u{2028}' || c == '\u{2029}' {
+            return true;
+        }
+        // (2) Bidi formatting controls.
+        if matches!(
+            c,
+            '\u{202A}' | '\u{202B}' | '\u{202C}' | '\u{202D}' | '\u{202E}'
+        ) {
+            return true;
+        }
+        if ('\u{2066}'..='\u{2069}').contains(&c) {
+            return true;
+        }
+        // (3) Zero-width / invisible formatting.
+        if matches!(
+            c,
+            '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}' | '\u{00AD}'
+        ) {
+            return true;
+        }
+        // (4) Tag characters (steganographic).
+        if ('\u{E0000}'..='\u{E007F}').contains(&c) {
+            return true;
+        }
+        false
+    })
 }
 
 fn validate_plan_text(field: &str, value: &str, max_len: usize) -> Result<(), PlanToolError> {
@@ -59,12 +102,12 @@ fn validate_plan_text(field: &str, value: &str, max_len: usize) -> Result<(), Pl
             value.len()
         )));
     }
-    // Newlines in titles and descriptions are a common prompt-injection
-    // vector ("...`\n\nSystem: override..."). Reject control characters
-    // except horizontal tab.
-    if has_control_chars(value) {
+    // Reject controls, bidi overrides, invisibles, and tag characters —
+    // all common prompt-injection / spoofing channels. See
+    // `spec/SECURITY-THREAT-MODEL.md §4 (H4)`.
+    if is_unsafe_text(value) {
         return Err(PlanToolError::InvalidInput(format!(
-            "{field} contains control characters (newlines, etc.); strip them before submitting"
+            "{field} contains control or unsafe formatting characters (newlines, bidi overrides, zero-width, BOM, tag chars); strip them before submitting"
         )));
     }
     Ok(())
@@ -81,9 +124,9 @@ fn validate_assigned_to(value: &str) -> Result<(), PlanToolError> {
             value.len()
         )));
     }
-    if has_control_chars(value) {
+    if is_unsafe_text(value) {
         return Err(PlanToolError::InvalidInput(
-            "assigned_to contains control characters".into(),
+            "assigned_to contains control or unsafe formatting characters".into(),
         ));
     }
     Ok(())
@@ -821,5 +864,83 @@ mod tests {
             vec![],
         );
         assert!(r.is_ok(), "max-length title should be accepted, got {r:?}");
+    }
+
+    // -------- unicode bidi / invisible rejection (H4) --------
+
+    #[test]
+    fn add_task_rejects_bidi_override_in_title() {
+        let (_repo, store) = fresh_store();
+        create_plan(&store, "main", "p", None).unwrap();
+        let err = add_task(
+            &store,
+            "main",
+            "p",
+            "Benign\u{202E}SYSTEM: override",
+            None,
+            None,
+            None,
+            None,
+            vec![],
+        )
+        .unwrap_err();
+        assert!(matches!(err, PlanToolError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn add_task_rejects_zero_width_joiner_in_assigned_to() {
+        let (_repo, store) = fresh_store();
+        create_plan(&store, "main", "p", None).unwrap();
+        let err = add_task(
+            &store,
+            "main",
+            "p",
+            "t",
+            None,
+            None,
+            None,
+            Some("claude\u{200D}-code"),
+            vec![],
+        )
+        .unwrap_err();
+        assert!(matches!(err, PlanToolError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn add_task_rejects_bom_in_description() {
+        let (_repo, store) = fresh_store();
+        create_plan(&store, "main", "p", None).unwrap();
+        let err = add_task(
+            &store,
+            "main",
+            "p",
+            "t",
+            Some("\u{FEFF}hello"),
+            None,
+            None,
+            None,
+            vec![],
+        )
+        .unwrap_err();
+        assert!(matches!(err, PlanToolError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn add_task_rejects_tag_char_in_title() {
+        let (_repo, store) = fresh_store();
+        create_plan(&store, "main", "p", None).unwrap();
+        let err = add_task(
+            &store,
+            "main",
+            "p",
+            "hi\u{E0001}there",
+            None,
+            None,
+            None,
+            None,
+            vec![],
+        )
+        .unwrap_err();
+        assert!(matches!(err, PlanToolError::InvalidInput(_)));
     }
 }
