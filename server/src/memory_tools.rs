@@ -3,10 +3,12 @@
 //! Higher-level memory operations built on top of AgentStateGraph primitives.
 //! Each tool includes token usage metadata (`_ctxone_stats`) for tracking savings.
 
-use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, RwLock};
+
+use lru::LruCache;
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -344,16 +346,27 @@ impl SessionSnapshot {
 /// `mark_all_dirty()`. This keeps the per-session API correct without
 /// introducing a separate graph-size cache or a cross-session channel.
 ///
-/// ## Concurrency
+/// ## Concurrency + bounded cardinality
 ///
-/// Sessions are stored in `RwLock<HashMap<_, _>>`. Reads take a read
-/// lock, missing-session creation takes a write lock briefly. Once a
-/// session exists, all subsequent `get_or_create` calls return the
-/// cloned `Arc` via the read path. This is fast enough for typical
-/// session counts (<100) — if that changes, swap for `DashMap`.
+/// Sessions are stored in `Mutex<LruCache<_, _>>`. Capacity is capped
+/// (default 1024, override via `CTXONE_MAX_SESSIONS`) to defend
+/// against a caller spraying `X-CTXone-Session` with random UUIDs —
+/// every unused session eventually falls off the LRU tail. An LRU
+/// cache with 1024 entries has a negligible footprint; the cap is
+/// there for the spray-attack floor, not normal operation.
+///
+/// Switching from `RwLock<HashMap>` to `Mutex<LruCache>` gives up the
+/// reader-reader parallelism we had before. Fine in practice — the
+/// hot path is a single session per connection and the critical
+/// section is a single `get` + optional `put`.
 pub struct SessionRegistry {
-    sessions: RwLock<HashMap<String, Arc<SessionStats>>>,
+    sessions: Mutex<LruCache<String, Arc<SessionStats>>>,
 }
+
+/// Default maximum number of sessions retained in memory before LRU
+/// eviction kicks in. See `SessionRegistry` docs. Override at startup
+/// via the `CTXONE_MAX_SESSIONS` env var.
+pub const MAX_SESSIONS_DEFAULT: usize = 1024;
 
 impl Default for SessionRegistry {
     fn default() -> Self {
@@ -363,57 +376,77 @@ impl Default for SessionRegistry {
 
 impl SessionRegistry {
     pub fn new() -> Self {
-        let mut map = HashMap::new();
+        let cap = std::env::var("CTXONE_MAX_SESSIONS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(MAX_SESSIONS_DEFAULT);
+        Self::with_capacity(cap)
+    }
+
+    /// Construct with an explicit capacity. Values below 1 are clamped
+    /// to 1 so the default session always fits.
+    pub fn with_capacity(cap: usize) -> Self {
+        let capacity = NonZeroUsize::new(cap.max(1)).expect("capacity >= 1");
+        let mut lru = LruCache::new(capacity);
         // Always pre-seed the "default" session so empty /api/stats/sessions
         // responses still show the baseline bucket instead of nothing.
-        map.insert(
+        lru.put(
             DEFAULT_SESSION_ID.to_string(),
             Arc::new(SessionStats::new()),
         );
         Self {
-            sessions: RwLock::new(map),
+            sessions: Mutex::new(lru),
         }
     }
 
+    /// Capacity (the LRU cap, not the current length).
+    pub fn capacity(&self) -> usize {
+        self.sessions.lock().expect("sessions lock").cap().get()
+    }
+
+    /// Current number of sessions (for tests + metrics).
+    pub fn len(&self) -> usize {
+        self.sessions.lock().expect("sessions lock").len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Look up a session by ID, creating a new one if it doesn't exist.
+    /// The LRU is mutated on every call (get promotes; put inserts).
     pub fn get_or_create(&self, id: &str) -> Arc<SessionStats> {
-        // Fast path: shared read lock, clone out the Arc
-        {
-            let r = self.sessions.read().expect("sessions read lock");
-            if let Some(s) = r.get(id) {
-                return s.clone();
-            }
+        let mut w = self.sessions.lock().expect("sessions lock");
+        if let Some(s) = w.get(id) {
+            return s.clone();
         }
-        // Slow path: exclusive write lock to insert. Re-check in case
-        // another caller beat us to it between the read and write.
-        let mut w = self.sessions.write().expect("sessions write lock");
-        w.entry(id.to_string())
-            .or_insert_with(|| Arc::new(SessionStats::new()))
-            .clone()
+        let s = Arc::new(SessionStats::new());
+        w.put(id.to_string(), s.clone());
+        s
     }
 
     /// Invalidate every session's cached flat-size. Call after any write.
     pub fn mark_all_dirty(&self) {
-        let r = self.sessions.read().expect("sessions read lock");
-        for s in r.values() {
+        let w = self.sessions.lock().expect("sessions lock");
+        for (_, s) in w.iter() {
             s.mark_dirty();
         }
     }
 
     /// Return a sorted list of known session IDs.
     pub fn list_ids(&self) -> Vec<String> {
-        let r = self.sessions.read().expect("sessions read lock");
-        let mut ids: Vec<String> = r.keys().cloned().collect();
+        let w = self.sessions.lock().expect("sessions lock");
+        let mut ids: Vec<String> = w.iter().map(|(k, _)| k.clone()).collect();
         ids.sort();
         ids
     }
 
     /// Snapshot a single session by ID. Returns `None` if the session
-    /// doesn't exist. This reads the current atomic values — no
-    /// locking outside the registry itself.
+    /// doesn't exist. Uses `peek` to avoid promoting on snapshot reads.
     pub fn snapshot(&self, id: &str) -> Option<SessionSnapshot> {
-        let r = self.sessions.read().expect("sessions read lock");
-        r.get(id).map(|s| SessionSnapshot::from_session(id, s))
+        let w = self.sessions.lock().expect("sessions lock");
+        w.peek(id).map(|s| SessionSnapshot::from_session(id, s))
     }
 
     /// Aggregate stats across every session.
@@ -427,7 +460,7 @@ impl SessionRegistry {
     /// sessions, so we take the max observed value (every session
     /// should converge to the same number anyway).
     pub fn aggregate(&self) -> SessionSnapshot {
-        let r = self.sessions.read().expect("sessions read lock");
+        let w = self.sessions.lock().expect("sessions lock");
 
         let mut total_used = 0u64;
         let mut total_saved = 0u64;
@@ -438,7 +471,7 @@ impl SessionRegistry {
         let mut llm_cache_create = 0u64;
         let mut llm_calls = 0u64;
 
-        for s in r.values() {
+        for (_, s) in w.iter() {
             total_used += s.tokens_sent.load(Ordering::Relaxed);
             total_saved += s.tokens_saved.load(Ordering::Relaxed);
             graph_chars = graph_chars.max(s.total_graph_size_chars.load(Ordering::Relaxed));
@@ -477,8 +510,8 @@ impl SessionRegistry {
     /// Snapshot every session as a list. Sorted by session ID for
     /// stable output.
     pub fn snapshot_all(&self) -> Vec<SessionSnapshot> {
-        let r = self.sessions.read().expect("sessions read lock");
-        let mut snaps: Vec<SessionSnapshot> = r
+        let w = self.sessions.lock().expect("sessions lock");
+        let mut snaps: Vec<SessionSnapshot> = w
             .iter()
             .map(|(id, s)| SessionSnapshot::from_session(id, s))
             .collect();
@@ -2543,5 +2576,78 @@ mod tests {
         let r = run_recall_scoped(&repo, &session, "alpha", 1500, "main", None);
         assert!(r["replay_guidance"].as_str().unwrap().contains("data"));
         assert!(r["scope"].is_null());
+    }
+
+    // --- session cardinality cap (security v3) --------------------------
+
+    #[test]
+    fn session_registry_evicts_beyond_capacity() {
+        let registry = SessionRegistry::with_capacity(4);
+        registry.get_or_create("a");
+        registry.get_or_create("b");
+        registry.get_or_create("c");
+        // "default" is pre-seeded, so we're at 4 entries. Adding "d" evicts
+        // the least-recently-used (which is "default" since it's the
+        // oldest and untouched).
+        registry.get_or_create("d");
+        assert_eq!(registry.len(), 4, "capacity must hold");
+        assert!(registry.snapshot("default").is_none());
+        // Adding "e" evicts "a" next.
+        registry.get_or_create("e");
+        assert_eq!(registry.len(), 4);
+        assert!(registry.snapshot("a").is_none());
+        // "b", "c", "d", "e" are all live.
+        for id in ["b", "c", "d", "e"] {
+            assert!(
+                registry.snapshot(id).is_some(),
+                "expected {id} to still be live"
+            );
+        }
+    }
+
+    #[test]
+    fn session_registry_spray_stays_bounded() {
+        // Simulate the attack vector: attacker sprays unique session IDs.
+        let registry = SessionRegistry::with_capacity(64);
+        for i in 0..10_000 {
+            registry.get_or_create(&format!("spray-{i}"));
+        }
+        assert_eq!(
+            registry.len(),
+            64,
+            "LRU must not let the map grow past capacity under a spray attack"
+        );
+    }
+
+    #[test]
+    fn session_registry_get_or_create_promotes_on_reuse() {
+        let registry = SessionRegistry::with_capacity(3);
+        // Prime "a", "b", "c". ("default" was pre-seeded but evicted by
+        // the third put since capacity=3.)
+        registry.get_or_create("a");
+        registry.get_or_create("b");
+        registry.get_or_create("c");
+        assert_eq!(registry.len(), 3);
+        // Touch "a" so it becomes most-recently-used.
+        let _ = registry.get_or_create("a");
+        // Insert "d"; the LRU victim must be "b", not "a".
+        registry.get_or_create("d");
+        assert!(
+            registry.snapshot("a").is_some(),
+            "promoted 'a' must survive"
+        );
+        assert!(
+            registry.snapshot("b").is_none(),
+            "expected 'b' to be evicted"
+        );
+    }
+
+    #[test]
+    fn session_registry_default_capacity_from_env() {
+        // Clearing the env var falls back to MAX_SESSIONS_DEFAULT.
+        // Safety: these tests run single-threaded per-module by default.
+        unsafe { std::env::remove_var("CTXONE_MAX_SESSIONS") };
+        let r = SessionRegistry::new();
+        assert_eq!(r.capacity(), MAX_SESSIONS_DEFAULT);
     }
 }

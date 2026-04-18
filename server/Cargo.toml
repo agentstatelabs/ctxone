@@ -40,3 +40,4 @@ governor = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
+lru = "0.12"
