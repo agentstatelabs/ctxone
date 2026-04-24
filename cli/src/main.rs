@@ -55,6 +55,10 @@ struct RawCli {
     #[arg(long, env = "CTX_FORMAT", value_enum, global = true)]
     format: Option<OutputFormat>,
 
+    /// Session identifier sent as X-CTXone-Session header (env: CTX_SESSION)
+    #[arg(long, env = "CTX_SESSION", global = true)]
+    session: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -65,6 +69,7 @@ struct Cli {
     server: String,
     branch: String,
     format: OutputFormat,
+    session: Option<String>,
     command: Commands,
 }
 
@@ -80,8 +85,22 @@ impl Cli {
                 .or_else(|| config.branch.clone())
                 .unwrap_or_else(|| "main".to_string()),
             format: raw.format.or(config.format).unwrap_or(OutputFormat::Text),
+            session: raw.session,
             command: raw.command,
         }
+    }
+
+    /// Build a reqwest client with X-CTXone-Session baked in as a default header.
+    fn http_client(&self) -> reqwest::Client {
+        let mut builder = reqwest::Client::builder();
+        if let Some(ref sid) = self.session {
+            let mut headers = reqwest::header::HeaderMap::new();
+            if let Ok(val) = reqwest::header::HeaderValue::from_str(sid) {
+                headers.insert("X-CTXone-Session", val);
+            }
+            builder = builder.default_headers(headers);
+        }
+        builder.build().unwrap_or_default()
     }
 }
 
@@ -672,6 +691,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let raw = RawCli::parse();
     let config = CtxConfig::load();
     let cli = Cli::from_raw(raw, &config);
+    let client = cli.http_client();
 
     match cli.command {
         Commands::Remember {
@@ -710,7 +730,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 body["tags"] = serde_json::json!(tags);
             }
 
-            let resp = match reqwest::Client::new()
+            let resp = match client.clone()
                 .post(format!("{}/api/memory/remember", cli.server))
                 .json(&body)
                 .send()
@@ -1009,7 +1029,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(status.code().unwrap_or(1));
         }
         Commands::Demo => {
-            run_demo(&cli.server).await?;
+            run_demo(&cli.server, client.clone()).await?;
         }
         Commands::Pinned => {
             let resp = match reqwest::get(format!("{}/api/memory/pinned", cli.server)).await {
@@ -1153,7 +1173,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "ref": cli.branch,
             });
 
-            let resp = match reqwest::Client::new()
+            let resp = match client.clone()
                 .post(format!("{}/api/memory/prime", cli.server))
                 .json(&body)
                 .send()
@@ -1251,7 +1271,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 body["description"] = serde_json::json!(m);
             }
 
-            let resp = match reqwest::Client::new()
+            let resp = match client.clone()
                 .post(format!("{}/api/merge", cli.server))
                 .json(&body)
                 .send()
@@ -1305,7 +1325,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 body["reason"] = serde_json::json!(r);
             }
 
-            let resp = match reqwest::Client::new()
+            let resp = match client.clone()
                 .post(format!("{}/api/memory/forget", cli.server))
                 .json(&body)
                 .send()
@@ -1471,7 +1491,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Branch { name, from } => {
             let body = serde_json::json!({ "name": name, "from": from });
-            let resp = match reqwest::Client::new()
+            let resp = match client.clone()
                 .post(format!("{}/api/branches", cli.server))
                 .json(&body)
                 .send()
@@ -1543,7 +1563,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // graph) and when the user passed --no-agents.
             if !dry_run && !no_agents {
                 println!();
-                if let Err(e) = agents_install_prompt(&server, &branch, format).await {
+                if let Err(e) = agents_install_prompt(&server, &branch, format, client.clone()).await {
                     eprintln!("  \u{2717} agents: {}", e);
                 }
             }
@@ -1552,13 +1572,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let server = cli.server.clone();
             let branch = cli.branch.clone();
             let format = cli.format;
-            handle_agents(action, &server, &branch, format).await?;
+            handle_agents(action, &server, &branch, format, client.clone()).await?;
         }
         Commands::Plan { action } => {
             let server = cli.server.clone();
             let branch = cli.branch.clone();
             let format = cli.format;
-            handle_plan(action, &server, &branch, format).await?;
+            handle_plan(action, &server, &branch, format, client.clone()).await?;
         }
     }
 
@@ -1575,13 +1595,14 @@ async fn handle_agents(
     server: &str,
     branch: &str,
     format: OutputFormat,
+    client: reqwest::Client,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match action {
         AgentsAction::Show => agents_show()?,
-        AgentsAction::Status => agents_status(server, branch, format).await?,
-        AgentsAction::Remove => agents_remove(server, branch).await?,
+        AgentsAction::Status => agents_status(server, branch, format, client.clone()).await?,
+        AgentsAction::Remove => agents_remove(server, branch, client.clone()).await?,
         AgentsAction::Install { file, yes, show } => {
-            agents_install(file, yes, show, server, branch).await?;
+            agents_install(file, yes, show, server, branch, client.clone()).await?;
         }
     }
     Ok(())
@@ -1606,6 +1627,7 @@ async fn agents_status(
     server: &str,
     branch: &str,
     format: OutputFormat,
+    client: reqwest::Client,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let disk_path = agents_md_path();
     let disk_status = if disk_path.exists() {
@@ -1668,7 +1690,7 @@ async fn agents_status(
 
 /// Remove the primed AGENTS.md from the Hub (via forget). Does not
 /// touch the local file. Blame history preserves the prior content.
-async fn agents_remove(server: &str, branch: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn agents_remove(server: &str, branch: &str, client: reqwest::Client) -> Result<(), Box<dyn std::error::Error>> {
     let paths_url = format!(
         "{}/api/state/{}/paths?prefix=/memory/pinned/{}",
         server, branch, AGENTS_SOURCE
@@ -1690,7 +1712,6 @@ async fn agents_remove(server: &str, branch: &str) -> Result<(), Box<dyn std::er
         return Ok(());
     }
 
-    let client = reqwest::Client::new();
     let mut forgotten = 0usize;
     for path in &paths {
         let body = serde_json::json!({
@@ -1733,6 +1754,7 @@ async fn agents_install(
     show: bool,
     server: &str,
     branch: &str,
+    client: reqwest::Client,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (content, source_desc) =
         load_agents_md(file.as_deref()).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
@@ -1812,7 +1834,7 @@ async fn agents_install(
         "ref": branch,
     });
 
-    let resp = match reqwest::Client::new()
+    let resp = match client.clone()
         .post(format!("{}/api/memory/prime", server))
         .json(&body)
         .send()
@@ -1846,10 +1868,11 @@ async fn agents_install_prompt(
     server: &str,
     branch: &str,
     _format: OutputFormat,
+    client: reqwest::Client,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("---");
     println!();
-    agents_install(None, false, false, server, branch).await
+    agents_install(None, false, false, server, branch, client).await
 }
 
 fn urlencoding(s: &str) -> String {
@@ -2328,7 +2351,7 @@ async fn run_doctor(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn run_demo(server: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_demo(server: &str, client: reqwest::Client) -> Result<(), Box<dyn std::error::Error>> {
     // Verify Hub is reachable first
     match reqwest::get(format!("{}/api/health", server)).await {
         Ok(r) if r.status().is_success() => {}
@@ -2453,7 +2476,6 @@ async fn run_demo(server: &str) -> Result<(), Box<dyn std::error::Error>> {
         ),
     ];
 
-    let client = reqwest::Client::new();
     let mut remembered = 0;
     for (context, importance, fact) in seed {
         let body = serde_json::json!({
@@ -3039,8 +3061,8 @@ async fn handle_plan(
     server: &str,
     branch: &str,
     format: OutputFormat,
+    client: reqwest::Client,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let client = reqwest::Client::new();
     let agent_id = std::env::var("CTX_AGENT_ID").unwrap_or_else(|_| "ctx-cli".to_string());
 
     match action {
