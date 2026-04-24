@@ -85,6 +85,7 @@
 
 		<ul>
 			<li><a href="/">Dashboard</a></li>
+			<li><a href="/sessions">Sessions</a></li>
 			<li><a href="/plans">Plans</a></li>
 			<li><a href="/pinned">Pinned</a></li>
 			<li><a href="/browse">Browse</a></li>
@@ -92,7 +93,7 @@
 			<li><a href="/history">History</a></li>
 			<li><a href="/diff">Diff</a></li>
 			<li><a href="/team">Team</a></li>
-				<li><a href="/taint">Taint</a></li>
+			<li><a href="/taint">Taint</a></li>
 		</ul>
 	</nav>
 	<main>
