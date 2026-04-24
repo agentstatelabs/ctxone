@@ -8,6 +8,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, RwLock};
 
+use rusqlite::{Connection as SqliteConn, params as sqlite_params};
+
 use lru::LruCache;
 
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -201,6 +203,33 @@ impl SessionStats {
             llm_call_count: AtomicU64::new(0),
             last_model: RwLock::new(None),
             last_provider: RwLock::new(None),
+        }
+    }
+
+    /// Restore from persisted values (used on hub startup).
+    fn with_values(
+        tokens_sent: u64,
+        tokens_saved: u64,
+        llm_input: u64,
+        llm_output: u64,
+        llm_cache_read: u64,
+        llm_cache_create: u64,
+        llm_call_count: u64,
+        last_model: Option<String>,
+        last_provider: Option<String>,
+    ) -> Self {
+        Self {
+            tokens_sent: AtomicU64::new(tokens_sent),
+            tokens_saved: AtomicU64::new(tokens_saved),
+            total_graph_size_chars: AtomicU64::new(0),
+            graph_size_dirty: AtomicBool::new(true),
+            llm_input_tokens: AtomicU64::new(llm_input),
+            llm_output_tokens: AtomicU64::new(llm_output),
+            llm_cache_read_tokens: AtomicU64::new(llm_cache_read),
+            llm_cache_create_tokens: AtomicU64::new(llm_cache_create),
+            llm_call_count: AtomicU64::new(llm_call_count),
+            last_model: RwLock::new(last_model),
+            last_provider: RwLock::new(last_provider),
         }
     }
 
@@ -517,6 +546,157 @@ impl SessionRegistry {
             .collect();
         snaps.sort_by(|a, b| a.session_id.cmp(&b.session_id));
         snaps
+    }
+
+    /// Load persisted session stats from a SQLite file into a fresh registry.
+    ///
+    /// Creates the `ctxone_sessions` table if it doesn't exist, then
+    /// pre-populates the in-memory LRU with every saved row so stats
+    /// survive hub restarts. Falls back to an empty registry on any error.
+    pub fn load_from_db(db_path: &str) -> Self {
+        let registry = Self::new();
+        let conn = match SqliteConn::open(db_path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "session-db open failed; starting empty");
+                return registry;
+            }
+        };
+        if let Err(e) = conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS ctxone_sessions (
+                session_id             TEXT PRIMARY KEY,
+                tokens_sent            INTEGER NOT NULL DEFAULT 0,
+                tokens_saved           INTEGER NOT NULL DEFAULT 0,
+                llm_input_tokens       INTEGER NOT NULL DEFAULT 0,
+                llm_output_tokens      INTEGER NOT NULL DEFAULT 0,
+                llm_cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+                llm_cache_create_tokens INTEGER NOT NULL DEFAULT 0,
+                llm_call_count         INTEGER NOT NULL DEFAULT 0,
+                last_model             TEXT,
+                last_provider          TEXT,
+                updated_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            );",
+        ) {
+            tracing::warn!(error = %e, "session-db schema init failed");
+            return registry;
+        }
+        let mut stmt = match conn.prepare(
+            "SELECT session_id, tokens_sent, tokens_saved,
+                    llm_input_tokens, llm_output_tokens, llm_cache_read_tokens,
+                    llm_cache_create_tokens, llm_call_count, last_model, last_provider
+             FROM ctxone_sessions",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "session-db query prepare failed");
+                return registry;
+            }
+        };
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u64>(1)?,
+                row.get::<_, u64>(2)?,
+                row.get::<_, u64>(3)?,
+                row.get::<_, u64>(4)?,
+                row.get::<_, u64>(5)?,
+                row.get::<_, u64>(6)?,
+                row.get::<_, u64>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(9)?,
+            ))
+        });
+        let rows = match rows {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "session-db query failed");
+                return registry;
+            }
+        };
+        let mut loaded = 0usize;
+        {
+            let mut lru = registry.sessions.lock().expect("sessions lock");
+            for row in rows.flatten() {
+                let (id, sent, saved, llm_in, llm_out, llm_cr, llm_cc, calls, model, provider) = row;
+                let stats = Arc::new(SessionStats::with_values(
+                    sent, saved, llm_in, llm_out, llm_cr, llm_cc, calls, model, provider,
+                ));
+                lru.put(id, stats);
+                loaded += 1;
+            }
+        }
+        tracing::info!(sessions = loaded, "session stats loaded from db");
+        registry
+    }
+
+    /// Upsert every in-memory session into the SQLite persistence table.
+    ///
+    /// Safe to call concurrently — takes the LRU lock briefly to snapshot
+    /// all sessions, then writes outside the lock. Errors are logged but
+    /// not propagated (stats persistence is best-effort).
+    pub fn flush_to_db(&self, db_path: &str) {
+        let snaps = self.snapshot_all();
+        let conn = match SqliteConn::open(db_path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "session-db flush: open failed");
+                return;
+            }
+        };
+        // Ensure table exists (hub may flush before a clean load path ran).
+        let _ = conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS ctxone_sessions (
+                session_id             TEXT PRIMARY KEY,
+                tokens_sent            INTEGER NOT NULL DEFAULT 0,
+                tokens_saved           INTEGER NOT NULL DEFAULT 0,
+                llm_input_tokens       INTEGER NOT NULL DEFAULT 0,
+                llm_output_tokens      INTEGER NOT NULL DEFAULT 0,
+                llm_cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+                llm_cache_create_tokens INTEGER NOT NULL DEFAULT 0,
+                llm_call_count         INTEGER NOT NULL DEFAULT 0,
+                last_model             TEXT,
+                last_provider          TEXT,
+                updated_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            );",
+        );
+        let mut written = 0usize;
+        for s in &snaps {
+            let ok = conn.execute(
+                "INSERT INTO ctxone_sessions
+                    (session_id, tokens_sent, tokens_saved,
+                     llm_input_tokens, llm_output_tokens, llm_cache_read_tokens,
+                     llm_cache_create_tokens, llm_call_count, last_model, last_provider,
+                     updated_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                 ON CONFLICT(session_id) DO UPDATE SET
+                    tokens_sent             = excluded.tokens_sent,
+                    tokens_saved            = excluded.tokens_saved,
+                    llm_input_tokens        = excluded.llm_input_tokens,
+                    llm_output_tokens       = excluded.llm_output_tokens,
+                    llm_cache_read_tokens   = excluded.llm_cache_read_tokens,
+                    llm_cache_create_tokens = excluded.llm_cache_create_tokens,
+                    llm_call_count          = excluded.llm_call_count,
+                    last_model              = excluded.last_model,
+                    last_provider           = excluded.last_provider,
+                    updated_at              = excluded.updated_at",
+                sqlite_params![
+                    s.session_id,
+                    s.session_tokens_used,
+                    s.session_tokens_saved,
+                    s.llm_input_tokens,
+                    s.llm_output_tokens,
+                    s.llm_cache_read_tokens,
+                    s.llm_cache_create_tokens,
+                    s.llm_call_count,
+                    s.last_model,
+                    s.last_provider,
+                ],
+            );
+            if ok.is_ok() {
+                written += 1;
+            }
+        }
+        tracing::debug!(sessions = written, "session stats flushed to db");
     }
 }
 

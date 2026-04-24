@@ -311,32 +311,71 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         info!("Try: curl http://localhost:{}/api/health", http_port);
 
-        // Session registry holds per-session stats. The default
-        // session is auto-created with a dirty flat-size; new sessions
-        // get added as clients arrive with new X-CtxOne-Session headers.
-        let sessions = Arc::new(memory_tools::SessionRegistry::new());
+        // Session registry: load persisted stats from SQLite (if sqlite storage),
+        // so token savings survive hub restarts. Falls back to empty on memory/pg.
+        let sessions = Arc::new(if storage_type == "sqlite" {
+            info!("Loading persisted session stats from db");
+            memory_tools::SessionRegistry::load_from_db(&db_path)
+        } else {
+            memory_tools::SessionRegistry::new()
+        });
 
         let hub_config = http::HubConfig { rate_limit_rpm };
+
+        // Capture db_path for background flush tasks.
+        let flush_db_path = if storage_type == "sqlite" {
+            Some(db_path.clone())
+        } else {
+            None
+        };
 
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?
             .block_on(async {
                 let app = if lens_mode {
-                    http::router_with_lens(repo.clone(), sessions, hub_config)
+                    http::router_with_lens(repo.clone(), sessions.clone(), hub_config)
                 } else {
-                    http::router_with_config(repo.clone(), sessions, hub_config)
+                    http::router_with_config(repo.clone(), sessions.clone(), hub_config)
                 };
+
+                // Spawn background flush task: writes session stats to SQLite every 30s.
+                if let Some(ref path) = flush_db_path {
+                    let sessions_bg = sessions.clone();
+                    let path_bg = path.clone();
+                    tokio::spawn(async move {
+                        let mut interval = tokio::time::interval(
+                            std::time::Duration::from_secs(30)
+                        );
+                        interval.tick().await; // skip the immediate first tick
+                        loop {
+                            interval.tick().await;
+                            sessions_bg.flush_to_db(&path_bg);
+                        }
+                    });
+                }
+
                 let listener = tokio::net::TcpListener::bind(&addr).await?;
                 // `into_make_service_with_connect_info::<SocketAddr>()` attaches
                 // the peer IP to each request so the rate limiter's
                 // PeerIpKeyExtractor can actually see client addresses.
-                if let Err(e) = axum::serve(
+                let serve = axum::serve(
                     listener,
                     app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-                )
-                .await
-                {
+                );
+                // Graceful shutdown on Ctrl-C / SIGTERM: flush sessions before exit.
+                let result = serve
+                    .with_graceful_shutdown(async {
+                        tokio::signal::ctrl_c()
+                            .await
+                            .expect("failed to listen for ctrl-c");
+                    })
+                    .await;
+                if let Some(ref path) = flush_db_path {
+                    info!("Flushing session stats to db on shutdown");
+                    sessions.flush_to_db(path);
+                }
+                if let Err(e) = result {
                     error!(error = %e, "HTTP server error");
                     return Err::<(), Box<dyn std::error::Error>>(e.into());
                 }
