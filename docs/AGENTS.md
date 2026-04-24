@@ -36,9 +36,10 @@ Map importance to confidence:
 If you're unsure, save it. `remember` is cheap. Forgetting something
 the user already told you is expensive.
 
-## `recall` — call it at the start of substantial work
+## `recall` — call it at the start of substantial work and on topic pivots
 
-Call `recall` at the start of any substantial task. It's
+Call `recall` at the start of any substantial task, and again whenever
+the conversation shifts to a meaningfully different topic. It's
 budget-capped, so it costs tokens in the low hundreds — near-zero
 compared to the context window you'd otherwise burn on re-learning.
 
@@ -50,6 +51,13 @@ Pass a **specific topic**, not "context". Good topics:
 
 Every `recall` response includes `ctx_savings_ratio`. If it's below
 `2×`, your topic was too broad — try a narrower one.
+
+**Topic pivots within a session:** When the user switches to a clearly
+different subject (a side question, a different project, a different
+layer of the stack), call `recall` with the new topic before diving in.
+Don't assume the current context window covers it — the user may have
+discussed it weeks ago in a different session. The new topic's memories
+are cheap to fetch and may change your answer entirely.
 
 ## `forget` — call it when a fact is wrong, not stale
 
@@ -77,10 +85,27 @@ licensing, deployment).
 
 ## Session hygiene
 
-At the end of a substantial session, if you worked through a real
-decision with the user, call `summarize_session` to record what was
-learned and decided. Don't summarize every chat — only real working
-sessions where something was figured out.
+Call `summarize_session` in two situations:
+
+1. **Topic pivot** — before switching to a substantially different
+   subject, summarize what was decided in the current topic. This
+   distills the conversation into durable memory so the next session
+   (or a different agent) picks up cleanly without replaying the full
+   transcript.
+
+2. **End of session** — after any real working session where decisions
+   were made, architecture was discussed, or direction was set.
+
+Don't summarize every chat. Only summarize when something was actually
+figured out. A good summary is 3–5 bullet points: what was decided,
+why, and what's next.
+
+**Context tags vs branches for within-session topics:** Use `context`
+tags on `remember` calls to isolate unrelated topics (e.g.
+`--context birds` for a side question). Recall filters on these
+naturally — a bird fact won't surface in a coding recall. Branches are
+for long-lived project separation (weeks/months), not within-session
+pivots.
 
 ## Plans — use them for multi-step work
 

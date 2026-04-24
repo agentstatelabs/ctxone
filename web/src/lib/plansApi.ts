@@ -5,7 +5,8 @@
  * here without re-discovering the error conventions.
  */
 
-const API_BASE = import.meta.env.VITE_CTXONE_API_URL || 'http://localhost:3001';
+const API_BASE: string = import.meta.env.VITE_CTXONE_API_URL
+	?? (import.meta.env.DEV ? 'http://localhost:3001' : '');
 
 export type TaskStatus = 'pending' | 'in_progress' | 'done' | 'abandoned';
 export type PlanStatus = 'active' | 'completed' | 'archived';

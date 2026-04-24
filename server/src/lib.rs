@@ -5,6 +5,7 @@
 //! without a separate process.
 
 pub mod http;
+pub mod lens;
 pub mod memory_tools;
 pub mod migrations;
 pub mod plan_tools;

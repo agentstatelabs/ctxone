@@ -55,6 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut database_url = String::new();
     let mut tenant_id = "default".to_string();
     let mut http_mode = false;
+    let mut lens_mode = false;
     let mut http_port: u16 = 3001;
     // Default production rate limit: 600 req/min per peer IP.
     // Overridable via --rate-limit-rpm or CTXONE_RATE_LIMIT_RPM.
@@ -104,6 +105,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--http" => {
                 http_mode = true;
             }
+            "--lens" => {
+                lens_mode = true;
+            }
             "--port" => {
                 i += 1;
                 if i < args.len() {
@@ -133,6 +137,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("MODES:");
                 eprintln!("  (default)             MCP server over stdio (memory tools)");
                 eprintln!("  --http                HTTP REST API server");
+                eprintln!("  --lens                Serve Lens web UI at / (requires --http)");
                 eprintln!();
                 eprintln!("OPTIONS:");
                 eprintln!(
@@ -317,7 +322,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .enable_all()
             .build()?
             .block_on(async {
-                let app = http::router_with_config(repo.clone(), sessions, hub_config);
+                let app = if lens_mode {
+                    http::router_with_lens(repo.clone(), sessions, hub_config)
+                } else {
+                    http::router_with_config(repo.clone(), sessions, hub_config)
+                };
                 let listener = tokio::net::TcpListener::bind(&addr).await?;
                 // `into_make_service_with_connect_info::<SocketAddr>()` attaches
                 // the peer IP to each request so the rate limiter's

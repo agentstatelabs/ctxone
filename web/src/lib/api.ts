@@ -2,7 +2,10 @@
  * CtxOne Lens — HTTP client for the Hub REST API.
  */
 
-const API_BASE = import.meta.env.VITE_CTXONE_API_URL || 'http://localhost:3001';
+// Dev: default to Hub on 3001. Embedded (adapter-static build served from Hub):
+// same-origin relative URLs. Explicit VITE_CTXONE_API_URL overrides both.
+const API_BASE: string = import.meta.env.VITE_CTXONE_API_URL
+	?? (import.meta.env.DEV ? 'http://localhost:3001' : '');
 
 export interface StatsResponse {
 	commit_count: number;

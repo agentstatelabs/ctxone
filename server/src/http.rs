@@ -123,6 +123,21 @@ pub fn router(repo: Arc<Repository>, sessions: Arc<SessionRegistry>) -> Router {
     router_with_config(repo, sessions, HubConfig::default())
 }
 
+/// Build the Hub router with Lens UI mounted at `/`.
+///
+/// API routes (`/api/*`) are handled normally. Every other path falls
+/// through to the embedded Lens SPA — index.html is served as the
+/// catch-all for client-side routing. Start the Hub with `--lens` to
+/// activate this router.
+pub fn router_with_lens(
+    repo: Arc<Repository>,
+    sessions: Arc<SessionRegistry>,
+    config: HubConfig,
+) -> Router {
+    router_with_config(repo, sessions, config)
+        .fallback(crate::lens::lens_handler)
+}
+
 /// Build the Hub router with explicit HTTP configuration.
 pub fn router_with_config(
     repo: Arc<Repository>,
