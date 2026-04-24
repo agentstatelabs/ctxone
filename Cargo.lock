@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agentstategraph"
-version = "0.75.0"
+version = "0.75.1"
 dependencies = [
  "agentstategraph-core",
  "agentstategraph-storage",
@@ -17,7 +17,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-core"
-version = "0.75.0"
+version = "0.75.1"
 dependencies = [
  "blake3",
  "chrono",
@@ -29,7 +29,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-migrate"
-version = "0.75.0"
+version = "0.75.1"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -43,7 +43,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-storage"
-version = "0.75.0"
+version = "0.75.1"
 dependencies = [
  "agentstategraph-core",
  "chrono",
@@ -58,7 +58,7 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-tasks"
-version = "0.75.0"
+version = "0.75.1"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -478,7 +478,7 @@ dependencies = [
 
 [[package]]
 name = "ctx"
-version = "0.75.0"
+version = "0.75.1"
 dependencies = [
  "clap",
  "clap_complete",
@@ -493,7 +493,7 @@ dependencies = [
 
 [[package]]
 name = "ctxone-hub"
-version = "0.75.0"
+version = "0.75.1"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
