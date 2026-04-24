@@ -280,6 +280,9 @@ enum Commands {
         /// Also start HTTP API server
         #[arg(long)]
         http: bool,
+        /// Serve Lens web UI at / (requires --http)
+        #[arg(long)]
+        lens: bool,
     },
     /// Seed the Hub with realistic demo data and show live token savings
     Demo,
@@ -982,6 +985,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             storage,
             path,
             http,
+            lens,
         } => {
             let db_path = path.unwrap_or_else(canonical_db_path);
             if let Some(parent) = std::path::Path::new(&db_path).parent() {
@@ -992,6 +996,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut args = vec![];
             if http {
                 args.push("--http".to_string());
+            }
+            if lens {
+                args.push("--lens".to_string());
             }
             args.extend(["--port".to_string(), port.to_string()]);
             args.extend(["--storage".to_string(), storage]);
