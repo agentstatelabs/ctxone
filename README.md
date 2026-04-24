@@ -19,10 +19,22 @@ token savings in 5 minutes.
 
 ### Install
 
+**macOS (Homebrew):**
+
+```bash
+brew install ctxone/tap/ctxone
+```
+
 **macOS / Linux** (one-liner):
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/ctxone/ctxone/main/install.sh | sh
+```
+
+**Uninstall:**
+
+```bash
+curl -sSL https://raw.githubusercontent.com/ctxone/ctxone/main/uninstall.sh | sh
 ```
 
 **Windows** (PowerShell, one-liner):

@@ -4,7 +4,13 @@ From nothing to seeing live token savings in about five minutes.
 
 ## 1. Install
 
-**macOS / Linux:**
+**macOS (Homebrew — recommended):**
+
+```bash
+brew install ctxone/tap/ctxone
+```
+
+**macOS / Linux** (one-liner):
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/ctxone/ctxone/main/install.sh | sh
@@ -31,7 +37,7 @@ install for the PATH change to take effect.
 
 ```bash
 ctx --version
-# ctx 0.60.0
+# ctx 0.75.1
 ```
 
 ## 2. Start the Hub
@@ -45,10 +51,11 @@ ctx serve --http
 You'll see:
 
 ```
-Starting CTXone Hub on port 3001 (db: /Users/user/.ctxone/memory.db)
-CTXone Hub v0.5.0
-Storage: /Users/user/.ctxone/memory.db
-HTTP API listening on http://0.0.0.0:3001
+Starting CtxOne Hub on port 3001 (db: /Users/user/.ctxone/memory.db)
+INFO CtxOne Hub starting version="0.75.1"
+INFO Storage: sqlite path=/Users/user/.ctxone/memory.db
+INFO HTTP API listening port=3001
+INFO Try: curl http://localhost:3001/api/health
 ```
 
 Leave it running. Open a second terminal for the rest of this guide.
