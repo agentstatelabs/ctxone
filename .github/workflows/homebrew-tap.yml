@@ -40,20 +40,16 @@ jobs:
         shell: bash
         env:
           TAG: ${{ steps.meta.outputs.tag }}
-          BASE_URL: ${{ steps.meta.outputs.base_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p dist
           cd dist
-          for target in \
-            aarch64-apple-darwin \
-            x86_64-apple-darwin \
-            x86_64-unknown-linux-gnu \
-            aarch64-unknown-linux-gnu; do
-            FNAME="ctxone-${TAG}-${target}.tar.gz"
-            URL="${BASE_URL}/${FNAME}"
-            echo "Downloading $URL"
-            curl -fsSL -o "$FNAME" "$URL"
-          done
+          gh release download "$TAG" \
+            --repo "${{ github.repository }}" \
+            --pattern "ctxone-${TAG}-aarch64-apple-darwin.tar.gz" \
+            --pattern "ctxone-${TAG}-x86_64-apple-darwin.tar.gz" \
+            --pattern "ctxone-${TAG}-x86_64-unknown-linux-gnu.tar.gz" \
+            --pattern "ctxone-${TAG}-aarch64-unknown-linux-gnu.tar.gz"
           sha256sum *.tar.gz
 
       - name: Render formula
