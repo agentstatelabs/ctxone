@@ -8,6 +8,7 @@ version = "0.75.1"
 dependencies = [
  "agentstategraph-core",
  "agentstategraph-storage",
+ "agentstategraph-taint",
  "chrono",
  "serde",
  "serde_json",
@@ -46,6 +47,7 @@ name = "agentstategraph-storage"
 version = "0.75.1"
 dependencies = [
  "agentstategraph-core",
+ "agentstategraph-taint",
  "chrono",
  "deadpool-postgres",
  "rusqlite",
@@ -54,6 +56,19 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-postgres",
+ "uuid",
+]
+
+[[package]]
+name = "agentstategraph-taint"
+version = "0.75.1"
+dependencies = [
+ "agentstategraph-core",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]

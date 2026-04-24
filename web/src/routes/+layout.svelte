@@ -92,6 +92,7 @@
 			<li><a href="/history">History</a></li>
 			<li><a href="/diff">Diff</a></li>
 			<li><a href="/team">Team</a></li>
+				<li><a href="/taint">Taint</a></li>
 		</ul>
 	</nav>
 	<main>
