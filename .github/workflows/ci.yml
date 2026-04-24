@@ -1,10 +1,13 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
+  # Auto-triggers paused 2026-04-24 — GitHub Actions quota at 90%.
+  # Restore push/pull_request triggers ~2026-05-01.
+  # push:
+  #   branches: [main]
+  # pull_request:
+  #   branches: [main]
 
 env:
   CARGO_TERM_COLOR: always

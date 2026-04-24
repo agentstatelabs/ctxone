@@ -1,10 +1,12 @@
 name: Docker
 
 on:
-  push:
-    branches: [main]
-    tags: ['v*']
   workflow_dispatch:
+  # Auto-triggers paused 2026-04-24 — GitHub Actions quota at 90%.
+  # Restore push/branches and tags triggers ~2026-05-01.
+  # push:
+  #   branches: [main]
+  #   tags: ['v*']
 
 # Multi-arch builds take 10-20 minutes because of QEMU arm64 emulation.
 # If several commits land in quick succession, cancel the older in-flight
