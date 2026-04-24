@@ -91,6 +91,7 @@
 			<li><a href="/search">Search</a></li>
 			<li><a href="/history">History</a></li>
 			<li><a href="/diff">Diff</a></li>
+			<li><a href="/team">Team</a></li>
 		</ul>
 	</nav>
 	<main>
