@@ -1,3 +1,5 @@
+mod ingest;
+
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
 use serde_json::Value;
@@ -303,6 +305,55 @@ enum Commands {
         #[arg(long)]
         lens: bool,
     },
+    /// Import a Claude Code session JSONL into CTXone memory
+    ///
+    /// Extracts structured memories and token usage from each conversation
+    /// turn and stores them in the Hub. Requires ANTHROPIC_API_KEY.
+    IngestSession {
+        /// Path to a specific .jsonl file (default: all sessions for this project)
+        #[arg(long)]
+        file: Option<String>,
+
+        /// Only import sessions modified after this date (YYYY-MM-DD)
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Process only the last N turns (default: all)
+        #[arg(long)]
+        last: Option<usize>,
+
+        /// Skip memory extraction, only record token usage
+        #[arg(long)]
+        tokens_only: bool,
+
+        /// Dry run: show what would be stored without writing
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Capture memories and token usage from the last agent turn.
+    ///
+    /// Called automatically by the Claude Code / Codex Stop hook.
+    /// Reads hook payload JSON from stdin (contains transcript_path).
+    /// Requires ANTHROPIC_API_KEY.
+    CaptureTurn {
+        /// Path to transcript file (overrides stdin payload)
+        #[arg(long)]
+        transcript: Option<String>,
+
+        /// Session ID to attach to stored memories and token records
+        #[arg(long, env = "CTX_SESSION")]
+        session: Option<String>,
+
+        /// Number of recent turns to process (default: 1)
+        #[arg(long, default_value = "1")]
+        turns: usize,
+
+        /// Skip memory extraction, only record token usage
+        #[arg(long)]
+        tokens_only: bool,
+    },
+
     /// Seed the Hub with realistic demo data and show live token savings
     Demo,
     /// List pinned memories (always-included critical context)
@@ -1030,6 +1081,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Demo => {
             run_demo(&cli.server, client.clone()).await?;
+        }
+
+        Commands::IngestSession { file, since, last, tokens_only, dry_run } => {
+            run_ingest_session(
+                &cli.server, &cli.branch, cli.session.as_deref(),
+                file, since, last, tokens_only, dry_run, client.clone(),
+            ).await?;
+        }
+
+        Commands::CaptureTurn { transcript, session, turns, tokens_only } => {
+            // Prefer explicit --session flag, then CLI global, then CTX_SESSION env.
+            let sid = session
+                .or(cli.session.clone())
+                .or_else(|| std::env::var("CTX_SESSION").ok());
+            run_capture_turn(
+                &cli.server, &cli.branch, sid.as_deref(),
+                transcript, turns, tokens_only, client.clone(),
+            ).await?;
         }
         Commands::Pinned => {
             let resp = match reqwest::get(format!("{}/api/memory/pinned", cli.server)).await {
@@ -2349,6 +2418,193 @@ async fn run_doctor(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(EX_SOFTWARE);
     }
     Ok(())
+}
+
+// ── ingest-session / capture-turn ────────────────────────────────────────────
+
+async fn run_ingest_session(
+    server: &str,
+    branch: &str,
+    session: Option<&str>,
+    file: Option<String>,
+    since: Option<String>,
+    last: Option<usize>,
+    tokens_only: bool,
+    dry_run: bool,
+    client: reqwest::Client,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+    if api_key.is_empty() && !tokens_only {
+        eprintln!("warn: ANTHROPIC_API_KEY not set — memory extraction disabled (use --tokens-only to suppress)");
+    }
+
+    let files: Vec<std::path::PathBuf> = if let Some(f) = file {
+        vec![std::path::PathBuf::from(f)]
+    } else {
+        let cwd = std::env::current_dir()?;
+        crate::ingest::find_session_files(&cwd)
+    };
+
+    if files.is_empty() {
+        println!("No session files found for this project.");
+        println!("Pass --file <path> to specify a .jsonl file directly.");
+        return Ok(());
+    }
+
+    // Parse since date filter.
+    let since_ts = since.as_deref().unwrap_or("");
+
+    let mut total_turns = 0usize;
+    let mut total_memories = 0usize;
+    let mut total_tokens = crate::ingest::TurnTokens::default();
+
+    for path in &files {
+        let fname = path.file_name().unwrap_or_default().to_string_lossy();
+        println!("→ {}", fname);
+
+        let mut turns = crate::ingest::parse_turns(path);
+
+        // Apply --since filter on timestamp.
+        if !since_ts.is_empty() {
+            turns.retain(|t| t.timestamp.as_str() >= since_ts);
+        }
+
+        // Apply --last filter.
+        if let Some(n) = last {
+            let skip = turns.len().saturating_sub(n);
+            turns = turns.into_iter().skip(skip).collect();
+        }
+
+        for turn in &turns {
+            total_tokens.add(&turn.tokens);
+
+            if !turn.tokens.is_empty() {
+                if dry_run {
+                    println!(
+                        "  [dry] token record: in={} out={} cache_read={} cache_create={} model={}",
+                        turn.tokens.input,
+                        turn.tokens.output,
+                        turn.tokens.cache_read,
+                        turn.tokens.cache_creation,
+                        turn.model,
+                    );
+                } else {
+                    crate::ingest::record_turn_tokens(
+                        &turn.tokens, &turn.model, server, session, &client,
+                    ).await;
+                }
+            }
+
+            if tokens_only || api_key.is_empty() || !turn.is_substantial() {
+                continue;
+            }
+
+            let memories = crate::ingest::extract_memories(turn, &api_key, &client).await;
+            for mem in &memories {
+                if dry_run {
+                    println!(
+                        "  [dry] memory: {} ({}) — {}",
+                        mem.path, mem.importance, mem.title
+                    );
+                } else {
+                    crate::ingest::store_memory(mem, server, branch, session, &client).await;
+                    print!(".");
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                }
+            }
+            if !memories.is_empty() && !dry_run {
+                println!(" {} memories", memories.len());
+            }
+            total_memories += memories.len();
+            total_turns += 1;
+        }
+    }
+
+    println!();
+    println!(
+        "Done. {} turns processed, {} memories stored.",
+        total_turns, total_memories
+    );
+    println!(
+        "Tokens — input: {}  output: {}  cache_read: {}  cache_create: {}",
+        total_tokens.input,
+        total_tokens.output,
+        total_tokens.cache_read,
+        total_tokens.cache_creation,
+    );
+    Ok(())
+}
+
+async fn run_capture_turn(
+    server: &str,
+    branch: &str,
+    session: Option<&str>,
+    transcript: Option<String>,
+    turns: usize,
+    tokens_only: bool,
+    client: reqwest::Client,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Resolve transcript path: explicit flag > stdin hook payload > latest session file.
+    let transcript_path: std::path::PathBuf = if let Some(t) = transcript {
+        std::path::PathBuf::from(t)
+    } else {
+        // Try reading hook payload from stdin (non-blocking check).
+        let stdin_payload = read_stdin_nonblocking();
+        if let Some(path) = stdin_payload
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .and_then(|v| v.get("transcript_path").and_then(|p| p.as_str()).map(|s| s.to_string()))
+        {
+            std::path::PathBuf::from(path)
+        } else {
+            // Fall back to the most recent session file for the cwd.
+            let cwd = std::env::current_dir()?;
+            match crate::ingest::latest_session_file(&cwd) {
+                Some(p) => p,
+                None => {
+                    // Silent exit — hook context, not interactive.
+                    return Ok(());
+                }
+            }
+        }
+    };
+
+    if !transcript_path.exists() {
+        return Ok(());
+    }
+
+    let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+    let recent = crate::ingest::last_turns(&transcript_path, turns);
+
+    for turn in &recent {
+        if !turn.tokens.is_empty() {
+            crate::ingest::record_turn_tokens(
+                &turn.tokens, &turn.model, server, session, &client,
+            ).await;
+        }
+        if tokens_only || api_key.is_empty() || !turn.is_substantial() {
+            continue;
+        }
+        let memories = crate::ingest::extract_memories(turn, &api_key, &client).await;
+        for mem in &memories {
+            crate::ingest::store_memory(mem, server, branch, session, &client).await;
+        }
+    }
+
+    Ok(())
+}
+
+/// Read up to 4KB from stdin with a short timeout (for hook payloads).
+/// Returns None immediately if stdin has no data (interactive mode).
+fn read_stdin_nonblocking() -> Option<String> {
+    use std::io::Read;
+    // Only attempt to read stdin if it's not a TTY (i.e., hook piped data).
+    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        return None;
+    }
+    let mut buf = String::new();
+    let _ = std::io::stdin().take(4096).read_to_string(&mut buf);
+    if buf.trim().is_empty() { None } else { Some(buf) }
 }
 
 async fn run_demo(server: &str, client: reqwest::Client) -> Result<(), Box<dyn std::error::Error>> {
