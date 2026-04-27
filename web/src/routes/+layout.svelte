@@ -92,6 +92,7 @@
 		<ul>
 			<li><a href="/">Dashboard</a></li>
 			<li><a href="/sessions">Sessions</a></li>
+			<li><a href="/branches">Branches</a></li>
 			<li><a href="/plans">Plans</a></li>
 			<li><a href="/pinned">Pinned</a></li>
 			<li><a href="/browse">Browse</a></li>
