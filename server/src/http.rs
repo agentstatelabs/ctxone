@@ -208,6 +208,9 @@ pub fn router_with_config(
         )
         .route("/api/plans/{name}/next", get(next_plan_task))
         .route("/api/plans/{name}/archive", post(archive_plan))
+        // Session turn capture (full request/response/tool/usage JSON)
+        .route("/api/sessions/{sid}/turns", get(list_session_turns))
+        .route("/api/sessions/{sid}/turns/{idx}", post(put_session_turn).get(get_session_turn))
         // Taint / quarantine / watch
         .route("/api/taint", get(list_taints_handler).post(apply_taint_handler))
         .route("/api/taint/check", get(check_taint_handler))
@@ -1634,6 +1637,101 @@ fn taint_effect_str(e: agentstategraph_taint::TaintEffect) -> &'static str {
         TaintEffect::Isolate => "isolate",
         TaintEffect::Advisory => "advisory",
     }
+}
+
+// ── Session turn capture ────────────────────────────────────────────────────
+//
+// These endpoints persist the full per-turn payload (request + response +
+// tool calls + token usage) at a deterministic path on the requested ref,
+// so re-ingesting the same JSONL is idempotent.
+
+const SESSION_TURNS_MAX_BYTES: usize = 1 * 1024 * 1024; // 1 MiB
+
+fn session_turn_path(sid: &str, idx: u32) -> String {
+    // Prefix with `t` so the segment is a map Key, not a list Index — ASG
+    // path parsing turns all-digit segments into list indexes which can't
+    // create-on-write under an empty parent.
+    format!("/sessions/{}/turns/t{:04}", sid, idx)
+}
+
+#[derive(Deserialize)]
+struct SessionTurnQuery {
+    #[serde(default = "default_ref", rename = "ref")]
+    ref_name: String,
+}
+
+async fn put_session_turn(
+    State(s): State<HubState>,
+    Path((sid, idx)): Path<(String, u32)>,
+    agent_id: AgentId,
+    Query(q): Query<SessionTurnQuery>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let bytes = serde_json::to_vec(&body)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    if bytes.len() > SESSION_TURNS_MAX_BYTES {
+        return Err((StatusCode::PAYLOAD_TOO_LARGE, format!(
+            "turn payload {} bytes exceeds {} byte cap",
+            bytes.len(), SESSION_TURNS_MAX_BYTES
+        )));
+    }
+    let path = session_turn_path(&sid, idx);
+    let intent = format!("capture session {} turn {:04}", sid, idx);
+    let opts = CommitOptions::new(
+        &agent_id.0,
+        IntentCategory::Custom("Observe".to_string()),
+        &intent,
+    )
+    .with_tags(vec![
+        format!("session:{}", sid),
+        format!("turn:{}", idx),
+        "kind:full-turn".to_string(),
+    ]);
+    let commit_id = s
+        .repo
+        .set_json(&q.ref_name, &path, &body, opts)
+        .map_err(internal_error)?;
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "ref": q.ref_name,
+        "path": path,
+        "commit_id": format!("{}", commit_id.short()),
+    })))
+}
+
+async fn get_session_turn(
+    State(s): State<HubState>,
+    Path((sid, idx)): Path<(String, u32)>,
+    Query(q): Query<SessionTurnQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let path = session_turn_path(&sid, idx);
+    s.repo.get_json(&q.ref_name, &path).map(Json).map_err(internal_error)
+}
+
+async fn list_session_turns(
+    State(s): State<HubState>,
+    Path(sid): Path<String>,
+    Query(q): Query<SessionTurnQuery>,
+) -> Result<Json<Vec<String>>, (StatusCode, String)> {
+    let prefix = format!("/sessions/{}/turns", sid);
+    let all = s
+        .repo
+        .list_paths(&q.ref_name, &prefix, None)
+        .map_err(internal_error)?;
+    // Collapse leaf paths down to one entry per turn root
+    // (e.g. /sessions/X/turns/t0000/...).
+    let prefix_with_slash = format!("{}/", prefix);
+    let mut roots: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for p in all {
+        if let Some(rest) = p.strip_prefix(&prefix_with_slash) {
+            if let Some((first, _)) = rest.split_once('/') {
+                roots.insert(format!("{}{}", prefix_with_slash, first));
+            } else {
+                roots.insert(format!("{}{}", prefix_with_slash, rest));
+            }
+        }
+    }
+    Ok(Json(roots.into_iter().collect()))
 }
 
 #[cfg(test)]

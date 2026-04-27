@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 // ── JSONL structures ──────────────────────────────────────────────────────────
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize)]
 pub struct TurnTokens {
     pub input: u64,
     pub output: u64,
@@ -33,6 +33,10 @@ pub struct Turn {
     pub user_text: String,
     pub assistant_text: String,
     pub tool_calls: Vec<String>,
+    /// Full tool_use blocks as they appeared in the JSONL — preserves the
+    /// real arguments (Bash command, full Edit diff, etc.) that the
+    /// summarized `tool_calls` list throws away.
+    pub tool_calls_raw: Vec<Value>,
     pub tokens: TurnTokens,
     pub model: String,
     pub timestamp: String,
@@ -115,6 +119,7 @@ pub fn parse_turns(path: &Path) -> Vec<Turn> {
 
                 let assistant_text = extract_text_content(Some(msg));
                 let tool_calls = extract_tool_calls(msg);
+                let tool_calls_raw = extract_tool_calls_raw(msg);
                 let tokens = extract_tokens(msg);
                 let model = msg
                     .get("model")
@@ -128,6 +133,7 @@ pub fn parse_turns(path: &Path) -> Vec<Turn> {
                         last.assistant_text.push('\n');
                         last.assistant_text.push_str(&assistant_text);
                         last.tool_calls.extend(tool_calls);
+                        last.tool_calls_raw.extend(tool_calls_raw);
                         last.tokens.add(&tokens);
                         if !model.is_empty() && model != "unknown" {
                             last.model = model;
@@ -140,6 +146,7 @@ pub fn parse_turns(path: &Path) -> Vec<Turn> {
                     user_text: user_text.clone(),
                     assistant_text,
                     tool_calls,
+                    tool_calls_raw,
                     tokens,
                     model,
                     timestamp: current_ts.clone(),
@@ -228,6 +235,27 @@ fn extract_tool_calls(msg: &Value) -> Vec<String> {
         }
     }
     calls
+}
+
+/// Like `extract_tool_calls` but returns the raw `{name, input}` pairs so
+/// we can persist the full call (e.g., the actual Bash command, the full
+/// Edit diff) rather than just the human-readable summary.
+fn extract_tool_calls_raw(msg: &Value) -> Vec<Value> {
+    let blocks = match msg.get("content").and_then(|v| v.as_array()) {
+        Some(b) => b,
+        None => return vec![],
+    };
+    let mut out = vec![];
+    for block in blocks {
+        if block.get("type").and_then(|v| v.as_str()) != Some("tool_use") {
+            continue;
+        }
+        let name = block.get("name").cloned().unwrap_or(Value::Null);
+        let input = block.get("input").cloned().unwrap_or(Value::Null);
+        let id = block.get("id").cloned().unwrap_or(Value::Null);
+        out.push(serde_json::json!({ "id": id, "name": name, "input": input }));
+    }
+    out
 }
 
 fn extract_tokens(msg: &Value) -> TurnTokens {
@@ -416,6 +444,49 @@ pub async fn record_turn_tokens(
     let mut req = client.post(format!("{}/api/stats/llm_usage", hub)).json(&body);
     if let Some(sid) = session {
         req = req.header("X-CTXone-Session", sid);
+    }
+    let _ = req.send().await;
+}
+
+/// Persist the full turn (request, assistant response, tool calls with
+/// real arguments, token usage, model, timestamp) as a memory at a
+/// deterministic per-session path. This complements the Haiku-extracted
+/// memories: extraction loses fidelity, the raw turn keeps everything.
+///
+/// Path: `/sessions/{session}/turns/{idx:04}` so turns sort lexically.
+/// `idx` is the per-session turn number (0-based).
+pub async fn store_full_turn(
+    turn: &Turn,
+    idx: usize,
+    source_file: &str,
+    hub: &str,
+    branch: &str,
+    session: Option<&str>,
+    client: &reqwest::Client,
+) {
+    let sid = session.unwrap_or("default");
+    let snapshot = serde_json::json!({
+        "session": sid,
+        "turn_index": idx,
+        "timestamp": turn.timestamp,
+        "model": turn.model,
+        "source_file": source_file,
+        "user_text": turn.user_text,
+        "assistant_text": turn.assistant_text,
+        "tool_calls": turn.tool_calls,
+        "tool_calls_raw": turn.tool_calls_raw,
+        "tokens": turn.tokens,
+    });
+    let url = format!(
+        "{}/api/sessions/{}/turns/{}?ref={}",
+        hub,
+        crate::urlencoding(sid),
+        idx,
+        crate::urlencoding(branch),
+    );
+    let mut req = client.post(url).json(&snapshot);
+    if let Some(s) = session {
+        req = req.header("X-CTXone-Session", s);
     }
     let _ = req.send().await;
 }

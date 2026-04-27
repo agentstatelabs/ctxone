@@ -329,6 +329,10 @@ enum Commands {
         /// Dry run: show what would be stored without writing
         #[arg(long)]
         dry_run: bool,
+
+        /// Skip persisting the full turn JSON (only extracted memories + tokens)
+        #[arg(long)]
+        no_full_turn: bool,
     },
 
     /// Capture memories and token usage from the last agent turn.
@@ -352,6 +356,10 @@ enum Commands {
         /// Skip memory extraction, only record token usage
         #[arg(long)]
         tokens_only: bool,
+
+        /// Skip persisting the full turn JSON (only extracted memories + tokens)
+        #[arg(long)]
+        no_full_turn: bool,
     },
 
     /// Seed the Hub with realistic demo data and show live token savings
@@ -1083,21 +1091,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             run_demo(&cli.server, client.clone()).await?;
         }
 
-        Commands::IngestSession { file, since, last, tokens_only, dry_run } => {
+        Commands::IngestSession { file, since, last, tokens_only, dry_run, no_full_turn } => {
             run_ingest_session(
                 &cli.server, &cli.branch, cli.session.as_deref(),
-                file, since, last, tokens_only, dry_run, client.clone(),
+                file, since, last, tokens_only, dry_run, !no_full_turn, client.clone(),
             ).await?;
         }
 
-        Commands::CaptureTurn { transcript, session, turns, tokens_only } => {
+        Commands::CaptureTurn { transcript, session, turns, tokens_only, no_full_turn } => {
             // Prefer explicit --session flag, then CLI global, then CTX_SESSION env.
             let sid = session
                 .or(cli.session.clone())
                 .or_else(|| std::env::var("CTX_SESSION").ok());
             run_capture_turn(
                 &cli.server, &cli.branch, sid.as_deref(),
-                transcript, turns, tokens_only, client.clone(),
+                transcript, turns, tokens_only, !no_full_turn, client.clone(),
             ).await?;
         }
         Commands::Pinned => {
@@ -1944,7 +1952,7 @@ async fn agents_install_prompt(
     agents_install(None, false, false, server, branch, client).await
 }
 
-fn urlencoding(s: &str) -> String {
+pub(crate) fn urlencoding(s: &str) -> String {
     s.replace(' ', "%20")
         .replace('&', "%26")
         .replace('?', "%3F")
@@ -2431,6 +2439,7 @@ async fn run_ingest_session(
     last: Option<usize>,
     tokens_only: bool,
     dry_run: bool,
+    full_turn: bool,
     client: reqwest::Client,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
@@ -2456,6 +2465,7 @@ async fn run_ingest_session(
 
     let mut total_turns = 0usize;
     let mut total_memories = 0usize;
+    let mut total_full_turns = 0usize;
     let mut total_tokens = crate::ingest::TurnTokens::default();
 
     for path in &files {
@@ -2475,7 +2485,8 @@ async fn run_ingest_session(
             turns = turns.into_iter().skip(skip).collect();
         }
 
-        for turn in &turns {
+        let source_file = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        for (idx, turn) in turns.iter().enumerate() {
             total_tokens.add(&turn.tokens);
 
             if !turn.tokens.is_empty() {
@@ -2492,6 +2503,23 @@ async fn run_ingest_session(
                     crate::ingest::record_turn_tokens(
                         &turn.tokens, &turn.model, server, session, &client,
                     ).await;
+                }
+            }
+
+            if full_turn {
+                if dry_run {
+                    println!(
+                        "  [dry] full turn: /sessions/{}/turns/{:04} ({} bytes assistant, {} tools)",
+                        session.unwrap_or("default"),
+                        idx,
+                        turn.assistant_text.len(),
+                        turn.tool_calls_raw.len(),
+                    );
+                } else {
+                    crate::ingest::store_full_turn(
+                        turn, idx, &source_file, server, branch, session, &client,
+                    ).await;
+                    total_full_turns += 1;
                 }
             }
 
@@ -2522,8 +2550,8 @@ async fn run_ingest_session(
 
     println!();
     println!(
-        "Done. {} turns processed, {} memories stored.",
-        total_turns, total_memories
+        "Done. {} turns processed, {} memories stored, {} full turns persisted.",
+        total_turns, total_memories, total_full_turns
     );
     println!(
         "Tokens — input: {}  output: {}  cache_read: {}  cache_create: {}",
@@ -2542,6 +2570,7 @@ async fn run_capture_turn(
     transcript: Option<String>,
     turns: usize,
     tokens_only: bool,
+    full_turn: bool,
     client: reqwest::Client,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Resolve transcript path: explicit flag > stdin hook payload > latest session file.
@@ -2574,12 +2603,27 @@ async fn run_capture_turn(
     }
 
     let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+    // last_turns gives us tail items; for the full-turn path we need their
+    // absolute index in the session so paths stay stable across captures.
+    let all_count = crate::ingest::parse_turns(&transcript_path).len();
     let recent = crate::ingest::last_turns(&transcript_path, turns);
+    let base_idx = all_count.saturating_sub(recent.len());
+    let source_file = transcript_path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
 
-    for turn in &recent {
+    for (offset, turn) in recent.iter().enumerate() {
+        let idx = base_idx + offset;
         if !turn.tokens.is_empty() {
             crate::ingest::record_turn_tokens(
                 &turn.tokens, &turn.model, server, session, &client,
+            ).await;
+        }
+        if full_turn {
+            crate::ingest::store_full_turn(
+                turn, idx, &source_file, server, branch, session, &client,
             ).await;
         }
         if tokens_only || api_key.is_empty() || !turn.is_substantial() {
