@@ -63,9 +63,101 @@
 	let applyError: string | null = $state(null);
 	let applySuccess: string | null = $state(null);
 
+	// Auto-suggest effect defaults when kind changes — quarantine wants
+	// isolation, watch is observe-only, taint defaults to a soft warn.
+	const KIND_DEFAULT_EFFECT: Record<TaintRecord['kind'], TaintRecord['effect']> = {
+		taint: 'warn',
+		quarantine: 'isolate',
+		watch: 'advisory'
+	};
+
+	let lastKind: TaintRecord['kind'] = applyKind;
+	$effect(() => {
+		if (applyKind !== lastKind) {
+			applyEffect = KIND_DEFAULT_EFFECT[applyKind];
+			lastKind = applyKind;
+		}
+	});
+
+	// Validation — surface issues inline before the user submits.
+	let validation = $derived(validateApply({
+		path: applyPath,
+		name: applyName,
+		agentId: applyAgentId,
+		reason: applyReason,
+		kind: applyKind,
+		authorizedAgents: applyAuthorizedAgents
+	}));
+
+	function validateApply(v: {
+		path: string;
+		name: string;
+		agentId: string;
+		reason: string;
+		kind: TaintRecord['kind'];
+		authorizedAgents: string;
+	}): { path?: string; name?: string; agentId?: string; reason?: string; authorizedAgents?: string } {
+		const errs: Record<string, string> = {};
+		const path = v.path.trim();
+		if (!path) errs.path = 'Required';
+		else if (!path.startsWith('/')) errs.path = 'Must start with /';
+		else if (/\s/.test(path)) errs.path = 'No whitespace allowed';
+
+		const name = v.name.trim();
+		if (!name) errs.name = 'Required';
+		else if (!/^[a-z0-9][a-z0-9_-]*$/.test(name))
+			errs.name = 'lowercase letters, digits, _ or - (must start with letter/digit)';
+
+		const agent = v.agentId.trim();
+		if (!agent) errs.agentId = 'Required';
+		else if (!/^[a-zA-Z0-9._:/-]+$/.test(agent)) errs.agentId = 'Invalid characters';
+
+		if (!v.reason.trim()) errs.reason = 'Required';
+		else if (v.reason.trim().length < 8) errs.reason = 'Be specific (≥8 chars)';
+
+		if (v.kind === 'quarantine') {
+			const list = v.authorizedAgents.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+			if (list.length === 0) {
+				errs.authorizedAgents =
+					'Quarantine without authorized agents blocks everyone. Add at least one, or pick kind=taint.';
+			}
+		}
+		return errs;
+	}
+
+	let validationCount = $derived(Object.keys(validation).length);
+	let conflictingTaints = $derived(
+		applyPath.trim() ? taints.filter((t) => t.path === applyPath.trim()) : []
+	);
+
+	function summarizeApply(): string {
+		const parts = [
+			`Apply ${applyKind.toUpperCase()} (effect=${applyEffect}, severity=${applySeverity})`,
+			`at ${applyPath.trim()}`,
+			`as agent ${applyAgentId.trim()}`
+		];
+		return parts.join('\n');
+	}
+
 	async function submitApply(e: Event) {
 		e.preventDefault();
-		if (!applyPath.trim() || !applyName.trim() || !applyReason.trim() || !applyAgentId.trim()) return;
+		if (validationCount > 0) return;
+
+		// Confirm destructive/strong effects explicitly. Soft effects skip the
+		// extra dialog so the form stays low-friction for the common case.
+		const strong = applyEffect === 'block' || applyEffect === 'isolate' || applySeverity === 'critical';
+		if (strong) {
+			const ok = confirm(
+				`${summarizeApply()}\n\nThis can prevent writes by other agents. Proceed?`
+			);
+			if (!ok) return;
+		} else if (conflictingTaints.length > 0) {
+			const ok = confirm(
+				`There are already ${conflictingTaints.length} taint(s) at ${applyPath.trim()}. Add another?`
+			);
+			if (!ok) return;
+		}
+
 		applySubmitting = true;
 		applyError = null;
 		applySuccess = null;
@@ -91,7 +183,6 @@
 			applyPath = '';
 			applyName = '';
 			applyReason = '';
-			applyAgentId = '';
 			applyAuthorizedAgents = '';
 			await refresh();
 		} catch (e) {
@@ -125,6 +216,9 @@
 	async function submitRemove(e: Event) {
 		e.preventDefault();
 		if (!removeId || !removeReason.trim() || !removeAgentId.trim()) return;
+		const target = taints.find((t) => t.id === removeId);
+		const label = target ? `${target.kind} on ${target.path}` : removeId;
+		if (!confirm(`Remove ${label}?\n\nThis lifts the protection immediately.`)) return;
 		removeSubmitting = true;
 		removeError = null;
 		try {
@@ -341,12 +435,25 @@
 				<div class="form-field">
 					<label for="ap-path">Path</label>
 					<input id="ap-path" type="text" bind:value={applyPath} placeholder="/ctx/..." required />
+					{#if validation.path && applyPath}
+						<span class="field-error">{validation.path}</span>
+					{/if}
 				</div>
 				<div class="form-field">
 					<label for="ap-name">Name</label>
 					<input id="ap-name" type="text" bind:value={applyName} placeholder="short identifier" required />
+					{#if validation.name && applyName}
+						<span class="field-error">{validation.name}</span>
+					{/if}
 				</div>
 			</div>
+
+			{#if conflictingTaints.length > 0}
+				<p class="conflict-note">
+					⚠ {conflictingTaints.length} existing taint(s) at this exact path:
+					{conflictingTaints.map((t) => `${t.kind}/${t.name}`).join(', ')}
+				</p>
+			{/if}
 
 			<div class="form-row">
 				<div class="form-field">
@@ -382,6 +489,9 @@
 				<div class="form-field">
 					<label for="ap-agent">Agent ID</label>
 					<input id="ap-agent" type="text" bind:value={applyAgentId} placeholder="agent-id" required />
+					{#if validation.agentId && applyAgentId}
+						<span class="field-error">{validation.agentId}</span>
+					{/if}
 				</div>
 			</div>
 
@@ -394,18 +504,27 @@
 						bind:value={applyAuthorizedAgents}
 						placeholder="comma- or space-separated agent ids allowed past the quarantine"
 					/>
+					{#if validation.authorizedAgents}
+						<span class="field-error">{validation.authorizedAgents}</span>
+					{/if}
 				</div>
 			{/if}
 
 			<div class="form-field">
 				<label for="ap-reason">Reason</label>
 				<textarea id="ap-reason" bind:value={applyReason} rows="3" placeholder="Describe why this taint is being applied…" required></textarea>
+				{#if validation.reason && applyReason}
+					<span class="field-error">{validation.reason}</span>
+				{/if}
 			</div>
 
 			<div class="form-actions">
-				<button type="submit" class="btn-primary" disabled={applySubmitting}>
+				<button type="submit" class="btn-primary" disabled={applySubmitting || validationCount > 0}>
 					{applySubmitting ? 'Applying…' : 'Apply Taint'}
 				</button>
+				{#if validationCount > 0}
+					<span class="msg-dim">{validationCount} field(s) need attention</span>
+				{/if}
 				{#if applyError}
 					<span class="msg-error">{applyError}</span>
 				{/if}
@@ -422,12 +541,12 @@
 		margin: 0 0 1.5rem 0;
 		font-size: 1.4rem;
 		font-weight: 600;
-		color: #fff;
+		color: var(--text-0);
 	}
 
 	.panel {
-		background: #111;
-		border: 1px solid #222;
+		background: var(--bg-1);
+		border: 1px solid var(--border);
 		border-radius: 8px;
 		padding: 1.25rem 1.5rem;
 		margin-bottom: 1.5rem;
@@ -437,7 +556,7 @@
 		margin: 0 0 1rem 0;
 		font-size: 1rem;
 		font-weight: 600;
-		color: #fff;
+		color: var(--text-0);
 	}
 
 	.panel-header {
@@ -474,7 +593,7 @@
 	}
 
 	.chevron {
-		color: #555;
+		color: var(--text-3);
 		font-size: 0.75rem;
 	}
 
@@ -506,16 +625,16 @@
 		font-size: 0.7rem;
 		text-transform: uppercase;
 		letter-spacing: 0.07em;
-		color: #555;
+		color: var(--text-3);
 		font-weight: 600;
 		padding: 0.4rem 0.6rem;
-		border-bottom: 1px solid #222;
+		border-bottom: 1px solid var(--border);
 	}
 
 	tbody td {
 		padding: 0.55rem 0.6rem;
-		border-bottom: 1px solid #1a1a1a;
-		color: #ccc;
+		border-bottom: 1px solid var(--border);
+		color: var(--text-1);
 		vertical-align: middle;
 	}
 
@@ -524,7 +643,7 @@
 	}
 
 	tbody tr.removing td {
-		background: #1a0a0a;
+		background: var(--bg-hover);
 	}
 
 	.path-cell {
@@ -537,7 +656,7 @@
 	/* Remove inline form */
 	.remove-row td {
 		padding: 0.5rem 0.6rem;
-		background: #150a0a;
+		background: var(--bg-2);
 	}
 
 	.remove-form {
@@ -548,9 +667,9 @@
 	}
 
 	.remove-form input {
-		background: #0a0a0a;
-		border: 1px solid #333;
-		color: #e0e0e0;
+		background: var(--bg-0);
+		border: 1px solid var(--border);
+		color: var(--text-1);
 		padding: 0.3rem 0.6rem;
 		border-radius: 4px;
 		font-size: 0.82rem;
@@ -568,43 +687,59 @@
 		display: inline-block;
 	}
 
-	.kind-taint     { background: #431407; color: #fb923c; }
-	.kind-quarantine { background: #3b0000; color: #f87171; }
-	.kind-watch     { background: #1e3a5f; color: #93c5fd; }
+	.kind-taint      { background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); }
+	.kind-quarantine { background: color-mix(in srgb, var(--danger) 18%, transparent); color: var(--danger); }
+	.kind-watch      { background: var(--accent-bg); color: var(--accent); }
 
-	.effect-block   { background: #3b0000; color: #f87171; }
-	.effect-review  { background: #422006; color: #fcd34d; }
-	.effect-warn    { background: #3d2a00; color: #fcd34d; }
-	.effect-isolate { background: #2e1a4a; color: #c4b5fd; }
-	.effect-advisory { background: #1a1a1a; color: #888; }
+	.effect-block    { background: color-mix(in srgb, var(--danger) 18%, transparent); color: var(--danger); }
+	.effect-review   { background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); }
+	.effect-warn     { background: color-mix(in srgb, var(--warning) 14%, transparent); color: var(--warning); }
+	.effect-isolate  { background: color-mix(in srgb, var(--info) 18%, transparent); color: var(--info); }
+	.effect-advisory { background: var(--bg-hover); color: var(--text-2); }
 
 	/* Severity text */
 	.sev { font-size: 0.82rem; font-weight: 500; }
-	.sev-low      { color: #888; }
-	.sev-medium   { color: #fcd34d; }
-	.sev-high     { color: #fb923c; }
-	.sev-critical { color: #ef4444; font-weight: 700; }
+	.sev-low      { color: var(--text-2); }
+	.sev-medium   { color: var(--warning); }
+	.sev-high     { color: var(--warning); font-weight: 600; }
+	.sev-critical { color: var(--danger); font-weight: 700; }
 
 	/* Misc text */
 	.mono { font-family: monospace; }
-	.dim  { color: #666; }
+	.dim  { color: var(--text-3); }
 
 	.empty {
-		color: #555;
+		color: var(--text-3);
 		padding: 1.5rem;
 		text-align: center;
 		font-size: 0.9rem;
 	}
 
-	.msg-error   { color: #ef4444; font-size: 0.85rem; margin: 0.25rem 0; }
-	.msg-success { color: #22c55e; font-size: 0.85rem; margin: 0.25rem 0; }
-	.msg-dim     { color: #555; font-size: 0.9rem; }
+	.msg-error   { color: var(--danger); font-size: 0.85rem; margin: 0.25rem 0; }
+	.msg-success { color: var(--success); font-size: 0.85rem; margin: 0.25rem 0; }
+	.msg-dim     { color: var(--text-3); font-size: 0.85rem; }
+
+	.field-error {
+		color: var(--danger);
+		font-size: 0.75rem;
+		margin-top: 0.15rem;
+	}
+
+	.conflict-note {
+		color: var(--warning);
+		background: color-mix(in srgb, var(--warning) 10%, transparent);
+		border: 1px solid color-mix(in srgb, var(--warning) 30%, transparent);
+		border-radius: 4px;
+		padding: 0.45rem 0.7rem;
+		font-size: 0.8rem;
+		margin: 0;
+	}
 
 	/* Buttons */
 	.btn-primary {
-		background: #1e3a5f;
-		border: 1px solid #2a4a7a;
-		color: #93c5fd;
+		background: var(--accent-bg);
+		border: 1px solid var(--accent-bg-hi);
+		color: var(--accent);
 		padding: 0.35rem 0.85rem;
 		border-radius: 4px;
 		font-size: 0.85rem;
@@ -612,48 +747,47 @@
 	}
 
 	.btn-primary:hover:not(:disabled) {
-		background: #243f6a;
-		border-color: #3a5a8a;
+		background: var(--accent-bg-hi);
 	}
 
 	.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
 	.btn-secondary {
-		background: #1a1a1a;
-		border: 1px solid #333;
-		color: #888;
+		background: var(--bg-hover);
+		border: 1px solid var(--border);
+		color: var(--text-2);
 		padding: 0.35rem 0.75rem;
 		border-radius: 4px;
 		font-size: 0.85rem;
 		cursor: pointer;
 	}
 
-	.btn-secondary:hover { color: #fff; border-color: #555; }
+	.btn-secondary:hover { color: var(--text-0); border-color: var(--text-3); }
 
 	.btn-refresh {
-		background: #1a1a1a;
-		border: 1px solid #333;
-		color: #888;
+		background: var(--bg-hover);
+		border: 1px solid var(--border);
+		color: var(--text-2);
 		padding: 0.3rem 0.7rem;
 		border-radius: 4px;
 		font-size: 0.8rem;
 		cursor: pointer;
 	}
 
-	.btn-refresh:hover:not(:disabled) { color: #fff; border-color: #555; }
+	.btn-refresh:hover:not(:disabled) { color: var(--text-0); border-color: var(--text-3); }
 	.btn-refresh:disabled { opacity: 0.5; cursor: not-allowed; }
 
 	.btn-remove {
-		background: #3b0000;
-		border: 1px solid #5a0000;
-		color: #f87171;
+		background: color-mix(in srgb, var(--danger) 18%, transparent);
+		border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+		color: var(--danger);
 		padding: 0.2rem 0.55rem;
 		border-radius: 3px;
 		font-size: 0.75rem;
 		cursor: pointer;
 	}
 
-	.btn-remove:hover { background: #4a0000; }
+	.btn-remove:hover { background: color-mix(in srgb, var(--danger) 28%, transparent); }
 
 	/* Check form */
 	.check-form {
@@ -666,7 +800,7 @@
 		font-size: 0.75rem;
 		text-transform: uppercase;
 		letter-spacing: 0.07em;
-		color: #555;
+		color: var(--text-3);
 		margin-bottom: 0.1rem;
 	}
 
@@ -676,9 +810,9 @@
 	}
 
 	.check-form input[type='text'] {
-		background: #0a0a0a;
-		border: 1px solid #333;
-		color: #e0e0e0;
+		background: var(--bg-0);
+		border: 1px solid var(--border);
+		color: var(--text-1);
 		padding: 0.4rem 0.6rem;
 		border-radius: 4px;
 		font-family: monospace;
@@ -687,12 +821,12 @@
 	}
 
 	.check-form input[type='range'] {
-		accent-color: #3b82f6;
+		accent-color: var(--accent);
 	}
 
 	.conf-val {
 		font-family: monospace;
-		color: #93c5fd;
+		color: var(--accent);
 		font-size: 0.85rem;
 		margin-left: 0.4rem;
 		text-transform: none;
@@ -706,11 +840,11 @@
 		gap: 0.5rem;
 	}
 
-	.result-allow   { color: #22c55e; font-size: 1.1rem; font-weight: 600; margin: 0; }
-	.result-block   { color: #ef4444; font-size: 1.1rem; font-weight: 600; margin: 0; }
-	.result-review  { color: #fcd34d; font-size: 1.05rem; font-weight: 600; margin: 0; }
-	.result-isolated { color: #c4b5fd; font-size: 0.85rem; margin: 0; }
-	.result-meta    { color: #888; font-size: 0.85rem; margin: 0; }
+	.result-allow    { color: var(--success); font-size: 1.1rem; font-weight: 600; margin: 0; }
+	.result-block    { color: var(--danger); font-size: 1.1rem; font-weight: 600; margin: 0; }
+	.result-review   { color: var(--warning); font-size: 1.05rem; font-weight: 600; margin: 0; }
+	.result-isolated { color: var(--info); font-size: 0.85rem; margin: 0; }
+	.result-meta     { color: var(--text-2); font-size: 0.85rem; margin: 0; }
 
 	.warnings { margin-top: 0.5rem; }
 
@@ -718,7 +852,7 @@
 		font-size: 0.7rem;
 		text-transform: uppercase;
 		letter-spacing: 0.07em;
-		color: #fcd34d;
+		color: var(--warning);
 		margin: 0 0 0.3rem 0;
 	}
 
@@ -726,7 +860,7 @@
 		margin: 0;
 		padding-left: 1.25rem;
 		font-size: 0.85rem;
-		color: #ccc;
+		color: var(--text-1);
 	}
 
 	.warnings li { margin-bottom: 0.2rem; }
@@ -754,15 +888,15 @@
 		font-size: 0.75rem;
 		text-transform: uppercase;
 		letter-spacing: 0.07em;
-		color: #555;
+		color: var(--text-3);
 	}
 
 	.form-field input,
 	.form-field select,
 	.form-field textarea {
-		background: #0a0a0a;
-		border: 1px solid #333;
-		color: #e0e0e0;
+		background: var(--bg-0);
+		border: 1px solid var(--border);
+		color: var(--text-1);
 		padding: 0.4rem 0.6rem;
 		border-radius: 4px;
 		font-family: monospace;
