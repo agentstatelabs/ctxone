@@ -1218,6 +1218,153 @@ fn default_budget() -> usize {
 fn default_ref() -> String {
     "main".to_string()
 }
+fn default_forget_reason() -> String {
+    "forgotten via MCP".to_string()
+}
+fn default_check_confidence() -> f64 {
+    1.0
+}
+
+// -- MCP-parity param types (forget, branches, taints) --
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ForgetParams {
+    /// Path to forget (e.g., "/memory/facts/abc123").
+    pub path: String,
+    /// Reason recorded in the rollback commit's blame.
+    #[serde(default = "default_forget_reason")]
+    pub reason: String,
+    /// Branch to write the rollback to (default: "main").
+    #[serde(default = "default_ref", rename = "ref")]
+    pub ref_name: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct BranchListParams {}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct BranchCreateParams {
+    /// New branch name.
+    pub name: String,
+    /// Source ref to branch from (default: "main").
+    #[serde(default = "default_ref")]
+    pub from: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct TaintListParams {
+    /// Optional path prefix filter.
+    pub path_prefix: Option<String>,
+    /// Optional kind filter: "taint" | "quarantine" | "watch".
+    pub kind: Option<String>,
+    /// Include resolved taints (default: false).
+    #[serde(default)]
+    pub include_resolved: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct TaintCheckParams {
+    /// Path being written to.
+    pub path: String,
+    /// Agent attempting the write.
+    pub agent_id: String,
+    /// Confidence of the write (default: 1.0).
+    #[serde(default = "default_check_confidence")]
+    pub confidence: f64,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct TaintApplyParams {
+    /// Path to taint.
+    pub path: String,
+    /// Human-readable taint name.
+    pub name: String,
+    /// Kind: "taint" | "quarantine" | "watch".
+    pub kind: String,
+    /// Effect (taint only): "warn" | "block" | "review" | "isolate" | "advisory".
+    /// Ignored for quarantine/watch.
+    #[serde(default)]
+    pub effect: Option<String>,
+    /// Severity: "low" | "medium" | "high" | "critical" (default: medium).
+    pub severity: Option<String>,
+    /// Reason recorded in the taint.
+    pub reason: String,
+    /// Agent applying the taint.
+    pub agent_id: String,
+    /// Branch (default: "main").
+    #[serde(default = "default_ref", rename = "ref")]
+    pub ref_name: String,
+    /// For quarantine: agents authorized to write through it.
+    pub authorized_agents: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct TaintRemoveParams {
+    /// Taint id to resolve.
+    pub taint_id: String,
+    /// Reason recorded in the resolution.
+    pub reason: String,
+    /// Agent resolving the taint.
+    pub agent_id: String,
+    /// Branch (default: "main").
+    #[serde(default = "default_ref", rename = "ref")]
+    pub ref_name: String,
+}
+
+fn parse_taint_kind(s: &str) -> Result<agentstategraph_taint::TaintKind, String> {
+    use agentstategraph_taint::TaintKind;
+    match s {
+        "taint" => Ok(TaintKind::Taint),
+        "quarantine" => Ok(TaintKind::Quarantine),
+        "watch" => Ok(TaintKind::Watch),
+        other => Err(format!("invalid kind: {other}")),
+    }
+}
+
+fn parse_taint_kind_opt(
+    s: Option<&str>,
+) -> Result<Option<agentstategraph_taint::TaintKind>, String> {
+    match s {
+        None | Some("") => Ok(None),
+        Some(k) => parse_taint_kind(k).map(Some),
+    }
+}
+
+fn parse_taint_effect(s: &str) -> Result<agentstategraph_taint::TaintEffect, String> {
+    use agentstategraph_taint::TaintEffect;
+    match s {
+        "warn" => Ok(TaintEffect::Warn),
+        "block" => Ok(TaintEffect::Block),
+        "review" => Ok(TaintEffect::Review),
+        "isolate" => Ok(TaintEffect::Isolate),
+        "advisory" => Ok(TaintEffect::Advisory),
+        other => Err(format!("invalid effect: {other}")),
+    }
+}
+
+fn parse_taint_severity(
+    s: Option<&str>,
+) -> Result<agentstategraph_taint::TaintSeverity, String> {
+    use agentstategraph_taint::TaintSeverity;
+    match s {
+        None | Some("") | Some("medium") => Ok(TaintSeverity::Medium),
+        Some("low") => Ok(TaintSeverity::Low),
+        Some("high") => Ok(TaintSeverity::High),
+        Some("critical") => Ok(TaintSeverity::Critical),
+        Some(other) => Err(format!("invalid severity: {other}")),
+    }
+}
+
+fn taint_effect_to_str(e: agentstategraph_taint::TaintEffect) -> &'static str {
+    use agentstategraph_taint::TaintEffect;
+    match e {
+        TaintEffect::Warn => "warn",
+        TaintEffect::Block => "block",
+        TaintEffect::Review => "review",
+        TaintEffect::Isolate => "isolate",
+        TaintEffect::Advisory => "advisory",
+    }
+}
 
 fn importance_to_confidence(importance: &str) -> f64 {
     match importance {
@@ -1833,6 +1980,306 @@ impl CtxOneServer {
                 with_stats(&output, flat_size, &self.session)
             }
             Err(e) => format!("Error: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Forget a path by writing a rollback commit. The data isn't physically removed — its history is preserved in blame — but `get_state` and `recall` will no longer surface it. \
+        \
+        CALL THIS WHEN the user asks to forget, retract, or revoke a stored memory; or when a stored fact is wrong and you've replaced it with a corrected one. The reason becomes part of the rollback's blame trail."
+    )]
+    async fn forget(&self, params: Parameters<ForgetParams>) -> String {
+        let p = params.0;
+        let opts = CommitOptions::new(&self.agent_id, IntentCategory::Rollback, &p.reason);
+        match self.repo.delete(&p.ref_name, &p.path, opts) {
+            Ok(commit_id) => {
+                self.session.mark_dirty();
+                serde_json::json!({
+                    "status": "ok",
+                    "ref": p.ref_name,
+                    "path": p.path,
+                    "commit_id": format!("{}", commit_id.short()),
+                })
+                .to_string()
+            }
+            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "List every branch in the graph with its current head commit id. \
+        \
+        CALL THIS to discover what branches exist before reading or writing — branch names are free-form, so you can't assume `feature/x` exists without checking."
+    )]
+    async fn branch_list(&self, _params: Parameters<BranchListParams>) -> String {
+        match self.repo.list_branches(None) {
+            Ok(branches) => {
+                let out: Vec<serde_json::Value> = branches
+                    .into_iter()
+                    .map(|(name, id)| {
+                        serde_json::json!({ "name": name, "id": format!("{}", id.short()) })
+                    })
+                    .collect();
+                serde_json::to_string(&out).unwrap_or_else(|_| "[]".into())
+            }
+            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Create a new branch starting from `from` (default: \"main\"). \
+        \
+        CALL THIS WHEN you want to explore a hypothesis, draft an alternative, or stage memory writes that shouldn't land on main yet. Branches are cheap — prefer a branch over racing writes on main."
+    )]
+    async fn branch_create(&self, params: Parameters<BranchCreateParams>) -> String {
+        let p = params.0;
+        match self.repo.branch(&p.name, &p.from) {
+            Ok(id) => {
+                self.session.mark_dirty();
+                serde_json::json!({
+                    "status": "ok",
+                    "name": p.name,
+                    "from": p.from,
+                    "commit_id": format!("{}", id.short()),
+                })
+                .to_string()
+            }
+            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "List taints / quarantines / watches across the graph. \
+        \
+        CALL THIS to inspect what guardrails are active before writing into a sensitive subtree. Filter by `path_prefix` to scope to one area, by `kind` to one category, or set `include_resolved=true` to see history."
+    )]
+    async fn taint_list(&self, params: Parameters<TaintListParams>) -> String {
+        let p = params.0;
+        let kind = match parse_taint_kind_opt(p.kind.as_deref()) {
+            Ok(k) => k,
+            Err(msg) => return serde_json::json!({ "error": msg }).to_string(),
+        };
+        match self
+            .repo
+            .list_taints(p.path_prefix.as_deref(), kind, p.include_resolved)
+        {
+            Ok(taints) => serde_json::json!({ "taints": taints }).to_string(),
+            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Check whether `agent_id` may write to `path` at the given `confidence`, given any active taints/quarantines. Returns `can_write`, `effect` (the strongest blocking effect, if any), and matching taint id. \
+        \
+        CALL THIS BEFORE a write you suspect could be guarded — cheaper than failing the write and parsing the error. Confidence defaults to 1.0; lower it to test what a less-confident write would face."
+    )]
+    async fn taint_check(&self, params: Parameters<TaintCheckParams>) -> String {
+        let p = params.0;
+        match self.repo.check_taint(&p.path, &p.agent_id, p.confidence) {
+            Ok(check) => {
+                let warnings: Vec<String> = check
+                    .taints
+                    .iter()
+                    .filter(|t| {
+                        matches!(
+                            t.effect,
+                            agentstategraph_taint::TaintEffect::Warn
+                                | agentstategraph_taint::TaintEffect::Isolate
+                        )
+                    })
+                    .map(|t| format!("{}: {}", t.name, t.reason))
+                    .collect();
+                let blocking = check
+                    .quarantines
+                    .iter()
+                    .find(|q| !q.authorized_agents().iter().any(|a| a == &p.agent_id))
+                    .map(|q| (Some("isolate".to_string()), Some(q.id.clone())))
+                    .or_else(|| {
+                        check
+                            .taints
+                            .iter()
+                            .find(|t| {
+                                matches!(
+                                    t.effect,
+                                    agentstategraph_taint::TaintEffect::Block
+                                        | agentstategraph_taint::TaintEffect::Review
+                                )
+                            })
+                            .map(|t| {
+                                (
+                                    Some(taint_effect_to_str(t.effect).to_string()),
+                                    Some(t.id.clone()),
+                                )
+                            })
+                    });
+                let (effect, matching_taint_id) = blocking.unwrap_or((None, None));
+                serde_json::json!({
+                    "can_write": check.can_write,
+                    "isolated": check.isolated,
+                    "required_confidence": check.required_confidence,
+                    "warnings": warnings,
+                    "effect": effect,
+                    "matching_taint_id": matching_taint_id,
+                })
+                .to_string()
+            }
+            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Apply a taint, quarantine, or watch to a path. `kind` selects the variant: `taint` (with an `effect` of warn/block/review/isolate/advisory), `quarantine` (with optional `authorized_agents` whitelist), or `watch` (advisory tracking). \
+        \
+        CALL THIS WHEN you discover bad data, an untrusted source, or an area that needs review before further writes. Effects: `block` and `review` stop writes; `warn` and `advisory` log; `isolate` confines to authorized agents."
+    )]
+    async fn taint_apply(&self, params: Parameters<TaintApplyParams>) -> String {
+        use agentstategraph_taint::{
+            QuarantineParams, TaintKind, TaintParams, WatchParams,
+        };
+        let p = params.0;
+        let kind = match parse_taint_kind(&p.kind) {
+            Ok(k) => k,
+            Err(msg) => return serde_json::json!({ "error": msg }).to_string(),
+        };
+        let severity = match parse_taint_severity(p.severity.as_deref()) {
+            Ok(s) => s,
+            Err(msg) => return serde_json::json!({ "error": msg }).to_string(),
+        };
+        let now = chrono::Utc::now();
+
+        let result = match kind {
+            TaintKind::Taint => {
+                let effect_str = match p.effect.as_deref() {
+                    Some(e) => e,
+                    None => {
+                        return serde_json::json!({ "error": "effect is required for kind=taint" })
+                            .to_string();
+                    }
+                };
+                let effect = match parse_taint_effect(effect_str) {
+                    Ok(e) => e,
+                    Err(msg) => return serde_json::json!({ "error": msg }).to_string(),
+                };
+                self.repo.taint(
+                    &p.ref_name,
+                    &p.path,
+                    TaintParams {
+                        name: p.name,
+                        effect,
+                        reason: p.reason,
+                        severity,
+                        expires_at: None,
+                        propagate: true,
+                        metadata: Default::default(),
+                        agent_id: p.agent_id,
+                    },
+                )
+            }
+            TaintKind::Quarantine => self.repo.quarantine(
+                &p.ref_name,
+                &p.path,
+                QuarantineParams {
+                    name: p.name,
+                    reason: p.reason,
+                    severity,
+                    authorized_agents: p.authorized_agents.unwrap_or_default(),
+                    expires_at: None,
+                    propagate: true,
+                    agent_id: p.agent_id,
+                },
+            ),
+            TaintKind::Watch => self.repo.watch_path(
+                &p.ref_name,
+                &p.path,
+                WatchParams {
+                    name: p.name,
+                    reason: p.reason,
+                    metric: None,
+                    threshold: None,
+                    direction: Default::default(),
+                    check_interval_secs: None,
+                    expires_at: None,
+                    severity,
+                    propagate: true,
+                    agent_id: p.agent_id,
+                },
+            ),
+        };
+
+        match result {
+            Ok(taint_id) => {
+                self.session.mark_dirty();
+                serde_json::json!({
+                    "taint_id": taint_id,
+                    "path": p.path,
+                    "created_at": now,
+                })
+                .to_string()
+            }
+            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Resolve (lift) an active taint, quarantine, or watch by id. The taint isn't deleted — it's marked resolved with a reason for audit. \
+        \
+        CALL THIS WHEN the condition that justified the taint has been fixed: the bad data was forgotten, the untrusted source was vetted, the watch is no longer needed. Use `taint_list` to find the id."
+    )]
+    async fn taint_remove(&self, params: Parameters<TaintRemoveParams>) -> String {
+        use agentstategraph_taint::{TaintKind, UntaintParams, UnwatchParams};
+        let p = params.0;
+        let taint = match self.repo.get_taint(&p.taint_id) {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                return serde_json::json!({ "error": format!("taint not found: {}", p.taint_id) })
+                    .to_string();
+            }
+            Err(e) => return serde_json::json!({ "error": e.to_string() }).to_string(),
+        };
+
+        let result = match taint.kind {
+            TaintKind::Taint => self.repo.untaint(
+                &p.ref_name,
+                &taint.path,
+                &taint.name,
+                UntaintParams {
+                    reason: p.reason,
+                    proof: None,
+                    agent_id: p.agent_id,
+                },
+            ),
+            TaintKind::Quarantine => self.repo.unquarantine(
+                &p.ref_name,
+                &taint.path,
+                &taint.name,
+                UntaintParams {
+                    reason: p.reason,
+                    proof: None,
+                    agent_id: p.agent_id,
+                },
+            ),
+            TaintKind::Watch => self.repo.unwatch(
+                &p.ref_name,
+                &taint.path,
+                &taint.name,
+                UnwatchParams {
+                    reason: Some(p.reason),
+                    agent_id: p.agent_id,
+                },
+            ),
+        };
+
+        match result {
+            Ok(_) => {
+                self.session.mark_dirty();
+                serde_json::json!({
+                    "status": "ok",
+                    "taint_id": p.taint_id,
+                    "resolved_at": chrono::Utc::now(),
+                })
+                .to_string()
+            }
+            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
         }
     }
 }
