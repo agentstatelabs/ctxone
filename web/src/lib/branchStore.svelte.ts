@@ -1,11 +1,20 @@
 /**
- * Global current-branch store.
- *
- * Svelte 5 runes only work inside .svelte / .svelte.ts files. The rest of the
- * app imports `branchStore` and reads/writes `branchStore.current` directly.
- * Any component referencing `branchStore.current` automatically reacts to
- * changes via Svelte's reactivity.
+ * Global current-branch store. Mirrors selection to localStorage so a
+ * page refresh lands on the same branch. The layout calls `hydrate(known)`
+ * once it has the live branch list — if the persisted branch is gone, we
+ * fall back to main.
  */
+
+const KEY = 'ctxone:branch';
+
+function load(): string {
+	if (typeof localStorage === 'undefined') return 'main';
+	return localStorage.getItem(KEY) ?? 'main';
+}
+
+function save(name: string) {
+	if (typeof localStorage !== 'undefined') localStorage.setItem(KEY, name);
+}
 
 function createBranchStore() {
 	let current = $state('main');
@@ -16,6 +25,16 @@ function createBranchStore() {
 		},
 		set current(value: string) {
 			current = value;
+			save(value);
+		},
+		hydrate(known: string[]) {
+			const persisted = load();
+			if (known.includes(persisted)) {
+				current = persisted;
+			} else {
+				current = 'main';
+				save('main');
+			}
 		}
 	};
 }

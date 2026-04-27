@@ -16,10 +16,10 @@
 	async function refreshBranches() {
 		try {
 			const list = await getBranches();
-			branches = list.map((b) => b.name);
-			if (!branches.includes(branchStore.current)) {
-				branchStore.current = 'main';
-			}
+			const names = list.map((b) => b.name);
+			names.sort((a, b) => (a === 'main' ? -1 : b === 'main' ? 1 : a.localeCompare(b)));
+			branches = names;
+			branchStore.hydrate(names);
 		} catch {
 			branches = ['main'];
 		}
