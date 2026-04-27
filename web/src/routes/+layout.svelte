@@ -1,12 +1,54 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
 	import { onMount } from 'svelte';
+	import { page } from '$app/stores';
 	import { getBranches, createBranch } from '$lib/api';
 	import { branchStore } from '$lib/branchStore.svelte';
 	import { themeStore, THEMES, type ThemeId } from '$lib/themeStore.svelte';
 	import '../app.css';
 
 	let { children }: { children: Snippet } = $props();
+
+	// Sidebar groups — order is intent-driven, not alphabetical:
+	// "Now" = current work, "Memory" = stored knowledge,
+	// "Changes" = audit, "Governance" = control surfaces.
+	const NAV_GROUPS: { label: string; items: { href: string; label: string }[] }[] = [
+		{
+			label: 'Now',
+			items: [
+				{ href: '/', label: 'Dashboard' },
+				{ href: '/plans', label: 'Plans' },
+				{ href: '/sessions', label: 'Sessions' }
+			]
+		},
+		{
+			label: 'Memory',
+			items: [
+				{ href: '/pinned', label: 'Pinned' },
+				{ href: '/browse', label: 'Browse' },
+				{ href: '/search', label: 'Search' }
+			]
+		},
+		{
+			label: 'Changes',
+			items: [
+				{ href: '/history', label: 'History' },
+				{ href: '/diff', label: 'Diff' }
+			]
+		},
+		{
+			label: 'Governance',
+			items: [
+				{ href: '/branches', label: 'Branches' },
+				{ href: '/taint', label: 'Taint' }
+			]
+		}
+	];
+
+	function isActive(href: string, pathname: string): boolean {
+		if (href === '/') return pathname === '/';
+		return pathname === href || pathname.startsWith(href + '/');
+	}
 
 	let branches: string[] = $state(['main']);
 	let newBranchName = $state('');
@@ -89,18 +131,27 @@
 			{/if}
 		</div>
 
-		<ul>
-			<li><a href="/">Dashboard</a></li>
-			<li><a href="/sessions">Sessions</a></li>
-			<li><a href="/branches">Branches</a></li>
-			<li><a href="/plans">Plans</a></li>
-			<li><a href="/pinned">Pinned</a></li>
-			<li><a href="/browse">Browse</a></li>
-			<li><a href="/search">Search</a></li>
-			<li><a href="/history">History</a></li>
-			<li><a href="/diff">Diff</a></li>
-			<li><a href="/taint">Taint</a></li>
-		</ul>
+		<nav class="nav-groups">
+			{#each NAV_GROUPS as group}
+				<div class="nav-group">
+					<span class="nav-group-label">{group.label}</span>
+					<ul>
+						{#each group.items as item}
+							{@const active = isActive(item.href, $page.url.pathname)}
+							<li>
+								<a
+									href={item.href}
+									class:active
+									aria-current={active ? 'page' : undefined}
+								>
+									{item.label}
+								</a>
+							</li>
+						{/each}
+					</ul>
+				</div>
+			{/each}
+		</nav>
 
 		<div class="theme-picker">
 			<label for="theme-select">Theme</label>
@@ -239,28 +290,52 @@
 		margin: 0.35rem 0 0 0;
 	}
 
+	.nav-groups {
+		margin-top: 1.5rem;
+		display: flex;
+		flex-direction: column;
+		gap: 1.1rem;
+	}
+
+	.nav-group-label {
+		display: block;
+		font-size: 0.65rem;
+		text-transform: uppercase;
+		letter-spacing: 0.1em;
+		color: var(--text-3);
+		padding: 0 0.75rem 0.3rem;
+	}
+
 	ul {
 		list-style: none;
 		padding: 0;
-		margin-top: 2rem;
+		margin: 0;
 	}
 
 	li {
-		margin-bottom: 0.5rem;
+		margin-bottom: 0.15rem;
 	}
 
 	a {
 		color: var(--text-2);
 		text-decoration: none;
-		padding: 0.5rem 0.75rem;
+		padding: 0.4rem 0.75rem;
 		display: block;
 		border-radius: 6px;
-		transition: all 0.15s;
+		transition: background 0.12s, color 0.12s;
+		font-size: 0.92rem;
+		border-left: 2px solid transparent;
 	}
 
 	a:hover {
 		color: var(--text-0);
 		background: var(--bg-hover);
+	}
+
+	a.active {
+		color: var(--text-0);
+		background: var(--accent-bg);
+		border-left-color: var(--accent);
 	}
 
 	main {
