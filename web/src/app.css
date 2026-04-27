@@ -1,0 +1,96 @@
+/**
+ * CtxOne Lens — design tokens.
+ *
+ * All themes set the same set of variables. Components should reference
+ * these vars (var(--bg-1), var(--text-2), …) instead of hardcoding hex
+ * values, so theme switching reaches them automatically.
+ *
+ * Naming:
+ *   --bg-0        page background (deepest)
+ *   --bg-1        panel / card background
+ *   --bg-2        input / nested background
+ *   --bg-hover    hover surface
+ *   --bg-active   selected surface
+ *   --text-0      primary text
+ *   --text-1      secondary text
+ *   --text-2      muted text
+ *   --border      default border
+ *   --border-hi   emphasized / focused border
+ *   --accent      primary accent (links, focus, primary buttons)
+ *   --accent-bg   accent-tinted background
+ *   --success     completion / good
+ *   --warning     in-progress / caution
+ *   --danger      error / abandoned
+ *   --info        informational accent (cache reads, secondary stats)
+ */
+
+:root,
+:root[data-theme='tw-dark'] {
+	--bg-0: #0a0a0a;
+	--bg-1: #111;
+	--bg-2: #161616;
+	--bg-hover: #1a1a1a;
+	--bg-active: #0f1f3d;
+	--text-0: #ffffff;
+	--text-1: #e0e0e0;
+	--text-2: #888;
+	--text-3: #555;
+	--border: #222;
+	--border-hi: #3b82f6;
+	--accent: #93c5fd;
+	--accent-bg: #1e3a5f;
+	--accent-bg-hi: #2a4a7a;
+	--success: #4ade80;
+	--warning: #fbbf24;
+	--danger: #ef4444;
+	--info: #93c5fd;
+}
+
+:root[data-theme='pure-black'] {
+	--bg-0: #000000;
+	--bg-1: #0a0a0a;
+	--bg-2: #141414;
+	--bg-hover: #1a1a1a;
+	--bg-active: #0a1a30;
+	--text-0: #ffffff;
+	--text-1: #d4d4d4;
+	--text-2: #7a7a7a;
+	--text-3: #4a4a4a;
+	--border: #1a1a1a;
+	--border-hi: #60a5fa;
+	--accent: #60a5fa;
+	--accent-bg: #102a4f;
+	--accent-bg-hi: #1d3f6a;
+	--success: #34d399;
+	--warning: #fbbf24;
+	--danger: #f87171;
+	--info: #60a5fa;
+}
+
+:root[data-theme='slate'] {
+	--bg-0: #0f1419;
+	--bg-1: #161c23;
+	--bg-2: #1d242c;
+	--bg-hover: #232b35;
+	--bg-active: #1e3550;
+	--text-0: #f1f5f9;
+	--text-1: #cbd5e1;
+	--text-2: #94a3b8;
+	--text-3: #64748b;
+	--border: #2a323d;
+	--border-hi: #60a5fa;
+	--accent: #7dd3fc;
+	--accent-bg: #164e63;
+	--accent-bg-hi: #155e75;
+	--success: #6ee7b7;
+	--warning: #fcd34d;
+	--danger: #fca5a5;
+	--info: #7dd3fc;
+}
+
+body {
+	margin: 0;
+	font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+	background: var(--bg-0);
+	color: var(--text-1);
+}

@@ -3,6 +3,8 @@
 	import { onMount } from 'svelte';
 	import { getBranches, createBranch } from '$lib/api';
 	import { branchStore } from '$lib/branchStore.svelte';
+	import { themeStore, THEMES, type ThemeId } from '$lib/themeStore.svelte';
+	import '../app.css';
 
 	let { children }: { children: Snippet } = $props();
 
@@ -18,13 +20,15 @@
 			if (!branches.includes(branchStore.current)) {
 				branchStore.current = 'main';
 			}
-		} catch (e) {
-			// Hub may not be up yet — fail silently, the dashboard will show it
+		} catch {
 			branches = ['main'];
 		}
 	}
 
-	onMount(refreshBranches);
+	onMount(() => {
+		themeStore.hydrate();
+		refreshBranches();
+	});
 
 	async function handleCreateBranch() {
 		const name = newBranchName.trim();
@@ -69,12 +73,14 @@
 				+
 			</button>
 			{#if showCreate}
-				<form class="new-branch-form" onsubmit={(e) => { e.preventDefault(); handleCreateBranch(); }}>
-					<input
-						type="text"
-						bind:value={newBranchName}
-						placeholder="new branch name"
-					/>
+				<form
+					class="new-branch-form"
+					onsubmit={(e) => {
+						e.preventDefault();
+						handleCreateBranch();
+					}}
+				>
+					<input type="text" bind:value={newBranchName} placeholder="new branch name" />
 					<button type="submit">Create</button>
 				</form>
 				{#if branchError}
@@ -94,6 +100,19 @@
 			<li><a href="/diff">Diff</a></li>
 			<li><a href="/taint">Taint</a></li>
 		</ul>
+
+		<div class="theme-picker">
+			<label for="theme-select">Theme</label>
+			<select
+				id="theme-select"
+				value={themeStore.current}
+				onchange={(e) => themeStore.set((e.currentTarget as HTMLSelectElement).value as ThemeId)}
+			>
+				{#each THEMES as t}
+					<option value={t.id}>{t.label}</option>
+				{/each}
+			</select>
+		</div>
 	</nav>
 	<main>
 		{@render children()}
@@ -101,13 +120,6 @@
 </div>
 
 <style>
-	:global(body) {
-		margin: 0;
-		font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-		background: #0a0a0a;
-		color: #e0e0e0;
-	}
-
 	.app {
 		display: flex;
 		min-height: 100vh;
@@ -115,21 +127,23 @@
 
 	.sidebar {
 		width: 220px;
-		background: #111;
-		border-right: 1px solid #222;
+		background: var(--bg-1);
+		border-right: 1px solid var(--border);
 		padding: 1.5rem 1rem;
 		flex-shrink: 0;
+		display: flex;
+		flex-direction: column;
 	}
 
 	.logo h1 {
 		margin: 0;
 		font-size: 1.4rem;
-		color: #fff;
+		color: var(--text-0);
 	}
 
 	.subtitle {
 		font-size: 0.75rem;
-		color: #666;
+		color: var(--text-3);
 		text-transform: uppercase;
 		letter-spacing: 0.1em;
 	}
@@ -137,33 +151,45 @@
 	.branch-switcher {
 		margin-top: 1.5rem;
 		padding-bottom: 1rem;
-		border-bottom: 1px solid #222;
+		border-bottom: 1px solid var(--border);
 	}
 
-	.branch-switcher label {
+	.branch-switcher label,
+	.theme-picker label {
 		display: block;
 		font-size: 0.7rem;
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
-		color: #555;
+		color: var(--text-3);
 		margin-bottom: 0.35rem;
 	}
 
-	.branch-switcher select {
+	.branch-switcher select,
+	.theme-picker select {
 		width: calc(100% - 2.2rem);
-		background: #0a0a0a;
-		border: 1px solid #333;
-		color: #e0e0e0;
+		background: var(--bg-0);
+		border: 1px solid var(--border);
+		color: var(--text-1);
 		padding: 0.35rem 0.5rem;
 		border-radius: 4px;
 		font-family: monospace;
 		font-size: 0.85rem;
 	}
 
+	.theme-picker select {
+		width: 100%;
+	}
+
+	.theme-picker {
+		margin-top: auto;
+		padding-top: 1rem;
+		border-top: 1px solid var(--border);
+	}
+
 	.new-branch-btn {
-		background: #1a1a1a;
-		border: 1px solid #333;
-		color: #888;
+		background: var(--bg-hover);
+		border: 1px solid var(--border);
+		color: var(--text-2);
 		width: 1.7rem;
 		height: 1.7rem;
 		border-radius: 4px;
@@ -175,8 +201,8 @@
 	}
 
 	.new-branch-btn:hover {
-		color: #fff;
-		border-color: #555;
+		color: var(--text-0);
+		border-color: var(--text-3);
 	}
 
 	.new-branch-form {
@@ -188,18 +214,18 @@
 	.new-branch-form input {
 		flex: 1;
 		min-width: 0;
-		background: #0a0a0a;
-		border: 1px solid #333;
-		color: #e0e0e0;
+		background: var(--bg-0);
+		border: 1px solid var(--border);
+		color: var(--text-1);
 		padding: 0.3rem 0.5rem;
 		border-radius: 4px;
 		font-size: 0.8rem;
 	}
 
 	.new-branch-form button {
-		background: #1e3a5f;
-		border: 1px solid #2a4a7a;
-		color: #93c5fd;
+		background: var(--accent-bg);
+		border: 1px solid var(--accent-bg-hi);
+		color: var(--accent);
 		padding: 0.3rem 0.6rem;
 		border-radius: 4px;
 		font-size: 0.8rem;
@@ -207,7 +233,7 @@
 	}
 
 	.branch-error {
-		color: #ef4444;
+		color: var(--danger);
 		font-size: 0.75rem;
 		margin: 0.35rem 0 0 0;
 	}
@@ -223,7 +249,7 @@
 	}
 
 	a {
-		color: #888;
+		color: var(--text-2);
 		text-decoration: none;
 		padding: 0.5rem 0.75rem;
 		display: block;
@@ -232,8 +258,8 @@
 	}
 
 	a:hover {
-		color: #fff;
-		background: #1a1a1a;
+		color: var(--text-0);
+		background: var(--bg-hover);
 	}
 
 	main {
