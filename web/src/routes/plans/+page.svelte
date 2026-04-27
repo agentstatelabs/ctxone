@@ -197,6 +197,17 @@
 		}
 	}
 
+	type PlanLike = { status: string; task_counts: { done: number; in_progress: number; pending: number; abandoned: number; total: number } };
+
+	function effectivePlanStatus(p: PlanLike): string {
+		if (p.status === 'archived') return 'archived';
+		const tc = p.task_counts;
+		if (tc.in_progress > 0) return 'in_progress';
+		if (tc.pending > 0) return 'active';
+		if (tc.total > 0 && tc.done + tc.abandoned === tc.total) return 'completed';
+		return p.status;
+	}
+
 	function statusGlyph(status: string): string {
 		switch (status) {
 			case 'done':
@@ -271,6 +282,7 @@
 			<p class="empty">No plans yet.</p>
 		{/if}
 		{#each plans as plan}
+			{@const eff = effectivePlanStatus(plan)}
 			<button
 				class="plan-row"
 				class:selected={plan.name === selectedName}
@@ -278,7 +290,7 @@
 			>
 				<div class="plan-name">{plan.name}</div>
 				<div class="plan-meta">
-					<span class="plan-status plan-status-{plan.status}">{plan.status}</span>
+					<span class="plan-status plan-status-{eff}">{eff.replace('_', ' ')}</span>
 					<span class="plan-counts">
 						{plan.task_counts.done}&check;
 						{plan.task_counts.in_progress}&gt;
@@ -577,6 +589,9 @@
 	}
 	.plan-status-active {
 		color: #7fd484;
+	}
+	.plan-status-in_progress {
+		color: #fbbf24;
 	}
 	.plan-status-completed {
 		color: #93c5fd;
