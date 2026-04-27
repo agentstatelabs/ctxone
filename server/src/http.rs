@@ -232,10 +232,23 @@ pub fn router_with_config(
 
 // -- Helpers --
 
-fn internal_error(e: impl std::fmt::Display) -> (StatusCode, String) {
+/// Map a `RepoError` to an HTTP status. Missing paths / objects /
+/// refs become 404; everything else is a 500 (and logged).
+fn internal_error(e: agentstategraph::RepoError) -> (StatusCode, String) {
+    use agentstategraph::RepoError;
+    use agentstategraph::tree::TreeError;
     let msg = e.to_string();
-    warn!(error = %msg, "request returned 500");
-    (StatusCode::INTERNAL_SERVER_ERROR, msg)
+    let status = match &e {
+        RepoError::Tree(TreeError::PathNotFound(_))
+        | RepoError::Tree(TreeError::ObjectNotFound(_))
+        | RepoError::RefNotFound(_)
+        | RepoError::BranchNotFound(_) => StatusCode::NOT_FOUND,
+        _ => {
+            warn!(error = %msg, "request returned 500");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    };
+    (status, msg)
 }
 
 fn importance_to_confidence(importance: &str) -> f64 {
@@ -407,23 +420,7 @@ async fn list_paths(
     s.repo
         .list_paths(&ref_name, &prefix, q.max_depth)
         .map(Json)
-        .map_err(repo_error_status)
-}
-
-fn repo_error_status(e: agentstategraph::RepoError) -> (StatusCode, String) {
-    use agentstategraph::RepoError;
-    use agentstategraph::tree::TreeError;
-    let msg = e.to_string();
-    let status = match &e {
-        RepoError::Tree(TreeError::PathNotFound(_))
-        | RepoError::Tree(TreeError::ObjectNotFound(_))
-        | RepoError::RefNotFound(_) => StatusCode::NOT_FOUND,
-        _ => {
-            warn!(error = %msg, "request returned 500");
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-    };
-    (status, msg)
+        .map_err(internal_error)
 }
 
 #[derive(Deserialize)]
@@ -1339,7 +1336,7 @@ async fn list_taints_handler(
     let taints = s
         .repo
         .list_taints(q.path_prefix.as_deref(), kind, q.include_resolved)
-        .map_err(repo_error_status)?;
+        .map_err(internal_error)?;
     Ok(Json(ListTaintsResponse { taints }))
 }
 
@@ -1374,7 +1371,7 @@ async fn check_taint_handler(
     let check = s
         .repo
         .check_taint(&q.path, &q.agent_id, q.confidence)
-        .map_err(repo_error_status)?;
+        .map_err(internal_error)?;
     let warnings: Vec<String> = check
         .taints
         .iter()
@@ -1498,7 +1495,7 @@ async fn apply_taint_handler(
             },
         ),
     }
-    .map_err(repo_error_status)?;
+    .map_err(internal_error)?;
 
     Ok(Json(ApplyTaintResponse {
         taint_id,
@@ -1531,7 +1528,7 @@ async fn remove_taint_handler(
     let all = s
         .repo
         .list_taints(None, None, false)
-        .map_err(repo_error_status)?;
+        .map_err(internal_error)?;
     let taint = all
         .into_iter()
         .find(|t| t.id == id)
@@ -1569,7 +1566,7 @@ async fn remove_taint_handler(
             },
         ),
     }
-    .map_err(repo_error_status)?;
+    .map_err(internal_error)?;
 
     Ok(Json(RemoveTaintResponse {
         resolved_at: chrono::Utc::now(),
