@@ -642,6 +642,7 @@ fn default_ref() -> String {
 async fn remember(
     State(s): State<HubState>,
     agent_id: AgentId,
+    session_id: SessionId,
     Json(req): Json<RememberRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let path = match &req.context {
@@ -656,7 +657,16 @@ async fn remember(
         &req.fact,
     );
     opts = opts.with_confidence(confidence);
-    if let Some(tags) = req.tags {
+    let mut tags = req.tags.unwrap_or_default();
+    // Auto-tag with the originating session so Lens can group
+    // memories per session without a separate index.
+    if session_id.0 != DEFAULT_SESSION_ID {
+        let stag = format!("session:{}", session_id.0);
+        if !tags.iter().any(|t| t == &stag) {
+            tags.push(stag);
+        }
+    }
+    if !tags.is_empty() {
         opts = opts.with_tags(tags);
     }
 

@@ -18,10 +18,42 @@
 		last_provider: string | null;
 	}
 
+	interface MemoryCommit {
+		id: string;
+		timestamp: string;
+		agent_id: string;
+		intent: { description: string; tags: string[] };
+	}
+
 	let sessions: Session[] = $state([]);
 	let loading = $state(true);
 	let error: string | null = $state(null);
 	let selected: Session | null = $state(null);
+	let memories: MemoryCommit[] = $state([]);
+	let memoriesLoading = $state(false);
+
+	$effect(() => {
+		if (selected) {
+			loadMemories(selected.session_id);
+		} else {
+			memories = [];
+		}
+	});
+
+	async function loadMemories(sessionId: string) {
+		memoriesLoading = true;
+		try {
+			const r = await fetch(`${API_BASE}/api/log/main?limit=500`);
+			if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+			const all: MemoryCommit[] = await r.json();
+			const tag = `session:${sessionId}`;
+			memories = all.filter((c) => c.intent.tags?.includes(tag));
+		} catch {
+			memories = [];
+		} finally {
+			memoriesLoading = false;
+		}
+	}
 
 	async function load() {
 		loading = true;
@@ -142,6 +174,36 @@
 							No LLM usage reported. Agents can call <code>record_llm_usage</code> (MCP)
 							or <code>POST /api/stats/llm_usage</code> to surface real token counts.
 						</p>
+					{/if}
+
+					<h3>Memories</h3>
+					{#if memoriesLoading}
+						<p class="muted">Loading memories…</p>
+					{:else if memories.length === 0}
+						<p class="muted hint">
+							No memories tagged <code>session:{selected.session_id}</code>.
+							New <code>remember</code> calls from this session are auto-tagged.
+						</p>
+					{:else}
+						<ul class="memory-list">
+							{#each memories as m}
+								<li class="memory-item">
+									<div class="memory-head">
+										<code class="memory-id">{m.id.slice(0, 12)}</code>
+										<span class="memory-agent">{m.agent_id}</span>
+										<span class="memory-time">{new Date(m.timestamp).toLocaleString()}</span>
+									</div>
+									<div class="memory-desc">{m.intent.description}</div>
+									{#if m.intent.tags?.length}
+										<div class="memory-tags">
+											{#each m.intent.tags as t}
+												<span class="tag">{t}</span>
+											{/each}
+										</div>
+									{/if}
+								</li>
+							{/each}
+						</ul>
 					{/if}
 				</div>
 			{:else}
@@ -288,6 +350,57 @@
 	}
 
 	.hint { margin-top: 1rem; }
+
+	.memory-list {
+		list-style: none;
+		padding: 0;
+		margin: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+	}
+
+	.memory-item {
+		background: #0a0a0a;
+		border: 1px solid #1e1e1e;
+		border-radius: 6px;
+		padding: 0.6rem 0.8rem;
+	}
+
+	.memory-head {
+		display: flex;
+		gap: 0.75rem;
+		align-items: center;
+		font-size: 0.75rem;
+		color: #666;
+		margin-bottom: 0.3rem;
+	}
+
+	.memory-id { color: #888; }
+	.memory-agent { color: #93c5fd; }
+	.memory-time { margin-left: auto; }
+
+	.memory-desc {
+		font-size: 0.88rem;
+		color: #e0e0e0;
+		line-height: 1.4;
+	}
+
+	.memory-tags {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.3rem;
+		margin-top: 0.4rem;
+	}
+
+	.tag {
+		background: #1a1a1a;
+		border: 1px solid #2a2a2a;
+		color: #888;
+		font-size: 0.7rem;
+		padding: 0.1rem 0.4rem;
+		border-radius: 3px;
+	}
 
 	code {
 		background: #1a1a1a;
