@@ -68,6 +68,7 @@ export async function applyTaint(body: {
 	severity: TaintRecord['severity'];
 	reason: string;
 	agent_id: string;
+	authorized_agents?: string[];
 }): Promise<{ taint_id: string; path: string; created_at: string }> {
 	const resp = await fetch(`${API_BASE}/api/taint`, {
 		method: 'POST',

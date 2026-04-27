@@ -58,6 +58,7 @@
 	let applySeverity: TaintRecord['severity'] = $state('medium');
 	let applyReason = $state('');
 	let applyAgentId = $state('');
+	let applyAuthorizedAgents = $state('');
 	let applySubmitting = $state(false);
 	let applyError: string | null = $state(null);
 	let applySuccess: string | null = $state(null);
@@ -69,6 +70,13 @@
 		applyError = null;
 		applySuccess = null;
 		try {
+			const authorized =
+				applyKind === 'quarantine'
+					? applyAuthorizedAgents
+							.split(/[\s,]+/)
+							.map((s) => s.trim())
+							.filter(Boolean)
+					: undefined;
 			const res = await applyTaint({
 				path: applyPath.trim(),
 				name: applyName.trim(),
@@ -76,13 +84,15 @@
 				effect: applyEffect,
 				severity: applySeverity,
 				reason: applyReason.trim(),
-				agent_id: applyAgentId.trim()
+				agent_id: applyAgentId.trim(),
+				authorized_agents: authorized
 			});
 			applySuccess = `Taint applied: ${res.taint_id}`;
 			applyPath = '';
 			applyName = '';
 			applyReason = '';
 			applyAgentId = '';
+			applyAuthorizedAgents = '';
 			await refresh();
 		} catch (e) {
 			applyError = e instanceof Error ? e.message : 'Failed to apply taint';
@@ -374,6 +384,18 @@
 					<input id="ap-agent" type="text" bind:value={applyAgentId} placeholder="agent-id" required />
 				</div>
 			</div>
+
+			{#if applyKind === 'quarantine'}
+				<div class="form-field">
+					<label for="ap-authorized">Authorized agents</label>
+					<input
+						id="ap-authorized"
+						type="text"
+						bind:value={applyAuthorizedAgents}
+						placeholder="comma- or space-separated agent ids allowed past the quarantine"
+					/>
+				</div>
+			{/if}
 
 			<div class="form-field">
 				<label for="ap-reason">Reason</label>
