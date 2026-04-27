@@ -208,6 +208,10 @@ pub fn router_with_config(
         )
         .route("/api/plans/{name}/next", get(next_plan_task))
         .route("/api/plans/{name}/archive", post(archive_plan))
+        // Taint / quarantine / watch
+        .route("/api/taint", get(list_taints_handler).post(apply_taint_handler))
+        .route("/api/taint/check", get(check_taint_handler))
+        .route("/api/taint/{id}", axum::routing::delete(remove_taint_handler))
         .layer(trace)
         .layer(cors)
         .with_state(state);
@@ -403,7 +407,23 @@ async fn list_paths(
     s.repo
         .list_paths(&ref_name, &prefix, q.max_depth)
         .map(Json)
-        .map_err(internal_error)
+        .map_err(repo_error_status)
+}
+
+fn repo_error_status(e: agentstategraph::RepoError) -> (StatusCode, String) {
+    use agentstategraph::RepoError;
+    use agentstategraph::tree::TreeError;
+    let msg = e.to_string();
+    let status = match &e {
+        RepoError::Tree(TreeError::PathNotFound(_))
+        | RepoError::Tree(TreeError::ObjectNotFound(_))
+        | RepoError::RefNotFound(_) => StatusCode::NOT_FOUND,
+        _ => {
+            warn!(error = %msg, "request returned 500");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    };
+    (status, msg)
 }
 
 #[derive(Deserialize)]
@@ -1294,6 +1314,324 @@ async fn archive_plan(
         .map_err(substrate_error_to_response)?;
     s.sessions.mark_all_dirty();
     Ok(Json(plan_tools::plan_to_json(&plan, &[], false)))
+}
+
+// -- Taint endpoints --
+
+#[derive(Deserialize)]
+struct ListTaintsQuery {
+    path_prefix: Option<String>,
+    kind: Option<String>,
+    #[serde(default)]
+    include_resolved: bool,
+}
+
+#[derive(Serialize)]
+struct ListTaintsResponse {
+    taints: Vec<agentstategraph_taint::Taint>,
+}
+
+async fn list_taints_handler(
+    State(s): State<HubState>,
+    Query(q): Query<ListTaintsQuery>,
+) -> Result<Json<ListTaintsResponse>, (StatusCode, String)> {
+    let kind = parse_kind(q.kind.as_deref())?;
+    let taints = s
+        .repo
+        .list_taints(q.path_prefix.as_deref(), kind, q.include_resolved)
+        .map_err(repo_error_status)?;
+    Ok(Json(ListTaintsResponse { taints }))
+}
+
+#[derive(Deserialize)]
+struct CheckTaintQuery {
+    path: String,
+    agent_id: String,
+    #[serde(default = "one")]
+    confidence: f64,
+}
+
+fn one() -> f64 {
+    1.0
+}
+
+#[derive(Serialize)]
+struct CheckTaintResponse {
+    can_write: bool,
+    isolated: bool,
+    required_confidence: f64,
+    warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effect: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    matching_taint_id: Option<String>,
+}
+
+async fn check_taint_handler(
+    State(s): State<HubState>,
+    Query(q): Query<CheckTaintQuery>,
+) -> Result<Json<CheckTaintResponse>, (StatusCode, String)> {
+    let check = s
+        .repo
+        .check_taint(&q.path, &q.agent_id, q.confidence)
+        .map_err(repo_error_status)?;
+    let warnings: Vec<String> = check
+        .taints
+        .iter()
+        .filter(|t| {
+            matches!(
+                t.effect,
+                agentstategraph_taint::TaintEffect::Warn
+                    | agentstategraph_taint::TaintEffect::Isolate
+            )
+        })
+        .map(|t| format!("{}: {}", t.name, t.reason))
+        .collect();
+    let blocking = check
+        .quarantines
+        .iter()
+        .find(|q| !q.authorized_agents().iter().any(|a| a == &q.agent_id))
+        .or_else(|| {
+            check.taints.iter().find(|t| {
+                matches!(
+                    t.effect,
+                    agentstategraph_taint::TaintEffect::Block
+                        | agentstategraph_taint::TaintEffect::Review
+                )
+            })
+        });
+    let (effect, matching_taint_id) = match blocking {
+        Some(t) => (Some(taint_effect_str(t.effect).to_string()), Some(t.id.clone())),
+        None => (None, None),
+    };
+    Ok(Json(CheckTaintResponse {
+        can_write: check.can_write,
+        isolated: check.isolated,
+        required_confidence: check.required_confidence,
+        warnings,
+        effect,
+        matching_taint_id,
+    }))
+}
+
+#[derive(Deserialize)]
+struct ApplyTaintBody {
+    path: String,
+    name: String,
+    kind: String,
+    effect: String,
+    #[serde(default)]
+    severity: Option<String>,
+    reason: String,
+    agent_id: String,
+    #[serde(default)]
+    ref_name: Option<String>,
+    #[serde(default)]
+    authorized_agents: Option<Vec<String>>,
+}
+
+#[derive(Serialize)]
+struct ApplyTaintResponse {
+    taint_id: String,
+    path: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+async fn apply_taint_handler(
+    State(s): State<HubState>,
+    Json(body): Json<ApplyTaintBody>,
+) -> Result<Json<ApplyTaintResponse>, (StatusCode, String)> {
+    use agentstategraph_taint::{
+        QuarantineParams, TaintKind, TaintParams, WatchParams,
+    };
+    let kind = parse_kind(Some(&body.kind))?
+        .ok_or((StatusCode::BAD_REQUEST, "kind required".to_string()))?;
+    let severity = parse_severity(body.severity.as_deref())?;
+    let ref_name = body.ref_name.unwrap_or_else(|| "main".to_string());
+    let now = chrono::Utc::now();
+
+    let taint_id = match kind {
+        TaintKind::Taint => {
+            let effect = parse_effect(&body.effect)?;
+            s.repo.taint(
+                &ref_name,
+                &body.path,
+                TaintParams {
+                    name: body.name,
+                    effect,
+                    reason: body.reason,
+                    severity,
+                    expires_at: None,
+                    propagate: true,
+                    metadata: Default::default(),
+                    agent_id: body.agent_id,
+                },
+            )
+        }
+        TaintKind::Quarantine => s.repo.quarantine(
+            &ref_name,
+            &body.path,
+            QuarantineParams {
+                name: body.name,
+                reason: body.reason,
+                severity,
+                authorized_agents: body.authorized_agents.unwrap_or_default(),
+                expires_at: None,
+                propagate: true,
+                agent_id: body.agent_id,
+            },
+        ),
+        TaintKind::Watch => s.repo.watch_path(
+            &ref_name,
+            &body.path,
+            WatchParams {
+                name: body.name,
+                reason: body.reason,
+                metric: None,
+                threshold: None,
+                direction: Default::default(),
+                check_interval_secs: None,
+                expires_at: None,
+                severity,
+                propagate: true,
+                agent_id: body.agent_id,
+            },
+        ),
+    }
+    .map_err(repo_error_status)?;
+
+    Ok(Json(ApplyTaintResponse {
+        taint_id,
+        path: body.path,
+        created_at: now,
+    }))
+}
+
+#[derive(Deserialize)]
+struct RemoveTaintBody {
+    reason: String,
+    agent_id: String,
+    #[serde(default)]
+    ref_name: Option<String>,
+}
+
+#[derive(Serialize)]
+struct RemoveTaintResponse {
+    resolved_at: chrono::DateTime<chrono::Utc>,
+}
+
+async fn remove_taint_handler(
+    State(s): State<HubState>,
+    Path(id): Path<String>,
+    Json(body): Json<RemoveTaintBody>,
+) -> Result<Json<RemoveTaintResponse>, (StatusCode, String)> {
+    use agentstategraph_taint::{TaintKind, UntaintParams, UnwatchParams};
+    // Look up the taint by id (engine doesn't expose get-by-id on
+    // Repository, so we scan the active list).
+    let all = s
+        .repo
+        .list_taints(None, None, false)
+        .map_err(repo_error_status)?;
+    let taint = all
+        .into_iter()
+        .find(|t| t.id == id)
+        .ok_or((StatusCode::NOT_FOUND, format!("taint not found: {id}")))?;
+    let ref_name = body.ref_name.unwrap_or_else(|| "main".to_string());
+
+    match taint.kind {
+        TaintKind::Taint => s.repo.untaint(
+            &ref_name,
+            &taint.path,
+            &taint.name,
+            UntaintParams {
+                reason: body.reason,
+                proof: None,
+                agent_id: body.agent_id,
+            },
+        ),
+        TaintKind::Quarantine => s.repo.unquarantine(
+            &ref_name,
+            &taint.path,
+            &taint.name,
+            UntaintParams {
+                reason: body.reason,
+                proof: None,
+                agent_id: body.agent_id,
+            },
+        ),
+        TaintKind::Watch => s.repo.unwatch(
+            &ref_name,
+            &taint.path,
+            &taint.name,
+            UnwatchParams {
+                reason: Some(body.reason),
+                agent_id: body.agent_id,
+            },
+        ),
+    }
+    .map_err(repo_error_status)?;
+
+    Ok(Json(RemoveTaintResponse {
+        resolved_at: chrono::Utc::now(),
+    }))
+}
+
+fn parse_kind(
+    s: Option<&str>,
+) -> Result<Option<agentstategraph_taint::TaintKind>, (StatusCode, String)> {
+    use agentstategraph_taint::TaintKind;
+    match s {
+        None | Some("") => Ok(None),
+        Some("taint") => Ok(Some(TaintKind::Taint)),
+        Some("quarantine") => Ok(Some(TaintKind::Quarantine)),
+        Some("watch") => Ok(Some(TaintKind::Watch)),
+        Some(other) => Err((
+            StatusCode::BAD_REQUEST,
+            format!("invalid kind: {other}"),
+        )),
+    }
+}
+
+fn parse_effect(s: &str) -> Result<agentstategraph_taint::TaintEffect, (StatusCode, String)> {
+    use agentstategraph_taint::TaintEffect;
+    match s {
+        "warn" => Ok(TaintEffect::Warn),
+        "block" => Ok(TaintEffect::Block),
+        "review" => Ok(TaintEffect::Review),
+        "isolate" => Ok(TaintEffect::Isolate),
+        "advisory" => Ok(TaintEffect::Advisory),
+        other => Err((
+            StatusCode::BAD_REQUEST,
+            format!("invalid effect: {other}"),
+        )),
+    }
+}
+
+fn parse_severity(
+    s: Option<&str>,
+) -> Result<agentstategraph_taint::TaintSeverity, (StatusCode, String)> {
+    use agentstategraph_taint::TaintSeverity;
+    match s {
+        None | Some("") | Some("medium") => Ok(TaintSeverity::Medium),
+        Some("low") => Ok(TaintSeverity::Low),
+        Some("high") => Ok(TaintSeverity::High),
+        Some("critical") => Ok(TaintSeverity::Critical),
+        Some(other) => Err((
+            StatusCode::BAD_REQUEST,
+            format!("invalid severity: {other}"),
+        )),
+    }
+}
+
+fn taint_effect_str(e: agentstategraph_taint::TaintEffect) -> &'static str {
+    use agentstategraph_taint::TaintEffect;
+    match e {
+        TaintEffect::Warn => "warn",
+        TaintEffect::Block => "block",
+        TaintEffect::Review => "review",
+        TaintEffect::Isolate => "isolate",
+        TaintEffect::Advisory => "advisory",
+    }
 }
 
 #[cfg(test)]

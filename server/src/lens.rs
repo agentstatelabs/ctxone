@@ -23,7 +23,22 @@ struct LensAssets;
 /// Handler for all non-API routes — serves embedded Lens static files.
 /// Unknown paths fall back to `index.html` for SPA client-side routing.
 pub async fn lens_handler(req: Request<Body>) -> Response {
-    let path = req.uri().path().trim_start_matches('/');
+    let raw_path = req.uri().path();
+
+    // Unknown /api/* routes must return JSON 404 — falling back to
+    // the SPA's index.html breaks JSON.parse on the client.
+    if raw_path.starts_with("/api/") {
+        let body = format!(r#"{{"error":"not found","path":"{raw_path}"}}"#);
+        let mut resp = Response::new(Body::from(body));
+        *resp.status_mut() = StatusCode::NOT_FOUND;
+        resp.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        return resp;
+    }
+
+    let path = raw_path.trim_start_matches('/');
 
     // Try exact path first, then path/index.html for directory routes,
     // then fall back to root index.html for SPA routing.
