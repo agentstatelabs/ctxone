@@ -92,7 +92,7 @@ export async function getHealth(): Promise<boolean> {
 }
 
 export async function getStats(ref_name = 'main'): Promise<StatsResponse> {
-	return fetchJson(`/api/stats/${ref_name}`);
+	return fetchJson(`/api/stats/${encodeURIComponent(ref_name)}`);
 }
 
 export async function getTokenStats(): Promise<TokenStats> {
@@ -108,23 +108,23 @@ export async function getSessionTokenStats(sessionId: string): Promise<SessionSn
 }
 
 export async function getState(ref_name = 'main', path = '/'): Promise<unknown> {
-	return fetchJson(`/api/state/${ref_name}?path=${encodeURIComponent(path)}`);
+	return fetchJson(`/api/state/${encodeURIComponent(ref_name)}?path=${encodeURIComponent(path)}`);
 }
 
 export async function listPaths(ref_name = 'main', prefix = '/'): Promise<string[]> {
-	return fetchJson(`/api/state/${ref_name}/paths?prefix=${encodeURIComponent(prefix)}`);
+	return fetchJson(`/api/state/${encodeURIComponent(ref_name)}/paths?prefix=${encodeURIComponent(prefix)}`);
 }
 
 export async function searchValues(ref_name = 'main', query: string): Promise<SearchResult[]> {
-	return fetchJson(`/api/state/${ref_name}/search?query=${encodeURIComponent(query)}`);
+	return fetchJson(`/api/state/${encodeURIComponent(ref_name)}/search?query=${encodeURIComponent(query)}`);
 }
 
 export async function getLog(ref_name = 'main', limit = 20): Promise<CommitEntry[]> {
-	return fetchJson(`/api/log/${ref_name}?limit=${limit}`);
+	return fetchJson(`/api/log/${encodeURIComponent(ref_name)}?limit=${limit}`);
 }
 
 export async function getBlame(ref_name = 'main', path: string): Promise<BlameEntry[]> {
-	return fetchJson(`/api/blame/${ref_name}?path=${encodeURIComponent(path)}`);
+	return fetchJson(`/api/blame/${encodeURIComponent(ref_name)}?path=${encodeURIComponent(path)}`);
 }
 
 export async function getBranches(): Promise<Array<{ name: string; id: string }>> {
