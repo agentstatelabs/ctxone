@@ -1523,15 +1523,10 @@ async fn remove_taint_handler(
     Json(body): Json<RemoveTaintBody>,
 ) -> Result<Json<RemoveTaintResponse>, (StatusCode, String)> {
     use agentstategraph_taint::{TaintKind, UntaintParams, UnwatchParams};
-    // Look up the taint by id (engine doesn't expose get-by-id on
-    // Repository, so we scan the active list).
-    let all = s
+    let taint = s
         .repo
-        .list_taints(None, None, false)
-        .map_err(internal_error)?;
-    let taint = all
-        .into_iter()
-        .find(|t| t.id == id)
+        .get_taint(&id)
+        .map_err(internal_error)?
         .ok_or((StatusCode::NOT_FOUND, format!("taint not found: {id}")))?;
     let ref_name = body.ref_name.unwrap_or_else(|| "main".to_string());
 
