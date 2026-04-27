@@ -3,6 +3,9 @@
 	import { listPaths, getState, getBlame, forget } from '$lib/api';
 	import { branchStore } from '$lib/branchStore.svelte';
 
+	type ViewMode = 'tree' | 'flat';
+	const VIEW_KEY = 'ctxone:browseView';
+
 	let paths: string[] = $state([]);
 	let selectedPath: string | null = $state(null);
 	let selectedValue: unknown = $state(null);
@@ -10,6 +13,70 @@
 	let error: string | null = $state(null);
 	let forgetting = $state(false);
 	let forgetMessage: string | null = $state(null);
+	let viewMode: ViewMode = $state(loadView());
+	let expanded: Set<string> = $state(new Set(['']));
+
+	function loadView(): ViewMode {
+		if (typeof localStorage === 'undefined') return 'tree';
+		const v = localStorage.getItem(VIEW_KEY);
+		return v === 'flat' ? 'flat' : 'tree';
+	}
+
+	function setView(v: ViewMode) {
+		viewMode = v;
+		if (typeof localStorage !== 'undefined') localStorage.setItem(VIEW_KEY, v);
+	}
+
+	interface TreeNode {
+		name: string;
+		fullPath: string;
+		children: Map<string, TreeNode>;
+		leafPath: string | null;
+	}
+
+	function buildTree(list: string[]): TreeNode {
+		const root: TreeNode = { name: '', fullPath: '', children: new Map(), leafPath: null };
+		for (const p of list) {
+			const segments = p.split('/').filter((s) => s.length > 0);
+			let node = root;
+			let acc = '';
+			for (let i = 0; i < segments.length; i++) {
+				const seg = segments[i];
+				acc = `${acc}/${seg}`;
+				let child = node.children.get(seg);
+				if (!child) {
+					child = { name: seg, fullPath: acc, children: new Map(), leafPath: null };
+					node.children.set(seg, child);
+				}
+				if (i === segments.length - 1) child.leafPath = p;
+				node = child;
+			}
+		}
+		return root;
+	}
+
+	let tree = $derived(buildTree(paths));
+
+	function toggleFolder(path: string) {
+		const next = new Set(expanded);
+		if (next.has(path)) next.delete(path);
+		else next.add(path);
+		expanded = next;
+	}
+
+	function expandAll() {
+		const all = new Set<string>(['']);
+		const walk = (n: TreeNode) => {
+			if (n.children.size > 0) all.add(n.fullPath);
+			for (const c of n.children.values()) walk(c);
+		};
+		walk(tree);
+		expanded = all;
+	}
+
+	function collapseAll() {
+		expanded = new Set(['']);
+	}
 
 	async function loadPaths() {
 		error = null;
@@ -23,9 +90,7 @@
 
 	onMount(loadPaths);
 
-	// Reload when the branch changes
 	$effect(() => {
-		// Track branch reactively
 		void branchStore.current;
 		selectedPath = null;
 		selectedValue = null;
@@ -63,13 +128,11 @@
 				reason: 'forgotten via Lens browse',
 				ref: branchStore.current
 			});
-			forgetMessage = `Forgot ${selectedPath}`;
 			const forgotten = selectedPath;
 			selectedPath = null;
 			selectedValue = null;
 			blame = null;
 			await loadPaths();
-			// Keep the message after paths reload
 			forgetMessage = `Forgot ${forgotten}`;
 		} catch (e) {
 			forgetMessage = e instanceof Error ? e.message : 'Forget failed';
@@ -78,14 +141,23 @@
 		}
 	}
 
-	// Pretty-print blame which may be an array, object, or null
 	function formatBlame(b: unknown): string {
 		if (b === null || b === undefined) return 'No provenance available';
 		return JSON.stringify(b, null, 2);
 	}
 </script>
 
-<h2>Browse Memory <span class="branch-label">on {branchStore.current}</span></h2>
+<h2>
+	Browse Memory <span class="branch-label">on {branchStore.current}</span>
+	<span class="view-toggle">
+		<button class="seg" class:active={viewMode === 'tree'} onclick={() => setView('tree')}>Tree</button>
+		<button class="seg" class:active={viewMode === 'flat'} onclick={() => setView('flat')}>Flat</button>
+	</span>
+	{#if viewMode === 'tree'}
+		<button class="link-btn" onclick={expandAll}>expand all</button>
+		<button class="link-btn" onclick={collapseAll}>collapse all</button>
+	{/if}
+</h2>
 
 {#if error}
 	<p class="error">{error}</p>
@@ -93,17 +165,20 @@
 
 <div class="browser">
 	<div class="path-list">
-		{#each paths as path}
-			<button
-				class="path-item"
-				class:selected={selectedPath === path}
-				onclick={() => selectPath(path)}
-			>
-				{path}
-			</button>
-		{/each}
 		{#if paths.length === 0}
 			<p class="empty">No paths found on {branchStore.current}. Start by remembering something.</p>
+		{:else if viewMode === 'flat'}
+			{#each paths as path}
+				<button
+					class="path-item"
+					class:selected={selectedPath === path}
+					onclick={() => selectPath(path)}
+				>
+					{path}
+				</button>
+			{/each}
+		{:else}
+			{@render renderChildren(tree, 0)}
 		{/if}
 	</div>
 
@@ -134,13 +209,98 @@
 	</div>
 </div>
 
+{#snippet renderChildren(node: TreeNode, depth: number)}
+	{#each [...node.children.values()].sort((a, b) => a.name.localeCompare(b.name)) as child}
+		{@const isFolder = child.children.size > 0}
+		{@const isExpanded = expanded.has(child.fullPath)}
+		<div class="row" style="padding-left: {depth * 0.9 + 0.25}rem">
+			{#if isFolder}
+				<button class="folder" onclick={() => toggleFolder(child.fullPath)}>
+					<span class="caret">{isExpanded ? '▾' : '▸'}</span>
+					<span class="folder-name">{child.name}/</span>
+					<span class="count">{countLeaves(child)}</span>
+				</button>
+			{:else if child.leafPath}
+				<button
+					class="path-item leaf"
+					class:selected={selectedPath === child.leafPath}
+					onclick={() => selectPath(child.leafPath!)}
+				>
+					{child.name}
+				</button>
+			{/if}
+		</div>
+		{#if isFolder && isExpanded}
+			{@render renderChildren(child, depth + 1)}
+		{/if}
+		{#if isFolder && isExpanded && child.leafPath}
+			<div class="row" style="padding-left: {(depth + 1) * 0.9 + 0.25}rem">
+				<button
+					class="path-item leaf"
+					class:selected={selectedPath === child.leafPath}
+					onclick={() => selectPath(child.leafPath!)}
+				>
+					(self)
+				</button>
+			</div>
+		{/if}
+	{/each}
+{/snippet}
+
+<script lang="ts" module>
+	function countLeaves(node: { children: Map<string, any>; leafPath: string | null }): number {
+		let n = node.leafPath ? 1 : 0;
+		for (const c of node.children.values()) n += countLeaves(c);
+		return n;
+	}
+</script>
+
 <style>
 	.branch-label {
 		font-size: 0.85rem;
 		font-family: monospace;
-		color: #3b82f6;
+		color: var(--accent);
 		font-weight: normal;
 		margin-left: 0.5rem;
+	}
+
+	.view-toggle {
+		display: inline-flex;
+		gap: 0;
+		margin-left: 1rem;
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		overflow: hidden;
+		vertical-align: middle;
+	}
+
+	.seg {
+		background: var(--bg-1);
+		border: none;
+		color: var(--text-2);
+		padding: 0.25rem 0.7rem;
+		font-size: 0.78rem;
+		cursor: pointer;
+	}
+	.seg:not(:last-child) {
+		border-right: 1px solid var(--border);
+	}
+	.seg.active {
+		background: var(--accent-bg);
+		color: var(--accent);
+	}
+
+	.link-btn {
+		background: none;
+		border: none;
+		color: var(--text-2);
+		font-size: 0.78rem;
+		cursor: pointer;
+		margin-left: 0.5rem;
+		text-decoration: underline;
+	}
+	.link-btn:hover {
+		color: var(--text-0);
 	}
 
 	.browser {
@@ -151,8 +311,8 @@
 	}
 
 	.path-list {
-		background: #111;
-		border: 1px solid #222;
+		background: var(--bg-1);
+		border: 1px solid var(--border);
 		border-radius: 8px;
 		overflow-y: auto;
 		padding: 0.5rem;
@@ -164,20 +324,61 @@
 		text-align: left;
 		background: none;
 		border: none;
-		color: #ccc;
-		padding: 0.5rem 0.75rem;
+		color: var(--text-1);
+		padding: 0.35rem 0.6rem;
 		cursor: pointer;
 		border-radius: 4px;
 		font-family: monospace;
-		font-size: 0.85rem;
+		font-size: 0.82rem;
 	}
 
-	.path-item:hover { background: #1a1a1a; }
-	.path-item.selected { background: #1e3a5f; color: #fff; }
+	.path-item:hover {
+		background: var(--bg-hover);
+	}
+	.path-item.selected {
+		background: var(--bg-active);
+		color: var(--text-0);
+	}
+
+	.row {
+		display: block;
+	}
+
+	.folder {
+		display: flex;
+		align-items: center;
+		gap: 0.35rem;
+		width: 100%;
+		background: none;
+		border: none;
+		color: var(--text-2);
+		padding: 0.3rem 0.6rem;
+		cursor: pointer;
+		border-radius: 4px;
+		font-family: monospace;
+		font-size: 0.82rem;
+		text-align: left;
+	}
+	.folder:hover {
+		background: var(--bg-hover);
+		color: var(--text-0);
+	}
+	.caret {
+		width: 0.8rem;
+		display: inline-block;
+		color: var(--text-3);
+	}
+	.folder-name {
+		flex: 1;
+	}
+	.count {
+		color: var(--text-3);
+		font-size: 0.72rem;
+	}
 
 	.detail {
-		background: #111;
-		border: 1px solid #222;
+		background: var(--bg-1);
+		border: 1px solid var(--border);
 		border-radius: 8px;
 		padding: 1rem 1.25rem;
 		overflow-y: auto;
@@ -194,12 +395,12 @@
 		margin: 0;
 		font-family: monospace;
 		font-size: 0.95rem;
-		color: #fff;
+		color: var(--text-0);
 		word-break: break-all;
 	}
 
 	.detail h4 {
-		color: #666;
+		color: var(--text-3);
 		font-size: 0.75rem;
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
@@ -210,26 +411,23 @@
 	.forget-btn {
 		background: #3a1a1a;
 		border: 1px solid #5a2a2a;
-		color: #ef4444;
+		color: var(--danger);
 		padding: 0.3rem 0.75rem;
 		border-radius: 4px;
 		font-size: 0.8rem;
 		cursor: pointer;
 		flex-shrink: 0;
 	}
-
 	.forget-btn:hover:not(:disabled) {
 		background: #4a2020;
-		border-color: #7a3030;
 	}
-
 	.forget-btn:disabled {
 		opacity: 0.5;
 		cursor: not-allowed;
 	}
 
 	.forget-message {
-		color: #22c55e;
+		color: var(--success);
 		font-size: 0.8rem;
 		margin: 0.5rem 0 0 0;
 		font-family: monospace;
@@ -242,12 +440,16 @@
 		word-break: break-word;
 		margin: 0;
 	}
-
 	pre.blame {
 		color: #8b9ab0;
 		font-size: 0.78rem;
 	}
 
-	.error { color: #ef4444; }
-	.empty, .hint { color: #555; }
+	.error {
+		color: var(--danger);
+	}
+	.empty,
+	.hint {
+		color: var(--text-3);
+	}
 </style>
