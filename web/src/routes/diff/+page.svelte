@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { getBranches, getDiff } from '$lib/api';
-	import type { DiffOp, DiffResponse } from '$lib/api';
+	import { getBranches, getDiff, mergeRefs } from '$lib/api';
+	import type { DiffOp, DiffResponse, MergeResult } from '$lib/api';
 	import { branchStore } from '$lib/branchStore.svelte';
 
 	let branches: string[] = $state(['main']);
@@ -10,6 +10,42 @@
 	let diff: DiffResponse | null = $state(null);
 	let loading = $state(false);
 	let error: string | null = $state(null);
+
+	// Merge UI state — merges refA → refB (matches the on-screen "From → To" arrow).
+	let merging = $state(false);
+	let mergeMessage: string | null = $state(null);
+	let mergeError: string | null = $state(null);
+	let mergeConflict: MergeResult | null = $state(null);
+
+	async function runMerge() {
+		if (!diff) return;
+		const description = prompt(
+			`Merge ${refA} → ${refB}. Commit description:`,
+			`Merge ${refA} into ${refB}`
+		);
+		if (description === null) return; // user cancelled
+		mergeError = null;
+		mergeMessage = null;
+		mergeConflict = null;
+		merging = true;
+		try {
+			const result = await mergeRefs({
+				source: refA,
+				target: refB,
+				description: description.trim() || `Merge ${refA} into ${refB}`
+			});
+			if (result.status === 'ok') {
+				mergeMessage = `Merged ${refA} → ${refB} as ${result.commit_id}. Re-running diff…`;
+				await runDiff();
+			} else {
+				mergeConflict = result;
+			}
+		} catch (e) {
+			mergeError = e instanceof Error ? e.message : 'Merge failed';
+		} finally {
+			merging = false;
+		}
+	}
 
 	onMount(async () => {
 		try {
@@ -107,7 +143,32 @@
 		<span class="count"><span class="op-del">−{summary.dels}</span> removed</span>
 		<span class="count"><span class="op-mod">~{summary.mods}</span> modified</span>
 		<span class="total">{diff.ops.length} total</span>
+		{#if diff.ops.length > 0}
+			<button
+				type="button"
+				class="merge-btn"
+				onclick={runMerge}
+				disabled={merging}
+				title="Merge {refA} → {refB} (you'll be prompted for a commit message)"
+			>
+				{merging ? 'Merging…' : `Merge ${refA} → ${refB}`}
+			</button>
+		{/if}
 	</div>
+
+	{#if mergeMessage}
+		<p class="merge-msg ok">{mergeMessage}</p>
+	{/if}
+	{#if mergeError}
+		<p class="merge-msg err">{mergeError}</p>
+	{/if}
+	{#if mergeConflict}
+		<div class="merge-conflict">
+			<h3>Merge conflict</h3>
+			<p>{refA} and {refB} have changes to overlapping paths. Resolve by hand on the source branch, then re-merge.</p>
+			<pre>{JSON.stringify(mergeConflict, null, 2)}</pre>
+		</div>
+	{/if}
 
 	{#if diff.ops.length === 0}
 		<p class="empty">No differences. {diff.ref_a} and {diff.ref_b} are at the same state.</p>
@@ -241,4 +302,73 @@
 
 	.error { color: #ef4444; }
 	.empty { color: #555; padding: 2rem; text-align: center; }
+
+	.merge-btn {
+		margin-left: 1rem;
+		background: var(--accent-bg);
+		border: 1px solid var(--accent);
+		color: var(--accent);
+		padding: 0.3rem 0.85rem;
+		border-radius: 4px;
+		font-size: 0.78rem;
+		cursor: pointer;
+		font-family: monospace;
+	}
+	.merge-btn:hover:not(:disabled) {
+		background: color-mix(in srgb, var(--accent) 25%, transparent);
+		color: var(--text-0);
+	}
+	.merge-btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	.merge-msg {
+		font-size: 0.85rem;
+		font-family: monospace;
+		margin: 0.5rem 0 1rem 0;
+		padding: 0.5rem 0.75rem;
+		border-radius: 4px;
+	}
+	.merge-msg.ok {
+		color: var(--success);
+		background: color-mix(in srgb, var(--success) 12%, transparent);
+		border: 1px solid color-mix(in srgb, var(--success) 30%, transparent);
+	}
+	.merge-msg.err {
+		color: var(--danger);
+		background: color-mix(in srgb, var(--danger) 12%, transparent);
+		border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
+	}
+
+	.merge-conflict {
+		margin: 0.5rem 0 1rem 0;
+		padding: 0.85rem 1rem;
+		background: color-mix(in srgb, var(--warning) 8%, transparent);
+		border: 1px solid color-mix(in srgb, var(--warning) 30%, transparent);
+		border-radius: 6px;
+	}
+	.merge-conflict h3 {
+		margin: 0 0 0.4rem 0;
+		color: var(--warning);
+		font-size: 0.95rem;
+	}
+	.merge-conflict p {
+		margin: 0 0 0.5rem 0;
+		color: var(--text-2);
+		font-size: 0.85rem;
+	}
+	.merge-conflict pre {
+		margin: 0;
+		padding: 0.6rem 0.8rem;
+		background: var(--bg-0);
+		border: 1px solid var(--border);
+		border-radius: 4px;
+		font-size: 0.75rem;
+		color: var(--text-1);
+		white-space: pre-wrap;
+		word-break: break-word;
+		max-height: 20rem;
+		overflow-y: auto;
+	}
 </style>

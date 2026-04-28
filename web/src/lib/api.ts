@@ -197,6 +197,52 @@ export async function getDiff(refA: string, refB: string): Promise<DiffResponse>
 	);
 }
 
+export interface MergeRequest {
+	source: string;
+	target: string;
+	description?: string;
+	reasoning?: string;
+}
+
+export interface MergeOk {
+	status: 'ok';
+	source: string;
+	target: string;
+	commit_id: string;
+}
+
+export interface MergeConflict {
+	status: 'conflict';
+	source: string;
+	target: string;
+	conflicts: unknown;
+}
+
+export type MergeResult = MergeOk | MergeConflict;
+
+/** POST /api/merge. Returns ok on success, conflict on 409. Throws for other errors. */
+export async function mergeRefs(req: MergeRequest): Promise<MergeResult> {
+	const resp = await fetch(`${API_BASE}/api/merge`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(req)
+	});
+	if (resp.status === 409) {
+		// Hub returns the conflict envelope as the response body (text-encoded JSON).
+		const text = await resp.text();
+		try {
+			return JSON.parse(text) as MergeConflict;
+		} catch {
+			throw new Error(`merge conflict (unparseable): ${text}`);
+		}
+	}
+	if (!resp.ok) {
+		const msg = await resp.text();
+		throw new Error(`merge failed: ${resp.status} ${msg}`);
+	}
+	return resp.json();
+}
+
 export interface CreateBranchRequest {
 	name: string;
 	from?: string;
