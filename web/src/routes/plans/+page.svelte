@@ -17,6 +17,31 @@
 	} from '$lib/plansApi';
 
 	let plans: Plan[] = $state([]);
+
+	// View controls — Tree groups the sidebar by effective status, Flat
+	// is the original single list. Persist so the choice sticks across
+	// reloads (mirrors /browse, /pinned).
+	type ViewMode = 'tree' | 'flat';
+	const VIEW_KEY = 'lens.plans.view';
+	function loadView(): ViewMode {
+		if (typeof localStorage === 'undefined') return 'tree';
+		const v = localStorage.getItem(VIEW_KEY);
+		return v === 'flat' ? 'flat' : 'tree';
+	}
+	let viewMode: ViewMode = $state(loadView());
+	function setView(v: ViewMode) {
+		viewMode = v;
+		if (typeof localStorage !== 'undefined') localStorage.setItem(VIEW_KEY, v);
+	}
+	let filter = $state('');
+	let collapsedGroups: Set<string> = $state(new Set());
+	function toggleGroup(g: string) {
+		const next = new Set(collapsedGroups);
+		if (next.has(g)) next.delete(g);
+		else next.add(g);
+		collapsedGroups = next;
+	}
+
 	let selectedName: string | null = $state(null);
 	let selectedPlan: Plan | null = $state(null);
 	let selectedTask: Task | null = $state(null);
@@ -234,6 +259,40 @@
 		}
 	}
 
+	// Apply the filter input (case-insensitive substring) to plan name
+	// + description. Empty filter is the identity.
+	let filteredPlans = $derived.by(() => {
+		const q = filter.trim().toLowerCase();
+		if (!q) return plans;
+		return plans.filter(
+			(p) =>
+				p.name.toLowerCase().includes(q) ||
+				(p.description ?? '').toLowerCase().includes(q)
+		);
+	});
+
+	// Tree-view: group by effective status. Order matters — agents
+	// almost always want "what's in flight right now" first.
+	const STATUS_ORDER = ['in_progress', 'active', 'completed', 'archived'] as const;
+	const STATUS_LABELS: Record<string, string> = {
+		in_progress: 'In progress',
+		active: 'Active (pending tasks)',
+		completed: 'Completed',
+		archived: 'Archived'
+	};
+	let groupedPlans = $derived.by(() => {
+		const buckets: Record<string, Plan[]> = {};
+		for (const p of filteredPlans) {
+			const eff = effectivePlanStatus(p);
+			(buckets[eff] ??= []).push(p);
+		}
+		return STATUS_ORDER.filter((s) => buckets[s]?.length).map((s) => ({
+			key: s,
+			label: STATUS_LABELS[s],
+			plans: buckets[s]
+		}));
+	});
+
 	function statusClass(s: string): string {
 		switch (s) {
 			case 'done':
@@ -278,27 +337,90 @@
 
 <div class="layout">
 	<aside class="plan-list">
+		<div class="sidebar-controls">
+			<div class="seg-group" role="tablist" aria-label="View mode">
+				<button
+					class="seg"
+					class:active={viewMode === 'tree'}
+					onclick={() => setView('tree')}
+					type="button"
+				>Grouped</button>
+				<button
+					class="seg"
+					class:active={viewMode === 'flat'}
+					onclick={() => setView('flat')}
+					type="button"
+				>Flat</button>
+			</div>
+			<input
+				type="search"
+				class="filter-input"
+				placeholder="Filter plans…"
+				bind:value={filter}
+				aria-label="Filter plans"
+			/>
+		</div>
+
 		{#if plans.length === 0}
 			<p class="empty">No plans yet.</p>
-		{/if}
-		{#each plans as plan}
-			{@const eff = effectivePlanStatus(plan)}
-			<button
-				class="plan-row"
-				class:selected={plan.name === selectedName}
-				onclick={() => selectPlan(plan.name)}
-			>
-				<div class="plan-name">{plan.name}</div>
-				<div class="plan-meta">
-					<span class="plan-status plan-status-{eff}">{eff.replace('_', ' ')}</span>
-					<span class="plan-counts">
-						{plan.task_counts.done}&check;
-						{plan.task_counts.in_progress}&gt;
-						{plan.task_counts.pending}&middot;
-					</span>
+		{:else if filteredPlans.length === 0}
+			<p class="empty">No plans match "{filter}".</p>
+		{:else if viewMode === 'tree'}
+			{#each groupedPlans as group}
+				{@const collapsed = collapsedGroups.has(group.key)}
+				<div class="status-group">
+					<button
+						class="status-header"
+						type="button"
+						onclick={() => toggleGroup(group.key)}
+						aria-expanded={!collapsed}
+					>
+						<span class="caret">{collapsed ? '▸' : '▾'}</span>
+						<span class="status-label plan-status-{group.key}">{group.label}</span>
+						<span class="status-count">{group.plans.length}</span>
+					</button>
+					{#if !collapsed}
+						{#each group.plans as plan}
+							{@const eff = effectivePlanStatus(plan)}
+							<button
+								class="plan-row"
+								class:selected={plan.name === selectedName}
+								onclick={() => selectPlan(plan.name)}
+							>
+								<div class="plan-name">{plan.name}</div>
+								<div class="plan-meta">
+									<span class="plan-status plan-status-{eff}">{eff.replace('_', ' ')}</span>
+									<span class="plan-counts">
+										{plan.task_counts.done}&check;
+										{plan.task_counts.in_progress}&gt;
+										{plan.task_counts.pending}&middot;
+									</span>
+								</div>
+							</button>
+						{/each}
+					{/if}
 				</div>
-			</button>
-		{/each}
+			{/each}
+		{:else}
+			{#each filteredPlans as plan}
+				{@const eff = effectivePlanStatus(plan)}
+				<button
+					class="plan-row"
+					class:selected={plan.name === selectedName}
+					onclick={() => selectPlan(plan.name)}
+				>
+					<div class="plan-name">{plan.name}</div>
+					<div class="plan-meta">
+						<span class="plan-status plan-status-{eff}">{eff.replace('_', ' ')}</span>
+						<span class="plan-counts">
+							{plan.task_counts.done}&check;
+							{plan.task_counts.in_progress}&gt;
+							{plan.task_counts.pending}&middot;
+						</span>
+					</div>
+				</button>
+			{/each}
+		{/if}
 	</aside>
 
 	<section class="plan-detail">
@@ -554,6 +676,82 @@
 		border-radius: 6px;
 		padding: 0.4rem;
 		background: #0d0d0d;
+	}
+	.sidebar-controls {
+		display: flex;
+		flex-direction: column;
+		gap: 0.4rem;
+		padding: 0.3rem 0.2rem 0.6rem;
+		border-bottom: 1px solid #1a1a1a;
+		margin-bottom: 0.4rem;
+	}
+	.seg-group {
+		display: inline-flex;
+		border: 1px solid #2a2a2a;
+		border-radius: 4px;
+		overflow: hidden;
+		align-self: stretch;
+	}
+	.seg {
+		flex: 1;
+		background: #0a0a0a;
+		border: 0;
+		color: #888;
+		padding: 0.3rem 0.6rem;
+		font-size: 0.78rem;
+		font-family: monospace;
+		cursor: pointer;
+	}
+	.seg:not(:last-child) {
+		border-right: 1px solid #2a2a2a;
+	}
+	.seg.active {
+		background: #1e3a5f;
+		color: #93c5fd;
+	}
+	.filter-input {
+		background: #0a0a0a;
+		border: 1px solid #333;
+		border-radius: 4px;
+		color: #e0e0e0;
+		padding: 0.35rem 0.55rem;
+		font-family: monospace;
+		font-size: 0.8rem;
+	}
+	.status-group {
+		margin-bottom: 0.4rem;
+	}
+	.status-header {
+		width: 100%;
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		background: transparent;
+		border: 0;
+		padding: 0.4rem 0.45rem;
+		color: #888;
+		cursor: pointer;
+		font-family: monospace;
+		font-size: 0.75rem;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		text-align: left;
+	}
+	.status-header:hover {
+		background: #131313;
+		border-radius: 4px;
+	}
+	.caret {
+		display: inline-block;
+		width: 0.8rem;
+		color: #555;
+	}
+	.status-label {
+		flex: 1;
+	}
+	.status-count {
+		color: #555;
+		font-size: 0.7rem;
 	}
 	.plan-row {
 		width: 100%;

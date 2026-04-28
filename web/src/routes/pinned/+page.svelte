@@ -7,6 +7,23 @@
 	let error: string | null = $state(null);
 	let loading = $state(true);
 
+	// View controls (mirror /browse: Tree groups by source, Flat is a
+	// single searchable list). Persist the choice across reloads so the
+	// agent's "I prefer flat" intent sticks.
+	type ViewMode = 'tree' | 'flat';
+	const VIEW_KEY = 'lens.pinned.view';
+	function loadView(): ViewMode {
+		if (typeof localStorage === 'undefined') return 'tree';
+		const v = localStorage.getItem(VIEW_KEY);
+		return v === 'flat' ? 'flat' : 'tree';
+	}
+	let viewMode: ViewMode = $state(loadView());
+	function setView(v: ViewMode) {
+		viewMode = v;
+		if (typeof localStorage !== 'undefined') localStorage.setItem(VIEW_KEY, v);
+	}
+	let filter = $state('');
+
 	// Upload form
 	let fileInput: HTMLInputElement;
 	let sourceName = $state('');
@@ -48,9 +65,39 @@
 
 		return Array.from(bySource.entries()).map(([source, sections]) => ({
 			source,
-			sections: Array.from(sections.values()).filter((s) => s.title && s.body)
+			sections: Array.from(sections.values()).filter((s) => s.title && s.body) as Array<{
+				title: string;
+				body: string;
+			}>
 		}));
 	});
+
+	// Apply the filter input (case-insensitive substring) to source +
+	// title + body. An empty filter shows everything.
+	let filtered = $derived.by(() => {
+		const q = filter.trim().toLowerCase();
+		if (!q) return grouped;
+		return grouped
+			.map((g) => ({
+				source: g.source,
+				sections: g.sections.filter(
+					(s) =>
+						g.source.toLowerCase().includes(q) ||
+						s.title.toLowerCase().includes(q) ||
+						s.body.toLowerCase().includes(q)
+				)
+			}))
+			.filter((g) => g.sections.length > 0);
+	});
+
+	// Flat view: every section as its own row, with source as a prefix
+	// chip. Useful when you know the title and don't want to scroll
+	// through groups.
+	let flatSections = $derived.by(() =>
+		filtered.flatMap((g) =>
+			g.sections.map((s) => ({ source: g.source, title: s.title, body: s.body }))
+		)
+	);
 
 	async function handleUpload(e: SubmitEvent) {
 		e.preventDefault();
@@ -125,19 +172,62 @@
 {:else if grouped.length === 0}
 	<p class="muted">No pinned memories yet. Upload a markdown file above or run <code>ctx prime ./docs/VISION.md --pin</code>.</p>
 {:else}
-	{#each grouped as group}
-		<div class="source-group">
-			<h3 class="source-name">{group.source}</h3>
-			<div class="sections">
-				{#each group.sections as section}
-					<div class="section">
-						<div class="section-title">{section.title}</div>
-						<div class="section-body">{section.body}</div>
-					</div>
-				{/each}
-			</div>
+	<div class="controls-bar">
+		<div class="seg-group" role="tablist" aria-label="View mode">
+			<button
+				class="seg"
+				class:active={viewMode === 'tree'}
+				onclick={() => setView('tree')}
+				type="button"
+			>Grouped</button>
+			<button
+				class="seg"
+				class:active={viewMode === 'flat'}
+				onclick={() => setView('flat')}
+				type="button"
+			>Flat</button>
 		</div>
-	{/each}
+		<input
+			type="search"
+			class="filter-input"
+			placeholder="Filter source / title / body…"
+			bind:value={filter}
+			aria-label="Filter pinned memories"
+		/>
+		<span class="result-count">
+			{flatSections.length} / {grouped.reduce((n, g) => n + g.sections.length, 0)}
+		</span>
+	</div>
+
+	{#if filtered.length === 0}
+		<p class="muted">No pinned memories match "{filter}".</p>
+	{:else if viewMode === 'tree'}
+		{#each filtered as group}
+			<div class="source-group">
+				<h3 class="source-name">{group.source}</h3>
+				<div class="sections">
+					{#each group.sections as section}
+						<div class="section">
+							<div class="section-title">{section.title}</div>
+							<div class="section-body">{section.body}</div>
+						</div>
+					{/each}
+				</div>
+			</div>
+		{/each}
+	{:else}
+		<div class="source-group flat-list">
+			{#each flatSections as s}
+				<div class="section flat-section">
+					<div class="section-title">
+						<span class="source-chip">{s.source}</span>
+						{s.title}
+					</div>
+					<div class="section-body">{s.body}</div>
+				</div>
+			{/each}
+		</div>
+	{/if}
 {/if}
 
 <style>
@@ -264,5 +354,69 @@
 
 	.error {
 		color: #ef4444;
+	}
+
+	/* View controls bar — mirrors /browse for consistency. */
+	.controls-bar {
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+		margin-bottom: 1rem;
+		flex-wrap: wrap;
+	}
+	.seg-group {
+		display: inline-flex;
+		border: 1px solid #2a2a2a;
+		border-radius: 6px;
+		overflow: hidden;
+	}
+	.seg {
+		background: #0d0d0d;
+		border: 0;
+		color: #888;
+		padding: 0.35rem 0.85rem;
+		font-size: 0.85rem;
+		font-family: monospace;
+		cursor: pointer;
+	}
+	.seg:not(:last-child) {
+		border-right: 1px solid #2a2a2a;
+	}
+	.seg.active {
+		background: #1e3a5f;
+		color: #93c5fd;
+	}
+	.filter-input {
+		flex: 1 1 16rem;
+		min-width: 12rem;
+		background: #0a0a0a;
+		border: 1px solid #333;
+		border-radius: 6px;
+		color: #e0e0e0;
+		padding: 0.4rem 0.7rem;
+		font-family: monospace;
+		font-size: 0.85rem;
+	}
+	.result-count {
+		color: #555;
+		font-family: monospace;
+		font-size: 0.78rem;
+	}
+	/* Flat-mode chip identifying the source for each row. */
+	.source-chip {
+		display: inline-block;
+		background: #1a2a3a;
+		color: #93c5fd;
+		font-family: monospace;
+		font-size: 0.7rem;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		padding: 0.05rem 0.45rem;
+		border-radius: 3px;
+		margin-right: 0.5rem;
+		vertical-align: middle;
+	}
+	.flat-section {
+		padding: 0.6rem 0.25rem;
 	}
 </style>
