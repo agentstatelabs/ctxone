@@ -34,7 +34,25 @@
 		viewMode = v;
 		if (typeof localStorage !== 'undefined') localStorage.setItem(VIEW_KEY, v);
 	}
+	// Filter input — what the user is typing — and the debounced
+	// "applied" value used for actual filtering. 150ms feels instant but
+	// avoids re-filtering 800-plan lists on every keystroke.
 	let filter = $state('');
+	let appliedFilter = $state('');
+	let filterTimer: ReturnType<typeof setTimeout> | null = null;
+	$effect(() => {
+		const v = filter;
+		if (filterTimer) clearTimeout(filterTimer);
+		filterTimer = setTimeout(() => {
+			appliedFilter = v;
+			page = 0; // reset to page 1 whenever the search changes
+		}, 150);
+	});
+
+	// Pagination — Flat view only. Tree view groups by status and
+	// would look broken if cut mid-bucket, so we leave it ungated.
+	const PAGE_SIZE = 25;
+	let page = $state(0);
 
 	// Sort controls (t-014). Default is the "what should I look at
 	// next" order — for plans that's status-first; for tasks it's
@@ -334,7 +352,7 @@
 	// Apply the filter input (case-insensitive substring) to plan name
 	// + description. Empty filter is the identity.
 	let filteredPlans = $derived.by(() => {
-		const q = filter.trim().toLowerCase();
+		const q = appliedFilter.trim().toLowerCase();
 		if (!q) return plans;
 		return plans.filter(
 			(p) =>
@@ -379,6 +397,17 @@
 		}
 	}
 	let sortedPlans = $derived.by(() => [...filteredPlans].sort(comparePlans));
+
+	// Page slice (Flat view only). Clamp page when filter shrinks the list.
+	let pageCount = $derived(Math.max(1, Math.ceil(sortedPlans.length / PAGE_SIZE)));
+	$effect(() => {
+		if (page >= pageCount) page = pageCount - 1;
+		if (page < 0) page = 0;
+	});
+	let pagedPlans = $derived.by(() => {
+		const start = page * PAGE_SIZE;
+		return sortedPlans.slice(start, start + PAGE_SIZE);
+	});
 
 	const PRIORITY_RANK: Record<string, number> = {
 		critical: 0,
@@ -544,7 +573,7 @@
 		{#if plans.length === 0}
 			<p class="empty">No plans yet.</p>
 		{:else if filteredPlans.length === 0}
-			<p class="empty">No plans match "{filter}".</p>
+			<p class="empty">No plans match "{appliedFilter}".</p>
 		{:else if viewMode === 'tree'}
 			{#each groupedPlans as group}
 				{@const collapsed = collapsedGroups.has(group.key)}
@@ -582,7 +611,7 @@
 				</div>
 			{/each}
 		{:else}
-			{#each sortedPlans as plan}
+			{#each pagedPlans as plan}
 				{@const eff = effectivePlanStatus(plan)}
 				<button
 					class="plan-row"
@@ -600,6 +629,28 @@
 					</div>
 				</button>
 			{/each}
+			{#if pageCount > 1}
+				<nav class="paginator" aria-label="Plans pagination">
+					<button
+						type="button"
+						class="page-btn"
+						onclick={() => (page = Math.max(0, page - 1))}
+						disabled={page === 0}
+					>‹ Prev</button>
+					<span class="page-info">
+						Page {page + 1} of {pageCount}
+						<span class="page-total">({sortedPlans.length} plans)</span>
+					</span>
+					<button
+						type="button"
+						class="page-btn"
+						onclick={() => (page = Math.min(pageCount - 1, page + 1))}
+						disabled={page >= pageCount - 1}
+					>Next ›</button>
+				</nav>
+			{:else if sortedPlans.length > 0}
+				<p class="page-total page-info-static">{sortedPlans.length} plans</p>
+			{/if}
 		{/if}
 	</aside>
 
@@ -1094,6 +1145,48 @@
 	}
 	.plan-row.selected {
 		background: var(--accent-bg);
+	}
+	.paginator {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.5rem;
+		padding: 0.5rem 0.4rem 0.2rem;
+		border-top: 1px solid var(--bg-hover);
+		margin-top: 0.4rem;
+	}
+	.page-btn {
+		background: var(--bg-0);
+		border: 1px solid var(--border);
+		color: var(--text-2);
+		padding: 0.25rem 0.55rem;
+		border-radius: 4px;
+		font-size: 0.75rem;
+		font-family: monospace;
+		cursor: pointer;
+	}
+	.page-btn:disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
+	}
+	.page-btn:not(:disabled):hover {
+		background: var(--bg-hover);
+		color: var(--text-0);
+	}
+	.page-info {
+		font-size: 0.72rem;
+		font-family: monospace;
+		color: var(--text-2);
+		text-align: center;
+	}
+	.page-total {
+		color: var(--text-3);
+	}
+	.page-info-static {
+		text-align: center;
+		font-size: 0.72rem;
+		font-family: monospace;
+		margin: 0.4rem 0 0;
 	}
 	.plan-name {
 		font-family: monospace;
