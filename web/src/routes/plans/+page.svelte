@@ -575,6 +575,27 @@
 		selectedPlan?.tasks ? [...selectedPlan.tasks].sort(compareTasks) : []
 	);
 
+	// Task-list pagination (t-001 of lens-enhancements-3). 50/page is
+	// roughly one screenful at typical row heights; prev/next is enough
+	// because deep-jumping in a single plan's task list is unusual.
+	const TASK_PAGE_SIZE = 50;
+	let taskPage = $state(0);
+	let taskPageCount = $derived(Math.max(1, Math.ceil(sortedTasks.length / TASK_PAGE_SIZE)));
+	$effect(() => {
+		if (taskPage >= taskPageCount) taskPage = taskPageCount - 1;
+		if (taskPage < 0) taskPage = 0;
+	});
+	// Reset on plan switch and sort change — both invalidate "page 3".
+	$effect(() => {
+		void selectedName;
+		void taskSort;
+		taskPage = 0;
+	});
+	let pagedTasks = $derived.by(() => {
+		const start = taskPage * TASK_PAGE_SIZE;
+		return sortedTasks.slice(start, start + TASK_PAGE_SIZE);
+	});
+
 	// Tree-view: group by effective status. Order matters — agents
 	// almost always want "what's in flight right now" first.
 	const STATUS_ORDER = ['in_progress', 'active', 'completed', 'archived'] as const;
@@ -845,7 +866,7 @@
 
 			{#if sortedTasks.length > 0}
 				<ul class="task-list">
-					{#each sortedTasks as task}
+					{#each pagedTasks as task}
 						{@const expanded = isExpanded(task.id)}
 						<li class="task-item">
 							<div
@@ -966,6 +987,28 @@
 						</li>
 					{/each}
 				</ul>
+				{#if taskPageCount > 1}
+					<nav class="paginator" aria-label="Tasks pagination">
+						<button
+							type="button"
+							class="page-btn"
+							onclick={() => (taskPage = Math.max(0, taskPage - 1))}
+							disabled={taskPage === 0}
+						>‹ Prev</button>
+						<span class="page-info">
+							Page {taskPage + 1} of {taskPageCount}
+							<span class="page-total">({sortedTasks.length} tasks)</span>
+						</span>
+						<button
+							type="button"
+							class="page-btn"
+							onclick={() => (taskPage = Math.min(taskPageCount - 1, taskPage + 1))}
+							disabled={taskPage >= taskPageCount - 1}
+						>Next ›</button>
+					</nav>
+				{:else if sortedTasks.length > TASK_PAGE_SIZE / 2}
+					<p class="page-total page-info-static">{sortedTasks.length} tasks</p>
+				{/if}
 			{:else}
 				<p class="empty">No tasks in this plan yet.</p>
 			{/if}
