@@ -410,6 +410,15 @@ enum Commands {
         #[arg(long)]
         reason: Option<String>,
     },
+    /// Trace decision provenance — find facts/decisions that mention a
+    /// phrase and return the blame chain (who wrote each, when, why) for
+    /// every match. Use this before reversing or debating a settled
+    /// decision, especially security/licensing/deployment choices.
+    /// Mirrors the `why_did_we` MCP tool.
+    WhyDidWe {
+        /// Decision phrase to search for, e.g. "BSL", "SQLite", "Postgres".
+        decision: String,
+    },
     /// Search the graph for a literal substring. Unlike recall, this is not
     /// LLM-oriented — it returns full matching paths and values, no budget.
     Search {
@@ -1447,6 +1456,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let id = v.get("commit_id").and_then(|x| x.as_str()).unwrap_or("");
                 println!("Forgot: {}", path);
                 println!("  commit: {}", id);
+            });
+        }
+        Commands::WhyDidWe { decision } => {
+            // Mirrors the `why_did_we` MCP tool: search_values + blame
+            // for every matching path. The HTTP route always reads from
+            // `main` (not the per-request branch) — that's intentional
+            // because decision provenance is global, not branch-scoped.
+            let url = format!(
+                "{}/api/memory/why_did_we?decision={}",
+                cli.server,
+                urlencoding(&decision),
+            );
+            let resp = match reqwest::get(&url).await {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(&cli.server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "why-did-we failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(cli.format, &parsed, |v| {
+                let traces = v["traces"].as_array().cloned().unwrap_or_default();
+                if traces.is_empty() {
+                    println!("No traced decisions for '{}'", decision);
+                    return;
+                }
+                println!(
+                    "Found {} trace{} for '{}':",
+                    traces.len(),
+                    if traces.len() == 1 { "" } else { "s" },
+                    decision
+                );
+                for t in &traces {
+                    let path = t["path"].as_str().unwrap_or("");
+                    let blame = &t["blame"];
+                    println!();
+                    println!("  {}", path);
+                    let by = blame["agent_id"].as_str().unwrap_or("?");
+                    let at = blame["timestamp"].as_str().unwrap_or("?");
+                    let why = blame["intent_description"].as_str().unwrap_or("");
+                    let category = blame["intent_category"].as_str().unwrap_or("");
+                    println!("    {} @ {} [{}]", by, at, category);
+                    if !why.is_empty() {
+                        println!("    {}", why);
+                    }
+                }
             });
         }
         Commands::Search { query, max } => {
