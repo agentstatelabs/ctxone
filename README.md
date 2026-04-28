@@ -117,6 +117,30 @@ CTXone tracks token usage in real-time. Every response includes how many tokens 
 sent vs how many would have been sent with flat memory loading — making the savings
 measurable and provable.
 
+## Durability
+
+Your memory db is the only thing in CTXone that can't be regenerated, so
+the hub treats it as the crown jewel. All defenses are on by default:
+
+- **Automatic snapshots** via SQLite `VACUUM INTO` — one on startup and
+  one every 30min (configurable: `CTXONE_BACKUP_INTERVAL_SECS`,
+  `CTXONE_BACKUP_KEEP`). Stored next to the db as `<db>.bak.<utc>`.
+- **PID lockfile** — a second hub against the same db refuses to start
+  with a clear error instead of silently corrupting writes.
+- **Inode-drift watchdog** — if the db file is `rm`'d or replaced under
+  a running hub, you get a WARN within 30s instead of silent loss at
+  next restart.
+- **Strict argv** — `ctxone-hub --version` and `--help` short-circuit
+  before any storage code runs, and a missing db file is only created
+  when you pass `--init`. Stray invocations no longer leave debris.
+- **Recovery** — `ctx db backup` triggers a snapshot on demand;
+  `ctx db restore <snapshot>` swaps one back in (current db is
+  preserved at `<db>.pre-restore-<ts>` first).
+- **`ctx doctor`** flags inode drift, stray db files, and missing
+  recent backups, with one-line fixes.
+
+Full details: [Data Safety](docs/DATA_SAFETY.md).
+
 ## Architecture
 
 ```
@@ -139,6 +163,7 @@ ctxone/
 - [Architecture](docs/ARCHITECTURE.md) — the mental model (pinned vs primed, how recall ranks, why O(log n))
 - [Token Savings](docs/TOKEN_SAVINGS.md) — how the ratio is computed, how to read it, how to maximize it
 - [Cookbook](docs/COOKBOOK.md) — git hooks, cron jobs, shell prompts, team setups
+- [Data Safety](docs/DATA_SAFETY.md) — snapshots, lockfile, watchdog, and `ctx db backup`/`restore`
 
 **Reference:**
 - [CLI Reference](docs/CLI_REFERENCE.md) — every `ctx` command, flag, and exit code

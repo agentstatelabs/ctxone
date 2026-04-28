@@ -126,6 +126,13 @@ const MAPPING = [
 		order: 2,
 		title: 'Troubleshooting',
 	},
+	{
+		src: 'DATA_SAFETY.md',
+		section: 'operating',
+		slug: 'data-safety',
+		order: 3,
+		title: 'Data safety',
+	},
 
 	// Why CtxOne (strategy)
 	{
