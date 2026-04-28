@@ -2699,6 +2699,161 @@ async fn run_doctor(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // -- db-safety checks (added by t-007 of the db-safety plan) --
+
+    // Common dev locations to scan. We don't recurse — these are the
+    // exact spots where ctxone.db has historically appeared.
+    let mut candidate_paths: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        candidate_paths.push(cwd.join("ctxone.db"));
+        candidate_paths.push(cwd.join("target").join("ctxone.db"));
+    }
+    if let Some(home) = dirs::home_dir() {
+        candidate_paths.push(home.join(".ctxone").join("memory.db"));
+    }
+    candidate_paths.push(std::path::PathBuf::from(&db));
+
+    // Dedupe (canonicalize where possible).
+    let mut seen = std::collections::HashSet::new();
+    candidate_paths.retain(|p| {
+        let key = p.canonicalize().unwrap_or_else(|_| p.clone());
+        seen.insert(key)
+    });
+
+    // Check 6 (a): inode drift — for each candidate <db>.lock with a
+    // live PID, the corresponding db file must exist. If the lock is
+    // present and the PID is alive but the db is gone, the hub is
+    // writing to an unlinked inode (the 2026-04-28 failure mode).
+    let mut drift_problems: Vec<String> = Vec::new();
+    for p in &candidate_paths {
+        // PathBuf::with_extension replaces rather than appends, so build
+        // the `<db>.lock` path manually to match server/src/lockfile.rs.
+        let lock = std::path::PathBuf::from(format!("{}.lock", p.display()));
+        if !lock.exists() {
+            continue;
+        }
+        let body = std::fs::read_to_string(&lock).unwrap_or_default();
+        let pid: Option<u32> = body
+            .split("\"pid\":")
+            .nth(1)
+            .map(|s| s.chars().take_while(|c| c.is_ascii_digit()).collect::<String>())
+            .and_then(|s| s.parse().ok());
+        let alive = pid
+            .map(|p| {
+                std::process::Command::new("kill")
+                    .args(["-0", &p.to_string()])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        if alive && !p.exists() {
+            drift_problems.push(format!(
+                "{} (lock pid {} alive, db missing)",
+                p.display(),
+                pid.unwrap_or(0)
+            ));
+        }
+    }
+    let drift_ok = drift_problems.is_empty();
+    checks.push((
+        "db inode drift".to_string(),
+        drift_ok,
+        if drift_ok {
+            "no live hubs with missing db files".to_string()
+        } else {
+            drift_problems.join("; ")
+        },
+    ));
+    if !drift_ok {
+        suggestions.push(
+            "Restart the hub immediately and restore from <db>.bak.<utc> — \
+             writes are hitting an orphaned inode and will be lost on next restart"
+                .to_string(),
+        );
+    }
+
+    // Check 7 (b): multiple ctxone.db files in dev locations. One is
+    // the canonical home; more than one means somebody (often us) ran
+    // the hub from the wrong cwd and birthed a stub.
+    let stray_paths: Vec<std::path::PathBuf> = candidate_paths
+        .iter()
+        .filter(|p| p.exists())
+        .cloned()
+        .collect();
+    let stray_ok = stray_paths.len() <= 1;
+    checks.push((
+        "stray db files".to_string(),
+        stray_ok,
+        if stray_ok {
+            format!("{} db file present", stray_paths.len())
+        } else {
+            format!(
+                "{} db files in dev locations: {}",
+                stray_paths.len(),
+                stray_paths
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        },
+    ));
+    if !stray_ok {
+        suggestions.push(
+            "Multiple ctxone.db files exist — confirm which one the hub is using \
+             (check the --path arg) and remove the stragglers"
+                .to_string(),
+        );
+    }
+
+    // Check 8 (c): at least one snapshot from the last 24h. Looks for
+    // <db>.bak.* siblings of each existing candidate db.
+    let now = std::time::SystemTime::now();
+    let one_day = std::time::Duration::from_secs(86_400);
+    let mut recent_count = 0usize;
+    for p in &stray_paths {
+        let parent = p.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let basename = p
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let prefix = format!("{}.bak.", basename);
+        if let Ok(entries) = std::fs::read_dir(parent) {
+            for e in entries.flatten() {
+                if !e.file_name().to_string_lossy().starts_with(&prefix) {
+                    continue;
+                }
+                if let Ok(meta) = e.metadata()
+                    && let Ok(mtime) = meta.modified()
+                    && now.duration_since(mtime).map(|d| d < one_day).unwrap_or(false)
+                {
+                    recent_count += 1;
+                }
+            }
+        }
+    }
+    let backups_ok = !stray_paths.is_empty() && recent_count > 0;
+    checks.push((
+        "recent backups".to_string(),
+        backups_ok || stray_paths.is_empty(),
+        if stray_paths.is_empty() {
+            "no db files to back up".to_string()
+        } else if backups_ok {
+            format!("{} snapshot(s) within last 24h", recent_count)
+        } else {
+            "no .bak.* siblings within last 24h".to_string()
+        },
+    ));
+    if !stray_paths.is_empty() && !backups_ok {
+        suggestions.push(
+            "Take a snapshot now: ctx db backup  (or start the hub — startup snapshots are automatic)"
+                .to_string(),
+        );
+    }
+
     // Build structured output
     let checks_json: Vec<Value> = checks
         .iter()

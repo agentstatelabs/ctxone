@@ -20,7 +20,7 @@
 //! create-if-missing open so two simultaneous hubs racing for the
 //! same db get a deterministic loser. The watchdog never panics.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -215,6 +215,7 @@ pub fn spawn_watchdog(db_path: String, baseline: DbFingerprint, interval_secs: u
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
 
     fn unique_db_path(tag: &str) -> PathBuf {
         let nanos = SystemTime::now()
