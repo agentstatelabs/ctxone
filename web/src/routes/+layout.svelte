@@ -5,6 +5,7 @@
 	import { getBranches, createBranch } from '$lib/api';
 	import { branchStore } from '$lib/branchStore.svelte';
 	import { themeStore, THEMES, type ThemeId } from '$lib/themeStore.svelte';
+	import { refreshStore, REFRESH_INTERVAL_MS } from '$lib/refreshStore.svelte';
 	import '../app.css';
 
 	let { children }: { children: Snippet } = $props();
@@ -153,6 +154,18 @@
 			{/each}
 		</nav>
 
+		<div class="refresh-toggle">
+			<label class="refresh-row">
+				<input
+					type="checkbox"
+					checked={refreshStore.enabled}
+					onchange={(e) => (refreshStore.enabled = (e.currentTarget as HTMLInputElement).checked)}
+				/>
+				<span>Auto-refresh</span>
+			</label>
+			<span class="refresh-hint">every {Math.round(REFRESH_INTERVAL_MS / 1000)}s</span>
+		</div>
+
 		<div class="theme-picker">
 			<label for="theme-select">Theme</label>
 			<select
@@ -233,9 +246,35 @@
 	}
 
 	.theme-picker {
+		padding-top: 1rem;
+		border-top: 1px solid var(--border);
+	}
+
+	.refresh-toggle {
 		margin-top: auto;
 		padding-top: 1rem;
 		border-top: 1px solid var(--border);
+	}
+
+	.refresh-row {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		color: var(--text-2);
+		font-size: 0.85rem;
+		cursor: pointer;
+	}
+
+	.refresh-row input {
+		accent-color: var(--accent);
+	}
+
+	.refresh-hint {
+		display: block;
+		font-size: 0.7rem;
+		color: var(--text-3);
+		margin-top: 0.2rem;
+		padding-left: 1.4rem;
 	}
 
 	.new-branch-btn {

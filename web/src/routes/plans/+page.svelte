@@ -15,6 +15,7 @@
 		type Priority,
 		type ProofKind
 	} from '$lib/plansApi';
+	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 
 	let plans: Plan[] = $state([]);
 
@@ -158,6 +159,13 @@
 	}
 
 	onMount(loadPlans);
+
+	// Refresh both the list and the open plan on each tick — agents
+	// looking at a plan want task-status changes to surface promptly.
+	const auto = useAutoRefresh(async () => {
+		await loadPlans();
+		if (selectedName) await refreshSelected();
+	});
 
 	$effect(() => {
 		void branchStore.current;
@@ -471,6 +479,7 @@
 
 <h2>
 	Plans <span class="branch-label">on {branchStore.current}</span>
+	<span class="ago">refreshed {formatAgo(auto.lastRefreshed)}</span>
 	<button class="btn-sm" onclick={() => (showCreate = !showCreate)}>
 		{showCreate ? 'Cancel' : '+ New plan'}
 	</button>
@@ -877,6 +886,13 @@
 		font-family: monospace;
 		font-weight: normal;
 		font-size: 0.9rem;
+	}
+	.ago {
+		font-size: 0.75rem;
+		font-family: monospace;
+		color: var(--text-3);
+		font-weight: normal;
+		margin-left: 0.75rem;
 	}
 	.error {
 		background: color-mix(in srgb, var(--danger) 18%, transparent);

@@ -3,6 +3,7 @@
 	import { getBranches, getDiff, mergeRefs } from '$lib/api';
 	import type { DiffOp, DiffResponse, MergeResult } from '$lib/api';
 	import { branchStore } from '$lib/branchStore.svelte';
+	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 
 	let branches: string[] = $state(['main']);
 	let refA = $state('main');
@@ -59,6 +60,12 @@
 		refB = branchStore.current !== 'main' ? branchStore.current : branches[1] ?? 'main';
 	});
 
+	// Re-run the diff on each tick if the user has chosen two different
+	// refs; otherwise just bump the timestamp so the indicator stays live.
+	const auto = useAutoRefresh(async () => {
+		if (refA && refB && refA !== refB) await runDiff();
+	});
+
 	async function runDiff() {
 		if (refA === refB) {
 			error = 'Pick two different branches';
@@ -107,7 +114,10 @@
 	}
 </script>
 
-<h2>Diff Branches</h2>
+<h2>
+	Diff Branches
+	<span class="ago">refreshed {formatAgo(auto.lastRefreshed)}</span>
+</h2>
 
 <div class="controls">
 	<label>
@@ -370,5 +380,13 @@
 		word-break: break-word;
 		max-height: 20rem;
 		overflow-y: auto;
+	}
+
+	.ago {
+		font-size: 0.75rem;
+		font-family: monospace;
+		color: var(--text-3);
+		font-weight: normal;
+		margin-left: 0.75rem;
 	}
 </style>

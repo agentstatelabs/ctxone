@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 
 	const API_BASE: string = import.meta.env.VITE_CTXONE_API_URL
 		?? (import.meta.env.DEV ? 'http://localhost:3001' : '');
@@ -72,6 +73,11 @@
 
 	onMount(load);
 
+	const auto = useAutoRefresh(async () => {
+		await load();
+		if (selected) await loadMemories(selected.session_id);
+	});
+
 	function ratioColor(r: number): string {
 		if (r >= 5) return 'var(--success)';
 		if (r >= 2) return 'var(--success)';
@@ -90,6 +96,7 @@
 		<button class="refresh-btn" onclick={load} disabled={loading}>
 			{loading ? 'Loading…' : 'Refresh'}
 		</button>
+		<span class="ago">refreshed {formatAgo(auto.lastRefreshed)}</span>
 	</div>
 
 	{#if error}
@@ -239,6 +246,13 @@
 
 	.refresh-btn:hover:not(:disabled) { color: var(--text-0); border-color: var(--text-3); }
 	.refresh-btn:disabled { opacity: 0.5; cursor: default; }
+
+	.ago {
+		font-size: 0.75rem;
+		font-family: monospace;
+		color: var(--text-3);
+		margin-left: auto;
+	}
 
 	.error { color: var(--danger); }
 	.muted { color: var(--text-3); font-size: 0.9rem; }

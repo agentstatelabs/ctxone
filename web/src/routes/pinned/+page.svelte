@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { getPinned, primeSections, parseMarkdownSections } from '$lib/api';
 	import type { PinnedItem } from '$lib/api';
+	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 
 	let pinned: PinnedItem[] = $state([]);
 	let error: string | null = $state(null);
@@ -43,6 +44,8 @@
 	}
 
 	onMount(refresh);
+
+	const auto = useAutoRefresh(refresh);
 
 	// Group pinned items by source (everything between /memory/pinned/ and the last segment)
 	let grouped = $derived.by(() => {
@@ -134,7 +137,10 @@
 	}
 </script>
 
-<h2>Pinned Memory</h2>
+<h2>
+	Pinned Memory
+	<span class="ago">refreshed {formatAgo(auto.lastRefreshed)}</span>
+</h2>
 <p class="intro">
 	Pinned memories are always included in every <code>recall</code> response, regardless of the
 	topic. Use them for critical project context.
@@ -418,5 +424,12 @@
 	}
 	.flat-section {
 		padding: 0.6rem 0.25rem;
+	}
+	.ago {
+		font-size: 0.75rem;
+		font-family: monospace;
+		color: var(--text-3);
+		font-weight: normal;
+		margin-left: 0.75rem;
 	}
 </style>

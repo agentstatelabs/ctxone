@@ -2,6 +2,7 @@
 	import { getLog } from '$lib/api';
 	import type { CommitEntry } from '$lib/api';
 	import { branchStore } from '$lib/branchStore.svelte';
+	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 
 	let commits: CommitEntry[] = $state([]);
 	let selectedCommit: CommitEntry | null = $state(null);
@@ -23,9 +24,14 @@
 		void branchStore.current;
 		loadLog();
 	});
+
+	const auto = useAutoRefresh(loadLog);
 </script>
 
-<h2>Commit History <span class="branch-label">on {branchStore.current}</span></h2>
+<h2>
+	Commit History <span class="branch-label">on {branchStore.current}</span>
+	<span class="ago">refreshed {formatAgo(auto.lastRefreshed)}</span>
+</h2>
 
 {#if error}
 	<p class="error">{error}</p>
@@ -139,5 +145,13 @@
 		color: var(--accent);
 		font-weight: normal;
 		margin-left: 0.5rem;
+	}
+
+	.ago {
+		font-size: 0.75rem;
+		font-family: monospace;
+		color: var(--text-3);
+		font-weight: normal;
+		margin-left: 0.75rem;
 	}
 </style>

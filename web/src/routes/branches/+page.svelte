@@ -4,6 +4,7 @@
 	import { getBranches, createBranch } from '$lib/api';
 	import { listPlans } from '$lib/plansApi';
 	import { branchStore } from '$lib/branchStore.svelte';
+	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 
 	interface BranchRow {
 		name: string;
@@ -47,6 +48,8 @@
 
 	onMount(load);
 
+	const auto = useAutoRefresh(load);
+
 	function activate(name: string) {
 		branchStore.current = name;
 	}
@@ -81,6 +84,7 @@
 <div class="page">
 	<header class="page-header">
 		<h1>Branches</h1>
+		<span class="ago">refreshed {formatAgo(auto.lastRefreshed)}</span>
 		<button class="btn" onclick={() => (showCreate = !showCreate)}>
 			{showCreate ? 'Cancel' : '+ New branch'}
 		</button>
@@ -163,6 +167,13 @@
 		align-items: center;
 		gap: 1rem;
 		margin-bottom: 1.5rem;
+	}
+
+	.ago {
+		font-size: 0.75rem;
+		font-family: monospace;
+		color: var(--text-3);
+		margin-right: auto;
 	}
 
 	h1 {

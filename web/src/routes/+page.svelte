@@ -4,6 +4,7 @@
 	import type { StatsResponse, CommitEntry, TokenStats, SessionSnapshot } from '$lib/api';
 	import { listPlans, type Plan } from '$lib/plansApi';
 	import LlmConsumptionPanel from '$lib/LlmConsumptionPanel.svelte';
+	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 
 	let connected = $state(false);
 	let stats: StatsResponse | null = $state(null);
@@ -49,6 +50,11 @@
 		}
 	});
 
+	const auto = useAutoRefresh(async () => {
+		connected = await getHealth();
+		if (connected) await refresh();
+	});
+
 	async function handleRemember(e: SubmitEvent) {
 		e.preventDefault();
 		if (!factText.trim()) return;
@@ -72,7 +78,10 @@
 	}
 </script>
 
-<h2>Dashboard</h2>
+<h2>
+	Dashboard
+	<span class="ago">refreshed {formatAgo(auto.lastRefreshed)}</span>
+</h2>
 
 <div class="status">
 	<div class="indicator" class:connected class:disconnected={!connected}></div>
@@ -386,5 +395,13 @@
 		font-size: 0.85rem;
 		margin: 0.5rem 0 0 0;
 		font-family: monospace;
+	}
+
+	.ago {
+		font-size: 0.75rem;
+		font-family: monospace;
+		color: var(--text-3);
+		font-weight: normal;
+		margin-left: 0.75rem;
 	}
 </style>

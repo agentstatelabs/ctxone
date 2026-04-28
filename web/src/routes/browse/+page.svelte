@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { listPaths, getState, getBlame, forget } from '$lib/api';
 	import { branchStore } from '$lib/branchStore.svelte';
+	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 
 	type ViewMode = 'tree' | 'flat';
 	const VIEW_KEY = 'ctxone:browseView';
@@ -90,6 +91,8 @@
 
 	onMount(loadPaths);
 
+	const auto = useAutoRefresh(loadPaths);
+
 	$effect(() => {
 		void branchStore.current;
 		selectedPath = null;
@@ -157,6 +160,7 @@
 		<button class="link-btn" onclick={expandAll}>expand all</button>
 		<button class="link-btn" onclick={collapseAll}>collapse all</button>
 	{/if}
+	<span class="ago">refreshed {formatAgo(auto.lastRefreshed)}</span>
 </h2>
 
 {#if error}
@@ -301,6 +305,14 @@
 	}
 	.link-btn:hover {
 		color: var(--text-0);
+	}
+
+	.ago {
+		font-size: 0.75rem;
+		font-family: monospace;
+		color: var(--text-3);
+		font-weight: normal;
+		margin-left: 0.75rem;
 	}
 
 	.browser {

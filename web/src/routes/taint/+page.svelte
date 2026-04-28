@@ -7,6 +7,7 @@
 		removeTaint
 	} from '$lib/teamApi';
 	import type { TaintRecord, TaintCheck } from '$lib/teamApi';
+	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 
 	// ── Active taints ────────────────────────────────────────────────────────
 	let taints: TaintRecord[] = $state([]);
@@ -26,6 +27,8 @@
 	}
 
 	onMount(refresh);
+
+	const auto = useAutoRefresh(refresh);
 
 	// ── Taint check ──────────────────────────────────────────────────────────
 	let checkPath = $state('');
@@ -240,7 +243,10 @@
 	}
 </script>
 
-<h2>Taint / Quarantine / Watch</h2>
+<h2>
+	Taint / Quarantine / Watch
+	<span class="ago">refreshed {formatAgo(auto.lastRefreshed)}</span>
+</h2>
 
 <!-- ── Panel 1: Active Taints ──────────────────────────────────────────────── -->
 <section class="panel">
@@ -919,5 +925,13 @@
 		align-items: center;
 		gap: 0.75rem;
 		flex-wrap: wrap;
+	}
+
+	.ago {
+		font-size: 0.75rem;
+		font-family: monospace;
+		color: var(--text-3);
+		font-weight: normal;
+		margin-left: 0.75rem;
 	}
 </style>
