@@ -409,8 +409,8 @@
 	}
 
 	.forget-btn {
-		background: #3a1a1a;
-		border: 1px solid #5a2a2a;
+		background: color-mix(in srgb, var(--danger) 18%, transparent);
+		border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
 		color: var(--danger);
 		padding: 0.3rem 0.75rem;
 		border-radius: 4px;
@@ -419,7 +419,7 @@
 		flex-shrink: 0;
 	}
 	.forget-btn:hover:not(:disabled) {
-		background: #4a2020;
+		background: color-mix(in srgb, var(--danger) 28%, transparent);
 	}
 	.forget-btn:disabled {
 		opacity: 0.5;
@@ -434,14 +434,14 @@
 	}
 
 	pre {
-		color: #a5d6a7;
+		color: var(--success);
 		font-size: 0.85rem;
 		white-space: pre-wrap;
 		word-break: break-word;
 		margin: 0;
 	}
 	pre.blame {
-		color: #8b9ab0;
+		color: var(--text-2);
 		font-size: 0.78rem;
 	}
 

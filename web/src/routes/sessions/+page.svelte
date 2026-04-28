@@ -73,10 +73,10 @@
 	onMount(load);
 
 	function ratioColor(r: number): string {
-		if (r >= 5) return '#4ade80';
-		if (r >= 2) return '#86efac';
-		if (r >= 1.2) return '#93c5fd';
-		return '#888';
+		if (r >= 5) return 'var(--success)';
+		if (r >= 2) return 'var(--success)';
+		if (r >= 1.2) return 'var(--accent)';
+		return 'var(--text-2)';
 	}
 
 	function fmt(n: number): string {
@@ -128,7 +128,7 @@
 							<div class="stat-label">Tokens used</div>
 						</div>
 						<div class="stat">
-							<div class="stat-value" style="color: #4ade80">{fmt(selected.session_tokens_saved)}</div>
+							<div class="stat-value" style="color: var(--success)">{fmt(selected.session_tokens_saved)}</div>
 							<div class="stat-label">Tokens saved</div>
 						</div>
 						<div class="stat">
@@ -228,20 +228,20 @@
 	h1 { margin: 0; font-size: 1.8rem; }
 
 	.refresh-btn {
-		background: #1a1a1a;
-		border: 1px solid #333;
-		color: #888;
+		background: var(--bg-hover);
+		border: 1px solid var(--border);
+		color: var(--text-2);
 		padding: 0.35rem 0.75rem;
 		border-radius: 6px;
 		cursor: pointer;
 		font-size: 0.85rem;
 	}
 
-	.refresh-btn:hover:not(:disabled) { color: #fff; border-color: #555; }
+	.refresh-btn:hover:not(:disabled) { color: var(--text-0); border-color: var(--text-3); }
 	.refresh-btn:disabled { opacity: 0.5; cursor: default; }
 
-	.error { color: #ef4444; }
-	.muted { color: #555; font-size: 0.9rem; }
+	.error { color: var(--danger); }
+	.muted { color: var(--text-3); font-size: 0.9rem; }
 
 	.layout {
 		display: grid;
@@ -258,18 +258,18 @@
 
 	.session-row {
 		width: 100%;
-		background: #111;
-		border: 1px solid #222;
+		background: var(--bg-1);
+		border: 1px solid var(--border);
 		border-radius: 8px;
 		padding: 0.75rem 1rem;
 		text-align: left;
 		cursor: pointer;
-		color: #e0e0e0;
+		color: var(--text-1);
 		transition: all 0.15s;
 	}
 
-	.session-row:hover { border-color: #444; background: #161616; }
-	.session-row.active { border-color: #3b82f6; background: #0f1f3d; }
+	.session-row:hover { border-color: var(--text-3); background: var(--bg-1); }
+	.session-row.active { border-color: var(--border-hi); background: var(--accent-bg); }
 
 	.session-name {
 		font-family: monospace;
@@ -282,14 +282,14 @@
 		display: flex;
 		justify-content: space-between;
 		font-size: 0.78rem;
-		color: #666;
+		color: var(--text-3);
 	}
 
 	.ratio { font-weight: 600; }
 
 	.detail {
-		background: #111;
-		border: 1px solid #222;
+		background: var(--bg-1);
+		border: 1px solid var(--border);
 		border-radius: 8px;
 		padding: 1.5rem;
 	}
@@ -313,7 +313,7 @@
 		font-size: 0.9rem;
 		text-transform: uppercase;
 		letter-spacing: 0.05em;
-		color: #666;
+		color: var(--text-3);
 	}
 
 	.stat-grid {
@@ -323,8 +323,8 @@
 	}
 
 	.stat {
-		background: #0a0a0a;
-		border: 1px solid #1e1e1e;
+		background: var(--bg-0);
+		border: 1px solid var(--border);
 		border-radius: 8px;
 		padding: 1rem;
 	}
@@ -332,21 +332,21 @@
 	.stat-value {
 		font-size: 1.5rem;
 		font-weight: 700;
-		color: #fff;
+		color: var(--text-0);
 	}
 
 	.stat-label {
 		font-size: 0.72rem;
 		text-transform: uppercase;
 		letter-spacing: 0.06em;
-		color: #555;
+		color: var(--text-3);
 		margin-top: 0.25rem;
 	}
 
 	.model-info {
 		margin-top: 1rem;
 		font-size: 0.85rem;
-		color: #666;
+		color: var(--text-3);
 	}
 
 	.hint { margin-top: 1rem; }
@@ -361,8 +361,8 @@
 	}
 
 	.memory-item {
-		background: #0a0a0a;
-		border: 1px solid #1e1e1e;
+		background: var(--bg-0);
+		border: 1px solid var(--border);
 		border-radius: 6px;
 		padding: 0.6rem 0.8rem;
 	}
@@ -372,17 +372,17 @@
 		gap: 0.75rem;
 		align-items: center;
 		font-size: 0.75rem;
-		color: #666;
+		color: var(--text-3);
 		margin-bottom: 0.3rem;
 	}
 
-	.memory-id { color: #888; }
-	.memory-agent { color: #93c5fd; }
+	.memory-id { color: var(--text-2); }
+	.memory-agent { color: var(--accent); }
 	.memory-time { margin-left: auto; }
 
 	.memory-desc {
 		font-size: 0.88rem;
-		color: #e0e0e0;
+		color: var(--text-1);
 		line-height: 1.4;
 	}
 
@@ -394,17 +394,17 @@
 	}
 
 	.tag {
-		background: #1a1a1a;
-		border: 1px solid #2a2a2a;
-		color: #888;
+		background: var(--bg-hover);
+		border: 1px solid var(--border);
+		color: var(--text-2);
 		font-size: 0.7rem;
 		padding: 0.1rem 0.4rem;
 		border-radius: 3px;
 	}
 
 	code {
-		background: #1a1a1a;
-		border: 1px solid #2a2a2a;
+		background: var(--bg-hover);
+		border: 1px solid var(--border);
 		padding: 0.1em 0.35em;
 		border-radius: 3px;
 		font-size: 0.85em;

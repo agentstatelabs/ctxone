@@ -232,22 +232,22 @@
 
 <style>
 	.intro {
-		color: #888;
+		color: var(--text-2);
 		margin-bottom: 2rem;
 		max-width: 60ch;
 	}
 
 	code {
-		background: #1a1a1a;
-		color: #a5d6a7;
+		background: var(--bg-hover);
+		color: var(--success);
 		padding: 0.1rem 0.4rem;
 		border-radius: 3px;
 		font-size: 0.85em;
 	}
 
 	.upload {
-		background: #111;
-		border: 1px solid #222;
+		background: var(--bg-1);
+		border: 1px solid var(--border);
 		border-radius: 8px;
 		padding: 1.25rem 1.5rem;
 		margin-bottom: 2rem;
@@ -256,7 +256,7 @@
 	.upload h3 {
 		margin: 0 0 0.75rem 0;
 		font-size: 1rem;
-		color: #fff;
+		color: var(--text-0);
 	}
 
 	.upload-row {
@@ -267,15 +267,15 @@
 
 	.upload input[type='text'] {
 		flex: 1;
-		background: #0a0a0a;
-		border: 1px solid #333;
+		background: var(--bg-0);
+		border: 1px solid var(--border);
 		border-radius: 6px;
-		color: #e0e0e0;
+		color: var(--text-1);
 		padding: 0.5rem 0.75rem;
 	}
 
 	.upload input[type='file'] {
-		color: #888;
+		color: var(--text-2);
 		flex: 1;
 	}
 
@@ -283,16 +283,16 @@
 		display: flex;
 		align-items: center;
 		gap: 0.5rem;
-		color: #aaa;
+		color: var(--text-2);
 		margin-bottom: 0.75rem;
 		cursor: pointer;
 	}
 
 	.upload button {
-		background: #3b82f6;
+		background: var(--accent);
 		border: none;
 		border-radius: 6px;
-		color: #fff;
+		color: var(--text-0);
 		padding: 0.5rem 1.25rem;
 		cursor: pointer;
 	}
@@ -303,15 +303,15 @@
 	}
 
 	.message {
-		color: #22c55e;
+		color: var(--success);
 		font-size: 0.85rem;
 		margin: 0.75rem 0 0 0;
 		font-family: monospace;
 	}
 
 	.source-group {
-		background: #111;
-		border: 1px solid #222;
+		background: var(--bg-1);
+		border: 1px solid var(--border);
 		border-radius: 8px;
 		padding: 1rem 1.5rem;
 		margin-bottom: 1.5rem;
@@ -319,7 +319,7 @@
 
 	.source-name {
 		margin: 0 0 1rem 0;
-		color: #3b82f6;
+		color: var(--accent);
 		font-size: 1rem;
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
@@ -328,7 +328,7 @@
 
 	.section {
 		padding: 0.75rem 0;
-		border-bottom: 1px solid #1a1a1a;
+		border-bottom: 1px solid var(--bg-hover);
 	}
 
 	.section:last-child {
@@ -336,24 +336,24 @@
 	}
 
 	.section-title {
-		color: #fff;
+		color: var(--text-0);
 		font-weight: 600;
 		margin-bottom: 0.25rem;
 	}
 
 	.section-body {
-		color: #aaa;
+		color: var(--text-2);
 		font-size: 0.9rem;
 		white-space: pre-wrap;
 		line-height: 1.5;
 	}
 
 	.muted {
-		color: #555;
+		color: var(--text-3);
 	}
 
 	.error {
-		color: #ef4444;
+		color: var(--danger);
 	}
 
 	/* View controls bar — mirrors /browse for consistency. */
@@ -366,47 +366,47 @@
 	}
 	.seg-group {
 		display: inline-flex;
-		border: 1px solid #2a2a2a;
+		border: 1px solid var(--border);
 		border-radius: 6px;
 		overflow: hidden;
 	}
 	.seg {
-		background: #0d0d0d;
+		background: var(--bg-1);
 		border: 0;
-		color: #888;
+		color: var(--text-2);
 		padding: 0.35rem 0.85rem;
 		font-size: 0.85rem;
 		font-family: monospace;
 		cursor: pointer;
 	}
 	.seg:not(:last-child) {
-		border-right: 1px solid #2a2a2a;
+		border-right: 1px solid var(--border);
 	}
 	.seg.active {
-		background: #1e3a5f;
-		color: #93c5fd;
+		background: var(--accent-bg);
+		color: var(--accent);
 	}
 	.filter-input {
 		flex: 1 1 16rem;
 		min-width: 12rem;
-		background: #0a0a0a;
-		border: 1px solid #333;
+		background: var(--bg-0);
+		border: 1px solid var(--border);
 		border-radius: 6px;
-		color: #e0e0e0;
+		color: var(--text-1);
 		padding: 0.4rem 0.7rem;
 		font-family: monospace;
 		font-size: 0.85rem;
 	}
 	.result-count {
-		color: #555;
+		color: var(--text-3);
 		font-family: monospace;
 		font-size: 0.78rem;
 	}
 	/* Flat-mode chip identifying the source for each row. */
 	.source-chip {
 		display: inline-block;
-		background: #1a2a3a;
-		color: #93c5fd;
+		background: var(--accent-bg);
+		color: var(--accent);
 		font-family: monospace;
 		font-size: 0.7rem;
 		text-transform: uppercase;

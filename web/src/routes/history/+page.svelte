@@ -69,21 +69,21 @@
 
 <style>
 	.history {
-		background: #111;
-		border: 1px solid #222;
+		background: var(--bg-1);
+		border: 1px solid var(--border);
 		border-radius: 8px;
 		overflow: hidden;
 	}
 
 	.commit {
 		padding: 0.75rem 1rem;
-		border-bottom: 1px solid #1a1a1a;
+		border-bottom: 1px solid var(--bg-hover);
 		cursor: pointer;
 		transition: background 0.1s;
 	}
 
-	.commit:hover { background: #151515; }
-	.commit.selected { background: #1a1a2e; }
+	.commit:hover { background: var(--bg-hover); }
+	.commit.selected { background: var(--accent-bg); }
 	.commit:last-child { border-bottom: none; }
 
 	.commit-header {
@@ -95,48 +95,48 @@
 	.commit-time {
 		font-family: monospace;
 		font-size: 0.8rem;
-		color: #555;
+		color: var(--text-3);
 	}
 
 	.commit-id {
 		font-family: monospace;
 		font-size: 0.75rem;
-		color: #444;
+		color: var(--text-3);
 	}
 
 	.commit-category {
-		background: #1e3a5f;
-		color: #93c5fd;
+		background: var(--accent-bg);
+		color: var(--accent);
 		padding: 0.1rem 0.5rem;
 		border-radius: 3px;
 		font-size: 0.75rem;
 		margin-right: 0.5rem;
 	}
 
-	.commit-desc { color: #ccc; font-size: 0.9rem; }
+	.commit-desc { color: var(--text-1); font-size: 0.9rem; }
 
 	.commit-meta {
 		font-size: 0.75rem;
-		color: #555;
+		color: var(--text-3);
 		margin-top: 0.25rem;
 	}
 
 	.commit-reasoning {
 		margin-top: 0.5rem;
 		padding: 0.5rem;
-		background: #0a0a0a;
+		background: var(--bg-0);
 		border-radius: 4px;
 		font-size: 0.85rem;
-		color: #999;
+		color: var(--text-2);
 	}
 
-	.error { color: #ef4444; }
-	.empty { color: #555; padding: 2rem; text-align: center; }
+	.error { color: var(--danger); }
+	.empty { color: var(--text-3); padding: 2rem; text-align: center; }
 
 	.branch-label {
 		font-size: 0.85rem;
 		font-family: monospace;
-		color: #3b82f6;
+		color: var(--accent);
 		font-weight: normal;
 		margin-left: 0.5rem;
 	}

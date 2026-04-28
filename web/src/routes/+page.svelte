@@ -207,10 +207,10 @@
 		border-radius: 50%;
 	}
 
-	.connected { background: #22c55e; }
-	.disconnected { background: #ef4444; }
+	.connected { background: var(--success); }
+	.disconnected { background: var(--danger); }
 
-	.error { color: #ef4444; }
+	.error { color: var(--danger); }
 
 	.stats-grid {
 		display: grid;
@@ -225,17 +225,17 @@
 
 	.see-all {
 		font-size: 0.75rem;
-		color: #666;
+		color: var(--text-3);
 		font-weight: normal;
 		margin-left: 0.5rem;
 	}
 	.see-all:hover {
-		color: #93c5fd;
+		color: var(--accent);
 	}
 
 	.stat-card {
-		background: #111;
-		border: 1px solid #222;
+		background: var(--bg-1);
+		border: 1px solid var(--border);
 		border-radius: 8px;
 		padding: 1.5rem;
 		text-align: center;
@@ -244,47 +244,47 @@
 	.stat-value {
 		font-size: 2rem;
 		font-weight: 700;
-		color: #fff;
+		color: var(--text-0);
 	}
 
 	.stat-label {
 		font-size: 0.8rem;
-		color: #666;
+		color: var(--text-3);
 		text-transform: uppercase;
 		margin-top: 0.25rem;
 	}
 
 	.commits {
-		background: #111;
-		border: 1px solid #222;
+		background: var(--bg-1);
+		border: 1px solid var(--border);
 		border-radius: 8px;
 		overflow: hidden;
 	}
 
 	.commit {
 		padding: 0.75rem 1rem;
-		border-bottom: 1px solid #1a1a1a;
+		border-bottom: 1px solid var(--bg-hover);
 		font-size: 0.9rem;
 	}
 
 	.commit:last-child { border-bottom: none; }
 
 	.commit-time {
-		color: #555;
+		color: var(--text-3);
 		font-family: monospace;
 		font-size: 0.8rem;
 	}
 
 	.commit-category {
-		color: #3b82f6;
+		color: var(--accent);
 		margin: 0 0.5rem;
 	}
 
-	.commit-desc { color: #ccc; }
+	.commit-desc { color: var(--text-1); }
 
 	.savings-card {
-		background: #111;
-		border: 1px solid #222;
+		background: var(--bg-1);
+		border: 1px solid var(--border);
 		border-radius: 8px;
 		padding: 1.25rem 1.5rem;
 		margin-bottom: 2rem;
@@ -294,20 +294,20 @@
 		display: flex;
 		justify-content: space-between;
 		padding: 0.5rem 0;
-		border-bottom: 1px solid #1a1a1a;
+		border-bottom: 1px solid var(--bg-hover);
 	}
 
 	.savings-row:last-child { border-bottom: none; }
 	.savings-row.big { padding-top: 0.75rem; }
 
-	.savings-label { color: #888; font-size: 0.9rem; }
-	.savings-value { color: #fff; font-family: monospace; }
-	.savings-value.saved { color: #22c55e; }
-	.savings-value.ratio { color: #3b82f6; font-size: 1.4rem; font-weight: 700; }
+	.savings-label { color: var(--text-2); font-size: 0.9rem; }
+	.savings-value { color: var(--text-0); font-family: monospace; }
+	.savings-value.saved { color: var(--success); }
+	.savings-value.ratio { color: var(--accent); font-size: 1.4rem; font-weight: 700; }
 
 	.remember-form {
-		background: #111;
-		border: 1px solid #222;
+		background: var(--bg-1);
+		border: 1px solid var(--border);
 		border-radius: 8px;
 		padding: 1.25rem 1.5rem;
 		margin-bottom: 2rem;
@@ -315,17 +315,17 @@
 
 	.remember-form h3 {
 		margin: 0 0 0.75rem 0;
-		color: #fff;
+		color: var(--text-0);
 		font-size: 1rem;
 		font-weight: 600;
 	}
 
 	.remember-form textarea {
 		width: 100%;
-		background: #0a0a0a;
-		border: 1px solid #333;
+		background: var(--bg-0);
+		border: 1px solid var(--border);
 		border-radius: 6px;
-		color: #e0e0e0;
+		color: var(--text-1);
 		padding: 0.625rem 0.75rem;
 		font-size: 0.95rem;
 		font-family: inherit;
@@ -337,7 +337,7 @@
 	.remember-form input:focus,
 	.remember-form select:focus {
 		outline: none;
-		border-color: #3b82f6;
+		border-color: var(--border-hi);
 	}
 
 	.remember-row {
@@ -348,10 +348,10 @@
 
 	.remember-form select,
 	.remember-form input {
-		background: #0a0a0a;
-		border: 1px solid #333;
+		background: var(--bg-0);
+		border: 1px solid var(--border);
 		border-radius: 6px;
-		color: #e0e0e0;
+		color: var(--text-1);
 		padding: 0.5rem 0.75rem;
 		font-size: 0.9rem;
 		font-family: inherit;
@@ -362,10 +362,10 @@
 	}
 
 	.remember-form button {
-		background: #3b82f6;
+		background: var(--accent);
 		border: none;
 		border-radius: 6px;
-		color: #fff;
+		color: var(--text-0);
 		padding: 0.5rem 1rem;
 		cursor: pointer;
 		font-size: 0.9rem;
@@ -373,7 +373,7 @@
 	}
 
 	.remember-form button:hover:not(:disabled) {
-		background: #2563eb;
+		background: color-mix(in srgb, var(--accent) 80%, black);
 	}
 
 	.remember-form button:disabled {
@@ -382,7 +382,7 @@
 	}
 
 	.save-message {
-		color: #22c55e;
+		color: var(--success);
 		font-size: 0.85rem;
 		margin: 0.5rem 0 0 0;
 		font-family: monospace;

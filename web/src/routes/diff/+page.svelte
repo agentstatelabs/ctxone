@@ -193,8 +193,8 @@
 		align-items: center;
 		gap: 1rem;
 		margin-bottom: 1.5rem;
-		background: #111;
-		border: 1px solid #222;
+		background: var(--bg-1);
+		border: 1px solid var(--border);
 		border-radius: 8px;
 		padding: 1rem 1.25rem;
 	}
@@ -206,13 +206,13 @@
 		font-size: 0.7rem;
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
-		color: #666;
+		color: var(--text-3);
 	}
 
 	.controls select {
-		background: #0a0a0a;
-		border: 1px solid #333;
-		color: #e0e0e0;
+		background: var(--bg-0);
+		border: 1px solid var(--border);
+		color: var(--text-1);
 		padding: 0.4rem 0.6rem;
 		border-radius: 4px;
 		font-family: monospace;
@@ -221,15 +221,15 @@
 	}
 
 	.arrow {
-		color: #555;
+		color: var(--text-3);
 		font-size: 1.3rem;
 		margin-top: 1.1rem;
 	}
 
 	.controls button {
-		background: #3b82f6;
+		background: var(--accent);
 		border: none;
-		color: #fff;
+		color: var(--text-0);
 		padding: 0.5rem 1.1rem;
 		border-radius: 4px;
 		cursor: pointer;
@@ -237,7 +237,7 @@
 		margin-top: 1.1rem;
 	}
 
-	.controls button:hover:not(:disabled) { background: #2563eb; }
+	.controls button:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 80%, black); }
 	.controls button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 	.summary {
@@ -245,25 +245,25 @@
 		gap: 1.5rem;
 		margin-bottom: 1rem;
 		padding: 0.6rem 1rem;
-		background: #111;
-		border: 1px solid #222;
+		background: var(--bg-1);
+		border: 1px solid var(--border);
 		border-radius: 6px;
 		font-size: 0.85rem;
 	}
 
-	.count { color: #888; }
-	.total { margin-left: auto; color: #555; font-family: monospace; }
+	.count { color: var(--text-2); }
+	.total { margin-left: auto; color: var(--text-3); font-family: monospace; }
 
 	.ops {
-		background: #111;
-		border: 1px solid #222;
+		background: var(--bg-1);
+		border: 1px solid var(--border);
 		border-radius: 8px;
 		overflow: hidden;
 	}
 
 	.op {
 		padding: 0.6rem 1rem;
-		border-bottom: 1px solid #1a1a1a;
+		border-bottom: 1px solid var(--bg-hover);
 		font-family: monospace;
 		font-size: 0.85rem;
 	}
@@ -278,30 +278,30 @@
 		border-radius: 3px;
 		font-size: 0.72rem;
 		text-transform: uppercase;
-		background: #222;
-		color: #888;
+		background: var(--border);
+		color: var(--text-2);
 	}
 
-	.op.op-add .op-kind { background: #14321d; color: #6ee7b7; }
-	.op.op-del .op-kind { background: #321414; color: #fca5a5; }
-	.op.op-mod .op-kind { background: #322814; color: #fcd34d; }
+	.op.op-add .op-kind { background: #14321d; color: var(--success); }
+	.op.op-del .op-kind { background: #321414; color: var(--danger); }
+	.op.op-mod .op-kind { background: #322814; color: var(--warning); }
 
-	.op-path { color: #ccc; }
+	.op-path { color: var(--text-1); }
 
 	.op-value {
 		margin: 0.5rem 0 0 5.8rem;
-		color: #888;
+		color: var(--text-2);
 		font-size: 0.78rem;
 		white-space: pre-wrap;
 		word-break: break-word;
 	}
 
-	.op-add { color: #6ee7b7; }
-	.op-del { color: #fca5a5; }
-	.op-mod { color: #fcd34d; }
+	.op-add { color: var(--success); }
+	.op-del { color: var(--danger); }
+	.op-mod { color: var(--warning); }
 
-	.error { color: #ef4444; }
-	.empty { color: #555; padding: 2rem; text-align: center; }
+	.error { color: var(--danger); }
+	.empty { color: var(--text-3); padding: 2rem; text-align: center; }
 
 	.merge-btn {
 		margin-left: 1rem;

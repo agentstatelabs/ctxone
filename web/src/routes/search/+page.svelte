@@ -59,51 +59,51 @@
 	input {
 		flex: 1;
 		padding: 0.75rem 1rem;
-		background: #111;
-		border: 1px solid #333;
+		background: var(--bg-1);
+		border: 1px solid var(--border);
 		border-radius: 6px;
-		color: #fff;
+		color: var(--text-0);
 		font-size: 1rem;
 	}
 
 	input:focus {
 		outline: none;
-		border-color: #3b82f6;
+		border-color: var(--border-hi);
 	}
 
 	button {
 		padding: 0.75rem 1.5rem;
-		background: #3b82f6;
+		background: var(--accent);
 		border: none;
 		border-radius: 6px;
-		color: #fff;
+		color: var(--text-0);
 		cursor: pointer;
 		font-size: 1rem;
 	}
 
-	button:hover { background: #2563eb; }
+	button:hover { background: color-mix(in srgb, var(--accent) 80%, black); }
 
-	.count { color: #666; margin-bottom: 1rem; }
-	.error { color: #ef4444; }
+	.count { color: var(--text-3); margin-bottom: 1rem; }
+	.error { color: var(--danger); }
 
 	.branch-label {
 		font-size: 0.85rem;
 		font-family: monospace;
-		color: #3b82f6;
+		color: var(--accent);
 		font-weight: normal;
 		margin-left: 0.5rem;
 	}
 
 	.results {
-		background: #111;
-		border: 1px solid #222;
+		background: var(--bg-1);
+		border: 1px solid var(--border);
 		border-radius: 8px;
 		overflow: hidden;
 	}
 
 	.result {
 		padding: 0.75rem 1rem;
-		border-bottom: 1px solid #1a1a1a;
+		border-bottom: 1px solid var(--bg-hover);
 	}
 
 	.result:last-child { border-bottom: none; }
@@ -111,12 +111,12 @@
 	.result-path {
 		font-family: monospace;
 		font-size: 0.8rem;
-		color: #3b82f6;
+		color: var(--accent);
 		margin-bottom: 0.25rem;
 	}
 
 	.result-value {
-		color: #ccc;
+		color: var(--text-1);
 		font-size: 0.9rem;
 	}
 </style>
