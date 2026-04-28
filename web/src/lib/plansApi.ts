@@ -189,6 +189,23 @@ export async function archivePlan(name: string, branch = 'main'): Promise<Plan> 
  * `completed`. Returns the freshly-loaded plan + the ids of tasks
  * that were abandoned this call.
  */
+/**
+ * Move a plan and all its tasks from one branch to another.
+ * Task ids and statuses are preserved.
+ */
+export async function movePlan(
+	name: string,
+	sourceBranch: string,
+	targetBranch: string
+): Promise<{ plan: Plan; source_ref: string; target_ref: string; task_count: number }> {
+	const url = `/api/plans/${encodeURIComponent(name)}/move?ref=${encodeURIComponent(sourceBranch)}`;
+	return fetchJson(url, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ target_ref: targetBranch })
+	});
+}
+
 export async function forceCompletePlan(
 	name: string,
 	branch = 'main',

@@ -630,6 +630,15 @@ enum PlanAction {
         #[arg(long, short)]
         reason: Option<String>,
     },
+    /// Move a plan from one branch to another. The source branch is
+    /// the active --branch flag (or "main"); the target is required.
+    /// Task ids and statuses are preserved.
+    Move {
+        plan_id: String,
+        /// Branch to move the plan onto (must differ from --branch).
+        #[arg(long = "to")]
+        target: String,
+    },
 }
 
 /// Subcommands under `ctx agents`. Everything here operates on the
@@ -3868,6 +3877,41 @@ async fn handle_plan(
                         }
                     }
                 }
+            });
+        }
+        PlanAction::Move { plan_id, target } => {
+            let url = format!(
+                "{}/api/plans/{}/move?ref={}",
+                server,
+                urlencoding(&plan_id),
+                urlencoding(&branch)
+            );
+            let body = serde_json::json!({ "target_ref": target });
+            let resp = match client
+                .post(&url)
+                .header("X-CTXone-Agent", &agent_id)
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "plan move failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(format, &parsed, |v| {
+                let plan_name = v["plan"]["name"].as_str().unwrap_or("");
+                let count = v["task_count"].as_u64().unwrap_or(0);
+                println!(
+                    "Moved plan {} from {} to {} ({} task{})",
+                    plan_name,
+                    v["source_ref"].as_str().unwrap_or(""),
+                    v["target_ref"].as_str().unwrap_or(""),
+                    count,
+                    if count == 1 { "" } else { "s" }
+                );
             });
         }
     }

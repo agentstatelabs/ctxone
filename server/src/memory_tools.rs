@@ -1999,6 +1999,33 @@ impl CtxOneServer {
     }
 
     #[tool(
+        description = "Move a plan and every task it contains from one branch to another. Task ids, statuses, proofs, and the plan-meta envelope are preserved bit-for-bit — only the ref changes. \
+        \
+        CALL THIS WHEN promoting a sandboxed plan onto `main`, pulling someone else's plan onto a feature branch for collaboration, or refiling work after a branch-strategy change. Refuses when source and target are the same ref or when a plan with the same name already exists on the target ref."
+    )]
+    async fn plan_move(
+        &self,
+        params: Parameters<crate::plan_tools::PlanMoveParams>,
+    ) -> String {
+        use crate::plan_tools as pt;
+        let p = params.0;
+        let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        match pt::move_plan(&self.repo, &store, &p.ref_name, &p.target_ref, &p.plan_id) {
+            Ok(result) => {
+                self.session.mark_dirty();
+                serde_json::to_string(&serde_json::json!({
+                    "plan": pt::plan_to_json(&result.plan, &[], false),
+                    "source_ref": result.source_ref,
+                    "target_ref": result.target_ref,
+                    "task_count": result.task_count,
+                }))
+                .unwrap_or_else(|_| "{}".into())
+            }
+            Err(e) => pt::err_json(e),
+        }
+    }
+
+    #[tool(
         description = "Force-complete a plan: abandon every still-open task with a fixed reason, then let the engine auto-promote the plan's `_meta` to `Completed`. Returns the updated plan + the ids of tasks that were abandoned. \
         \
         CALL THIS WHEN the user explicitly asks to mark a plan complete despite open tasks (scope cut, abandoned feature, end-of-quarter cleanup). Idempotent on already-completed plans. Refuses on archived plans (unarchive first) and on empty plans (use `plan_archive` instead). Each abandoned task records the reason — default \"Plan force-completed by user\" or whatever string the caller passes."

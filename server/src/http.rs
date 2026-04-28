@@ -212,6 +212,7 @@ pub fn router_with_config(
             "/api/plans/{name}/force_complete",
             post(force_complete_plan),
         )
+        .route("/api/plans/{name}/move", post(move_plan_handler))
         // Session turn capture (full request/response/tool/usage JSON)
         .route("/api/sessions/{sid}/turns", get(list_session_turns))
         .route("/api/sessions/{sid}/turns/{idx}", post(put_session_turn).get(get_session_turn))
@@ -1342,6 +1343,32 @@ async fn archive_plan(
         .map_err(substrate_error_to_response)?;
     s.sessions.mark_all_dirty();
     Ok(Json(plan_tools::plan_to_json(&plan, &[], false)))
+}
+
+#[derive(Deserialize)]
+struct MovePlanBody {
+    /// Branch the plan should be moved onto.
+    target_ref: String,
+}
+
+#[instrument(skip_all, fields(name = %name, ref_name = %q.ref_name, agent = %agent_id.0))]
+async fn move_plan_handler(
+    State(s): State<HubState>,
+    agent_id: AgentId,
+    Path(name): Path<String>,
+    Query(q): Query<RefQuery>,
+    Json(body): Json<MovePlanBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = plan_tools::make_store(s.repo.clone(), &agent_id.0);
+    let result = plan_tools::move_plan(&s.repo, &store, &q.ref_name, &body.target_ref, &name)
+        .map_err(plan_error_to_response)?;
+    s.sessions.mark_all_dirty();
+    Ok(Json(serde_json::json!({
+        "plan": plan_tools::plan_to_json(&result.plan, &[], false),
+        "source_ref": result.source_ref,
+        "target_ref": result.target_ref,
+        "task_count": result.task_count,
+    })))
 }
 
 #[derive(Deserialize, Default)]

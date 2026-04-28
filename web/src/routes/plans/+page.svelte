@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { branchStore } from '$lib/branchStore.svelte';
+	import { getBranches } from '$lib/api';
 	import {
 		listPlans,
 		getPlan,
@@ -11,6 +12,7 @@
 		abandonTask,
 		archivePlan,
 		forceCompletePlan,
+		movePlan,
 		type Plan,
 		type Task,
 		type Priority,
@@ -321,6 +323,42 @@
 			abandonOpen = false;
 			selectedTask = null;
 			await refreshSelected();
+		} catch (err) {
+			error = err instanceof Error ? err.message : String(err);
+		}
+	}
+
+	// "Move to branch" — populated lazily on plan-detail mount so the
+	// dropdown always reflects the current branch list. We could share
+	// the layout's fetch via branchStore, but the layout doesn't
+	// expose the list — fetching here is one extra request and keeps
+	// the data flow obvious.
+	let allBranches: string[] = $state([]);
+	let moveTarget = $state('');
+	async function refreshBranchList() {
+		try {
+			const list = await getBranches();
+			allBranches = list.map((b) => b.name);
+		} catch {
+			allBranches = [];
+		}
+	}
+	onMount(refreshBranchList);
+
+	let movableBranches = $derived(allBranches.filter((b) => b !== branchStore.current));
+
+	async function handleMovePlan() {
+		if (!selectedName || !moveTarget) return;
+		const target = moveTarget;
+		const source = branchStore.current;
+		if (!confirm(`Move plan "${selectedName}" from ${source} to ${target}?`)) return;
+		try {
+			await movePlan(selectedName, source, target);
+			// Switch to the target branch so the user lands where their
+			// plan now lives. The $effect on branchStore.current will
+			// reload plans + clear selection.
+			branchStore.current = target;
+			moveTarget = '';
 		} catch (err) {
 			error = err instanceof Error ? err.message : String(err);
 		}
@@ -745,6 +783,24 @@
 					<button onclick={() => (showAddTask = !showAddTask)}>
 						{showAddTask ? 'Cancel' : '+ Add task'}
 					</button>
+					{#if movableBranches.length > 0}
+						<label class="move-row">
+							<span>Move to</span>
+							<select bind:value={moveTarget} aria-label="Target branch">
+								<option value="">— pick branch —</option>
+								{#each movableBranches as b}
+									<option value={b}>{b}</option>
+								{/each}
+							</select>
+							<button
+								class="btn-secondary btn-xs"
+								onclick={handleMovePlan}
+								disabled={!moveTarget}
+							>
+								Go
+							</button>
+						</label>
+					{/if}
 					{#if selectedPlan.status === 'active'}
 						<button class="btn-secondary btn-complete" onclick={handleForceComplete}>
 							Mark complete
@@ -1063,6 +1119,24 @@
 		background: var(--border);
 		border-color: var(--text-3);
 		color: var(--text-2);
+	}
+	.move-row {
+		display: flex;
+		align-items: center;
+		gap: 0.3rem;
+		font-size: 0.7rem;
+		color: var(--text-3);
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+	}
+	.move-row select {
+		background: var(--bg-0);
+		border: 1px solid var(--border);
+		border-radius: 4px;
+		color: var(--text-1);
+		padding: 0.25rem 0.4rem;
+		font-family: monospace;
+		font-size: 0.78rem;
 	}
 	.btn-complete {
 		color: var(--success);

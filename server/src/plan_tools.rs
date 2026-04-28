@@ -22,9 +22,10 @@
 
 use std::sync::Arc;
 
-use agentstategraph::Repository;
+use agentstategraph::{CommitOptions, Repository};
+use agentstategraph_core::IntentCategory;
 use agentstategraph_tasks::{
-    Plan, PlanStatus, Priority, Proof, ProofKind, Task, TaskId, TaskStatus, TaskStore,
+    paths, Plan, PlanStatus, Priority, Proof, ProofKind, Task, TaskId, TaskStatus, TaskStore,
     TaskStoreError,
 };
 use schemars::JsonSchema;
@@ -265,6 +266,12 @@ pub enum PlanToolError {
 impl From<agentstategraph::RepoError> for PlanToolError {
     fn from(e: agentstategraph::RepoError) -> Self {
         PlanToolError::Repo(e.to_string())
+    }
+}
+
+impl From<serde_json::Error> for PlanToolError {
+    fn from(e: serde_json::Error) -> Self {
+        PlanToolError::Repo(format!("serde_json: {}", e))
     }
 }
 
@@ -574,6 +581,25 @@ pub struct ForceCompleteResult {
     pub abandoned_task_ids: Vec<String>,
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct PlanMoveParams {
+    pub plan_id: String,
+    /// The branch the plan currently lives on. Defaults to "main".
+    #[serde(default = "default_ref", rename = "ref")]
+    pub ref_name: String,
+    /// The branch to move the plan onto. Required, must differ from
+    /// `ref`.
+    pub target_ref: String,
+}
+
+#[derive(Serialize, Debug)]
+pub struct MovePlanResult {
+    pub plan: Plan,
+    pub source_ref: String,
+    pub target_ref: String,
+    pub task_count: usize,
+}
+
 #[derive(Serialize)]
 pub struct ToolErr {
     pub error: String,
@@ -703,6 +729,97 @@ pub fn force_complete_plan(
     Ok(ForceCompleteResult {
         plan: final_plan,
         abandoned_task_ids: abandoned,
+    })
+}
+
+/// Move a plan and every task it contains from `source_ref` to
+/// `target_ref`. Task ids, statuses, proofs, abandon reasons, and the
+/// plan-meta envelope are preserved bit-for-bit — only the ref
+/// changes. This makes it safe to refile a plan onto a different
+/// branch (e.g. promoting a sandbox plan to `main`, or pulling
+/// somebody else's plan onto a feature branch for collaboration).
+///
+/// Refuses when source and target are the same ref. Refuses when a
+/// plan with the same name already exists on `target_ref` — overwriting
+/// would silently merge two unrelated histories. The caller can
+/// rename or archive the conflicting plan first.
+pub fn move_plan(
+    repo: &Repository,
+    store: &TaskStore,
+    source_ref: &str,
+    target_ref: &str,
+    plan: &str,
+) -> Result<MovePlanResult, PlanToolError> {
+    if source_ref == target_ref {
+        return Err(PlanToolError::InvalidInput(format!(
+            "source and target ref are both '{}'; nothing to move",
+            source_ref
+        )));
+    }
+
+    let plan_meta = store.get_plan(source_ref, plan)?;
+    let tasks = store.list_tasks(source_ref, plan)?;
+
+    // Check for a name collision on the target ref. plan_exists() is
+    // engine-private, so we mirror its match-on-PlanNotFound shape here.
+    match store.get_plan(target_ref, plan) {
+        Ok(_) => {
+            return Err(PlanToolError::InvalidInput(format!(
+                "plan '{}' already exists on ref '{}'; rename or archive the conflicting plan first",
+                plan, target_ref
+            )));
+        }
+        Err(TaskStoreError::PlanNotFound(_)) => {}
+        Err(e) => return Err(PlanToolError::Substrate(e)),
+    }
+
+    // Write meta + every task onto the target ref. We bypass
+    // create_plan / add_task here because they would re-stamp
+    // timestamps and reassign task ids — we want the records to land
+    // on the new ref unchanged so blame and audit trails carry over.
+    let prefix = store.prefix();
+    let agent_id = store.agent_id();
+
+    let meta_path = paths::plan_meta(prefix, plan);
+    let meta_value = serde_json::to_value(&plan_meta)?;
+    repo.set_json(
+        target_ref,
+        &meta_path,
+        &meta_value,
+        CommitOptions::new(
+            agent_id,
+            IntentCategory::Plan,
+            format!("Move plan {} from {} to {}", plan, source_ref, target_ref),
+        ),
+    )?;
+
+    for task in &tasks {
+        let task_path = paths::task(prefix, plan, &task.id);
+        let task_value = serde_json::to_value(task)?;
+        repo.set_json(
+            target_ref,
+            &task_path,
+            &task_value,
+            CommitOptions::new(
+                agent_id,
+                IntentCategory::Plan,
+                format!(
+                    "Move task {}/{} from {} to {}",
+                    plan, task.id.0, source_ref, target_ref
+                ),
+            ),
+        )?;
+    }
+
+    // Source-side delete only after every target write succeeds — if
+    // any write above fails we want the original to still be there.
+    store.delete_plan(source_ref, plan)?;
+
+    Ok(MovePlanResult {
+        plan: plan_meta,
+        source_ref: source_ref.to_string(),
+        target_ref: target_ref.to_string(),
+        task_count: tasks.len(),
     })
 }
 
@@ -858,6 +975,65 @@ mod tests {
         .expect("force complete");
         let t1_after = store.get_task("main", "p1", &t1.id).expect("get t1");
         assert_eq!(t1_after.abandoned_reason.as_deref(), Some("scope cut for v2"));
+    }
+
+    #[test]
+    fn move_plan_relocates_meta_and_tasks_preserving_ids() {
+        let (repo, store) = fresh_store();
+        // Create the destination ref.
+        repo.branch("feature/x", "main").expect("branch");
+
+        create_plan(&store, "main", "p1", Some("desc".into())).unwrap();
+        let t1 = add_task(&store, "main", "p1", "first", None, None, None, None, vec![]).unwrap();
+        let t2 =
+            add_task(&store, "main", "p1", "second", None, None, None, None, vec![]).unwrap();
+        // Mark one task as in-progress so we can confirm status carries.
+        store.start_task("main", "p1", &t2.id).unwrap();
+
+        let result = move_plan(&repo, &store, "main", "feature/x", "p1").expect("move");
+        assert_eq!(result.task_count, 2);
+        assert_eq!(result.source_ref, "main");
+        assert_eq!(result.target_ref, "feature/x");
+
+        // Source ref no longer has the plan.
+        assert!(matches!(
+            store.get_plan("main", "p1"),
+            Err(TaskStoreError::PlanNotFound(_))
+        ));
+        // Target ref has it with task ids and statuses preserved.
+        let on_target = store.get_plan("feature/x", "p1").expect("on target");
+        assert_eq!(on_target.name, "p1");
+        let tasks_after = store.list_tasks("feature/x", "p1").unwrap();
+        assert_eq!(tasks_after.len(), 2);
+        let ids: std::collections::HashSet<&str> =
+            tasks_after.iter().map(|t| t.id.0.as_str()).collect();
+        assert!(ids.contains(t1.id.0.as_str()));
+        assert!(ids.contains(t2.id.0.as_str()));
+        // Status preserved on t2.
+        let t2_after = tasks_after.iter().find(|t| t.id.0 == t2.id.0).unwrap();
+        assert_eq!(t2_after.status, TaskStatus::InProgress);
+    }
+
+    #[test]
+    fn move_plan_rejects_same_ref() {
+        let (repo, store) = fresh_store();
+        create_plan(&store, "main", "p1", None).unwrap();
+        let err = move_plan(&repo, &store, "main", "main", "p1")
+            .expect_err("same ref should reject");
+        assert!(matches!(err, PlanToolError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn move_plan_rejects_when_target_already_has_plan() {
+        let (repo, store) = fresh_store();
+        repo.branch("feature/x", "main").unwrap();
+        create_plan(&store, "main", "p1", None).unwrap();
+        create_plan(&store, "feature/x", "p1", None).unwrap();
+        let err = move_plan(&repo, &store, "main", "feature/x", "p1")
+            .expect_err("collision should reject");
+        assert!(matches!(err, PlanToolError::InvalidInput(_)));
+        // Source plan must still be intact after a refused move.
+        assert!(store.get_plan("main", "p1").is_ok());
     }
 
     #[test]
