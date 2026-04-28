@@ -592,7 +592,7 @@
 	// Task-list pagination (t-001 of lens-enhancements-3). 50/page is
 	// roughly one screenful at typical row heights; prev/next is enough
 	// because deep-jumping in a single plan's task list is unusual.
-	const TASK_PAGE_SIZE = 50;
+	const TASK_PAGE_SIZE = 25;
 	let taskPage = $state(0);
 	let taskPageCount = $derived(Math.max(1, Math.ceil(sortedTasks.length / TASK_PAGE_SIZE)));
 	$effect(() => {
