@@ -617,6 +617,9 @@ enum PlanAction {
     },
     /// Show a plan with its tasks
     Show { plan_id: String },
+    /// List the tasks of a plan (flat — no plan envelope). Use `show`
+    /// when you also want plan metadata.
+    Tasks { plan_id: String },
     /// Archive a plan (soft — task data preserved)
     Archive { plan_id: String },
     /// Force-complete a plan: abandon every still-open task with a fixed
@@ -3813,6 +3816,56 @@ async fn handle_plan(
                     if !blockers.is_empty() {
                         println!("      blocked by: {}", blockers.join(", "));
                     }
+                }
+            });
+        }
+        PlanAction::Tasks { plan_id } => {
+            // Mirrors the `plan_tasks` MCP tool: returns just the flat
+            // task array, no plan envelope. Useful in scripts that don't
+            // care about plan metadata.
+            let url = format!(
+                "{}/api/plans/{}/tasks?ref={}",
+                server,
+                urlencoding(&plan_id),
+                urlencoding(branch)
+            );
+            let resp = match client
+                .get(&url)
+                .header("X-CTXone-Agent", &agent_id)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "plan tasks failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(format, &parsed, |v| {
+                let empty = vec![];
+                let tasks = v.as_array().unwrap_or(&empty);
+                if tasks.is_empty() {
+                    println!("(no tasks)");
+                    return;
+                }
+                for task in tasks {
+                    let id = task["id"].as_str().unwrap_or("");
+                    let title = task["title"].as_str().unwrap_or("");
+                    let status = task["status"].as_str().unwrap_or("");
+                    let pri = task["priority"].as_str().unwrap_or("");
+                    let assigned = task["assigned_to"].as_str();
+                    let mut line = format!(
+                        "{} {} {} {}",
+                        status_glyph(status),
+                        id,
+                        priority_tag(pri),
+                        title
+                    );
+                    if let Some(a) = assigned {
+                        line.push_str(&format!(" @{}", a));
+                    }
+                    println!("{}", line);
                 }
             });
         }
