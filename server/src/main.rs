@@ -57,6 +57,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut http_mode = false;
     let mut lens_mode = false;
     let mut http_port: u16 = 3001;
+    // Refuse to silently create a fresh sqlite db when the file is
+    // missing — operators must opt in with --init. Prevents "ran the
+    // hub with the wrong --path and got an empty graph" disasters.
+    let mut init_flag = false;
     // Default production rate limit: 600 req/min per peer IP.
     // Overridable via --rate-limit-rpm or CTXONE_RATE_LIMIT_RPM.
     // 0 disables rate limiting.
@@ -108,6 +112,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--lens" => {
                 lens_mode = true;
             }
+            "--init" => {
+                init_flag = true;
+            }
             "--port" => {
                 i += 1;
                 if i < args.len() {
@@ -144,6 +151,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "  -s, --storage <TYPE>  Storage backend: sqlite (default), memory, or postgres"
                 );
                 eprintln!("  -p, --path <PATH>     SQLite database path (default: ./ctxone.db)");
+                eprintln!(
+                    "      --init            Create the sqlite db file if it doesn't exist"
+                );
+                eprintln!(
+                    "                        (without --init, missing files exit 66 — guards against typos)"
+                );
                 eprintln!("      --database-url <URL>  Postgres connection URL");
                 eprintln!(
                     "      --tenant <ID>     Tenant ID for multi-tenant Postgres (default: \"default\")"
@@ -213,7 +226,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Arc::new(Repository::new(Box::new(storage)))
         }
         _ => {
-            info!(storage = "sqlite", path = %db_path, "Storage: sqlite");
+            // Refuse to silently create a fresh db when the operator
+            // didn't ask for one. The default is to assume the file
+            // should already exist; a missing file usually means a
+            // typo'd --path or a mis-launched hub, NOT "please give
+            // me a brand new graph". --init opts in. EX_NOINPUT (66).
+            if !std::path::Path::new(&db_path).exists() && !init_flag {
+                error!(
+                    path = %db_path,
+                    "sqlite db not found; pass --init to create a new one, \
+                     or --path <PATH> to point at an existing db"
+                );
+                std::process::exit(66);
+            }
+            info!(storage = "sqlite", path = %db_path, init = init_flag, "Storage: sqlite");
             let storage = SqliteStorage::open(&db_path)?;
             Arc::new(Repository::new(Box::new(storage)))
         }
