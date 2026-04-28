@@ -1348,6 +1348,38 @@ fn default_root_path() -> String {
     "/".to_string()
 }
 
+fn default_log_limit() -> usize {
+    20
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct GetLogParams {
+    /// Max commits to return (default: 20).
+    #[serde(default = "default_log_limit")]
+    pub limit: usize,
+    /// Branch to read log from (default: "main").
+    #[serde(default = "default_ref", rename = "ref")]
+    pub ref_name: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct GetBlameParams {
+    /// Path to trace (default: "/" — branch root).
+    #[serde(default = "default_root_path")]
+    pub path: String,
+    /// Branch to read (default: "main").
+    #[serde(default = "default_ref", rename = "ref")]
+    pub ref_name: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct DiffParams {
+    /// First ref (usually older / base).
+    pub ref_a: String,
+    /// Second ref (usually newer / target).
+    pub ref_b: String,
+}
+
 fn parse_taint_kind(s: &str) -> Result<agentstategraph_taint::TaintKind, String> {
     use agentstategraph_taint::TaintKind;
     match s {
@@ -2361,6 +2393,69 @@ impl CtxOneServer {
                     .collect();
                 serde_json::to_string(&out).unwrap_or_else(|_| "[]".into())
             }
+            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Return the last N commits on a branch — newest first — including agent id, intent category, description, confidence, and tags. \
+        \
+        CALL THIS WHEN you want to see what's been happening on a branch: who wrote what and why. Cheaper than `what_changed_since` for an absolute count and broader than `get_blame` (which is per-path)."
+    )]
+    async fn get_log(&self, params: Parameters<GetLogParams>) -> String {
+        let p = params.0;
+        match self.repo.log(&p.ref_name, p.limit) {
+            Ok(commits) => {
+                let out: Vec<serde_json::Value> = commits
+                    .into_iter()
+                    .map(|c| {
+                        serde_json::json!({
+                            "id": format!("{}", c.id.short()),
+                            "timestamp": c.timestamp.to_rfc3339(),
+                            "agent_id": c.agent_id,
+                            "confidence": c.confidence,
+                            "intent": {
+                                "category": format!("{:?}", c.intent.category),
+                                "description": c.intent.description,
+                                "tags": c.intent.tags,
+                            },
+                            "reasoning": c.reasoning,
+                        })
+                    })
+                    .collect();
+                serde_json::to_string(&out).unwrap_or_else(|_| "[]".into())
+            }
+            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Return the full provenance chain for a path: every commit that touched it, who wrote it, with what intent and confidence. \
+        \
+        CALL THIS BEFORE acting on a stored value when stakes are high (security, licensing, deployment). If you can't see who wrote a fact and why, don't trust it. Use `why_did_we` for decision-phrase searches; use `get_blame` when you already have the path."
+    )]
+    async fn get_blame(&self, params: Parameters<GetBlameParams>) -> String {
+        let p = params.0;
+        match self.repo.blame(&p.ref_name, &p.path) {
+            Ok(blame) => serde_json::to_string(&blame).unwrap_or_else(|_| "null".into()),
+            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Compute the structural diff between two refs (branches or commits). Returns the operations needed to turn `ref_a` into `ref_b`. \
+        \
+        CALL THIS WHEN you need to know what's changed between branches before merging, or to compare a feature branch against main. Pair with `branch_list` to find ref names. Output is a list of ops (set/delete/etc) with paths and values, not a textual diff."
+    )]
+    async fn diff(&self, params: Parameters<DiffParams>) -> String {
+        let p = params.0;
+        match self.repo.diff(&p.ref_a, &p.ref_b) {
+            Ok(ops) => serde_json::json!({
+                "ref_a": p.ref_a,
+                "ref_b": p.ref_b,
+                "ops": ops,
+            })
+            .to_string(),
             Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
         }
     }
