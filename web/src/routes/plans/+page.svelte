@@ -34,6 +34,36 @@
 		if (typeof localStorage !== 'undefined') localStorage.setItem(VIEW_KEY, v);
 	}
 	let filter = $state('');
+
+	// Sort controls (t-014). Default is the "what should I look at
+	// next" order — for plans that's status-first; for tasks it's
+	// open-first then priority. Persist per-list so the agent's choice
+	// sticks.
+	type PlanSort = 'status' | 'date-new' | 'date-old' | 'name';
+	type TaskSort = 'default' | 'priority' | 'date-new' | 'date-old' | 'name' | 'status';
+	const PLAN_SORT_KEY = 'lens.plans.sort';
+	const TASK_SORT_KEY = 'lens.plans.tasks.sort';
+	function loadPlanSort(): PlanSort {
+		if (typeof localStorage === 'undefined') return 'status';
+		const v = localStorage.getItem(PLAN_SORT_KEY) as PlanSort | null;
+		return v && ['status', 'date-new', 'date-old', 'name'].includes(v) ? v : 'status';
+	}
+	function loadTaskSort(): TaskSort {
+		if (typeof localStorage === 'undefined') return 'default';
+		const v = localStorage.getItem(TASK_SORT_KEY) as TaskSort | null;
+		return v && ['default', 'priority', 'date-new', 'date-old', 'name', 'status'].includes(v)
+			? v
+			: 'default';
+	}
+	let planSort: PlanSort = $state(loadPlanSort());
+	let taskSort: TaskSort = $state(loadTaskSort());
+	$effect(() => {
+		if (typeof localStorage !== 'undefined') localStorage.setItem(PLAN_SORT_KEY, planSort);
+	});
+	$effect(() => {
+		if (typeof localStorage !== 'undefined') localStorage.setItem(TASK_SORT_KEY, taskSort);
+	});
+
 	let collapsedGroups: Set<string> = $state(new Set());
 	function toggleGroup(g: string) {
 		const next = new Set(collapsedGroups);
@@ -271,6 +301,104 @@
 		);
 	});
 
+	// Status priority for the "status" sort — lower = sorts first.
+	// Mirrors the grouped-view bucket order: in_progress → active →
+	// completed → archived.
+	const PLAN_STATUS_RANK: Record<string, number> = {
+		in_progress: 0,
+		active: 1,
+		completed: 2,
+		archived: 3
+	};
+	function planActivityTs(p: Plan): number {
+		// "Most-recent activity" proxy: archived_at if archived,
+		// otherwise created_at. The Plan shape doesn't carry a
+		// last-touched timestamp; this is good enough to keep
+		// recently-archived plans near the top of their bucket.
+		const t = p.archived_at ?? p.created_at;
+		return t ? new Date(t).getTime() : 0;
+	}
+	function comparePlans(a: Plan, b: Plan): number {
+		switch (planSort) {
+			case 'status': {
+				const ea = effectivePlanStatus(a);
+				const eb = effectivePlanStatus(b);
+				const ra = PLAN_STATUS_RANK[ea] ?? 99;
+				const rb = PLAN_STATUS_RANK[eb] ?? 99;
+				if (ra !== rb) return ra - rb;
+				return planActivityTs(b) - planActivityTs(a);
+			}
+			case 'date-new':
+				return planActivityTs(b) - planActivityTs(a);
+			case 'date-old':
+				return planActivityTs(a) - planActivityTs(b);
+			case 'name':
+				return a.name.localeCompare(b.name);
+		}
+	}
+	let sortedPlans = $derived.by(() => [...filteredPlans].sort(comparePlans));
+
+	const PRIORITY_RANK: Record<string, number> = {
+		critical: 0,
+		high: 1,
+		medium: 2,
+		low: 3
+	};
+	const TASK_STATUS_RANK: Record<string, number> = {
+		in_progress: 0,
+		pending: 1,
+		done: 2,
+		abandoned: 3
+	};
+	function taskActivityTs(t: Task): number {
+		// Most-recent timestamp on the task (any of the lifecycle stamps).
+		const stamps = [t.completed_at, t.abandoned_at, t.started_at, t.created_at]
+			.filter((s): s is string => !!s)
+			.map((s) => new Date(s).getTime());
+		return stamps.length > 0 ? Math.max(...stamps) : 0;
+	}
+	function compareTasks(a: Task, b: Task): number {
+		switch (taskSort) {
+			case 'default': {
+				// Open-first (in_progress, pending) then priority then
+				// created_at ascending — agents almost always want to
+				// know "what's the most important open thing on this
+				// plan" without thinking about it.
+				const ra = TASK_STATUS_RANK[a.status] ?? 99;
+				const rb = TASK_STATUS_RANK[b.status] ?? 99;
+				if (ra !== rb) return ra - rb;
+				const pa = PRIORITY_RANK[a.priority] ?? 99;
+				const pb = PRIORITY_RANK[b.priority] ?? 99;
+				if (pa !== pb) return pa - pb;
+				return (
+					(a.created_at ? new Date(a.created_at).getTime() : 0) -
+					(b.created_at ? new Date(b.created_at).getTime() : 0)
+				);
+			}
+			case 'priority': {
+				const pa = PRIORITY_RANK[a.priority] ?? 99;
+				const pb = PRIORITY_RANK[b.priority] ?? 99;
+				if (pa !== pb) return pa - pb;
+				return a.id.localeCompare(b.id);
+			}
+			case 'status': {
+				const ra = TASK_STATUS_RANK[a.status] ?? 99;
+				const rb = TASK_STATUS_RANK[b.status] ?? 99;
+				if (ra !== rb) return ra - rb;
+				return a.id.localeCompare(b.id);
+			}
+			case 'date-new':
+				return taskActivityTs(b) - taskActivityTs(a);
+			case 'date-old':
+				return taskActivityTs(a) - taskActivityTs(b);
+			case 'name':
+				return a.title.localeCompare(b.title);
+		}
+	}
+	let sortedTasks = $derived.by(() =>
+		selectedPlan?.tasks ? [...selectedPlan.tasks].sort(compareTasks) : []
+	);
+
 	// Tree-view: group by effective status. Order matters — agents
 	// almost always want "what's in flight right now" first.
 	const STATUS_ORDER = ['in_progress', 'active', 'completed', 'archived'] as const;
@@ -282,7 +410,7 @@
 	};
 	let groupedPlans = $derived.by(() => {
 		const buckets: Record<string, Plan[]> = {};
-		for (const p of filteredPlans) {
+		for (const p of sortedPlans) {
 			const eff = effectivePlanStatus(p);
 			(buckets[eff] ??= []).push(p);
 		}
@@ -359,6 +487,15 @@
 				bind:value={filter}
 				aria-label="Filter plans"
 			/>
+			<label class="sort-row">
+				<span>Sort</span>
+				<select bind:value={planSort} aria-label="Sort plans">
+					<option value="status">Status (default)</option>
+					<option value="date-new">Date — newest</option>
+					<option value="date-old">Date — oldest</option>
+					<option value="name">Name (A→Z)</option>
+				</select>
+			</label>
 		</div>
 
 		{#if plans.length === 0}
@@ -402,7 +539,7 @@
 				</div>
 			{/each}
 		{:else}
-			{#each filteredPlans as plan}
+			{#each sortedPlans as plan}
 				{@const eff = effectivePlanStatus(plan)}
 				<button
 					class="plan-row"
@@ -435,6 +572,17 @@
 					{/if}
 				</div>
 				<div class="plan-actions">
+					<label class="task-sort-row">
+						<span>Sort tasks</span>
+						<select bind:value={taskSort} aria-label="Sort tasks">
+							<option value="default">Open + priority (default)</option>
+							<option value="status">Status</option>
+							<option value="priority">Priority</option>
+							<option value="date-new">Date — newest</option>
+							<option value="date-old">Date — oldest</option>
+							<option value="name">Title (A→Z)</option>
+						</select>
+					</label>
 					<button onclick={() => (showAddTask = !showAddTask)}>
 						{showAddTask ? 'Cancel' : '+ Add task'}
 					</button>
@@ -467,9 +615,9 @@
 				</form>
 			{/if}
 
-			{#if selectedPlan.tasks && selectedPlan.tasks.length > 0}
+			{#if sortedTasks.length > 0}
 				<ul class="task-list">
-					{#each selectedPlan.tasks as task}
+					{#each sortedTasks as task}
 						<li class="task-row {statusClass(task.status)}">
 							<span class="task-glyph">[{statusGlyph(task.status)}]</span>
 							<span class="task-id">{task.id}</span>
@@ -717,6 +865,43 @@
 		padding: 0.35rem 0.55rem;
 		font-family: monospace;
 		font-size: 0.8rem;
+	}
+	.sort-row {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		font-size: 0.7rem;
+		color: #666;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+	}
+	.sort-row select {
+		flex: 1;
+		background: #0a0a0a;
+		border: 1px solid #333;
+		border-radius: 4px;
+		color: #e0e0e0;
+		padding: 0.3rem 0.45rem;
+		font-family: monospace;
+		font-size: 0.78rem;
+	}
+	.task-sort-row {
+		display: flex;
+		flex-direction: column;
+		gap: 0.2rem;
+		font-size: 0.65rem;
+		color: #666;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+	}
+	.task-sort-row select {
+		background: #0a0a0a;
+		border: 1px solid #333;
+		border-radius: 4px;
+		color: #e0e0e0;
+		padding: 0.3rem 0.5rem;
+		font-family: monospace;
+		font-size: 0.78rem;
 	}
 	.status-group {
 		margin-bottom: 0.4rem;
