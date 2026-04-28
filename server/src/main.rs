@@ -140,6 +140,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     agent_id = args[i].clone();
                 }
             }
+            "--version" | "-V" => {
+                // Diagnostic — must NOT touch storage. Print and exit
+                // before any other work. (The 2026-04-28 incident
+                // started with a typo'd flag silently falling through
+                // to default mode and opening sqlite.)
+                println!("ctxone-hub {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
             "--help" | "-h" => {
                 // --help output stays as plain eprintln — it's the classic
                 // usage-on-stderr contract, not a log line.
@@ -178,6 +186,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "      --agent-id <NAME>    Agent ID recorded on commits (default: \"ctxone\")"
                 );
                 eprintln!("  -h, --help            Print help");
+                eprintln!("  -V, --version         Print version and exit");
                 eprintln!();
                 eprintln!("LOGGING:");
                 eprintln!("      RUST_LOG=<level>  info (default), debug, trace, warn, error");
@@ -192,7 +201,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("  why_did_we            Trace decision provenance");
                 std::process::exit(0);
             }
-            _ => {}
+            other => {
+                // Strict parsing: unknown flags exit EX_USAGE (64) instead
+                // of silently falling through to default mode. The earlier
+                // permissive behavior was the chain-start in the
+                // 2026-04-28 lens-db loss.
+                eprintln!("ctxone-hub: unknown argument: {}", other);
+                eprintln!("Run `ctxone-hub --help` for usage.");
+                std::process::exit(64);
+            }
         }
         i += 1;
     }
