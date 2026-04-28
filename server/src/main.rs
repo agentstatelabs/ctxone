@@ -438,11 +438,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .enable_all()
             .build()?
             .block_on(async {
-                let app = if lens_mode {
-                    http::router_with_lens(repo.clone(), sessions.clone(), hub_config)
-                } else {
-                    http::router_with_config(repo.clone(), sessions.clone(), hub_config)
-                };
+                let app = http::router_with_db_path(
+                    repo.clone(),
+                    sessions.clone(),
+                    hub_config,
+                    flush_db_path.clone(),
+                    lens_mode,
+                );
 
                 // Spawn background flush task: writes session stats to SQLite every 30s.
                 if let Some(ref path) = flush_db_path {

@@ -47,6 +47,10 @@ pub struct HubConfig {
 pub struct HubState {
     pub repo: Arc<Repository>,
     pub sessions: Arc<SessionRegistry>,
+    /// Path to the live sqlite db file, or None for memory/postgres.
+    /// Required by the admin backup endpoint so we can VACUUM INTO
+    /// without having to re-open the same path independently.
+    pub db_path: Option<String>,
 }
 
 impl HubState {
@@ -123,6 +127,23 @@ pub fn router(repo: Arc<Repository>, sessions: Arc<SessionRegistry>) -> Router {
     router_with_config(repo, sessions, HubConfig::default())
 }
 
+/// Build the Hub router and attach a sqlite db path. Used by main()
+/// when storage is sqlite — the path is what `/api/admin/backup`
+/// VACUUMs INTO. Memory/postgres builds use the path-less variants.
+pub fn router_with_db_path(
+    repo: Arc<Repository>,
+    sessions: Arc<SessionRegistry>,
+    config: HubConfig,
+    db_path: Option<String>,
+    with_lens: bool,
+) -> Router {
+    let mut router = router_with_config_inner(repo, sessions, config, db_path);
+    if with_lens {
+        router = router.fallback(crate::lens::lens_handler);
+    }
+    router
+}
+
 /// Build the Hub router with Lens UI mounted at `/`.
 ///
 /// API routes (`/api/*`) are handled normally. Every other path falls
@@ -138,11 +159,22 @@ pub fn router_with_lens(
         .fallback(crate::lens::lens_handler)
 }
 
-/// Build the Hub router with explicit HTTP configuration.
+/// Build the Hub router with explicit HTTP configuration. Convenience
+/// wrapper that defaults `db_path` to None (admin/backup endpoints
+/// will refuse with a 400 — they need an explicit sqlite path).
 pub fn router_with_config(
     repo: Arc<Repository>,
     sessions: Arc<SessionRegistry>,
     config: HubConfig,
+) -> Router {
+    router_with_config_inner(repo, sessions, config, None)
+}
+
+fn router_with_config_inner(
+    repo: Arc<Repository>,
+    sessions: Arc<SessionRegistry>,
+    config: HubConfig,
+    db_path: Option<String>,
 ) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -157,7 +189,7 @@ pub fn router_with_config(
     // Rate limiter — returns None when rpm=0 (disabled).
     let governor = rate_limit::build_layer(config.rate_limit_rpm);
 
-    let state = HubState { repo, sessions };
+    let state = HubState { repo, sessions, db_path };
 
     let mut router = Router::new()
         // Health + stats
@@ -220,6 +252,8 @@ pub fn router_with_config(
         .route("/api/taint", get(list_taints_handler).post(apply_taint_handler))
         .route("/api/taint/check", get(check_taint_handler))
         .route("/api/taint/{id}", axum::routing::delete(remove_taint_handler))
+        // Admin endpoints
+        .route("/api/admin/backup", post(admin_backup))
         .layer(trace)
         .layer(cors)
         .with_state(state);
@@ -1807,6 +1841,45 @@ async fn list_session_turns(
         }
     }
     Ok(Json(roots.into_iter().collect()))
+}
+
+// -- Admin endpoints --
+
+#[derive(Deserialize, Default)]
+struct AdminBackupRequest {
+    /// Optional: override the snapshot suffix. Default = current UTC.
+    suffix: Option<String>,
+}
+
+/// `POST /api/admin/backup` — VACUUM INTO `<db>.bak.<suffix>`. Returns
+/// the snapshot path. Errors with 400 if storage isn't sqlite (no
+/// path to back up). Used by `ctx db backup`.
+#[instrument(skip_all)]
+async fn admin_backup(
+    State(s): State<HubState>,
+    body: Option<Json<AdminBackupRequest>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let db_path = s.db_path.as_deref().ok_or((
+        StatusCode::BAD_REQUEST,
+        "backup requires sqlite storage (db_path is unset)".to_string(),
+    ))?;
+    let suffix = body
+        .and_then(|b| b.0.suffix)
+        .unwrap_or_else(crate::backup::iso_utc_compact);
+    // VACUUM INTO can take a moment on a large db — run on a blocking
+    // thread so we don't park the async runtime.
+    let db_path_owned = db_path.to_string();
+    let result = tokio::task::spawn_blocking(move || {
+        crate::backup::snapshot_now(&db_path_owned, &suffix)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {}", e)))?;
+
+    let path = result.map_err(|msg| (StatusCode::INTERNAL_SERVER_ERROR, msg))?;
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "path": path.to_string_lossy(),
+    })))
 }
 
 #[cfg(test)]

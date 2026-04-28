@@ -29,6 +29,7 @@ const EX_NOINPUT: i32 = 66; // input not found / not readable
 const EX_UNAVAILABLE: i32 = 69; // service unavailable (hub unreachable)
 const EX_SOFTWARE: i32 = 70; // internal software error
 const EX_IOERR: i32 = 74; // I/O error
+const EX_TEMPFAIL: i32 = 75; // temporary failure (lock held, etc.)
 const EX_PROTOCOL: i32 = 76; // remote protocol error / server error
 
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -555,6 +556,15 @@ enum Commands {
         #[command(subcommand)]
         action: TaintAction,
     },
+    /// Database admin: snapshot the live db (`backup`) or restore from
+    /// a snapshot (`restore`). Backups are written via SQLite VACUUM
+    /// INTO so they're consistent against a running hub. Restore
+    /// REQUIRES the hub to be stopped — it operates on the file
+    /// system directly.
+    Db {
+        #[command(subcommand)]
+        action: DbAction,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -613,6 +623,34 @@ enum TaintAction {
         /// Why the taint is being resolved (recorded for audit).
         #[arg(long, short)]
         reason: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum DbAction {
+    /// Trigger a snapshot of the hub's live db. The hub responds
+    /// with the path it wrote (under <db>.bak.<utc>). Cheap — runs
+    /// against a live hub via SQLite VACUUM INTO.
+    Backup {
+        /// Optional suffix override. Default: current UTC timestamp.
+        #[arg(long)]
+        suffix: Option<String>,
+    },
+    /// Restore the live db from a snapshot file. The hub MUST be
+    /// stopped first — this command checks for an active lockfile
+    /// (<db>.lock) and refuses if a hub is running. Renames the
+    /// current db to `<db>.pre-restore-<utc>` so the operation is
+    /// reversible.
+    Restore {
+        /// Path to the snapshot file (the .bak.* you want to restore).
+        snapshot: String,
+        /// Path to the live db file to overwrite. Must match the
+        /// --path the hub will use on next start.
+        #[arg(long)]
+        to: String,
+        /// Skip the y/N confirmation prompt.
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -1926,6 +1964,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let branch = cli.branch.clone();
             let format = cli.format;
             handle_taint(action, &server, &branch, format, client.clone()).await?;
+        }
+        Commands::Db { action } => {
+            let server = cli.server.clone();
+            let format = cli.format;
+            handle_db(action, &server, format, client.clone()).await?;
         }
     }
 
@@ -4365,6 +4408,130 @@ async fn handle_taint(
             emit(format, &parsed, |v| {
                 let at = v["resolved_at"].as_str().unwrap_or("?");
                 println!("Resolved {} at {}", taint_id, at);
+            });
+        }
+    }
+    Ok(())
+}
+
+// -- Db command implementation --
+
+/// Dispatch for `ctx db <subcommand>`. `backup` calls the hub HTTP
+/// endpoint; `restore` operates directly on the file system (the hub
+/// must be stopped) so we can swap files atomically without trying
+/// to coax the running hub into releasing its open fd.
+async fn handle_db(
+    action: DbAction,
+    server: &str,
+    format: OutputFormat,
+    client: reqwest::Client,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match action {
+        DbAction::Backup { suffix } => {
+            let mut body = serde_json::Map::new();
+            if let Some(s) = suffix {
+                body.insert("suffix".into(), Value::String(s));
+            }
+            let url = format!("{}/api/admin/backup", server);
+            let resp = match client.post(&url).json(&Value::Object(body)).send().await {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "backup failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(format, &parsed, |v| {
+                let path = v.get("path").and_then(|x| x.as_str()).unwrap_or("?");
+                println!("Snapshot written: {}", path);
+            });
+        }
+        DbAction::Restore { snapshot, to, yes } => {
+            // Refuse if hub is running. The lockfile is the truth
+            // source — its presence-with-live-PID means a hub holds
+            // an open fd we'd be invalidating.
+            let lock_path = format!("{}.lock", to);
+            if std::path::Path::new(&lock_path).exists() {
+                if let Ok(body) = std::fs::read_to_string(&lock_path)
+                    && let Some(pid_str) = body
+                        .split("\"pid\":")
+                        .nth(1)
+                        .map(|s| s.chars().take_while(|c| c.is_ascii_digit()).collect::<String>())
+                    && let Ok(pid) = pid_str.parse::<u32>()
+                    && std::process::Command::new("kill")
+                        .args(["-0", &pid.to_string()])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status()
+                        .map(|s| s.success())
+                        .unwrap_or(false)
+                {
+                    eprintln!(
+                        "ctx db restore: hub is running (pid {} holds {}); stop it first",
+                        pid, lock_path
+                    );
+                    std::process::exit(EX_TEMPFAIL);
+                }
+            }
+
+            // Sanity-check the snapshot exists and the destination
+            // path is plausible. We don't open them as sqlite here —
+            // the next hub start will surface schema problems and
+            // can roll back via the .pre-restore-* sibling.
+            if !std::path::Path::new(&snapshot).exists() {
+                eprintln!("ctx db restore: snapshot not found: {}", snapshot);
+                std::process::exit(EX_NOINPUT);
+            }
+
+            if !yes {
+                eprintln!(
+                    "About to restore {} → {}\n  current db will be moved to {}.pre-restore-<utc>\nProceed? [y/N] ",
+                    snapshot, to, to
+                );
+                use std::io::BufRead;
+                let mut line = String::new();
+                std::io::stdin().lock().read_line(&mut line)?;
+                if !matches!(line.trim().to_lowercase().as_str(), "y" | "yes") {
+                    eprintln!("aborted");
+                    std::process::exit(0);
+                }
+            }
+
+            // Generate a sibling backup name. Match the hub's own
+            // VACUUM-INTO suffix style for symmetry.
+            let suffix = {
+                let secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                format!("{}", secs) // simple unix timestamp; cheap and unambiguous
+            };
+            let preserved = format!("{}.pre-restore-{}", to, suffix);
+
+            // Move current → preserved (only if it exists; first
+            // restore against an empty dir is fine).
+            if std::path::Path::new(&to).exists() {
+                std::fs::rename(&to, &preserved).map_err(|e| {
+                    format!("could not rename {} → {}: {}", to, preserved, e)
+                })?;
+                eprintln!("preserved current db at {}", preserved);
+            }
+
+            // Copy snapshot → to. Use copy not rename so the snapshot
+            // file stays put as a separate artifact.
+            std::fs::copy(&snapshot, &to)
+                .map_err(|e| format!("could not copy {} → {}: {}", snapshot, to, e))?;
+
+            let result = serde_json::json!({
+                "status": "ok",
+                "restored_to": to,
+                "from_snapshot": snapshot,
+                "preserved_at": preserved,
+            });
+            emit(format, &result, |_| {
+                println!("Restored {} from {}", to, snapshot);
+                println!("  previous db preserved at {}", preserved);
+                println!("  start the hub when ready");
             });
         }
     }

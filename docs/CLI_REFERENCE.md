@@ -401,6 +401,36 @@ Gemini CLI, Grok CLI.
 `mcpServers` JSON shape to any path you specify, merging with any
 existing file.
 
+### `ctx db backup [--suffix <NAME>]`
+
+Trigger a snapshot of the live db. The hub responds with the path it
+wrote (under `<db>.bak.<utc>`). Cheap — runs against a live hub via
+SQLite `VACUUM INTO`, no downtime.
+
+```
+USAGE: ctx db backup [OPTIONS]
+
+OPTIONS:
+      --suffix <NAME>  Override the .bak.<...> suffix (default: UTC)
+```
+
+### `ctx db restore <SNAPSHOT> --to <DB_PATH> [--yes]`
+
+Restore the live db from a snapshot. The hub MUST be stopped — this
+command checks for an active `<DB_PATH>.lock` and refuses (exit 75)
+if a hub is running. The current db is renamed to
+`<DB_PATH>.pre-restore-<unix_ts>` so the operation is reversible:
+just rename it back.
+
+```
+USAGE: ctx db restore <SNAPSHOT> --to <DB_PATH> [OPTIONS]
+
+OPTIONS:
+      --to <PATH>  Path to the live db to overwrite (must match what
+                   the hub will use on next start)
+      --yes        Skip the y/N confirmation prompt
+```
+
 ### `ctx completion <shell>`
 
 Generate a shell completion script to stdout.
