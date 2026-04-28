@@ -199,9 +199,16 @@
 				value={themeStore.current}
 				onchange={(e) => themeStore.set((e.currentTarget as HTMLSelectElement).value as ThemeId)}
 			>
-				{#each THEMES as t}
-					<option value={t.id}>{t.label}</option>
-				{/each}
+				<optgroup label="Dark">
+					{#each THEMES.filter((t) => t.group === 'dark') as t}
+						<option value={t.id}>{t.label}</option>
+					{/each}
+				</optgroup>
+				<optgroup label="Light">
+					{#each THEMES.filter((t) => t.group === 'light') as t}
+						<option value={t.id}>{t.label}</option>
+					{/each}
+				</optgroup>
 			</select>
 		</div>
 	</nav>
