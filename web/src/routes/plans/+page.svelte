@@ -145,20 +145,21 @@
 	let abandonOpen = $state(false);
 	let abandonReason = $state('');
 
-	// Details modal — read-only "everything we know about this task"
-	// view. Opened from the per-row Details button. Pulls from the
-	// already-loaded selectedPlan.tasks (no extra fetch required).
-	let detailsOpen = $state(false);
-	let detailsTask: Task | null = $state(null);
-	function openDetails(task: Task) {
-		detailsTask = task;
-		detailsOpen = true;
+	// Inline expanded-row tracking — a Set of task ids that are
+	// currently showing the details accordion. Multiple rows can be
+	// open at once and stay open across sort changes / auto-refresh.
+	// Cleared on plan change because task ids are scoped to a plan.
+	let expandedTaskIds: Set<string> = $state(new Set());
+	function toggleExpanded(id: string) {
+		const next = new Set(expandedTaskIds);
+		if (next.has(id)) next.delete(id);
+		else next.add(id);
+		expandedTaskIds = next;
 	}
-	function closeDetails() {
-		detailsOpen = false;
-		detailsTask = null;
+	function isExpanded(id: string): boolean {
+		return expandedTaskIds.has(id);
 	}
-	// Pretty-print a Task for the "raw JSON" footer of the modal.
+	// Pretty-print a Task for the "raw JSON" footer of the accordion.
 	// The Hub may carry fields the typed client doesn't model (e.g.
 	// payload, on_complete) — surfacing the JSON is the safety net.
 	function rawJson(t: Task | null): string {
@@ -218,7 +219,16 @@
 		selectedName = null;
 		selectedPlan = null;
 		selectedTask = null;
+		expandedTaskIds = new Set();
 		loadPlans();
+	});
+
+	// Clear expanded rows when the user picks a different plan — task
+	// ids are plan-scoped so leftover ids would be misleading. Sort
+	// changes and auto-refresh deliberately preserve the set.
+	$effect(() => {
+		void selectedName;
+		expandedTaskIds = new Set();
 	});
 
 	async function handleCreate(e: Event) {
@@ -836,59 +846,121 @@
 			{#if sortedTasks.length > 0}
 				<ul class="task-list">
 					{#each sortedTasks as task}
-						<li
-							class="task-row {statusClass(task.status)} task-clickable"
-							role="button"
-							tabindex="0"
-							title="Click to view full task details"
-							onclick={() => openDetails(task)}
-							onkeydown={(e) => {
-								if (e.key === 'Enter' || e.key === ' ') {
-									e.preventDefault();
-									openDetails(task);
-								}
-							}}
-						>
-							<span class="task-glyph">[{statusGlyph(task.status)}]</span>
-							<span class="task-id">{task.id}</span>
-							<span class="pri-tag {priorityClass(task.priority)}">
-								{task.priority.slice(0, 2).toUpperCase()}
-							</span>
-							<span class="task-title">{task.title}</span>
-							{#if task.assigned_to}
-								<span class="assigned">@{task.assigned_to}</span>
-							{/if}
-							<span class="task-actions" onclick={(e) => e.stopPropagation()}>
-								{#if task.status === 'pending'}
-									<button class="btn-xs" onclick={() => handleStart(task)}>
-										Start
-									</button>
-									<button class="btn-xs btn-secondary" onclick={() => openAbandon(task)}>
-										Abandon
-									</button>
-								{:else if task.status === 'in_progress'}
-									<button class="btn-xs" onclick={() => openProof(task)}>
-										Done
-									</button>
-									<button class="btn-xs btn-secondary" onclick={() => openAbandon(task)}>
-										Abandon
-									</button>
+						{@const expanded = isExpanded(task.id)}
+						<li class="task-item">
+							<div
+								class="task-row {statusClass(task.status)} task-clickable"
+								class:expanded
+								role="button"
+								tabindex="0"
+								aria-expanded={expanded}
+								title={expanded ? 'Click to collapse details' : 'Click to expand details'}
+								onclick={() => toggleExpanded(task.id)}
+								onkeydown={(e) => {
+									if (e.key === 'Enter' || e.key === ' ') {
+										e.preventDefault();
+										toggleExpanded(task.id);
+									}
+								}}
+							>
+								<span class="task-caret" aria-hidden="true">{expanded ? '▾' : '▸'}</span>
+								<span class="task-glyph">[{statusGlyph(task.status)}]</span>
+								<span class="task-id">{task.id}</span>
+								<span class="pri-tag {priorityClass(task.priority)}">
+									{task.priority.slice(0, 2).toUpperCase()}
+								</span>
+								<span class="task-title">{task.title}</span>
+								{#if task.assigned_to}
+									<span class="assigned">@{task.assigned_to}</span>
 								{/if}
-							</span>
-							{#if task.proof}
-								<div class="task-proof">
-									proof: {task.proof.kind} {task.proof.value}
-									{#if task.proof.note}
-										&mdash; {task.proof.note}
+								<span class="task-actions" onclick={(e) => e.stopPropagation()}>
+									{#if task.status === 'pending'}
+										<button class="btn-xs" onclick={() => handleStart(task)}>
+											Start
+										</button>
+										<button class="btn-xs btn-secondary" onclick={() => openAbandon(task)}>
+											Abandon
+										</button>
+									{:else if task.status === 'in_progress'}
+										<button class="btn-xs" onclick={() => openProof(task)}>
+											Done
+										</button>
+										<button class="btn-xs btn-secondary" onclick={() => openAbandon(task)}>
+											Abandon
+										</button>
 									{/if}
-								</div>
-							{/if}
-							{#if task.status === 'abandoned' && task.abandoned_reason}
-								<div class="task-proof">reason: {task.abandoned_reason}</div>
-							{/if}
-							{#if task.blocked_by.length > 0}
-								<div class="task-proof">
-									blocked by: {task.blocked_by.join(', ')}
+								</span>
+								{#if task.proof}
+									<div class="task-proof">
+										proof: {task.proof.kind} {task.proof.value}
+										{#if task.proof.note}
+											&mdash; {task.proof.note}
+										{/if}
+									</div>
+								{/if}
+								{#if task.status === 'abandoned' && task.abandoned_reason}
+									<div class="task-proof">reason: {task.abandoned_reason}</div>
+								{/if}
+								{#if task.blocked_by.length > 0}
+									<div class="task-proof">
+										blocked by: {task.blocked_by.join(', ')}
+									</div>
+								{/if}
+							</div>
+							{#if expanded}
+								<div class="task-details">
+									<dl class="details-grid">
+										<dt>Priority</dt><dd>{task.priority}</dd>
+										<dt>Status</dt><dd>{task.status}</dd>
+										<dt>Assigned to</dt><dd>{task.assigned_to ?? '—'}</dd>
+										<dt>Parent</dt><dd>{task.parent_id ?? '—'}</dd>
+										<dt>Blocked by</dt>
+										<dd>
+											{#if task.blocked_by.length > 0}
+												{task.blocked_by.join(', ')}
+											{:else}
+												—
+											{/if}
+										</dd>
+										<dt>Created</dt>
+										<dd>
+											{formatTs(task.created_at)}
+											{#if task.created_by}<span class="by">by {task.created_by}</span>{/if}
+										</dd>
+										<dt>Started</dt>
+										<dd>
+											{formatTs(task.started_at)}
+											{#if task.started_by}<span class="by">by {task.started_by}</span>{/if}
+										</dd>
+										<dt>Completed</dt>
+										<dd>
+											{formatTs(task.completed_at)}
+											{#if task.completed_by}<span class="by">by {task.completed_by}</span>{/if}
+										</dd>
+										<dt>Abandoned</dt>
+										<dd>
+											{formatTs(task.abandoned_at)}
+											{#if task.abandoned_reason}
+												<div class="reason">{task.abandoned_reason}</div>
+											{/if}
+										</dd>
+										<dt>Proof</dt>
+										<dd>
+											{#if task.proof}
+												<span class="proof-kind">{task.proof.kind}</span>
+												<code class="proof-value">{task.proof.value}</code>
+												{#if task.proof.note}
+													<div class="reason">{task.proof.note}</div>
+												{/if}
+											{:else}
+												—
+											{/if}
+										</dd>
+									</dl>
+									<details class="raw-json">
+										<summary>Raw JSON</summary>
+										<pre>{rawJson(task)}</pre>
+									</details>
 								</div>
 							{/if}
 						</li>
@@ -947,84 +1019,6 @@
 					</button>
 				</div>
 			</form>
-		</div>
-	</div>
-{/if}
-
-{#if detailsOpen && detailsTask}
-	<div class="modal-backdrop" onclick={closeDetails}>
-		<div class="modal modal-wide" onclick={(e) => e.stopPropagation()}>
-			<header class="details-header">
-				<div>
-					<h3>
-						<span class="task-id-mono">{detailsTask.id}</span>
-						<span class="pri-tag {priorityClass(detailsTask.priority)}">
-							{detailsTask.priority.slice(0, 2).toUpperCase()}
-						</span>
-						<span class="task-status-pill task-status-{detailsTask.status}">
-							{detailsTask.status.replace('_', ' ')}
-						</span>
-					</h3>
-					<p class="details-title">{detailsTask.title}</p>
-				</div>
-				<button type="button" class="btn-xs btn-secondary" onclick={closeDetails}>Close</button>
-			</header>
-
-			<dl class="details-grid">
-				<dt>Priority</dt><dd>{detailsTask.priority}</dd>
-				<dt>Status</dt><dd>{detailsTask.status}</dd>
-				<dt>Assigned to</dt><dd>{detailsTask.assigned_to ?? '—'}</dd>
-				<dt>Parent</dt><dd>{detailsTask.parent_id ?? '—'}</dd>
-				<dt>Blocked by</dt>
-				<dd>
-					{#if detailsTask.blocked_by.length > 0}
-						{detailsTask.blocked_by.join(', ')}
-					{:else}
-						—
-					{/if}
-				</dd>
-
-				<dt>Created</dt>
-				<dd>
-					{formatTs(detailsTask.created_at)}
-					{#if detailsTask.created_by}<span class="by">by {detailsTask.created_by}</span>{/if}
-				</dd>
-				<dt>Started</dt>
-				<dd>
-					{formatTs(detailsTask.started_at)}
-					{#if detailsTask.started_by}<span class="by">by {detailsTask.started_by}</span>{/if}
-				</dd>
-				<dt>Completed</dt>
-				<dd>
-					{formatTs(detailsTask.completed_at)}
-					{#if detailsTask.completed_by}<span class="by">by {detailsTask.completed_by}</span>{/if}
-				</dd>
-				<dt>Abandoned</dt>
-				<dd>
-					{formatTs(detailsTask.abandoned_at)}
-					{#if detailsTask.abandoned_reason}
-						<div class="reason">{detailsTask.abandoned_reason}</div>
-					{/if}
-				</dd>
-
-				<dt>Proof</dt>
-				<dd>
-					{#if detailsTask.proof}
-						<span class="proof-kind">{detailsTask.proof.kind}</span>
-						<code class="proof-value">{detailsTask.proof.value}</code>
-						{#if detailsTask.proof.note}
-							<div class="reason">{detailsTask.proof.note}</div>
-						{/if}
-					{:else}
-						—
-					{/if}
-				</dd>
-			</dl>
-
-			<details class="raw-json">
-				<summary>Raw JSON</summary>
-				<pre>{rawJson(detailsTask)}</pre>
-			</details>
 		</div>
 	</div>
 {/if}
@@ -1399,9 +1393,13 @@
 		flex-direction: column;
 		gap: 0.4rem;
 	}
+	.task-item {
+		display: flex;
+		flex-direction: column;
+	}
 	.task-row {
 		display: grid;
-		grid-template-columns: 2.2rem 4rem 2.4rem 1fr auto auto;
+		grid-template-columns: 1.1rem 2.2rem 4rem 2.4rem 1fr auto auto;
 		gap: 0.4rem;
 		align-items: center;
 		padding: 0.45rem 0.6rem;
@@ -1409,6 +1407,28 @@
 		border: 1px solid var(--border);
 		border-radius: 4px;
 		font-family: monospace;
+	}
+	.task-caret {
+		color: var(--text-3);
+		font-size: 0.85rem;
+		text-align: center;
+	}
+	.task-row.expanded {
+		border-bottom-left-radius: 0;
+		border-bottom-right-radius: 0;
+		border-bottom-color: transparent;
+	}
+	.task-details {
+		background: var(--bg-2, var(--bg-0));
+		border: 1px solid var(--border);
+		border-top: 0;
+		border-radius: 0 0 4px 4px;
+		padding: 0.75rem 1rem;
+	}
+	.task-details .raw-json {
+		margin-top: 0.75rem;
+		border-top: 1px solid var(--border);
+		padding-top: 0.5rem;
 	}
 	.task-row.task-done {
 		color: var(--success);
