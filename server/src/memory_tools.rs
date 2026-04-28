@@ -1252,6 +1252,24 @@ pub struct BranchCreateParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct MergeParams {
+    /// Branch with changes to merge from.
+    pub source: String,
+    /// Branch to merge into (default: "main").
+    #[serde(default = "default_ref")]
+    pub target: String,
+    /// Commit message describing the merge.
+    #[serde(default = "default_merge_description_param")]
+    pub description: String,
+    /// Optional reasoning for the merge.
+    pub reasoning: Option<String>,
+}
+
+fn default_merge_description_param() -> String {
+    "Merge".to_string()
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct TaintListParams {
     /// Optional path prefix filter.
     pub path_prefix: Option<String>,
@@ -2170,6 +2188,42 @@ impl CtxOneServer {
                     "name": p.name,
                     "from": p.from,
                     "commit_id": format!("{}", id.short()),
+                })
+                .to_string()
+            }
+            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Merge `source` into `target` (default target: \"main\"). Returns the new commit id, or a `conflict` payload listing the conflicting paths if the merge can't proceed cleanly. \
+        \
+        CALL THIS once a feature branch is ready to land back on the trunk. Conflicts are returned as a structured list — resolve by writing the desired value on `target` directly, then re-attempt or skip the merge."
+    )]
+    async fn merge(&self, params: Parameters<MergeParams>) -> String {
+        let p = params.0;
+        let mut opts = CommitOptions::new(&self.agent_id, IntentCategory::Merge, &p.description);
+        if let Some(r) = p.reasoning {
+            opts = opts.with_reasoning(r);
+        }
+        match self.repo.merge(&p.source, &p.target, opts) {
+            Ok(commit_id) => {
+                self.session.mark_dirty();
+                serde_json::json!({
+                    "status": "ok",
+                    "source": p.source,
+                    "target": p.target,
+                    "commit_id": format!("{}", commit_id.short()),
+                })
+                .to_string()
+            }
+            Err(agentstategraph::RepoError::MergeConflicts(conflicts)) => {
+                let conflict_json = serde_json::to_value(&conflicts).unwrap_or_default();
+                serde_json::json!({
+                    "status": "conflict",
+                    "source": p.source,
+                    "target": p.target,
+                    "conflicts": conflict_json,
                 })
                 .to_string()
             }
