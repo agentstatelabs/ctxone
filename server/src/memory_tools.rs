@@ -1311,6 +1311,43 @@ pub struct TaintRemoveParams {
     pub ref_name: String,
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct GetStateParams {
+    /// Path to read (e.g., "/memory/facts/abc"). Defaults to "/" (root).
+    #[serde(default = "default_root_path")]
+    pub path: String,
+    /// Branch to read (default: "main").
+    #[serde(default = "default_ref", rename = "ref")]
+    pub ref_name: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ListPathsParams {
+    /// Path prefix to list under (default: "/" for everything).
+    #[serde(default = "default_root_path")]
+    pub prefix: String,
+    /// Max depth from prefix (omit for unlimited).
+    pub max_depth: Option<usize>,
+    /// Branch to read (default: "main").
+    #[serde(default = "default_ref", rename = "ref")]
+    pub ref_name: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SearchValuesParams {
+    /// Substring to search for in stored values.
+    pub query: String,
+    /// Max results (default: 25).
+    pub max_results: Option<usize>,
+    /// Branch to search (default: "main").
+    #[serde(default = "default_ref", rename = "ref")]
+    pub ref_name: String,
+}
+
+fn default_root_path() -> String {
+    "/".to_string()
+}
+
 fn parse_taint_kind(s: &str) -> Result<agentstategraph_taint::TaintKind, String> {
     use agentstategraph_taint::TaintKind;
     match s {
@@ -2278,6 +2315,51 @@ impl CtxOneServer {
                     "resolved_at": chrono::Utc::now(),
                 })
                 .to_string()
+            }
+            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Read the JSON value stored at a path. Returns the raw value (string, object, list, etc) — not just memory facts. \
+        \
+        CALL THIS WHEN you need the exact contents at a known path: a primed section, a plan blob, a session turn, anything you've already located via `list_paths` or `search_values`. For free-text memory recall use `recall` instead — that one is keyword-tokenized and budgeted."
+    )]
+    async fn get_state(&self, params: Parameters<GetStateParams>) -> String {
+        let p = params.0;
+        match self.repo.get_json(&p.ref_name, &p.path) {
+            Ok(value) => serde_json::to_string(&value).unwrap_or_else(|_| "null".into()),
+            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "List every path under `prefix` on the given branch. Cheap discovery primitive — use it to see what's actually stored before guessing path names. \
+        \
+        CALL THIS WHEN you need to enumerate what exists in a subtree: '/memory/primed', '/sessions', '/plans', or any prefix you've heard about. `max_depth` limits how deep the walk descends from the prefix; omit for unlimited. Returns leaf paths."
+    )]
+    async fn list_paths(&self, params: Parameters<ListPathsParams>) -> String {
+        let p = params.0;
+        match self.repo.list_paths(&p.ref_name, &p.prefix, p.max_depth) {
+            Ok(paths) => serde_json::to_string(&paths).unwrap_or_else(|_| "[]".into()),
+            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Full-text substring search across every stored value on the branch. Returns matching `{path, value}` pairs. \
+        \
+        CALL THIS WHEN you need to find a value but don't know the path — different from `recall`, which only searches memory facts and applies a token budget. `search_values` is broader (hits any leaf, including plans, primed sections, session captures) and dumber (literal substring, no scoring). Use it for 'where did I store the X token?' style questions, then narrow with `get_state`."
+    )]
+    async fn search_values(&self, params: Parameters<SearchValuesParams>) -> String {
+        let p = params.0;
+        match self.repo.search_values(&p.ref_name, &p.query, p.max_results) {
+            Ok(results) => {
+                let out: Vec<serde_json::Value> = results
+                    .into_iter()
+                    .map(|(path, value)| serde_json::json!({ "path": path, "value": value }))
+                    .collect();
+                serde_json::to_string(&out).unwrap_or_else(|_| "[]".into())
             }
             Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
         }
