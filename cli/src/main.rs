@@ -513,6 +513,73 @@ enum Commands {
         #[command(subcommand)]
         action: PlanAction,
     },
+    /// Manage taints — markers that flag paths as needing verification,
+    /// blocking write attempts, or watching for changes. Three kinds:
+    /// `taint` (effect-based), `quarantine` (per-agent gate), `watch`
+    /// (observe-only). Mirrors the `taint_*` MCP tools.
+    Taint {
+        #[command(subcommand)]
+        action: TaintAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TaintAction {
+    /// List taints, optionally filtered by path prefix, kind, or
+    /// resolved-status.
+    List {
+        /// Only taints whose path starts with this prefix.
+        #[arg(long)]
+        path_prefix: Option<String>,
+        /// Filter by kind: taint|quarantine|watch.
+        #[arg(long)]
+        kind: Option<String>,
+        /// Include resolved (untainted) entries (default: false).
+        #[arg(long)]
+        include_resolved: bool,
+    },
+    /// Check whether a write would be allowed at a path for an agent
+    /// at a given confidence. Read-only — does not modify state.
+    Check {
+        path: String,
+        /// Agent attempting the write (defaults to session agent).
+        #[arg(long = "as")]
+        agent_id: Option<String>,
+        /// Confidence of the proposed write (default 1.0).
+        #[arg(long, default_value_t = 1.0)]
+        confidence: f64,
+    },
+    /// Apply a taint to a path.
+    Apply {
+        path: String,
+        /// Human-readable name for this taint.
+        #[arg(long)]
+        name: String,
+        /// Kind: taint|quarantine|watch (default taint).
+        #[arg(long, default_value = "taint")]
+        kind: String,
+        /// Effect (taint kind only): warn|block|review|isolate|advisory.
+        /// Required for kind=taint, ignored otherwise.
+        #[arg(long)]
+        effect: Option<String>,
+        /// Severity: low|medium|high|critical (default medium).
+        #[arg(long, default_value = "medium")]
+        severity: String,
+        /// Why this is being tainted (recorded for audit).
+        #[arg(long, short)]
+        reason: String,
+        /// For kind=quarantine: comma-separated agent ids allowed
+        /// to write through the quarantine.
+        #[arg(long, value_delimiter = ',')]
+        authorized: Vec<String>,
+    },
+    /// Remove (resolve) a taint by id. Use `ctx taint list` to find ids.
+    Remove {
+        taint_id: String,
+        /// Why the taint is being resolved (recorded for audit).
+        #[arg(long, short)]
+        reason: String,
+    },
 }
 
 /// Proof specifier — `kind:value[:note]`. Kind is one of commit|file|test|text.
@@ -1739,6 +1806,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let branch = cli.branch.clone();
             let format = cli.format;
             handle_plan(action, &server, &branch, format, client.clone()).await?;
+        }
+        Commands::Taint { action } => {
+            let server = cli.server.clone();
+            let branch = cli.branch.clone();
+            let format = cli.format;
+            handle_taint(action, &server, &branch, format, client.clone()).await?;
         }
     }
 
@@ -4020,6 +4093,164 @@ async fn handle_plan(
                     count,
                     if count == 1 { "" } else { "s" }
                 );
+            });
+        }
+    }
+    Ok(())
+}
+
+async fn handle_taint(
+    action: TaintAction,
+    server: &str,
+    branch: &str,
+    format: OutputFormat,
+    client: reqwest::Client,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let agent_id = std::env::var("CTX_AGENT_ID").unwrap_or_else(|_| "ctx-cli".to_string());
+    let agent_id = agent_id.as_str();
+    match action {
+        TaintAction::List {
+            path_prefix,
+            kind,
+            include_resolved,
+        } => {
+            let mut url = format!("{}/api/taint?include_resolved={}", server, include_resolved);
+            if let Some(p) = &path_prefix {
+                url.push_str(&format!("&path_prefix={}", urlencoding(p)));
+            }
+            if let Some(k) = &kind {
+                url.push_str(&format!("&kind={}", urlencoding(k)));
+            }
+            let resp = match client.get(&url).send().await {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "taint list failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(format, &parsed, |v| {
+                let empty = vec![];
+                let taints = v["taints"].as_array().unwrap_or(&empty);
+                if taints.is_empty() {
+                    println!("(no taints)");
+                    return;
+                }
+                for t in taints {
+                    let id = t["id"].as_str().unwrap_or("");
+                    let kind = t["kind"].as_str().unwrap_or("?");
+                    let name = t["name"].as_str().unwrap_or("");
+                    let path = t["path"].as_str().unwrap_or("");
+                    let sev = t["severity"].as_str().unwrap_or("");
+                    let resolved = t["resolved_at"].as_str().is_some();
+                    let mark = if resolved { "[resolved] " } else { "" };
+                    println!("{}{} {} {} {} — {}", mark, id, kind, sev, path, name);
+                }
+            });
+        }
+        TaintAction::Check {
+            path,
+            agent_id: who,
+            confidence,
+        } => {
+            let who = who.unwrap_or_else(|| agent_id.to_string());
+            let url = format!(
+                "{}/api/taint/check?path={}&agent_id={}&confidence={}",
+                server,
+                urlencoding(&path),
+                urlencoding(&who),
+                confidence,
+            );
+            let resp = match client.get(&url).send().await {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "taint check failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(format, &parsed, |v| {
+                let can_write = v["can_write"].as_bool().unwrap_or(false);
+                let isolated = v["isolated"].as_bool().unwrap_or(false);
+                let req = v["required_confidence"].as_f64().unwrap_or(0.0);
+                println!(
+                    "can_write: {}{}",
+                    can_write,
+                    if isolated { " (isolated)" } else { "" }
+                );
+                println!("required_confidence: {:.2}", req);
+                if let Some(eff) = v["effect"].as_str() {
+                    println!("effect: {}", eff);
+                }
+                if let Some(id) = v["matching_taint_id"].as_str() {
+                    println!("matching_taint_id: {}", id);
+                }
+                let warnings = v["warnings"].as_array().cloned().unwrap_or_default();
+                if !warnings.is_empty() {
+                    println!("warnings:");
+                    for w in &warnings {
+                        if let Some(s) = w.as_str() {
+                            println!("  - {}", s);
+                        }
+                    }
+                }
+            });
+        }
+        TaintAction::Apply {
+            path,
+            name,
+            kind,
+            effect,
+            severity,
+            reason,
+            authorized,
+        } => {
+            let mut body = serde_json::json!({
+                "path": path,
+                "name": name,
+                "kind": kind,
+                "effect": effect.unwrap_or_else(|| "warn".to_string()),
+                "severity": severity,
+                "reason": reason,
+                "agent_id": agent_id,
+                "ref_name": branch,
+            });
+            if !authorized.is_empty() {
+                body["authorized_agents"] = serde_json::json!(authorized);
+            }
+            let url = format!("{}/api/taint", server);
+            let resp = match client.post(&url).json(&body).send().await {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "taint apply failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(format, &parsed, |v| {
+                let id = v["taint_id"].as_str().unwrap_or("");
+                let path = v["path"].as_str().unwrap_or("");
+                println!("Applied {} on {}", id, path);
+            });
+        }
+        TaintAction::Remove { taint_id, reason } => {
+            let body = serde_json::json!({
+                "reason": reason,
+                "agent_id": agent_id,
+                "ref_name": branch,
+            });
+            let url = format!("{}/api/taint/{}", server, urlencoding(&taint_id));
+            let resp = match client.delete(&url).json(&body).send().await {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "taint remove failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(format, &parsed, |v| {
+                let at = v["resolved_at"].as_str().unwrap_or("?");
+                println!("Resolved {} at {}", taint_id, at);
             });
         }
     }
