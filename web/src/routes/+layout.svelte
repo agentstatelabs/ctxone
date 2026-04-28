@@ -139,7 +139,7 @@
 				onclick={() => (showCreate = !showCreate)}
 				title="Create a new branch"
 			>
-				+
+				{showCreate ? '− Cancel' : '+ New branch'}
 			</button>
 			{#if showCreate}
 				<form
@@ -284,7 +284,7 @@
 
 	.branch-switcher select,
 	.theme-picker select {
-		width: calc(100% - 2.2rem);
+		width: 100%;
 		background: var(--bg-0);
 		border: 1px solid var(--border);
 		color: var(--text-1);
@@ -292,10 +292,6 @@
 		border-radius: 4px;
 		font-family: monospace;
 		font-size: 0.85rem;
-	}
-
-	.theme-picker select {
-		width: 100%;
 	}
 
 	.theme-picker {
@@ -331,17 +327,18 @@
 	}
 
 	.new-branch-btn {
-		background: var(--bg-hover);
-		border: 1px solid var(--border);
+		display: block;
+		width: 100%;
+		background: transparent;
+		border: 1px dashed var(--border);
 		color: var(--text-2);
-		width: 1.7rem;
-		height: 1.7rem;
+		padding: 0.35rem 0.5rem;
 		border-radius: 4px;
-		font-size: 1.1rem;
+		font-size: 0.78rem;
 		line-height: 1;
 		cursor: pointer;
-		margin-left: 0.2rem;
-		vertical-align: middle;
+		margin-top: 0.5rem;
+		text-align: center;
 	}
 
 	.new-branch-btn:hover {

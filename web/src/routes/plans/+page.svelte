@@ -661,7 +661,19 @@
 			{#if sortedTasks.length > 0}
 				<ul class="task-list">
 					{#each sortedTasks as task}
-						<li class="task-row {statusClass(task.status)}">
+						<li
+							class="task-row {statusClass(task.status)} task-clickable"
+							role="button"
+							tabindex="0"
+							title="Click to view full task details"
+							onclick={() => openDetails(task)}
+							onkeydown={(e) => {
+								if (e.key === 'Enter' || e.key === ' ') {
+									e.preventDefault();
+									openDetails(task);
+								}
+							}}
+						>
 							<span class="task-glyph">[{statusGlyph(task.status)}]</span>
 							<span class="task-id">{task.id}</span>
 							<span class="pri-tag {priorityClass(task.priority)}">
@@ -671,14 +683,7 @@
 							{#if task.assigned_to}
 								<span class="assigned">@{task.assigned_to}</span>
 							{/if}
-							<span class="task-actions">
-								<button
-									class="btn-xs btn-secondary"
-									onclick={() => openDetails(task)}
-									title="Show every field for this task"
-								>
-									Details
-								</button>
+							<span class="task-actions" onclick={(e) => e.stopPropagation()}>
 								{#if task.status === 'pending'}
 									<button class="btn-xs" onclick={() => handleStart(task)}>
 										Start
@@ -1167,6 +1172,18 @@
 	}
 	.task-row.task-progress {
 		border-left: 3px solid var(--accent);
+	}
+	.task-clickable {
+		cursor: pointer;
+		transition: background 0.1s, border-color 0.1s;
+	}
+	.task-clickable:hover {
+		background: var(--bg-hover);
+		border-color: var(--text-3);
+	}
+	.task-clickable:focus-visible {
+		outline: 2px solid var(--accent);
+		outline-offset: -2px;
 	}
 	.task-row.task-abandoned {
 		color: var(--warning);
