@@ -6,6 +6,7 @@
 	import { branchStore } from '$lib/branchStore.svelte';
 	import { themeStore, THEMES, type ThemeId } from '$lib/themeStore.svelte';
 	import { refreshStore, REFRESH_INTERVAL_MS } from '$lib/refreshStore.svelte';
+	import CmdK from '$lib/CmdK.svelte';
 	import '../app.css';
 
 	let { children }: { children: Snippet } = $props();
@@ -51,6 +52,19 @@
 		return pathname === href || pathname.startsWith(href + '/');
 	}
 
+	let cmdkOpen = $state(false);
+
+	// Global Cmd/Ctrl-K: open the palette. Ignore when an input/textarea
+	// already has focus and the user is typing a real K — except when
+	// they're holding the meta/ctrl modifier, which is unambiguously the
+	// shortcut.
+	function onGlobalKey(e: KeyboardEvent) {
+		if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
+			e.preventDefault();
+			cmdkOpen = !cmdkOpen;
+		}
+	}
+
 	let branches: string[] = $state(['main']);
 	let newBranchName = $state('');
 	let showCreate = $state(false);
@@ -93,11 +107,23 @@
 	<title>CtxOne Lens</title>
 </svelte:head>
 
+<svelte:window onkeydown={onGlobalKey} />
+
+<CmdK bind:open={cmdkOpen} />
+
 <div class="app">
 	<nav class="sidebar">
 		<div class="logo">
 			<h1>CtxOne</h1>
 			<span class="subtitle">Lens</span>
+			<button
+				type="button"
+				class="cmdk-hint"
+				onclick={() => (cmdkOpen = true)}
+				title="Open command palette"
+			>
+				<kbd>⌘K</kbd>
+			</button>
 		</div>
 
 		<div class="branch-switcher">
@@ -211,6 +237,26 @@
 		color: var(--text-3);
 		text-transform: uppercase;
 		letter-spacing: 0.1em;
+	}
+
+	.cmdk-hint {
+		float: right;
+		background: transparent;
+		border: 1px solid var(--border);
+		border-radius: 4px;
+		padding: 0.1rem 0.4rem;
+		cursor: pointer;
+	}
+	.cmdk-hint kbd {
+		font-family: monospace;
+		font-size: 0.7rem;
+		color: var(--text-2);
+	}
+	.cmdk-hint:hover {
+		border-color: var(--accent);
+	}
+	.cmdk-hint:hover kbd {
+		color: var(--accent);
 	}
 
 	.branch-switcher {
