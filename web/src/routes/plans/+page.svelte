@@ -119,6 +119,20 @@
 		collapsedGroups = next;
 	}
 
+	// Per-bucket "show all" tracking (t-002 of lens-enhancements-3).
+	// Tree view shows the first GROUP_PAGE_SIZE plans per status bucket
+	// by default; clicking "Show all" reveals the rest. Buckets stay in
+	// their chosen state across filter/sort changes — agents typically
+	// expand the bucket they care about and don't want it snapping shut.
+	const GROUP_PAGE_SIZE = 25;
+	let expandedGroups: Set<string> = $state(new Set());
+	function toggleGroupExpanded(g: string) {
+		const next = new Set(expandedGroups);
+		if (next.has(g)) next.delete(g);
+		else next.add(g);
+		expandedGroups = next;
+	}
+
 	let selectedName: string | null = $state(null);
 	let selectedPlan: Plan | null = $state(null);
 	let selectedTask: Task | null = $state(null);
@@ -711,6 +725,11 @@
 		{:else if viewMode === 'tree'}
 			{#each groupedPlans as group}
 				{@const collapsed = collapsedGroups.has(group.key)}
+				{@const expanded = expandedGroups.has(group.key)}
+				{@const hidden = Math.max(0, group.plans.length - GROUP_PAGE_SIZE)}
+				{@const visible = expanded || hidden === 0
+					? group.plans
+					: group.plans.slice(0, GROUP_PAGE_SIZE)}
 				<div class="status-group">
 					<button
 						class="status-header"
@@ -723,7 +742,7 @@
 						<span class="status-count">{group.plans.length}</span>
 					</button>
 					{#if !collapsed}
-						{#each group.plans as plan}
+						{#each visible as plan}
 							{@const eff = effectivePlanStatus(plan)}
 							<button
 								class="plan-row"
@@ -741,6 +760,17 @@
 								</div>
 							</button>
 						{/each}
+						{#if hidden > 0}
+							<button
+								type="button"
+								class="show-more-btn"
+								onclick={() => toggleGroupExpanded(group.key)}
+							>
+								{expanded
+									? `Show less (hide ${hidden})`
+									: `Show all ${group.plans.length} (${hidden} more)`}
+							</button>
+						{/if}
 					{/if}
 				</div>
 			{/each}
@@ -1315,6 +1345,26 @@
 	.status-count {
 		color: var(--text-3);
 		font-size: 0.7rem;
+	}
+	.show-more-btn {
+		display: block;
+		width: 100%;
+		text-align: center;
+		background: transparent;
+		border: 1px dashed var(--border);
+		color: var(--text-3);
+		padding: 0.3rem 0.5rem;
+		margin-top: 0.2rem;
+		border-radius: 4px;
+		font-family: monospace;
+		font-size: 0.72rem;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		cursor: pointer;
+	}
+	.show-more-btn:hover {
+		background: var(--bg-hover);
+		color: var(--text-1);
 	}
 	.plan-row {
 		width: 100%;
