@@ -234,7 +234,7 @@ what's next — without asking the agent.
   `low` for nice-to-haves, `critical` only for emergencies.
 - `plan_start(<plan>, <id>)` — mark a task in-progress when you
   begin. If it refuses because of a blocker, respect that.
-- `plan_complete(<plan>, <id>, proof=...)` — mark done with PROOF
+- `plan_done(<plan>, <id>, proof=...)` — mark done with PROOF
   when finished. A commit SHA is the strongest proof. A file path is
   next. A test name after that. Never use `text:` unless no other
   proof is available.
@@ -242,7 +242,7 @@ what's next — without asking the agent.
   became unnecessary. Reasons are required; they show up in blame.
 
 At the start of any session, call `plan_list` (no args) to see what's
-in flight. If you're resuming a plan, call `plan_get` to see the full
+in flight. If you're resuming a plan, call `plan_show` to see the full
 task tree, or `plan_next` to continue from the highest-priority
 pending task.
 
@@ -258,7 +258,7 @@ the pattern is:
    (or unassigned, unless `assigned_only=true`), whose blockers are
    done.
 3. Agent picks it up (`plan_start`), does the work, completes with
-   proof (`plan_complete`). Blame records which agent did each step.
+   proof (`plan_done`). Blame records which agent did each step.
 4. Next agent, next task, same loop.
 
 This is **state-driven orchestration**: the plan IS the
@@ -309,8 +309,8 @@ Don't make it up if you don't know the numbers.
 - **Don't ignore the savings ratio.** It tells you if you're using the
   system well.
 - **Don't treat the plan file as truth.** The graph is the source of
-  truth. Query with `plan_list` / `plan_get`, not a markdown file.
-- **Don't mark anything done without proof.** `plan_complete`
+  truth. Query with `plan_list` / `plan_show`, not a markdown file.
+- **Don't mark anything done without proof.** `plan_done`
   requires `proof`. If you can't produce one, the task isn't done.
 - **Don't skip `summarize_session`.** If you did real work, summarize
   it. The next session (or human reading Lens) needs the arc, not

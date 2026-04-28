@@ -1851,7 +1851,7 @@ impl CtxOneServer {
         \
         CALL THIS WHEN you finish a task. Proof kinds in order of preference: `commit` (a git SHA — strongest), `file` (a path you created/edited), `test` (a test that now exists or passes), `text` (human-attested last-resort). The proof is stored but not verified at call time. Completing the last open task in the plan automatically promotes the plan to `completed`."
     )]
-    async fn plan_complete(
+    async fn plan_done(
         &self,
         params: Parameters<crate::plan_tools::PlanCompleteParams>,
     ) -> String {
@@ -1961,7 +1961,7 @@ impl CtxOneServer {
         \
         CALL THIS when you need the complete picture of a plan — its tasks, their statuses, their proofs, who's assigned to what. Cheaper than `list_plans` + N `plan_tasks` calls."
     )]
-    async fn plan_get(&self, params: Parameters<crate::plan_tools::PlanGetParams>) -> String {
+    async fn plan_show(&self, params: Parameters<crate::plan_tools::PlanGetParams>) -> String {
         use crate::plan_tools as pt;
         let p = params.0;
         let store = pt::make_store(self.repo.clone(), &self.agent_id);
@@ -2030,7 +2030,7 @@ impl CtxOneServer {
         \
         CALL THIS WHEN the user explicitly asks to mark a plan complete despite open tasks (scope cut, abandoned feature, end-of-quarter cleanup). Idempotent on already-completed plans. Refuses on archived plans (unarchive first) and on empty plans (use `plan_archive` instead). Each abandoned task records the reason — default \"Plan force-completed by user\" or whatever string the caller passes."
     )]
-    async fn plan_force_complete(
+    async fn plan_complete(
         &self,
         params: Parameters<crate::plan_tools::PlanForceCompleteParams>,
     ) -> String {
@@ -2056,7 +2056,7 @@ impl CtxOneServer {
     #[tool(
         description = "List every task in a plan, including `assigned_to` per task. \
         \
-        CALL THIS when you want the flat task list without plan metadata. `plan_get` returns the same tasks plus the plan envelope if you need that too."
+        CALL THIS when you want the flat task list without plan metadata. `plan_show` returns the same tasks plus the plan envelope if you need that too."
     )]
     async fn plan_tasks(&self, params: Parameters<crate::plan_tools::PlanTasksParams>) -> String {
         use crate::plan_tools as pt;
@@ -2113,7 +2113,7 @@ impl CtxOneServer {
     }
 
     #[tool(
-        description = "Forget a path by writing a rollback commit. The data isn't physically removed — its history is preserved in blame — but `get_state` and `recall` will no longer surface it. \
+        description = "Forget a path by writing a rollback commit. The data isn't physically removed — its history is preserved in blame — but `get` and `recall` will no longer surface it. \
         \
         CALL THIS WHEN the user asks to forget, retract, or revoke a stored memory; or when a stored fact is wrong and you've replaced it with a corrected one. The reason becomes part of the rollback's blame trail."
     )]
@@ -2140,7 +2140,7 @@ impl CtxOneServer {
         \
         CALL THIS to discover what branches exist before reading or writing — branch names are free-form, so you can't assume `feature/x` exists without checking."
     )]
-    async fn branch_list(&self, _params: Parameters<BranchListParams>) -> String {
+    async fn branches(&self, _params: Parameters<BranchListParams>) -> String {
         match self.repo.list_branches(None) {
             Ok(branches) => {
                 let out: Vec<serde_json::Value> = branches
@@ -2160,7 +2160,7 @@ impl CtxOneServer {
         \
         CALL THIS WHEN you want to explore a hypothesis, draft an alternative, or stage memory writes that shouldn't land on main yet. Branches are cheap — prefer a branch over racing writes on main."
     )]
-    async fn branch_create(&self, params: Parameters<BranchCreateParams>) -> String {
+    async fn branch(&self, params: Parameters<BranchCreateParams>) -> String {
         let p = params.0;
         match self.repo.branch(&p.name, &p.from) {
             Ok(id) => {
@@ -2415,9 +2415,9 @@ impl CtxOneServer {
     #[tool(
         description = "Read the JSON value stored at a path. Returns the raw value (string, object, list, etc) — not just memory facts. \
         \
-        CALL THIS WHEN you need the exact contents at a known path: a primed section, a plan blob, a session turn, anything you've already located via `list_paths` or `search_values`. For free-text memory recall use `recall` instead — that one is keyword-tokenized and budgeted."
+        CALL THIS WHEN you need the exact contents at a known path: a primed section, a plan blob, a session turn, anything you've already located via `ls` or `search`. For free-text memory recall use `recall` instead — that one is keyword-tokenized and budgeted."
     )]
-    async fn get_state(&self, params: Parameters<GetStateParams>) -> String {
+    async fn get(&self, params: Parameters<GetStateParams>) -> String {
         let p = params.0;
         match self.repo.get_json(&p.ref_name, &p.path) {
             Ok(value) => serde_json::to_string(&value).unwrap_or_else(|_| "null".into()),
@@ -2430,7 +2430,7 @@ impl CtxOneServer {
         \
         CALL THIS WHEN you need to enumerate what exists in a subtree: '/memory/primed', '/sessions', '/plans', or any prefix you've heard about. `max_depth` limits how deep the walk descends from the prefix; omit for unlimited. Returns leaf paths."
     )]
-    async fn list_paths(&self, params: Parameters<ListPathsParams>) -> String {
+    async fn ls(&self, params: Parameters<ListPathsParams>) -> String {
         let p = params.0;
         match self.repo.list_paths(&p.ref_name, &p.prefix, p.max_depth) {
             Ok(paths) => serde_json::to_string(&paths).unwrap_or_else(|_| "[]".into()),
@@ -2441,9 +2441,9 @@ impl CtxOneServer {
     #[tool(
         description = "Full-text substring search across every stored value on the branch. Returns matching `{path, value}` pairs. \
         \
-        CALL THIS WHEN you need to find a value but don't know the path — different from `recall`, which only searches memory facts and applies a token budget. `search_values` is broader (hits any leaf, including plans, primed sections, session captures) and dumber (literal substring, no scoring). Use it for 'where did I store the X token?' style questions, then narrow with `get_state`."
+        CALL THIS WHEN you need to find a value but don't know the path — different from `recall`, which only searches memory facts and applies a token budget. `search` is broader (hits any leaf, including plans, primed sections, session captures) and dumber (literal substring, no scoring). Use it for 'where did I store the X token?' style questions, then narrow with `get`."
     )]
-    async fn search_values(&self, params: Parameters<SearchValuesParams>) -> String {
+    async fn search(&self, params: Parameters<SearchValuesParams>) -> String {
         let p = params.0;
         match self.repo.search_values(&p.ref_name, &p.query, p.max_results) {
             Ok(results) => {
@@ -2460,9 +2460,9 @@ impl CtxOneServer {
     #[tool(
         description = "Return the last N commits on a branch — newest first — including agent id, intent category, description, confidence, and tags. \
         \
-        CALL THIS WHEN you want to see what's been happening on a branch: who wrote what and why. Cheaper than `what_changed_since` for an absolute count and broader than `get_blame` (which is per-path)."
+        CALL THIS WHEN you want to see what's been happening on a branch: who wrote what and why. Cheaper than `what_changed_since` for an absolute count and broader than `blame` (which is per-path)."
     )]
-    async fn get_log(&self, params: Parameters<GetLogParams>) -> String {
+    async fn log(&self, params: Parameters<GetLogParams>) -> String {
         let p = params.0;
         match self.repo.log(&p.ref_name, p.limit) {
             Ok(commits) => {
@@ -2492,9 +2492,9 @@ impl CtxOneServer {
     #[tool(
         description = "Return the full provenance chain for a path: every commit that touched it, who wrote it, with what intent and confidence. \
         \
-        CALL THIS BEFORE acting on a stored value when stakes are high (security, licensing, deployment). If you can't see who wrote a fact and why, don't trust it. Use `why_did_we` for decision-phrase searches; use `get_blame` when you already have the path."
+        CALL THIS BEFORE acting on a stored value when stakes are high (security, licensing, deployment). If you can't see who wrote a fact and why, don't trust it. Use `why_did_we` for decision-phrase searches; use `blame` when you already have the path."
     )]
-    async fn get_blame(&self, params: Parameters<GetBlameParams>) -> String {
+    async fn blame(&self, params: Parameters<GetBlameParams>) -> String {
         let p = params.0;
         match self.repo.blame(&p.ref_name, &p.path) {
             Ok(blame) => serde_json::to_string(&blame).unwrap_or_else(|_| "null".into()),
@@ -2505,7 +2505,7 @@ impl CtxOneServer {
     #[tool(
         description = "Compute the structural diff between two refs (branches or commits). Returns the operations needed to turn `ref_a` into `ref_b`. \
         \
-        CALL THIS WHEN you need to know what's changed between branches before merging, or to compare a feature branch against main. Pair with `branch_list` to find ref names. Output is a list of ops (set/delete/etc) with paths and values, not a textual diff."
+        CALL THIS WHEN you need to know what's changed between branches before merging, or to compare a feature branch against main. Pair with `branches` to find ref names. Output is a list of ops (set/delete/etc) with paths and values, not a textual diff."
     )]
     async fn diff(&self, params: Parameters<DiffParams>) -> String {
         let p = params.0;

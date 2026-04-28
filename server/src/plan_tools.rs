@@ -7,8 +7,9 @@
 //! adds only:
 //!
 //! - **MCP tool surface** (`plan_new`, `plan_add`, `plan_start`,
-//!   `plan_complete`, `plan_abandon`, `plan_next`, `plan_list`,
-//!   `plan_get`, `plan_archive`, `plan_tasks`) with proactive
+//!   `plan_done`, `plan_abandon`, `plan_next`, `plan_list`,
+//!   `plan_show`, `plan_archive`, `plan_tasks`, `plan_complete`,
+//!   `plan_move`) with proactive
 //!   "CALL THIS WHEN" descriptions. The tool methods themselves live
 //!   on `CtxOneServer` in `memory_tools.rs` so every MCP tool shares a
 //!   single `ToolRouter`; this module provides the typed parameter

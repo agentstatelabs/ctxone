@@ -797,7 +797,7 @@ def test_plan_start_posts_body():
     assert task.started_by == "alice"
 
 
-def test_plan_complete_with_proof_object():
+def test_plan_done_with_proof_object():
     from ctxone import Proof
 
     session = MagicMock()
@@ -811,7 +811,7 @@ def test_plan_complete_with_proof_object():
     hub = make_hub(session)
 
     proof = Proof(kind="commit", value="abc123")
-    task = hub.plan_complete("p1", "t-001", proof)
+    task = hub.plan_done("p1", "t-001", proof)
 
     args, kwargs = session.post.call_args
     assert args[0] == "http://fake:3001/api/plans/p1/tasks/t-001/complete"
@@ -821,7 +821,7 @@ def test_plan_complete_with_proof_object():
     assert task.proof.value == "abc123"
 
 
-def test_plan_complete_with_proof_dict():
+def test_plan_done_with_proof_dict():
     session = MagicMock()
     session.post.return_value = mock_response(
         json_body=_task_body(
@@ -831,7 +831,7 @@ def test_plan_complete_with_proof_dict():
     )
     hub = make_hub(session)
 
-    hub.plan_complete(
+    hub.plan_done(
         "p1",
         "t-001",
         {"kind": "file", "value": "src/foo.rs", "note": "wrote it"},
@@ -927,7 +927,7 @@ def test_plan_get_parses_nested_tasks():
     )
     hub = make_hub(session)
 
-    plan = hub.plan_get("p1")
+    plan = hub.plan_show("p1")
     assert plan.name == "p1"
     assert plan.task_counts.total == 2
     assert len(plan.tasks) == 2

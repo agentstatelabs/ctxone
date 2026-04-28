@@ -582,7 +582,7 @@ class Hub:
         )
         return Task.from_dict(data)
 
-    def plan_complete(
+    def plan_done(
         self,
         plan_id: str,
         task_id: str,
@@ -666,7 +666,7 @@ class Hub:
             return []
         return [Plan.from_dict(p) for p in data]
 
-    def plan_get(self, plan_id: str, *, ref: str | None = None) -> Plan:
+    def plan_show(self, plan_id: str, *, ref: str | None = None) -> Plan:
         """Fetch a plan with its full task list."""
         params = {"ref": ref or self.branch}
         data = self._get(f"/api/plans/{plan_id}", params=params)

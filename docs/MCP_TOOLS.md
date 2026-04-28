@@ -6,12 +6,12 @@ five groups:
 - **Memory** (7): `remember`, `recall`, `prime`, `context`,
   `summarize_session`, `what_changed_since`, `why_did_we`
 - **Plans** (10): `plan_new`, `plan_add`, `plan_start`,
-  `plan_complete`, `plan_abandon`, `plan_next`, `plan_list`,
-  `plan_get`, `plan_tasks`, `plan_archive`
-- **Governance** (7): `forget`, `branch_list`, `branch_create`,
+  `plan_done`, `plan_abandon`, `plan_next`, `plan_list`,
+  `plan_show`, `plan_tasks`, `plan_archive`
+- **Governance** (7): `forget`, `branches`, `branch`,
   `taint_list`, `taint_check`, `taint_apply`, `taint_remove`
-- **Read primitives** (6): `get_state`, `list_paths`,
-  `search_values`, `get_log`, `get_blame`, `diff`
+- **Read primitives** (6): `get`, `ls`,
+  `search`, `log`, `blame`, `diff`
 - **Accounting** (1): `record_llm_usage`
 
 Any MCP-compatible agent (Claude Code, Cursor, VS Code Copilot with
@@ -362,7 +362,7 @@ listing the blockers if any entry in `blocked_by` is not yet `done`.
 
 ---
 
-### `plan_complete`
+### `plan_done`
 
 Transition `in_progress → done`. Requires a proof.
 
@@ -431,7 +431,7 @@ resuming prior work.
 
 ---
 
-### `plan_get`
+### `plan_show`
 
 Fetch a plan with its full task list.
 
@@ -465,7 +465,7 @@ for in Lens or via `ctx`.
 ### `forget`
 
 Forget a path by writing a rollback commit. The data isn't physically
-removed — its history is preserved in blame — but `get_state` and
+removed — its history is preserved in blame — but `get` and
 `recall` will no longer surface it.
 
 **Parameters:** `path`, `reason?`, `ref?`.
@@ -477,7 +477,7 @@ here's why we stopped believing it."
 
 ---
 
-### `branch_list`
+### `branches`
 
 List every branch with its current head commit id.
 
@@ -485,7 +485,7 @@ List every branch with its current head commit id.
 
 ---
 
-### `branch_create`
+### `branch`
 
 Create a new branch starting from `from` (default `"main"`).
 
@@ -549,7 +549,7 @@ Low-level read tools that mirror the engine's HTTP surface. Agents
 generally reach for `recall` first; these are for cases where the
 agent already knows the path or wants to introspect provenance.
 
-### `get_state`
+### `get`
 
 Read the JSON value stored at a path.
 
@@ -557,7 +557,7 @@ Read the JSON value stored at a path.
 
 ---
 
-### `list_paths`
+### `ls`
 
 List every path under `prefix` on the given branch.
 
@@ -565,7 +565,7 @@ List every path under `prefix` on the given branch.
 
 ---
 
-### `search_values`
+### `search`
 
 Full-text substring search across every stored value on the branch.
 
@@ -573,7 +573,7 @@ Full-text substring search across every stored value on the branch.
 
 ---
 
-### `get_log`
+### `log`
 
 Return the last N commits on a branch — newest first — with agent
 id, intent category, description, confidence, and tags.
@@ -582,7 +582,7 @@ id, intent category, description, confidence, and tags.
 
 ---
 
-### `get_blame`
+### `blame`
 
 Return the full provenance chain for a path: every commit that
 touched it, who wrote it, with what intent and confidence.
