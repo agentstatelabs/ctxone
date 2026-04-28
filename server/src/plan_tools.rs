@@ -557,6 +557,23 @@ pub struct PlanTasksParams {
     pub ref_name: String,
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct PlanForceCompleteParams {
+    pub plan_id: String,
+    #[serde(default = "default_ref", rename = "ref")]
+    pub ref_name: String,
+    /// Reason recorded on every open task that gets abandoned. If
+    /// omitted, defaults to "Plan force-completed by user".
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct ForceCompleteResult {
+    pub plan: Plan,
+    pub abandoned_task_ids: Vec<String>,
+}
+
 #[derive(Serialize)]
 pub struct ToolErr {
     pub error: String,
@@ -630,6 +647,65 @@ pub fn add_task(
     Ok(store.add_task(ref_name, plan, &full_title, pri, parent, blockers, assigned)?)
 }
 
+/// Force-complete a plan: abandon every still-open task with a fixed
+/// reason, letting the engine's per-task auto-promotion bump the
+/// plan's `_meta` to `Completed` once the last open task transitions.
+///
+/// Idempotent on already-completed plans (returns the plan unchanged
+/// with an empty abandoned list). Refuses on archived plans (use the
+/// CLI to unarchive first if you really mean to). Refuses on empty
+/// plans because the engine has no codepath to promote a no-task plan
+/// to Completed — `archive_plan` is the right call there.
+pub fn force_complete_plan(
+    store: &TaskStore,
+    ref_name: &str,
+    plan: &str,
+    reason: Option<String>,
+) -> Result<ForceCompleteResult, PlanToolError> {
+    let plan_meta = store.get_plan(ref_name, plan)?;
+    match plan_meta.status {
+        PlanStatus::Completed => {
+            return Ok(ForceCompleteResult {
+                plan: plan_meta,
+                abandoned_task_ids: vec![],
+            });
+        }
+        PlanStatus::Archived => {
+            return Err(PlanToolError::InvalidInput(format!(
+                "plan '{}' is archived; cannot force-complete",
+                plan
+            )));
+        }
+        PlanStatus::Active => {}
+    }
+
+    let tasks = store.list_tasks(ref_name, plan)?;
+    if tasks.is_empty() {
+        return Err(PlanToolError::InvalidInput(format!(
+            "plan '{}' has no tasks; archive it instead",
+            plan
+        )));
+    }
+
+    let abandon_reason = reason
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "Plan force-completed by user".to_string());
+
+    let mut abandoned: Vec<String> = Vec::new();
+    for task in tasks {
+        if !matches!(task.status, TaskStatus::Done | TaskStatus::Abandoned) {
+            store.abandon_task(ref_name, plan, &task.id, &abandon_reason)?;
+            abandoned.push(task.id.0.clone());
+        }
+    }
+
+    let final_plan = store.get_plan(ref_name, plan)?;
+    Ok(ForceCompleteResult {
+        plan: final_plan,
+        abandoned_task_ids: abandoned,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -680,6 +756,108 @@ mod tests {
         assert_eq!(priority_from_str("High"), Some(Priority::High));
         assert_eq!(priority_from_str("critical"), Some(Priority::Critical));
         assert_eq!(priority_from_str("nope"), None);
+    }
+
+    #[test]
+    fn force_complete_abandons_open_tasks_and_promotes_plan() {
+        let (_repo, store) = fresh_store();
+        create_plan(&store, "main", "p1", None).unwrap();
+        let t1 = add_task(&store, "main", "p1", "first", None, None, None, None, vec![]).unwrap();
+        let _t2 =
+            add_task(&store, "main", "p1", "second", None, None, None, None, vec![]).unwrap();
+        let t3 = add_task(&store, "main", "p1", "third", None, None, None, None, vec![]).unwrap();
+        // Mark one task as already done — force_complete should leave it alone.
+        store
+            .start_task("main", "p1", &t1.id)
+            .expect("start task");
+        store
+            .complete_task(
+                "main",
+                "p1",
+                &t1.id,
+                Proof {
+                    kind: ProofKind::Commit,
+                    value: "abc1234".into(),
+                    note: None,
+                },
+            )
+            .expect("complete task");
+
+        let result = force_complete_plan(&store, "main", "p1", None).expect("force complete");
+        assert_eq!(result.plan.status, PlanStatus::Completed);
+        // Two tasks abandoned; t1 was already done so untouched.
+        assert_eq!(result.abandoned_task_ids.len(), 2);
+        assert!(!result.abandoned_task_ids.contains(&t1.id.0));
+        assert!(result.abandoned_task_ids.contains(&t3.id.0));
+
+        // The abandoned tasks carry the default reason.
+        let t3_after = store.get_task("main", "p1", &t3.id).expect("get t3");
+        assert_eq!(t3_after.status, TaskStatus::Abandoned);
+        assert_eq!(
+            t3_after.abandoned_reason.as_deref(),
+            Some("Plan force-completed by user")
+        );
+    }
+
+    #[test]
+    fn force_complete_is_idempotent_on_completed_plan() {
+        let (_repo, store) = fresh_store();
+        create_plan(&store, "main", "p1", None).unwrap();
+        let t1 = add_task(&store, "main", "p1", "first", None, None, None, None, vec![]).unwrap();
+        store.start_task("main", "p1", &t1.id).unwrap();
+        store
+            .complete_task(
+                "main",
+                "p1",
+                &t1.id,
+                Proof {
+                    kind: ProofKind::Commit,
+                    value: "abc".into(),
+                    note: None,
+                },
+            )
+            .unwrap();
+
+        // Plan is now Completed — second force-complete is a no-op.
+        let result =
+            force_complete_plan(&store, "main", "p1", None).expect("idempotent force complete");
+        assert_eq!(result.plan.status, PlanStatus::Completed);
+        assert!(result.abandoned_task_ids.is_empty());
+    }
+
+    #[test]
+    fn force_complete_rejects_archived_plan() {
+        let (_repo, store) = fresh_store();
+        create_plan(&store, "main", "p1", None).unwrap();
+        store.archive_plan("main", "p1").unwrap();
+        let err = force_complete_plan(&store, "main", "p1", None)
+            .expect_err("archived plan should reject");
+        assert!(matches!(err, PlanToolError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn force_complete_rejects_empty_plan() {
+        let (_repo, store) = fresh_store();
+        create_plan(&store, "main", "p1", None).unwrap();
+        let err = force_complete_plan(&store, "main", "p1", None)
+            .expect_err("empty plan should reject");
+        assert!(matches!(err, PlanToolError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn force_complete_uses_custom_reason() {
+        let (_repo, store) = fresh_store();
+        create_plan(&store, "main", "p1", None).unwrap();
+        let t1 = add_task(&store, "main", "p1", "first", None, None, None, None, vec![]).unwrap();
+        let _ = force_complete_plan(
+            &store,
+            "main",
+            "p1",
+            Some("scope cut for v2".into()),
+        )
+        .expect("force complete");
+        let t1_after = store.get_task("main", "p1", &t1.id).expect("get t1");
+        assert_eq!(t1_after.abandoned_reason.as_deref(), Some("scope cut for v2"));
     }
 
     #[test]

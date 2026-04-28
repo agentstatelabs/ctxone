@@ -1999,6 +1999,34 @@ impl CtxOneServer {
     }
 
     #[tool(
+        description = "Force-complete a plan: abandon every still-open task with a fixed reason, then let the engine auto-promote the plan's `_meta` to `Completed`. Returns the updated plan + the ids of tasks that were abandoned. \
+        \
+        CALL THIS WHEN the user explicitly asks to mark a plan complete despite open tasks (scope cut, abandoned feature, end-of-quarter cleanup). Idempotent on already-completed plans. Refuses on archived plans (unarchive first) and on empty plans (use `plan_archive` instead). Each abandoned task records the reason — default \"Plan force-completed by user\" or whatever string the caller passes."
+    )]
+    async fn plan_force_complete(
+        &self,
+        params: Parameters<crate::plan_tools::PlanForceCompleteParams>,
+    ) -> String {
+        use crate::plan_tools as pt;
+        let p = params.0;
+        let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        match pt::force_complete_plan(&store, &p.ref_name, &p.plan_id, p.reason) {
+            Ok(result) => {
+                self.session.mark_dirty();
+                let tasks = store
+                    .list_tasks(&p.ref_name, &p.plan_id)
+                    .unwrap_or_default();
+                serde_json::to_string(&serde_json::json!({
+                    "plan": pt::plan_to_json(&result.plan, &tasks, true),
+                    "abandoned_task_ids": result.abandoned_task_ids,
+                }))
+                .unwrap_or_else(|_| "{}".into())
+            }
+            Err(e) => pt::err_json(e),
+        }
+    }
+
+    #[tool(
         description = "List every task in a plan, including `assigned_to` per task. \
         \
         CALL THIS when you want the flat task list without plan metadata. `plan_get` returns the same tasks plus the plan envelope if you need that too."

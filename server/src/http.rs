@@ -208,6 +208,10 @@ pub fn router_with_config(
         )
         .route("/api/plans/{name}/next", get(next_plan_task))
         .route("/api/plans/{name}/archive", post(archive_plan))
+        .route(
+            "/api/plans/{name}/force_complete",
+            post(force_complete_plan),
+        )
         // Session turn capture (full request/response/tool/usage JSON)
         .route("/api/sessions/{sid}/turns", get(list_session_turns))
         .route("/api/sessions/{sid}/turns/{idx}", post(put_session_turn).get(get_session_turn))
@@ -1338,6 +1342,36 @@ async fn archive_plan(
         .map_err(substrate_error_to_response)?;
     s.sessions.mark_all_dirty();
     Ok(Json(plan_tools::plan_to_json(&plan, &[], false)))
+}
+
+#[derive(Deserialize, Default)]
+struct ForceCompleteBody {
+    /// Reason recorded on every still-open task. Optional — falls
+    /// back to the standard "Plan force-completed by user" string.
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[instrument(skip_all, fields(name = %name, ref_name = %q.ref_name, agent = %agent_id.0))]
+async fn force_complete_plan(
+    State(s): State<HubState>,
+    agent_id: AgentId,
+    Path(name): Path<String>,
+    Query(q): Query<RefQuery>,
+    body: Option<Json<ForceCompleteBody>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = plan_tools::make_store(s.repo.clone(), &agent_id.0);
+    let reason = body.and_then(|Json(b)| b.reason);
+    let result = plan_tools::force_complete_plan(&store, &q.ref_name, &name, reason)
+        .map_err(plan_error_to_response)?;
+    let tasks = store
+        .list_tasks(&q.ref_name, &name)
+        .unwrap_or_default();
+    s.sessions.mark_all_dirty();
+    Ok(Json(serde_json::json!({
+        "plan": plan_tools::plan_to_json(&result.plan, &tasks, true),
+        "abandoned_task_ids": result.abandoned_task_ids,
+    })))
 }
 
 // -- Taint endpoints --

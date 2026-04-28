@@ -619,6 +619,17 @@ enum PlanAction {
     Show { plan_id: String },
     /// Archive a plan (soft — task data preserved)
     Archive { plan_id: String },
+    /// Force-complete a plan: abandon every still-open task with a fixed
+    /// reason and let the engine promote the plan to `completed`.
+    /// Idempotent on already-completed plans; rejected on archived or
+    /// empty plans.
+    Complete {
+        plan_id: String,
+        /// Reason recorded on every abandoned task. Defaults to
+        /// "Plan force-completed by user".
+        #[arg(long, short)]
+        reason: Option<String>,
+    },
 }
 
 /// Subcommands under `ctx agents`. Everything here operates on the
@@ -3814,6 +3825,49 @@ async fn handle_plan(
             let parsed: Value = resp.json().await?;
             emit(format, &parsed, |v| {
                 println!("Archived plan {}", v["name"].as_str().unwrap_or(""));
+            });
+        }
+        PlanAction::Complete { plan_id, reason } => {
+            let url = format!(
+                "{}/api/plans/{}/force_complete?ref={}",
+                server,
+                urlencoding(&plan_id),
+                urlencoding(&branch)
+            );
+            let body = serde_json::json!({ "reason": reason });
+            let resp = match client
+                .post(&url)
+                .header("X-CTXone-Agent", &agent_id)
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "plan complete failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(format, &parsed, |v| {
+                let plan_name = v["plan"]["name"].as_str().unwrap_or("");
+                let abandoned = v["abandoned_task_ids"]
+                    .as_array()
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                println!(
+                    "Force-completed plan {} ({} task{} abandoned)",
+                    plan_name,
+                    abandoned,
+                    if abandoned == 1 { "" } else { "s" }
+                );
+                if let Some(arr) = v["abandoned_task_ids"].as_array() {
+                    for id in arr {
+                        if let Some(s) = id.as_str() {
+                            println!("  - {}", s);
+                        }
+                    }
+                }
             });
         }
     }

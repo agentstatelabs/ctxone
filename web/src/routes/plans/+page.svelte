@@ -10,6 +10,7 @@
 		completeTask,
 		abandonTask,
 		archivePlan,
+		forceCompletePlan,
 		type Plan,
 		type Task,
 		type Priority,
@@ -319,6 +320,27 @@
 			);
 			abandonOpen = false;
 			selectedTask = null;
+			await refreshSelected();
+		} catch (err) {
+			error = err instanceof Error ? err.message : String(err);
+		}
+	}
+
+	// Force-complete the open plan. Counts open tasks first so the
+	// confirmation prompt names the actual fallout. Disabled when the
+	// plan is already terminal (Completed / Archived).
+	async function handleForceComplete() {
+		if (!selectedPlan || !selectedName) return;
+		const tc = selectedPlan.task_counts;
+		const openCount = tc.pending + tc.in_progress;
+		const msg = openCount === 0
+			? `Mark plan "${selectedName}" complete?`
+			: `Mark plan "${selectedName}" complete? This will abandon ${openCount} open task${openCount === 1 ? '' : 's'} ` +
+				`with the reason "Plan force-completed by user".`;
+		if (!confirm(msg)) return;
+		try {
+			await forceCompletePlan(selectedName, branchStore.current);
+			await loadPlans();
 			await refreshSelected();
 		} catch (err) {
 			error = err instanceof Error ? err.message : String(err);
@@ -723,7 +745,10 @@
 					<button onclick={() => (showAddTask = !showAddTask)}>
 						{showAddTask ? 'Cancel' : '+ Add task'}
 					</button>
-					{#if selectedPlan.status !== 'archived'}
+					{#if selectedPlan.status === 'active'}
+						<button class="btn-secondary btn-complete" onclick={handleForceComplete}>
+							Mark complete
+						</button>
 						<button class="btn-secondary" onclick={handleArchive}>Archive</button>
 					{/if}
 				</div>
@@ -1038,6 +1063,14 @@
 		background: var(--border);
 		border-color: var(--text-3);
 		color: var(--text-2);
+	}
+	.btn-complete {
+		color: var(--success);
+		border-color: color-mix(in srgb, var(--success) 50%, transparent);
+		background: color-mix(in srgb, var(--success) 14%, transparent);
+	}
+	.btn-complete:hover {
+		background: color-mix(in srgb, var(--success) 24%, transparent);
 	}
 	.btn-sm {
 		padding: 0.25rem 0.6rem;

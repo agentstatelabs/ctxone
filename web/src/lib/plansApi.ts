@@ -183,6 +183,25 @@ export async function archivePlan(name: string, branch = 'main'): Promise<Plan> 
 	});
 }
 
+/**
+ * Force-complete a plan: server abandons every still-open task with
+ * the given reason (or the default), then auto-promotes the plan to
+ * `completed`. Returns the freshly-loaded plan + the ids of tasks
+ * that were abandoned this call.
+ */
+export async function forceCompletePlan(
+	name: string,
+	branch = 'main',
+	reason?: string
+): Promise<{ plan: Plan; abandoned_task_ids: string[] }> {
+	const url = `/api/plans/${encodeURIComponent(name)}/force_complete?ref=${encodeURIComponent(branch)}`;
+	return fetchJson(url, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ reason: reason ?? null })
+	});
+}
+
 export async function nextTask(
 	plan: string,
 	opts: {
