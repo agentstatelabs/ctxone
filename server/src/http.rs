@@ -662,12 +662,13 @@ async fn remember(
     opts = opts.with_confidence(confidence);
     let mut tags = req.tags.unwrap_or_default();
     // Auto-tag with the originating session so Lens can group
-    // memories per session without a separate index.
-    if session_id.0 != DEFAULT_SESSION_ID {
-        let stag = format!("session:{}", session_id.0);
-        if !tags.iter().any(|t| t == &stag) {
-            tags.push(stag);
-        }
+    // memories per session without a separate index. Apply this
+    // even on DEFAULT_SESSION_ID so the "default" bucket is
+    // visible on the Sessions page (otherwise it's a black hole
+    // for any caller that didn't set X-CtxOne-Session).
+    let stag = format!("session:{}", session_id.0);
+    if !tags.iter().any(|t| t == &stag) {
+        tags.push(stag);
     }
     if !tags.is_empty() {
         opts = opts.with_tags(tags);

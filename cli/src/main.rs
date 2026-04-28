@@ -2430,6 +2430,21 @@ async fn run_doctor(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
 // ── ingest-session / capture-turn ────────────────────────────────────────────
 
+/// Derive a session id from a JSONL transcript path. Claude Code names its
+/// session files `<uuid>.jsonl`, so the file stem makes a stable, unique
+/// session id that lets each ingested file land as its own row on the
+/// Sessions page (with its own token totals and tagged memories).
+///
+/// Falls back to "default" if the path has no usable stem (shouldn't happen
+/// in practice — Claude Code always names files).
+fn session_id_for_file(path: &std::path::Path) -> String {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "default".to_string())
+}
+
 async fn run_ingest_session(
     server: &str,
     branch: &str,
@@ -2470,7 +2485,19 @@ async fn run_ingest_session(
 
     for path in &files {
         let fname = path.file_name().unwrap_or_default().to_string_lossy();
-        println!("→ {}", fname);
+        // If the caller didn't pin an explicit --session, give each file
+        // its own session id derived from the filename so the Sessions
+        // page shows one row per ingested transcript instead of
+        // collapsing everything into "default".
+        let derived_sid;
+        let effective_session: Option<&str> = match session {
+            Some(s) => Some(s),
+            None => {
+                derived_sid = session_id_for_file(path);
+                Some(derived_sid.as_str())
+            }
+        };
+        println!("→ {}  (session: {})", fname, effective_session.unwrap_or("default"));
 
         let mut turns = crate::ingest::parse_turns(path);
 
@@ -2501,7 +2528,7 @@ async fn run_ingest_session(
                     );
                 } else {
                     crate::ingest::record_turn_tokens(
-                        &turn.tokens, &turn.model, server, session, &client,
+                        &turn.tokens, &turn.model, server, effective_session, &client,
                     ).await;
                 }
             }
@@ -2510,14 +2537,14 @@ async fn run_ingest_session(
                 if dry_run {
                     println!(
                         "  [dry] full turn: /sessions/{}/turns/{:04} ({} bytes assistant, {} tools)",
-                        session.unwrap_or("default"),
+                        effective_session.unwrap_or("default"),
                         idx,
                         turn.assistant_text.len(),
                         turn.tool_calls_raw.len(),
                     );
                 } else {
                     crate::ingest::store_full_turn(
-                        turn, idx, &source_file, server, branch, session, &client,
+                        turn, idx, &source_file, server, branch, effective_session, &client,
                     ).await;
                     total_full_turns += 1;
                 }
@@ -2535,7 +2562,7 @@ async fn run_ingest_session(
                         mem.path, mem.importance, mem.title
                     );
                 } else {
-                    crate::ingest::store_memory(mem, server, branch, session, &client).await;
+                    crate::ingest::store_memory(mem, server, branch, effective_session, &client).await;
                     print!(".");
                     let _ = std::io::Write::flush(&mut std::io::stdout());
                 }
@@ -2614,16 +2641,25 @@ async fn run_capture_turn(
         .to_string_lossy()
         .to_string();
 
+    // If no explicit --session was passed, derive one from the transcript
+    // filename (Claude Code names files <uuid>.jsonl) so each captured
+    // session lands as its own row on the Sessions page.
+    let derived_sid = session_id_for_file(&transcript_path);
+    let effective_session: Option<&str> = match session {
+        Some(s) => Some(s),
+        None => Some(derived_sid.as_str()),
+    };
+
     for (offset, turn) in recent.iter().enumerate() {
         let idx = base_idx + offset;
         if !turn.tokens.is_empty() {
             crate::ingest::record_turn_tokens(
-                &turn.tokens, &turn.model, server, session, &client,
+                &turn.tokens, &turn.model, server, effective_session, &client,
             ).await;
         }
         if full_turn {
             crate::ingest::store_full_turn(
-                turn, idx, &source_file, server, branch, session, &client,
+                turn, idx, &source_file, server, branch, effective_session, &client,
             ).await;
         }
         if tokens_only || api_key.is_empty() || !turn.is_substantial() {
@@ -2631,7 +2667,7 @@ async fn run_capture_turn(
         }
         let memories = crate::ingest::extract_memories(turn, &api_key, &client).await;
         for mem in &memories {
-            crate::ingest::store_memory(mem, server, branch, session, &client).await;
+            crate::ingest::store_memory(mem, server, branch, effective_session, &client).await;
         }
     }
 
@@ -3977,6 +4013,7 @@ mod tests {
             server: None,
             branch: None,
             format: None,
+            session: None,
             command: Commands::Status,
         }
     }
