@@ -98,6 +98,40 @@
 	let abandonOpen = $state(false);
 	let abandonReason = $state('');
 
+	// Details modal — read-only "everything we know about this task"
+	// view. Opened from the per-row Details button. Pulls from the
+	// already-loaded selectedPlan.tasks (no extra fetch required).
+	let detailsOpen = $state(false);
+	let detailsTask: Task | null = $state(null);
+	function openDetails(task: Task) {
+		detailsTask = task;
+		detailsOpen = true;
+	}
+	function closeDetails() {
+		detailsOpen = false;
+		detailsTask = null;
+	}
+	// Pretty-print a Task for the "raw JSON" footer of the modal.
+	// The Hub may carry fields the typed client doesn't model (e.g.
+	// payload, on_complete) — surfacing the JSON is the safety net.
+	function rawJson(t: Task | null): string {
+		if (!t) return '';
+		try {
+			return JSON.stringify(t, null, 2);
+		} catch {
+			return String(t);
+		}
+	}
+	function formatTs(ts: string | null): string {
+		if (!ts) return '—';
+		try {
+			const d = new Date(ts);
+			return `${d.toLocaleString()} (${ts})`;
+		} catch {
+			return ts;
+		}
+	}
+
 	async function loadPlans() {
 		error = null;
 		try {
@@ -629,6 +663,13 @@
 								<span class="assigned">@{task.assigned_to}</span>
 							{/if}
 							<span class="task-actions">
+								<button
+									class="btn-xs btn-secondary"
+									onclick={() => openDetails(task)}
+									title="Show every field for this task"
+								>
+									Details
+								</button>
 								{#if task.status === 'pending'}
 									<button class="btn-xs" onclick={() => handleStart(task)}>
 										Start
@@ -717,6 +758,84 @@
 					</button>
 				</div>
 			</form>
+		</div>
+	</div>
+{/if}
+
+{#if detailsOpen && detailsTask}
+	<div class="modal-backdrop" onclick={closeDetails}>
+		<div class="modal modal-wide" onclick={(e) => e.stopPropagation()}>
+			<header class="details-header">
+				<div>
+					<h3>
+						<span class="task-id-mono">{detailsTask.id}</span>
+						<span class="pri-tag {priorityClass(detailsTask.priority)}">
+							{detailsTask.priority.slice(0, 2).toUpperCase()}
+						</span>
+						<span class="task-status-pill task-status-{detailsTask.status}">
+							{detailsTask.status.replace('_', ' ')}
+						</span>
+					</h3>
+					<p class="details-title">{detailsTask.title}</p>
+				</div>
+				<button type="button" class="btn-xs btn-secondary" onclick={closeDetails}>Close</button>
+			</header>
+
+			<dl class="details-grid">
+				<dt>Priority</dt><dd>{detailsTask.priority}</dd>
+				<dt>Status</dt><dd>{detailsTask.status}</dd>
+				<dt>Assigned to</dt><dd>{detailsTask.assigned_to ?? '—'}</dd>
+				<dt>Parent</dt><dd>{detailsTask.parent_id ?? '—'}</dd>
+				<dt>Blocked by</dt>
+				<dd>
+					{#if detailsTask.blocked_by.length > 0}
+						{detailsTask.blocked_by.join(', ')}
+					{:else}
+						—
+					{/if}
+				</dd>
+
+				<dt>Created</dt>
+				<dd>
+					{formatTs(detailsTask.created_at)}
+					{#if detailsTask.created_by}<span class="by">by {detailsTask.created_by}</span>{/if}
+				</dd>
+				<dt>Started</dt>
+				<dd>
+					{formatTs(detailsTask.started_at)}
+					{#if detailsTask.started_by}<span class="by">by {detailsTask.started_by}</span>{/if}
+				</dd>
+				<dt>Completed</dt>
+				<dd>
+					{formatTs(detailsTask.completed_at)}
+					{#if detailsTask.completed_by}<span class="by">by {detailsTask.completed_by}</span>{/if}
+				</dd>
+				<dt>Abandoned</dt>
+				<dd>
+					{formatTs(detailsTask.abandoned_at)}
+					{#if detailsTask.abandoned_reason}
+						<div class="reason">{detailsTask.abandoned_reason}</div>
+					{/if}
+				</dd>
+
+				<dt>Proof</dt>
+				<dd>
+					{#if detailsTask.proof}
+						<span class="proof-kind">{detailsTask.proof.kind}</span>
+						<code class="proof-value">{detailsTask.proof.value}</code>
+						{#if detailsTask.proof.note}
+							<div class="reason">{detailsTask.proof.note}</div>
+						{/if}
+					{:else}
+						—
+					{/if}
+				</dd>
+			</dl>
+
+			<details class="raw-json">
+				<summary>Raw JSON</summary>
+				<pre>{rawJson(detailsTask)}</pre>
+			</details>
 		</div>
 	</div>
 {/if}
@@ -1132,5 +1251,130 @@
 		justify-content: flex-end;
 		gap: 0.4rem;
 		margin-top: 1rem;
+	}
+
+	/* Details modal — read-only "everything we know" view (t-020). */
+	.modal-wide {
+		min-width: 540px;
+		max-width: 720px;
+		max-height: 85vh;
+		overflow-y: auto;
+	}
+	.details-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: flex-start;
+		gap: 1rem;
+		margin-bottom: 0.75rem;
+	}
+	.details-header h3 {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		margin: 0;
+	}
+	.task-id-mono {
+		font-family: monospace;
+		color: var(--text-2);
+	}
+	.task-status-pill {
+		font-size: 0.7rem;
+		padding: 0.1rem 0.45rem;
+		border-radius: 3px;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		background: var(--bg-hover);
+	}
+	.task-status-pending { color: var(--text-2); }
+	.task-status-in_progress {
+		color: var(--accent);
+		background: var(--accent-bg);
+	}
+	.task-status-done {
+		color: var(--success);
+		background: color-mix(in srgb, var(--success) 18%, transparent);
+	}
+	.task-status-abandoned {
+		color: var(--warning);
+		background: color-mix(in srgb, var(--warning) 18%, transparent);
+	}
+	.details-title {
+		margin: 0.4rem 0 0 0;
+		color: var(--text-1);
+		font-size: 0.95rem;
+	}
+	.details-grid {
+		display: grid;
+		grid-template-columns: max-content 1fr;
+		gap: 0.4rem 1rem;
+		margin: 0;
+		font-size: 0.85rem;
+	}
+	.details-grid dt {
+		color: var(--text-3);
+		text-transform: uppercase;
+		font-size: 0.7rem;
+		letter-spacing: 0.05em;
+		font-family: monospace;
+		padding-top: 0.15rem;
+	}
+	.details-grid dd {
+		margin: 0;
+		color: var(--text-1);
+		font-family: monospace;
+		font-size: 0.82rem;
+		word-break: break-word;
+	}
+	.by {
+		color: var(--text-3);
+		margin-left: 0.4rem;
+	}
+	.reason {
+		color: var(--text-2);
+		margin-top: 0.2rem;
+		font-style: italic;
+	}
+	.proof-kind {
+		display: inline-block;
+		background: var(--accent-bg);
+		color: var(--accent);
+		padding: 0.05rem 0.4rem;
+		border-radius: 3px;
+		font-size: 0.7rem;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		margin-right: 0.4rem;
+	}
+	.proof-value {
+		background: var(--bg-0);
+		color: var(--success);
+		padding: 0.05rem 0.4rem;
+		border-radius: 3px;
+	}
+	.raw-json {
+		margin-top: 1rem;
+		border-top: 1px solid var(--border);
+		padding-top: 0.6rem;
+	}
+	.raw-json summary {
+		cursor: pointer;
+		color: var(--text-3);
+		font-size: 0.78rem;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		font-family: monospace;
+	}
+	.raw-json pre {
+		margin-top: 0.5rem;
+		padding: 0.6rem 0.8rem;
+		background: var(--bg-0);
+		border: 1px solid var(--border);
+		border-radius: 4px;
+		font-size: 0.75rem;
+		color: var(--text-1);
+		white-space: pre-wrap;
+		word-break: break-word;
+		max-height: 18rem;
+		overflow-y: auto;
 	}
 </style>
