@@ -17,7 +17,7 @@
 //!     RUST_LOG=ctxone_hub=trace ctxone-hub --http
 //! All logs go to stderr so they never corrupt the MCP stdio JSON stream.
 
-use ctxone_hub::{http, memory_tools, migrations};
+use ctxone_hub::{backup, http, memory_tools, migrations};
 
 use std::sync::Arc;
 
@@ -346,6 +346,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
+    // Startup snapshot: copy the live db to <db>.bak.<utc> before
+    // accepting any traffic. Keeps the last K backups (default 5,
+    // override CTXONE_BACKUP_KEEP=N). Skip for memory/postgres. A
+    // failed snapshot logs a WARN and lets the hub keep going —
+    // backups must never block startup.
+    let backup_keep: usize = std::env::var("CTXONE_BACKUP_KEEP")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5);
+    if storage_type == "sqlite" && backup_keep > 0 {
+        backup::snapshot_and_prune(&db_path, backup_keep);
+    }
+
     // Report AGENTS.md presence so operators can see at a glance
     // whether the Hub is serving pinned agent guidance. This is the
     // disclosure surface for the `ctx agents install` flow — if the
@@ -420,6 +433,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             sessions_bg.flush_to_db(&path_bg);
                         }
                     });
+                }
+
+                // Spawn background snapshot task: VACUUM INTO every
+                // N seconds (default 1800 = 30min, env
+                // CTXONE_BACKUP_INTERVAL_SECS, set to 0 to disable).
+                // Errors log WARN; never panic the runtime.
+                let backup_interval: u64 = std::env::var("CTXONE_BACKUP_INTERVAL_SECS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(1800);
+                if let Some(ref path) = flush_db_path
+                    && backup_interval > 0
+                    && backup_keep > 0
+                {
+                    let path_bg = path.clone();
+                    tokio::spawn(async move {
+                        let mut interval = tokio::time::interval(
+                            std::time::Duration::from_secs(backup_interval)
+                        );
+                        interval.tick().await; // skip the immediate first tick
+                        loop {
+                            interval.tick().await;
+                            // Run on a blocking thread so VACUUM INTO
+                            // doesn't park the async runtime on a slow
+                            // disk.
+                            let p = path_bg.clone();
+                            tokio::task::spawn_blocking(move || {
+                                backup::snapshot_and_prune(&p, backup_keep);
+                            });
+                        }
+                    });
+                    info!(
+                        interval_secs = backup_interval,
+                        keep = backup_keep,
+                        "background snapshot task scheduled"
+                    );
                 }
 
                 let listener = tokio::net::TcpListener::bind(&addr).await?;

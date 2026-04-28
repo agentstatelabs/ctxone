@@ -4,6 +4,7 @@
 //! runner so integration tests and downstream embedders can reuse them
 //! without a separate process.
 
+pub mod backup;
 pub mod http;
 pub mod lens;
 pub mod memory_tools;
