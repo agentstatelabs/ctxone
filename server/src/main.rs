@@ -7,6 +7,10 @@
 //! Options:                    ctxone-hub --storage memory
 //!                             ctxone-hub --path /data/ctxone.db
 //!
+//! Default sqlite path is `./target/ctxone.db` — that's the natural
+//! ephemeral zone for cargo workspaces. Production deployments should
+//! always pass --path explicitly (e.g. /var/lib/ctxone/db).
+//!
 //! Logging is controlled via the `RUST_LOG` env var (see `tracing-subscriber`
 //! docs). Default level is `info`. Examples:
 //!     RUST_LOG=debug ctxone-hub --http
@@ -51,7 +55,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
 
     let mut storage_type = "sqlite";
-    let mut db_path = "./ctxone.db".to_string();
+    // Default lives under target/ so it shares the cargo "ephemeral
+    // build artifacts" zone — one less foot-gun for devs who instinctively
+    // `rm` files in the repo root. Production setups always pass --path.
+    let mut db_path = "./target/ctxone.db".to_string();
     let mut database_url = String::new();
     let mut tenant_id = "default".to_string();
     let mut http_mode = false;
@@ -150,7 +157,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!(
                     "  -s, --storage <TYPE>  Storage backend: sqlite (default), memory, or postgres"
                 );
-                eprintln!("  -p, --path <PATH>     SQLite database path (default: ./ctxone.db)");
+                eprintln!(
+                    "  -p, --path <PATH>     SQLite database path (default: ./target/ctxone.db)"
+                );
                 eprintln!(
                     "      --init            Create the sqlite db file if it doesn't exist"
                 );
@@ -231,13 +240,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // should already exist; a missing file usually means a
             // typo'd --path or a mis-launched hub, NOT "please give
             // me a brand new graph". --init opts in. EX_NOINPUT (66).
-            if !std::path::Path::new(&db_path).exists() && !init_flag {
+            let path_obj = std::path::Path::new(&db_path);
+            if !path_obj.exists() && !init_flag {
                 error!(
                     path = %db_path,
                     "sqlite db not found; pass --init to create a new one, \
                      or --path <PATH> to point at an existing db"
                 );
                 std::process::exit(66);
+            }
+            // --init implies "yes, set up the world" — create the
+            // parent directory if needed so the default ./target/ path
+            // works on a fresh checkout before `cargo build` has run.
+            if init_flag && !path_obj.exists()
+                && let Some(parent) = path_obj.parent()
+                && !parent.as_os_str().is_empty()
+                && !parent.exists()
+            {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    error!(parent = %parent.display(), error = %e, "could not create db parent directory");
+                    std::process::exit(73); // EX_CANTCREAT
+                }
+                info!(parent = %parent.display(), "created db parent directory");
             }
             info!(storage = "sqlite", path = %db_path, init = init_flag, "Storage: sqlite");
             let storage = SqliteStorage::open(&db_path)?;
