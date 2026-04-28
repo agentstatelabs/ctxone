@@ -235,6 +235,94 @@ OPTIONS:
       --from <REF>  Ref to branch from  [default: main]
 ```
 
+### `ctx merge <source>`
+
+Merge `source` into a target branch (default `main`). Conflicts come back
+as a structured 409 — exit code `EX_DATAERR` with the conflicting paths
+listed on stderr. On success, prints the new commit id.
+
+```
+USAGE: ctx merge <SOURCE> [OPTIONS]
+
+OPTIONS:
+      --into <REF>      Target branch  [default: main]
+      --message <TEXT>  Commit description  [default: "Merge"]
+```
+
+---
+
+## Provenance & sessions
+
+### `ctx why-did-we <decision>`
+
+Trace a decision back through `recall` matches to the commits that wrote
+each value, including the agent, intent, and timestamp. Mirrors the
+`why_did_we` MCP tool — useful for "who decided this and when?".
+
+### `ctx summarize-session -p "<point>" [-d "<decision>"]`
+
+Capture key points and decisions for the current session. Stored under
+`/sessions/<id>/{summary,decisions}`. Session id resolves from the
+global `--session` flag or `CTX_SESSION` env (errors if neither is set).
+Mirrors the `summarize_session` MCP tool.
+
+```
+USAGE: ctx --session <ID> summarize-session [OPTIONS]
+
+OPTIONS:
+  -p, --point <TEXT>     One bullet (repeatable, required)
+  -d, --decision <TEXT>  One decision (repeatable)
+```
+
+### `ctx record-usage --input N --output N [OPTIONS]`
+
+Report LLM token usage for the current session — accumulates per-session
+counters in the Hub. Mirrors the `record_llm_usage` MCP tool.
+
+```
+OPTIONS:
+      --input <N>          Prompt tokens consumed
+      --output <N>         Completion tokens generated
+      --cache-read <N>     Cached prompt tokens read   [default: 0]
+      --cache-create <N>   Cached prompt tokens written [default: 0]
+      --model <NAME>       Model identifier (e.g., claude-sonnet-4-5)
+      --provider <NAME>    Provider name
+```
+
+---
+
+## Taint commands
+
+Guardrails for sensitive paths — `taint` (warn/block on write),
+`quarantine` (require authorization), `watch` (audit only). Mirrors the
+`taint_*` MCP tools.
+
+### `ctx taint list [--path-prefix <P>] [--kind <K>] [--include-resolved]`
+
+List active taints. Filter by path prefix, by `taint`/`quarantine`/`watch`,
+or include resolved entries.
+
+### `ctx taint check --path <P> [--confidence <F>]`
+
+Ask whether a write to `path` would be allowed at a given confidence
+(default 1.0). Returns `can_write`, the strongest blocking effect, and
+the matching taint id.
+
+### `ctx taint apply --path <P> --name <N> --kind <K> --reason "<text>" [OPTIONS]`
+
+Apply a taint, quarantine, or watch.
+
+```
+OPTIONS:
+      --effect <EFFECT>     warn | block | review | isolate | advisory (taint only)
+      --severity <SEV>      low | medium | high | critical  [default: medium]
+      --authorized <AGENT>  Agent allowed through quarantine (repeatable)
+```
+
+### `ctx taint remove --taint-id <ID> --reason "<text>"`
+
+Resolve an existing taint.
+
 ---
 
 ## Operations commands
@@ -515,6 +603,12 @@ With `--me`, two agents sharing one plan each pick up their own tasks
 without stepping on each other. This is **state-driven orchestration**
 — the plan IS the orchestration layer. No framework, no DAG runtime.
 
+### `ctx plan tasks <plan>`
+
+Print the flat task list for a plan — task ids, statuses, titles. Useful
+in scripts or to drive a `plan done` loop. Mirrors the `plan_tasks` MCP
+tool.
+
 ### `ctx plan list`
 
 List plans on the current branch.
@@ -525,6 +619,13 @@ Options: `--status active|completed|archived` — filter.
 
 Render a plan as a tree with tasks, statuses, proofs, assignments,
 and blockers.
+
+### `ctx plan complete <plan> --reason "<text>"`
+
+**Force-complete** an entire plan in one shot — marks every remaining
+task done with a "force-complete" reason and closes the plan. Use when
+remaining work is no longer relevant (scope cut, plan superseded). For
+incremental progress, prefer `ctx plan done` per task.
 
 ### `ctx plan archive <plan>`
 

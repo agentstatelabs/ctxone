@@ -1,14 +1,14 @@
 # MCP Tools Reference
 
-The CTXone Hub exposes **31 MCP tools** over the stdio transport, in
+The CTXone Hub exposes **33 MCP tools** over the stdio transport, in
 five groups:
 
 - **Memory** (7): `remember`, `recall`, `prime`, `context`,
   `summarize_session`, `what_changed_since`, `why_did_we`
-- **Plans** (10): `plan_new`, `plan_add`, `plan_start`,
+- **Plans** (11): `plan_new`, `plan_add`, `plan_start`,
   `plan_done`, `plan_abandon`, `plan_next`, `plan_list`,
-  `plan_show`, `plan_tasks`, `plan_archive`
-- **Governance** (7): `forget`, `branches`, `branch`,
+  `plan_show`, `plan_tasks`, `plan_complete`, `plan_archive`
+- **Governance** (8): `forget`, `branches`, `branch`, `merge`,
   `taint_list`, `taint_check`, `taint_apply`, `taint_remove`
 - **Read primitives** (6): `get`, `ls`,
   `search`, `log`, `blame`, `diff`
@@ -447,6 +447,17 @@ List the tasks of a plan, flat.
 
 ---
 
+### `plan_complete`
+
+**Force-complete an entire plan in one shot** — marks every remaining
+task done with a "force-complete" reason and closes the plan. Use
+when remaining work is no longer relevant (scope cut, plan
+superseded). For incremental progress, prefer `plan_done` per task.
+
+**Parameters:** `plan_id`, `reason`, `ref?`.
+
+---
+
 ### `plan_archive`
 
 Set plan status to `archived`. Soft — task data is preserved.
@@ -496,6 +507,21 @@ sandbox both code and memory — `remember` calls on a feature branch
 stay there until the branch merges. See
 [MEMORY_BRANCH_SCOPING.md](MEMORY_BRANCH_SCOPING.md) for the full
 model.
+
+---
+
+### `merge`
+
+Merge `source` into `target` (default `"main"`). Returns `{status:
+"ok", commit_id}` on success, or `{status: "conflict", conflicts:
+[...]}` if the 3-way merge can't proceed cleanly. Conflicting paths
+are returned structurally so the caller can write the desired value
+on `target` and re-attempt.
+
+**Parameters:** `source`, `target?`, `description?`, `reasoning?`.
+
+**When to call:** once a feature branch is ready to land back on the
+trunk. Mirror of the `ctx merge` CLI command.
 
 ---
 

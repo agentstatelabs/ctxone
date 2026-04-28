@@ -6,7 +6,7 @@ Persistent, searchable, accountable memory for AI agents. Eliminate context anxi
 
 | Component | Directory | Description |
 |-----------|-----------|-------------|
-| **CTXone Hub** | `server/` | MCP server (31 tools) + HTTP API — the memory interface for AI tools |
+| **CTXone Hub** | `server/` | MCP server (33 tools) + HTTP API — the memory interface for AI tools |
 | **CTXone Engine** | `engine/` | Core memory + graph layer (AgentStateGraph) |
 | **CTXone Lens** | `web/` | Web UI: dashboard, plans, sessions, browse, history, branches, taint, diff. ⌘K palette, 15s auto-refresh, multi-theme |
 | **ctx** | `cli/` | CLI for memory, plans, branches, taint, and team operations |
