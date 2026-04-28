@@ -34,6 +34,31 @@
 		viewMode = v;
 		if (typeof localStorage !== 'undefined') localStorage.setItem(VIEW_KEY, v);
 	}
+
+	// Status filter (t-001). 'all' is the no-op. Filter operates on the
+	// *effective* status (in_progress / active / completed / archived)
+	// — same buckets the grouped view uses, so the dropdown options
+	// match what the user already sees in the sidebar.
+	type StatusFilter = 'all' | 'in_progress' | 'active' | 'completed' | 'archived';
+	const STATUS_FILTER_KEY = 'lens.plans.statusFilter';
+	const STATUS_FILTERS: StatusFilter[] = ['all', 'in_progress', 'active', 'completed', 'archived'];
+	function loadStatusFilter(): StatusFilter {
+		if (typeof localStorage === 'undefined') return 'all';
+		const v = localStorage.getItem(STATUS_FILTER_KEY) as StatusFilter | null;
+		return v && STATUS_FILTERS.includes(v) ? v : 'all';
+	}
+	let statusFilter: StatusFilter = $state(loadStatusFilter());
+	$effect(() => {
+		if (typeof localStorage !== 'undefined')
+			localStorage.setItem(STATUS_FILTER_KEY, statusFilter);
+	});
+	const STATUS_FILTER_LABELS: Record<StatusFilter, string> = {
+		all: 'All statuses',
+		in_progress: 'In progress',
+		active: 'Active',
+		completed: 'Completed',
+		archived: 'Archived'
+	};
 	// Filter input — what the user is typing — and the debounced
 	// "applied" value used for actual filtering. 150ms feels instant but
 	// avoids re-filtering 800-plan lists on every keystroke.
@@ -353,12 +378,22 @@
 	// + description. Empty filter is the identity.
 	let filteredPlans = $derived.by(() => {
 		const q = appliedFilter.trim().toLowerCase();
-		if (!q) return plans;
-		return plans.filter(
-			(p) =>
+		const sf = statusFilter;
+		return plans.filter((p) => {
+			if (sf !== 'all' && effectivePlanStatus(p) !== sf) return false;
+			if (!q) return true;
+			return (
 				p.name.toLowerCase().includes(q) ||
 				(p.description ?? '').toLowerCase().includes(q)
-		);
+			);
+		});
+	});
+
+	// Reset to page 1 whenever the status filter changes — same UX as
+	// for text-search changes.
+	$effect(() => {
+		void statusFilter;
+		page = 0;
 	});
 
 	// Status priority for the "status" sort — lower = sorts first.
@@ -555,10 +590,18 @@
 			<input
 				type="search"
 				class="filter-input"
-				placeholder="Filter plans…"
+				placeholder="Search plans…"
 				bind:value={filter}
-				aria-label="Filter plans"
+				aria-label="Search plans"
 			/>
+			<label class="sort-row">
+				<span>Status</span>
+				<select bind:value={statusFilter} aria-label="Filter plans by status">
+					{#each STATUS_FILTERS as s}
+						<option value={s}>{STATUS_FILTER_LABELS[s]}</option>
+					{/each}
+				</select>
+			</label>
 			<label class="sort-row">
 				<span>Sort</span>
 				<select bind:value={planSort} aria-label="Sort plans">
