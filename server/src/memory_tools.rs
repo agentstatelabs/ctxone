@@ -1799,11 +1799,16 @@ impl CtxOneServer {
 
     #[tool(description = "Add a task to a plan. \
         \
-        CALL THIS WHEN enumerating the steps of a multi-step task — add every step as a task before you start executing. Pass `assigned_to` to address the work to a specific agent (e.g. 'claude-code', 'codex', a user email) — other agents sharing the plan can then fetch it via `plan_next(assigned_to='me')`. Omit `assigned_to` for tasks any agent can pick up. Blockers must already exist in the plan when passed. Subtasks via `parent_id` are limited to one level of nesting.")]
+        CALL THIS WHEN enumerating the steps of a multi-step task — add every step as a task before you start executing. Pass `assigned_to` to address the work to a specific agent (e.g. 'claude-code', 'codex', a user email) — other agents sharing the plan can then fetch it via `plan_next(assigned_to='me')`. Omit `assigned_to` for tasks any agent can pick up. Blockers must already exist in the plan when passed. Subtasks via `parent_id` are limited to one level of nesting. \
+        \
+        If the Hub has `CTXONE_PLAN_LOCK_RATIO` set and the plan's (done+abandoned)/total ratio meets the threshold, this tool refuses with a `plan locked` error — pass `force=true` to override or start a new plan instead.")]
     async fn plan_add(&self, params: Parameters<crate::plan_tools::PlanAddParams>) -> String {
         use crate::plan_tools as pt;
         let p = params.0;
         let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        if let Err(e) = pt::check_plan_lock(&store, &p.ref_name, &p.plan_id, p.force) {
+            return pt::err_json(e);
+        }
         match pt::add_task(
             &store,
             &p.ref_name,

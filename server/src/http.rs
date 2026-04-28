@@ -1041,6 +1041,11 @@ struct CreateTaskRequest {
     assigned_to: Option<String>,
     #[serde(default)]
     blocked_by: Vec<String>,
+    /// Bypass the "plan nearing completion" lock (see env var
+    /// `CTXONE_PLAN_LOCK_RATIO`). When the env var is unset the lock
+    /// is disabled and this flag is a no-op. Default: false.
+    #[serde(default)]
+    force: bool,
     #[serde(default = "default_ref", rename = "ref")]
     ref_name: String,
 }
@@ -1102,6 +1107,10 @@ fn plan_error_to_response(err: plan_tools::PlanToolError) -> (StatusCode, String
         plan_tools::PlanToolError::InvalidPriority(_) => StatusCode::BAD_REQUEST,
         plan_tools::PlanToolError::InvalidInput(_) => StatusCode::BAD_REQUEST,
         plan_tools::PlanToolError::Substrate(TE::InvalidBlockerId(_)) => StatusCode::BAD_REQUEST,
+        // 423 Locked — plan is nearing completion and the
+        // `CTXONE_PLAN_LOCK_RATIO` guard is engaged. Caller can pass
+        // `force=true` to bypass.
+        plan_tools::PlanToolError::PlanLocked { .. } => StatusCode::LOCKED,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
     (status, err.to_string())
@@ -1203,6 +1212,10 @@ async fn add_plan_task(
     Json(req): Json<CreateTaskRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
     let store = plan_tools::make_store(s.repo.clone(), &agent_id.0);
+    // Enforce the "plan nearing completion" lock before mutating.
+    // No-op unless `CTXONE_PLAN_LOCK_RATIO` is set; `force=true` bypasses.
+    plan_tools::check_plan_lock(&store, &req.ref_name, &name, req.force)
+        .map_err(plan_error_to_response)?;
     let task = plan_tools::add_task(
         &store,
         &req.ref_name,

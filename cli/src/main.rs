@@ -561,6 +561,11 @@ enum PlanAction {
         /// passed multiple times.
         #[arg(long = "blocks", short = 'b')]
         blocks: Vec<String>,
+        /// Bypass the "plan nearing completion" lock (Hub env var
+        /// `CTXONE_PLAN_LOCK_RATIO`). Has no effect unless the Hub
+        /// has the lock enabled.
+        #[arg(long)]
+        force: bool,
     },
     /// Mark a task in-progress
     Start {
@@ -3439,12 +3444,16 @@ async fn handle_plan(
             parent,
             assigned_to,
             blocks,
+            force,
         } => {
             let mut body = serde_json::json!({
                 "title": title,
                 "priority": priority,
                 "ref": branch,
             });
+            if force {
+                body["force"] = serde_json::json!(true);
+            }
             if let Some(d) = description {
                 body["description"] = serde_json::json!(d);
             }

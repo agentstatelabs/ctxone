@@ -33,6 +33,20 @@ use serde::{Deserialize, Serialize};
 /// Default path prefix where plans live in the state graph.
 pub const PLANS_PREFIX: &str = "/plans";
 
+/// Environment variable that controls the "lock plans nearing
+/// completion" guard. When set to a float in `[0.0, 1.0]`, any plan
+/// whose `(done + abandoned) / total` ratio is **>= the threshold**
+/// rejects new task additions unless the caller passes `force=true`.
+///
+/// Unset or unparseable means the guard is disabled — preserves
+/// backward-compatible behavior. Out-of-range values clamp to `[0,1]`.
+///
+/// The motivation (plan task `t-004`): once a plan is mostly done,
+/// late-arriving "oh, just one more thing" tasks blur the boundary
+/// between this plan and the next one. Locking forces a deliberate
+/// `--force` (or a fresh plan) for those additions.
+pub const PLAN_LOCK_RATIO_ENV: &str = "CTXONE_PLAN_LOCK_RATIO";
+
 /// Maximum length (bytes) of a task title. Titles render in UI rows
 /// and show up in `plan_next` / `plan_list` responses — bounding them
 /// blocks the "stuff an LLM system prompt into a title" channel. See
@@ -237,12 +251,88 @@ pub enum PlanToolError {
 
     #[error("repository error: {0}")]
     Repo(String),
+
+    #[error(
+        "plan '{plan}' is locked: terminal ratio {ratio:.2} >= threshold {threshold:.2}; pass force=true to override or start a new plan"
+    )]
+    PlanLocked {
+        plan: String,
+        ratio: f64,
+        threshold: f64,
+    },
 }
 
 impl From<agentstategraph::RepoError> for PlanToolError {
     fn from(e: agentstategraph::RepoError) -> Self {
         PlanToolError::Repo(e.to_string())
     }
+}
+
+/// Read the "lock plans nearing completion" threshold from the
+/// environment. Returns `None` if `CTXONE_PLAN_LOCK_RATIO` is unset
+/// or unparseable; clamps in-range values to `[0.0, 1.0]`.
+pub fn plan_lock_ratio_from_env() -> Option<f64> {
+    let raw = std::env::var(PLAN_LOCK_RATIO_ENV).ok()?;
+    let v: f64 = raw.trim().parse().ok()?;
+    if v.is_nan() {
+        return None;
+    }
+    Some(v.clamp(0.0, 1.0))
+}
+
+/// Compute `(done + abandoned) / total` for a slice of tasks. Returns
+/// `0.0` for an empty slice — an empty plan is by definition not
+/// "nearing completion".
+pub fn terminal_ratio(tasks: &[Task]) -> f64 {
+    if tasks.is_empty() {
+        return 0.0;
+    }
+    let terminal = tasks
+        .iter()
+        .filter(|t| matches!(t.status, TaskStatus::Done | TaskStatus::Abandoned))
+        .count();
+    terminal as f64 / tasks.len() as f64
+}
+
+/// Enforce the "plan nearing completion" lock. If
+/// `CTXONE_PLAN_LOCK_RATIO` is unset, this is a no-op. Otherwise it
+/// loads the plan's tasks, computes `terminal_ratio`, and rejects
+/// with `PlanLocked` if the ratio is **>= threshold** and `force` is
+/// false.
+///
+/// Empty plans never lock — adding the very first task to a fresh
+/// plan must always work.
+pub fn check_plan_lock(
+    store: &TaskStore,
+    ref_name: &str,
+    plan: &str,
+    force: bool,
+) -> Result<(), PlanToolError> {
+    if force {
+        return Ok(());
+    }
+    let Some(threshold) = plan_lock_ratio_from_env() else {
+        return Ok(());
+    };
+    // Threshold of 0.0 would lock empty plans too — treat 0 as
+    // "disable" since locking *every* add is rarely what an operator
+    // actually wants. Use a tiny epsilon.
+    if threshold <= 0.0 {
+        return Ok(());
+    }
+    let tasks = store.list_tasks(ref_name, plan)?;
+    if tasks.is_empty() {
+        return Ok(());
+    }
+    let ratio = terminal_ratio(&tasks);
+    if ratio >= threshold {
+        return Err(PlanToolError::PlanLocked {
+            plan: plan.to_string(),
+            ratio,
+            threshold,
+        });
+    }
+    Ok(())
 }
 
 /// Build a `TaskStore` bound to the default plans prefix for the
@@ -368,6 +458,11 @@ pub struct PlanAddParams {
     /// Task ids that must be `done` before this task can be started.
     #[serde(default)]
     pub blocked_by: Vec<String>,
+    /// Bypass the "plan nearing completion" lock (see
+    /// `CTXONE_PLAN_LOCK_RATIO`). When the env var is unset the lock
+    /// is disabled and this flag is a no-op. Default: false.
+    #[serde(default)]
+    pub force: bool,
     #[serde(default = "default_ref", rename = "ref")]
     pub ref_name: String,
 }
@@ -923,6 +1018,130 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, PlanToolError::InvalidInput(_)));
+    }
+
+    // -------- plan-lock guard (t-004) --------
+
+    // Serialize the env-var-touching tests. Cargo runs tests in
+    // parallel by default and `CTXONE_PLAN_LOCK_RATIO` is process-global.
+    use std::sync::Mutex;
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn complete_task(store: &TaskStore, plan: &str, task: &Task) {
+        store.start_task("main", plan, &task.id).unwrap();
+        store
+            .complete_task(
+                "main",
+                plan,
+                &task.id,
+                Proof::commit("deadbeef"),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn terminal_ratio_empty_is_zero() {
+        assert_eq!(terminal_ratio(&[]), 0.0);
+    }
+
+    #[test]
+    fn terminal_ratio_counts_done_and_abandoned() {
+        let (_repo, store) = fresh_store();
+        create_plan(&store, "main", "p", None).unwrap();
+        let t1 = add_task(&store, "main", "p", "a", None, None, None, None, vec![]).unwrap();
+        let t2 = add_task(&store, "main", "p", "b", None, None, None, None, vec![]).unwrap();
+        let _t3 = add_task(&store, "main", "p", "c", None, None, None, None, vec![]).unwrap();
+        let _t4 = add_task(&store, "main", "p", "d", None, None, None, None, vec![]).unwrap();
+
+        complete_task(&store, "p", &t1);
+        store
+            .abandon_task("main", "p", &t2.id, "nope")
+            .unwrap();
+
+        let tasks = store.list_tasks("main", "p").unwrap();
+        let r = terminal_ratio(&tasks);
+        assert!((r - 0.5).abs() < 1e-9, "expected 0.5, got {r}");
+    }
+
+    #[test]
+    fn check_plan_lock_disabled_when_env_unset() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: env mutation is serialized via ENV_LOCK above.
+        unsafe {
+            std::env::remove_var(PLAN_LOCK_RATIO_ENV);
+        }
+        let (_repo, store) = fresh_store();
+        create_plan(&store, "main", "p", None).unwrap();
+        let t1 = add_task(&store, "main", "p", "a", None, None, None, None, vec![]).unwrap();
+        complete_task(&store, "p", &t1);
+        // 100% terminal but lock disabled → ok.
+        check_plan_lock(&store, "main", "p", false).expect("lock disabled");
+    }
+
+    #[test]
+    fn check_plan_lock_blocks_at_or_above_threshold() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: env mutation is serialized via ENV_LOCK above.
+        unsafe {
+            std::env::set_var(PLAN_LOCK_RATIO_ENV, "0.5");
+        }
+        let (_repo, store) = fresh_store();
+        create_plan(&store, "main", "p", None).unwrap();
+        let t1 = add_task(&store, "main", "p", "a", None, None, None, None, vec![]).unwrap();
+        let _t2 = add_task(&store, "main", "p", "b", None, None, None, None, vec![]).unwrap();
+        // 0/2 terminal → ok
+        check_plan_lock(&store, "main", "p", false).expect("0/2 terminal allowed");
+        complete_task(&store, "p", &t1);
+        // 1/2 = 0.5 >= 0.5 → blocked
+        let err = check_plan_lock(&store, "main", "p", false).unwrap_err();
+        assert!(
+            matches!(err, PlanToolError::PlanLocked { .. }),
+            "expected PlanLocked, got {err:?}"
+        );
+        // force=true bypasses
+        check_plan_lock(&store, "main", "p", true).expect("force bypasses lock");
+        // SAFETY: cleanup of test-only env mutation.
+        unsafe {
+            std::env::remove_var(PLAN_LOCK_RATIO_ENV);
+        }
+    }
+
+    #[test]
+    fn check_plan_lock_ignores_empty_plan() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: env mutation is serialized via ENV_LOCK above.
+        unsafe {
+            std::env::set_var(PLAN_LOCK_RATIO_ENV, "0.5");
+        }
+        let (_repo, store) = fresh_store();
+        create_plan(&store, "main", "p", None).unwrap();
+        check_plan_lock(&store, "main", "p", false).expect("empty plan never locks");
+        // SAFETY: cleanup.
+        unsafe {
+            std::env::remove_var(PLAN_LOCK_RATIO_ENV);
+        }
+    }
+
+    #[test]
+    fn plan_lock_ratio_clamps_out_of_range() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: env mutation is serialized via ENV_LOCK above.
+        unsafe {
+            std::env::set_var(PLAN_LOCK_RATIO_ENV, "1.7");
+        }
+        assert_eq!(plan_lock_ratio_from_env(), Some(1.0));
+        unsafe {
+            std::env::set_var(PLAN_LOCK_RATIO_ENV, "-0.5");
+        }
+        assert_eq!(plan_lock_ratio_from_env(), Some(0.0));
+        unsafe {
+            std::env::set_var(PLAN_LOCK_RATIO_ENV, "garbage");
+        }
+        assert_eq!(plan_lock_ratio_from_env(), None);
+        // SAFETY: cleanup.
+        unsafe {
+            std::env::remove_var(PLAN_LOCK_RATIO_ENV);
+        }
     }
 
     #[test]
