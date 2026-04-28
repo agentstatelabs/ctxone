@@ -17,7 +17,7 @@
 //!     RUST_LOG=ctxone_hub=trace ctxone-hub --http
 //! All logs go to stderr so they never corrupt the MCP stdio JSON stream.
 
-use ctxone_hub::{backup, http, memory_tools, migrations};
+use ctxone_hub::{backup, http, lockfile, memory_tools, migrations};
 
 use std::sync::Arc;
 
@@ -346,6 +346,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
+    // Acquire <db>.lock so a second hub against the same path refuses
+    // to start. Must happen before backups so two racing hubs don't
+    // both snapshot the same db at the same moment. Skip for memory/
+    // postgres backends — those don't have a path to lock against.
+    let _lock_guard = if storage_type == "sqlite" {
+        match lockfile::acquire(&db_path, env!("CARGO_PKG_VERSION")) {
+            Ok(g) => Some(g),
+            Err(msg) => {
+                error!(error = %msg, "lockfile acquire failed");
+                std::process::exit(75); // EX_TEMPFAIL
+            }
+        }
+    } else {
+        None
+    };
+
+    // Capture the (dev, ino) of the db file at open. The watchdog
+    // (HTTP mode only) compares against this every N seconds and
+    // logs a WARN if the file gets replaced or unlinked.
+    let db_baseline = if storage_type == "sqlite" {
+        lockfile::fingerprint(&db_path)
+    } else {
+        None
+    };
+
     // Startup snapshot: copy the live db to <db>.bak.<utc> before
     // accepting any traffic. Keeps the last K backups (default 5,
     // override CTXONE_BACKUP_KEEP=N). Skip for memory/postgres. A
@@ -469,6 +494,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         keep = backup_keep,
                         "background snapshot task scheduled"
                     );
+                }
+
+                // Inode-drift watchdog: stat the db every N seconds
+                // (default 30, env CTXONE_WATCHDOG_INTERVAL_SECS, 0
+                // disables) and warn if the file got replaced or
+                // unlinked under us. This is the primary detection
+                // for the 2026-04-28 failure mode.
+                if let (Some(path), Some(baseline)) = (&flush_db_path, db_baseline) {
+                    let watch_interval: u64 = std::env::var("CTXONE_WATCHDOG_INTERVAL_SECS")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(30);
+                    if watch_interval > 0 {
+                        lockfile::spawn_watchdog(path.clone(), baseline, watch_interval);
+                        info!(interval_secs = watch_interval, "inode-drift watchdog scheduled");
+                    }
                 }
 
                 let listener = tokio::net::TcpListener::bind(&addr).await?;
