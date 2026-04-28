@@ -33,6 +33,13 @@ const direct: Tool[] = [
 	{ name: 'CLI', kind: 'ctx …', href: '/reference/cli/' },
 	{ name: 'HTTP API', kind: 'REST', href: '/reference/http-api/' },
 ];
+
+// Surfaces a human reaches for. Lens is the browser UI that ships
+// with the Hub on :3001 — dashboard, plans, sessions, browse,
+// history, branches, taint, diff. ⌘K palette, 15s auto-refresh.
+const ui: Tool[] = [
+	{ name: 'Lens', kind: 'browser :3001', href: '/how-it-works/architecture/' },
+];
 ---
 
 <section class="section">
@@ -77,6 +84,20 @@ const direct: Tool[] = [
 			<div class="tiles">
 				{
 					direct.map((t) => (
+						<a class="tile" href={t.href}>
+							<span class="tile-name">{t.name}</span>
+							<span class="tile-kind">{t.kind}</span>
+						</a>
+					))
+				}
+			</div>
+		</div>
+
+		<div class="group">
+			<h3>Inspect &amp; browse</h3>
+			<div class="tiles">
+				{
+					ui.map((t) => (
 						<a class="tile" href={t.href}>
 							<span class="tile-name">{t.name}</span>
 							<span class="tile-kind">{t.kind}</span>

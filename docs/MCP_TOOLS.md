@@ -1,9 +1,21 @@
 # MCP Tools Reference
 
-The CTXone Hub exposes its memory primitives and the plan primitives
-as MCP tools over the stdio transport. Any MCP-compatible agent
-(Claude Code, Cursor, VS Code Copilot with MCP, Codex, etc.) can call
-these directly.
+The CTXone Hub exposes **31 MCP tools** over the stdio transport, in
+five groups:
+
+- **Memory** (7): `remember`, `recall`, `prime`, `context`,
+  `summarize_session`, `what_changed_since`, `why_did_we`
+- **Plans** (10): `plan_new`, `plan_add`, `plan_start`,
+  `plan_complete`, `plan_abandon`, `plan_next`, `plan_list`,
+  `plan_get`, `plan_tasks`, `plan_archive`
+- **Governance** (7): `forget`, `branch_list`, `branch_create`,
+  `taint_list`, `taint_check`, `taint_apply`, `taint_remove`
+- **Read primitives** (6): `get_state`, `list_paths`,
+  `search_values`, `get_log`, `get_blame`, `diff`
+- **Accounting** (1): `record_llm_usage`
+
+Any MCP-compatible agent (Claude Code, Cursor, VS Code Copilot with
+MCP, Codex, etc.) can call these directly.
 
 For setup instructions, see [INTEGRATIONS.md](INTEGRATIONS.md).
 For the underlying concepts, see [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -440,6 +452,150 @@ List the tasks of a plan, flat.
 Set plan status to `archived`. Soft — task data is preserved.
 
 **Parameters:** `plan_id`, `ref?`.
+
+---
+
+## Governance
+
+These tools mediate writes that shouldn't be casual: deletion,
+branch creation, and trust controls. They exist as MCP tools so
+agents can introspect and act on the same surfaces a human reaches
+for in Lens or via `ctx`.
+
+### `forget`
+
+Forget a path by writing a rollback commit. The data isn't physically
+removed — its history is preserved in blame — but `get_state` and
+`recall` will no longer surface it.
+
+**Parameters:** `path`, `reason?`, `ref?`.
+
+**When to call:** when a fact is wrong, expired, or the user
+explicitly asks to forget it. Prefer `forget` over editing a fact in
+place — the audit trail tells the next session "this used to be true,
+here's why we stopped believing it."
+
+---
+
+### `branch_list`
+
+List every branch with its current head commit id.
+
+**Parameters:** none.
+
+---
+
+### `branch_create`
+
+Create a new branch starting from `from` (default `"main"`).
+
+**Parameters:** `name`, `from?`.
+
+**When to call:** before doing speculative or breaking work. Branches
+sandbox both code and memory — `remember` calls on a feature branch
+stay there until the branch merges. See
+[MEMORY_BRANCH_SCOPING.md](MEMORY_BRANCH_SCOPING.md) for the full
+model.
+
+---
+
+### `taint_list`
+
+List active taints / quarantines / watches across the graph.
+
+**Parameters:** `path_prefix?`, `effect?`.
+
+---
+
+### `taint_check`
+
+Check whether `agent_id` may write to `path` at the given
+`confidence`, given any active taints/quarantines. Returns
+`can_write`, `effect` (the strongest blocking effect, if any), and
+the matching taint id.
+
+**Parameters:** `path`, `agent_id`, `confidence?`.
+
+**When to call:** before any write you're not certain is allowed —
+especially in multi-agent settings where another agent may have
+fenced off a path.
+
+---
+
+### `taint_apply`
+
+Apply a taint, quarantine, or watch to a path. `kind` selects the
+variant: `taint` (with an `effect` of `warn`/`block`/`review`/
+`isolate`/`advisory`), `quarantine` (with optional `authorized_agents`
+whitelist), or `watch` (advisory tracking).
+
+**Parameters:** `path`, `kind`, `reason`, plus `effect?`,
+`authorized_agents?`, `min_confidence?`, `expires_at?`.
+
+---
+
+### `taint_remove`
+
+Resolve (lift) an active taint, quarantine, or watch by id. The
+record isn't deleted — it's marked resolved with a reason for audit.
+
+**Parameters:** `taint_id`, `reason`.
+
+---
+
+## Read primitives
+
+Low-level read tools that mirror the engine's HTTP surface. Agents
+generally reach for `recall` first; these are for cases where the
+agent already knows the path or wants to introspect provenance.
+
+### `get_state`
+
+Read the JSON value stored at a path.
+
+**Parameters:** `path`, `ref?`.
+
+---
+
+### `list_paths`
+
+List every path under `prefix` on the given branch.
+
+**Parameters:** `prefix?`, `ref?`.
+
+---
+
+### `search_values`
+
+Full-text substring search across every stored value on the branch.
+
+**Parameters:** `query`, `ref?`.
+
+---
+
+### `get_log`
+
+Return the last N commits on a branch — newest first — with agent
+id, intent category, description, confidence, and tags.
+
+**Parameters:** `limit?`, `ref?`.
+
+---
+
+### `get_blame`
+
+Return the full provenance chain for a path: every commit that
+touched it, who wrote it, with what intent and confidence.
+
+**Parameters:** `path`, `ref?`.
+
+---
+
+### `diff`
+
+Compute the structural diff between two refs (branches or commits).
+
+**Parameters:** `ref_a`, `ref_b`.
 
 ---
 

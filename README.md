@@ -6,10 +6,10 @@ Persistent, searchable, accountable memory for AI agents. Eliminate context anxi
 
 | Component | Directory | Description |
 |-----------|-----------|-------------|
-| **CTXone Hub** | `server/` | MCP server — the memory interface for AI tools |
+| **CTXone Hub** | `server/` | MCP server (31 tools) + HTTP API — the memory interface for AI tools |
 | **CTXone Engine** | `engine/` | Core memory + graph layer (AgentStateGraph) |
-| **CTXone Lens** | `web/` | Web UI for browsing agent memory |
-| **ctx** | `cli/` | CLI for interacting with agent memory |
+| **CTXone Lens** | `web/` | Web UI: dashboard, plans, sessions, browse, history, branches, taint, diff. ⌘K palette, 15s auto-refresh, multi-theme |
+| **ctx** | `cli/` | CLI for memory, plans, branches, taint, and team operations |
 | **ctxone (Python)** | `bindings/python/` | Python client library (`pip install ctxone`) |
 
 ## Quick Start
@@ -96,6 +96,15 @@ ctx recall "licensing decisions"
 
 # Load full project context
 ctx context myproject
+
+# Track multi-step work across sessions
+ctx plan new my-feature
+ctx plan add my-feature "Wire up new endpoint"
+ctx plan next my-feature        # what should I do next?
+ctx plan done my-feature t-001 --proof commit:abc1234
+
+# Sandbox speculative work on its own branch (memory follows the branch)
+ctx --branch feature/x remember "API renamed from foo to bar"
 
 # Check Hub status and token savings
 ctx status
