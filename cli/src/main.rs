@@ -419,6 +419,40 @@ enum Commands {
         /// Decision phrase to search for, e.g. "BSL", "SQLite", "Postgres".
         decision: String,
     },
+    /// Capture key points + decisions from the current (or named) session.
+    /// Stored under /sessions/<id>/{summary,decisions}. Mirrors the
+    /// `summarize_session` MCP tool. Session id resolves from the global
+    /// `--session` flag or the `CTX_SESSION` env.
+    SummarizeSession {
+        /// One bullet at a time; pass --point multiple times.
+        #[arg(long = "point", short = 'p', required = true)]
+        points: Vec<String>,
+        /// Decision recorded for the session; pass --decision multiple times.
+        #[arg(long = "decision", short = 'd')]
+        decisions: Vec<String>,
+    },
+    /// Report LLM token usage for the current session — accumulates per
+    /// session counters in the Hub. Mirrors `record_llm_usage` MCP.
+    RecordUsage {
+        /// Input/prompt tokens consumed.
+        #[arg(long = "input")]
+        input_tokens: u64,
+        /// Output/completion tokens generated.
+        #[arg(long = "output")]
+        output_tokens: u64,
+        /// Cache-hit (read) tokens (default 0).
+        #[arg(long = "cache-read", default_value_t = 0)]
+        cache_read_tokens: u64,
+        /// Cache-creation tokens (default 0).
+        #[arg(long = "cache-create", default_value_t = 0)]
+        cache_create_tokens: u64,
+        /// Model id, e.g. "claude-sonnet-4-5".
+        #[arg(long)]
+        model: Option<String>,
+        /// Provider id, e.g. "anthropic".
+        #[arg(long)]
+        provider: Option<String>,
+    },
     /// Search the graph for a literal substring. Unlike recall, this is not
     /// LLM-oriented — it returns full matching paths and values, no budget.
     Search {
@@ -1569,6 +1603,86 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("    {}", why);
                     }
                 }
+            });
+        }
+        Commands::SummarizeSession {
+            points,
+            decisions,
+        } => {
+            // Mirrors the summarize_session MCP tool. Session id comes
+            // from the global --session flag (or CTX_SESSION env); when
+            // absent we error so the capture is always anchored.
+            let session_id = cli.session.clone()
+                .ok_or_else(|| {
+                    "no session id (pass --session <id> or set CTX_SESSION)".to_string()
+                })?;
+            let body = serde_json::json!({
+                "session_id": session_id,
+                "key_points": points,
+                "decisions": decisions,
+            });
+            let url = format!("{}/api/memory/summarize_session", cli.server);
+            let resp = match client.post(&url).json(&body).send().await {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(&cli.server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "summarize-session failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(cli.format, &parsed, |v| {
+                let kp = v["key_points"].as_u64().unwrap_or(0);
+                let de = v["decisions"].as_u64().unwrap_or(0);
+                println!(
+                    "Captured {} key point{}, {} decision{} for session {}",
+                    kp,
+                    if kp == 1 { "" } else { "s" },
+                    de,
+                    if de == 1 { "" } else { "s" },
+                    session_id
+                );
+            });
+        }
+        Commands::RecordUsage {
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_create_tokens,
+            model,
+            provider,
+        } => {
+            let mut body = serde_json::json!({
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_read_tokens": cache_read_tokens,
+                "cache_create_tokens": cache_create_tokens,
+            });
+            if let Some(m) = model {
+                body["model"] = serde_json::json!(m);
+            }
+            if let Some(p) = provider {
+                body["provider"] = serde_json::json!(p);
+            }
+            let url = format!("{}/api/stats/llm_usage", cli.server);
+            let resp = match client.post(&url).json(&body).send().await {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(&cli.server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "record-usage failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(cli.format, &parsed, |v| {
+                // SessionSnapshot field names — be defensive across
+                // schema drift.
+                let total = v["total_tokens"].as_u64()
+                    .or_else(|| v["llm_total_tokens"].as_u64())
+                    .unwrap_or(0);
+                let session = v["session_id"].as_str().unwrap_or("?");
+                println!(
+                    "Recorded {} in / {} out (session totals: {} tokens) for session {}",
+                    input_tokens, output_tokens, total, session
+                );
             });
         }
         Commands::Search { query, max } => {
