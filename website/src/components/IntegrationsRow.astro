@@ -34,11 +34,10 @@ const direct: Tool[] = [
 	{ name: 'HTTP API', kind: 'REST', href: '/reference/http-api/' },
 ];
 
-// Surfaces a human reaches for. Lens is the browser UI that ships
-// with the Hub on :3001 — dashboard, plans, sessions, browse,
-// history, branches, taint, diff. ⌘K palette, 15s auto-refresh.
+// Lens is the full browser UI: plans dashboard, session history,
+// memory browser, branch/taint/diff, ⌘K palette, 15s auto-refresh.
 const ui: Tool[] = [
-	{ name: 'Lens', kind: 'browser :3001', href: '/how-it-works/architecture/' },
+	{ name: 'Lens Dashboard', kind: 'Plans · Memory · Branches · Taint', href: '/how-it-works/architecture/' },
 ];
 ---
 
@@ -98,7 +97,7 @@ const ui: Tool[] = [
 			<div class="tiles">
 				{
 					ui.map((t) => (
-						<a class="tile" href={t.href}>
+						<a class="tile tile-lens" href={t.href}>
 							<span class="tile-name">{t.name}</span>
 							<span class="tile-kind">{t.kind}</span>
 						</a>
@@ -106,6 +105,13 @@ const ui: Tool[] = [
 				}
 			</div>
 		</div>
+
+		<p class="model-agnostic">
+			<span class="ma-badge">Model-Agnostic</span>
+			Works with any model behind any tool — Claude, GPT, Gemini, local
+			models via Ollama. CTXone doesn't depend on the model's memory.
+			The system holds the context.
+		</p>
 	</div>
 </section>
 
@@ -168,5 +174,42 @@ const ui: Tool[] = [
 		font-size: 0.9em;
 		color: var(--ctx-accent-text);
 		font-family: var(--ctx-font-mono);
+	}
+
+	.tile-lens {
+		border-color: rgba(34, 197, 94, 0.25);
+	}
+
+	.tile-lens .tile-name {
+		color: var(--ctx-success);
+	}
+
+	.model-agnostic {
+		margin-top: 2rem;
+		padding: 1rem 1.25rem;
+		background: var(--ctx-panel);
+		border: 1px solid var(--ctx-border);
+		border-left: 3px solid var(--ctx-accent);
+		border-radius: 0 var(--ctx-radius-md) var(--ctx-radius-md) 0;
+		font-size: 0.88rem;
+		color: var(--ctx-text-dim);
+		line-height: 1.6;
+		display: flex;
+		align-items: center;
+		gap: 1rem;
+		flex-wrap: wrap;
+	}
+
+	.ma-badge {
+		font-family: var(--ctx-font-mono);
+		font-size: 0.7rem;
+		font-weight: 700;
+		letter-spacing: 0.1em;
+		color: var(--ctx-accent);
+		background: rgba(59, 130, 246, 0.08);
+		border: 1px solid rgba(59, 130, 246, 0.28);
+		padding: 0.3rem 0.7rem;
+		border-radius: 999px;
+		white-space: nowrap;
 	}
 </style>

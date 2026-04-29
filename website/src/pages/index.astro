@@ -9,19 +9,21 @@ import LandingLayout from '../layouts/LandingLayout.astro';
 import Hero from '../components/Hero.astro';
 import ProblemSection from '../components/ProblemSection.astro';
 import FeatureGrid from '../components/FeatureGrid.astro';
-import SavingsShowcase from '../components/SavingsShowcase.astro';
+import PlansSection from '../components/PlansSection.astro';
+import TokenControlSection from '../components/TokenControlSection.astro';
 import IntegrationsRow from '../components/IntegrationsRow.astro';
 import CallToAction from '../components/CallToAction.astro';
 ---
 
 <LandingLayout
-	title="CTXone — memory that survives the session"
-	description="Persistent, searchable, accountable memory for AI agents. Write a fact once — Claude, Cursor, and every other tool you use remembers it forever, across sessions, across branches, with full provenance."
+	title="CTXone — external context for AI agents"
+	description="System-centric AI infrastructure. Persistent memory, structured plans, and full provenance — so models execute within context instead of reasoning their way back to it."
 >
 	<Hero />
 	<ProblemSection />
 	<FeatureGrid />
-	<SavingsShowcase />
+	<PlansSection />
+	<TokenControlSection />
 	<IntegrationsRow />
 	<CallToAction />
 </LandingLayout>

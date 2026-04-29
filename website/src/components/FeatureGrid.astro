@@ -1,76 +1,85 @@
 ---
 /**
- * Three-column feature grid: Remember, Recall, Blame. Each column
- * pairs a CLI snippet with the matching MCP tool name so readers see
- * "this is how you do it from a shell" and "this is what the model
- * calls it" at the same glance.
+ * Three-layer platform overview. Each card covers one layer of the
+ * system-centric architecture:
  *
- * Card accent colors match the pillar mapping from the hero:
- *   Remember → blue    (stateful)
- *   Recall   → green   (topic-matched)
- *   Blame    → amber   (inspectable)
+ *   Memory layer     → stateful context, searchable, survives sessions
+ *   Plans layer      → structured execution, no agent drift
+ *   Governance layer → provenance, taint, branches, audit trail
+ *
+ * Each card pairs a CLI snippet with the MCP tool equivalent.
  */
 ---
 
 <section class="section features">
 	<div class="container">
 		<div class="eyebrow">
-			<span class="eyebrow-text">THREE_VERBS //</span>
+			<span class="eyebrow-text">ARCHITECTURE //</span>
 		</div>
-		<h2 class="section-title">Three verbs. That's the whole product.</h2>
+		<h2 class="section-title">Three layers. One system.</h2>
 		<p class="section-lede">
-			CTXone boils down to three things an AI tool does to memory.
-			Everything else — branches, priming, session stats, provenance
-			— falls out of these.
+			CTXone is external context and structure for models to work
+			within — not another memory plugin, not a prompt wrapper.
+			Three layers compose the full system-centric architecture.
 		</p>
 
 		<div class="grid">
 			<article class="card card-blue">
-				<div class="card-label">01 // REMEMBER</div>
-				<h3>Remember</h3>
+				<div class="card-label">01 // MEMORY LAYER</div>
+				<h3>Persistent, searchable context</h3>
 				<p>
-					Write a fact once. It survives sessions, branches, and tool
-					switches. Importance maps to a confidence score so
-					high-value facts aren't drowned out by chatter.
+					Write a fact once. It survives sessions, branches, and
+					tool switches — stored in a local graph, not the
+					model's context window. Topic-matched recall sends
+					only what's relevant, eliminating context debt before
+					the session starts.
 				</p>
-				<pre><code><span class="prompt">$</span> ctx remember "BSL-1.1 for all new repos" \
-    --importance high --context licensing
+				<pre><code><span class="prompt">$</span> ctx remember "SQLite only — no Postgres" \
+    --importance high --context architecture
 
-<span class="comment"># from an LLM:</span>
-remember(fact="BSL-1.1 for all new repos",
-         importance="high", context="licensing")</code></pre>
+<span class="comment"># model recalls on topic, not everything:</span>
+recall(topic="architecture", budget=1200)
+<span class="dim">→ 3 facts matched / 847 tokens sent</span></code></pre>
 			</article>
 
 			<article class="card card-green">
-				<div class="card-label">02 // RECALL</div>
-				<h3>Recall</h3>
+				<div class="card-label">02 // PLANS LAYER</div>
+				<h3>Agents that stay on task</h3>
 				<p>
-					Ask a topic. Get pinned context plus relevant facts,
-					capped at a token budget. Every response includes the
-					live savings ratio so the claim is provable in real
-					time.
+					Plans give agents a structured task list to execute
+					within — no plan drift, no focus drift, no execution
+					hallucination. When an agent knows exactly what's next,
+					it doesn't re-reason its position. Token usage drops
+					because the work is the work.
 				</p>
-				<pre><code><span class="prompt">$</span> ctx recall "licensing" --budget 1500
+				<pre><code><span class="prompt">$</span> ctx plan new auth-refactor
+<span class="prompt">$</span> ctx plan add auth-refactor "Replace JWT middleware"
+<span class="prompt">$</span> ctx plan next
 
-<span class="comment"># from an LLM:</span>
-recall(topic="licensing", budget=1500)</code></pre>
+<span class="comment"># model picks up exactly where work left off:</span>
+plan_next(assigned_to="claude-code")
+<span class="dim">→ task: Replace JWT middleware [in_progress]</span></code></pre>
 			</article>
 
 			<article class="card card-amber">
-				<div class="card-label">03 // BLAME</div>
-				<h3>Blame</h3>
+				<div class="card-label">03 // GOVERNANCE LAYER</div>
+				<h3>Provenance, taint, and audit trail</h3>
 				<p>
-					Every commit carries an agent ID, a timestamp, an intent,
-					and optional reasoning. <code>ctx blame</code> traces a
-					fact back to the tool, user, and session that wrote it.
+					Every memory commit carries an agent ID, a timestamp,
+					an intent, and reasoning. Taint guards sensitive paths
+					with warn or block policies. Branches let you stage
+					memory changes before they land on main — git-style,
+					for your context graph.
 				</p>
-				<pre><code><span class="prompt">$</span> ctx blame /memory/legal/bsl
+				<pre><code><span class="prompt">$</span> ctx blame /memory/architecture/db-choice
 
-<span class="comment"># who wrote it, when, and why:</span>
+<span class="comment"># full audit trail:</span>
 agent:  claude-code
-when:   2026-03-14T09:17:23Z
+when:   2026-04-01T11:42:07Z
 intent: Observe
-reason: user preference</code></pre>
+reason: user confirmed SQLite decision
+
+<span class="prompt">$</span> ctx taint apply "secrets/**" --policy block</code></pre>
 			</article>
 		</div>
 	</div>
@@ -217,6 +226,11 @@ reason: user preference</code></pre>
 
 	.comment {
 		color: var(--ctx-text-faint);
+	}
+
+	.dim {
+		color: var(--ctx-text-faint);
+		opacity: 0.7;
 	}
 
 	@media (max-width: 900px) {

@@ -1,0 +1,253 @@
+---
+/**
+ * Plans feature showcase. Angle: agents drift without structure.
+ * Plans eliminate Plan Drift, Focus Drift, and Execution Hallucination
+ * by giving the agent an explicit task list to execute within.
+ *
+ * This is the system-centric architecture made concrete: the plan
+ * lives outside the model, survives sessions, and is shared across
+ * agents. The model executes — it doesn't reconstruct.
+ */
+---
+
+<section class="section plans">
+	<div class="container">
+		<div class="eyebrow">
+			<span class="eyebrow-text">PLANS //</span>
+		</div>
+		<h2 class="section-title">Agents drift. Plans don't.</h2>
+		<p class="section-lede">
+			Without structure, an agent re-reasons its position on every
+			turn — re-reading prior output, reconstructing intent, deciding
+			what to do next. That's plan drift, and you pay for every token
+			of it. Plans give the agent an external task list to execute
+			within. It picks up exactly where work left off.
+		</p>
+
+		<div class="plans-layout">
+			<div class="plans-copy">
+				<div class="feature-row">
+					<div class="feature-icon" aria-hidden="true">▸</div>
+					<div>
+						<h3>No re-reasoning between sessions</h3>
+						<p>
+							A plan persists in the state graph. When an agent
+							resumes — tomorrow, or after a context switch — it calls
+							<code>plan_next</code> and gets exactly what to do next.
+							No context reconstruction. No token overhead.
+						</p>
+					</div>
+				</div>
+
+				<div class="feature-row">
+					<div class="feature-icon" aria-hidden="true">▸</div>
+					<div>
+						<h3>Shared across agents and tools</h3>
+						<p>
+							Plans live on branches, not in a session. Claude Code,
+							Cursor, and a Python script can all work from the same
+							plan simultaneously — each picking up the next available
+							task with <code>plan_next(assigned_to="me")</code>.
+						</p>
+					</div>
+				</div>
+
+				<div class="feature-row">
+					<div class="feature-icon" aria-hidden="true">▸</div>
+					<div>
+						<h3>Proof-of-work on every task</h3>
+						<p>
+							Closing a task requires a proof: a commit SHA, a file
+							path, or a test. No execution hallucination — no agent
+							marking work done that wasn't. The plan is an audit
+							trail as well as a task list.
+						</p>
+					</div>
+				</div>
+			</div>
+
+			<div class="plans-terminal">
+				<div class="terminal-bar">
+					<span class="dot dot-red"></span>
+					<span class="dot dot-yellow"></span>
+					<span class="dot dot-green"></span>
+					<span class="terminal-title">ctx plan show auth-refactor</span>
+				</div>
+				<pre class="terminal-body"><code><span class="t-dim">plan:</span>  <span class="t-white">auth-refactor</span>  <span class="t-dim">branch: main</span>
+<span class="t-dim">─────────────────────────────────────────</span>
+
+  <span class="t-done">✓</span>  <span class="t-dim">Audit existing JWT middleware</span>
+  <span class="t-done">✓</span>  <span class="t-dim">Document token expiry edge cases</span>
+  <span class="t-active">▸</span>  <span class="t-white">Replace JWT middleware</span>  <span class="t-badge">in_progress</span>
+  <span class="t-pending">○</span>  <span class="t-dim">Update integration tests</span>
+  <span class="t-pending">○</span>  <span class="t-dim">Update docs/AUTH.md</span>
+
+<span class="t-dim">─────────────────────────────────────────</span>
+<span class="t-dim">2 done · 1 in progress · 2 pending</span>
+
+<span class="t-prompt">$</span> ctx plan next
+<span class="t-dim">→</span> <span class="t-white">Replace JWT middleware</span>
+  <span class="t-dim">blocked_by: [] · assigned_to: claude-code</span></code></pre>
+			</div>
+		</div>
+
+		<p class="plans-link">
+			<a href="/reference/cli/#plans">See the full plans CLI reference →</a>
+		</p>
+	</div>
+</section>
+
+<style>
+	.plans {
+		background:
+			radial-gradient(
+				ellipse 60% 40% at 80% 50%,
+				rgba(34, 197, 94, 0.05),
+				transparent 60%
+			),
+			var(--ctx-bg);
+		border-top: 1px solid var(--ctx-border-lo);
+	}
+
+	.eyebrow {
+		display: inline-block;
+		padding: 0.3rem 0.8rem;
+		background: rgba(34, 197, 94, 0.08);
+		border: 1px solid rgba(34, 197, 94, 0.28);
+		border-radius: 999px;
+		font-family: var(--ctx-font-mono);
+		font-size: 0.68rem;
+		letter-spacing: 0.1em;
+		color: var(--ctx-success);
+		font-weight: 700;
+		margin-bottom: 1rem;
+	}
+
+	.plans-layout {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 3rem;
+		align-items: start;
+		margin-top: 2.5rem;
+	}
+
+	.feature-row {
+		display: flex;
+		gap: 1rem;
+		margin-bottom: 1.75rem;
+	}
+
+	.feature-row:last-child {
+		margin-bottom: 0;
+	}
+
+	.feature-icon {
+		color: var(--ctx-success);
+		font-size: 0.9rem;
+		flex-shrink: 0;
+		margin-top: 0.2rem;
+		font-family: var(--ctx-font-mono);
+	}
+
+	.feature-row h3 {
+		font-size: 1rem;
+		color: #ffffff;
+		margin: 0 0 0.4rem 0;
+		font-weight: 600;
+	}
+
+	.feature-row p {
+		font-size: 0.88rem;
+		color: var(--ctx-text-dim);
+		margin: 0;
+		line-height: 1.6;
+	}
+
+	.feature-row p code {
+		background: #0a0a0a;
+		padding: 0.1rem 0.35rem;
+		border-radius: var(--ctx-radius-sm);
+		font-size: 0.85em;
+		color: var(--ctx-success);
+		font-family: var(--ctx-font-mono);
+	}
+
+	/* Terminal widget */
+	.plans-terminal {
+		border: 1px solid var(--ctx-border);
+		border-radius: var(--ctx-radius-lg);
+		overflow: hidden;
+		background: #050505;
+	}
+
+	.terminal-bar {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		padding: 0.6rem 1rem;
+		background: var(--ctx-panel);
+		border-bottom: 1px solid var(--ctx-border-lo);
+	}
+
+	.dot {
+		width: 10px;
+		height: 10px;
+		border-radius: 50%;
+	}
+
+	.dot-red    { background: #ef4444; opacity: 0.7; }
+	.dot-yellow { background: #f59e0b; opacity: 0.7; }
+	.dot-green  { background: #22c55e; opacity: 0.7; }
+
+	.terminal-title {
+		font-family: var(--ctx-font-mono);
+		font-size: 0.7rem;
+		color: var(--ctx-text-faint);
+		margin-left: 0.25rem;
+	}
+
+	.terminal-body {
+		margin: 0;
+		padding: 1.25rem 1.5rem;
+		font-size: 0.78rem;
+		line-height: 1.8;
+		overflow-x: auto;
+	}
+
+	.terminal-body code {
+		font-family: var(--ctx-font-mono);
+	}
+
+	.t-white   { color: #ffffff; }
+	.t-dim     { color: var(--ctx-text-faint); }
+	.t-done    { color: var(--ctx-success); }
+	.t-active  { color: var(--ctx-success); font-weight: 700; }
+	.t-pending { color: var(--ctx-text-faint); }
+	.t-prompt  { color: var(--ctx-success); }
+
+	.t-badge {
+		font-size: 0.68rem;
+		padding: 0.1rem 0.4rem;
+		background: rgba(34, 197, 94, 0.12);
+		border: 1px solid rgba(34, 197, 94, 0.3);
+		border-radius: 999px;
+		color: var(--ctx-success);
+		font-family: var(--ctx-font-mono);
+	}
+
+	.plans-link {
+		margin-top: 2rem;
+		font-size: 0.88rem;
+	}
+
+	.plans-link a {
+		color: var(--ctx-success);
+	}
+
+	@media (max-width: 860px) {
+		.plans-layout {
+			grid-template-columns: 1fr;
+			gap: 2rem;
+		}
+	}
+</style>
