@@ -1,16 +1,11 @@
 ---
 /**
- * Landing-page hero. Lives above the fold. Jobs:
+ * Landing-page hero. Three beats:
  *
- *   1. Name the pain the reader feels every morning
- *   2. Give that pain a name (context anxiety) and a category
- *   3. State the three pillars of what CTXone gives you back:
- *      stateful, sharable, inspectable
- *   4. Install one-liner + two CTAs
- *
- * Kept deliberately personal. It's a dev tool but the reader is
- * a human who's frustrated every morning — lead with that, not
- * with abstractions about "memory layers."
+ *   1. Name the human pain (context anxiety — keeps the v1 emotional bridge)
+ *   2. Name the architectural cause (model-centric AI / context debt / reasoning tax)
+ *   3. State what CTXone gives back: external context, structured execution,
+ *      control over tokens and model choice
  */
 import InstallOneliner from './InstallOneliner.astro';
 ---
@@ -20,29 +15,31 @@ import InstallOneliner from './InstallOneliner.astro';
 	<div class="container">
 		<div class="eyebrow">
 			<span class="dot"></span>
-			<span class="eyebrow-text">CTXONE // memory for agents</span>
+			<span class="eyebrow-text">CTXONE // system-centric AI</span>
 		</div>
 
 		<h1>
-			Stop re-explaining your project
-			<span class="glow">every morning.</span>
+			Stop paying a reasoning tax
+			<span class="glow">for context you already have.</span>
 		</h1>
 
 		<p class="lede">
-			You know the feeling. Third day in a row, you paste the same
-			paragraph about your stack. You budget tokens for memory the
-			model should already have. That low-grade dread has a name:
-			<strong class="anxiety">context anxiety</strong>.
+			Every session you start from scratch, the model burns tokens
+			reconstructing what it should already know. That's not
+			intelligence — that's
+			<strong class="anxiety">context compensation</strong>.
+			Your model isn't thinking. It's catching up.
 		</p>
 
 		<p class="lede">
-			CTXone is the memory layer that cures it —
-			<strong class="pillar pillar-stateful">stateful</strong>
-			across sessions,
-			<strong class="pillar pillar-sharable">sharable</strong>
-			across tools,
-			<strong class="pillar pillar-inspectable">inspectable</strong>
-			with git-style blame.
+			CTXone is the external context layer that ends it.
+			Persistent memory, structured plans, and full provenance —
+			so the model
+			<strong class="pillar pillar-stateful">executes</strong>
+			within context instead of
+			<strong class="pillar pillar-burn">reasoning</strong>
+			its way back to it. Smaller models work.
+			Token costs drop. You stay in control.
 		</p>
 
 		<InstallOneliner />
@@ -61,10 +58,11 @@ import InstallOneliner from './InstallOneliner.astro';
 		</div>
 
 		<p class="badges">
-			<span class="badge">BSL-1.1 → Apache 2.0</span>
+			<span class="badge">System-Centric</span>
+			<span class="badge">Model-Agnostic</span>
 			<span class="badge">Self-hosted</span>
-			<span class="badge">MCP native</span>
 			<span class="badge">Zero telemetry</span>
+			<span class="badge">BSL-1.1 → Apache 2.0</span>
 		</p>
 	</div>
 </section>
@@ -196,12 +194,8 @@ import InstallOneliner from './InstallOneliner.astro';
 		color: var(--ctx-accent);
 	}
 
-	.pillar-sharable {
-		color: var(--ctx-success);
-	}
-
-	.pillar-inspectable {
-		color: var(--ctx-warn);
+	.pillar-burn {
+		color: var(--ctx-error, #ef4444);
 	}
 
 	.cta-row {

@@ -1,15 +1,13 @@
 ---
 /**
- * Problem-framing section. Three vignettes — one per pillar — that
- * each name a pain the reader feels, then explain what CTXone does
- * about it. The mapping is:
+ * Problem-framing section. Four vignettes mapping to four symptoms
+ * of Model-Centric AI. Each names a pain, then reframes it through
+ * the system-centric lens.
  *
- *   Stateful     → yesterday's context vanished
- *   Sharable     → your teammate is flying blind
- *   Inspectable  → who told the model that? no one remembers
- *
- * Each vignette is a personal story, not a feature bullet. That's
- * the whole point — this is a dev tool but the reader is human.
+ *   Context Debt    → yesterday's context is gone (stateful)
+ *   Reasoning Tax   → your teammate is flying blind (sharable)
+ *   Context Debt    → who told the model that? (inspectable)
+ *   Economic Opacity → the bill arrives (token control)
  */
 ---
 
@@ -17,76 +15,107 @@
 	<div class="container">
 		<div class="eyebrow">
 			<span class="dot"></span>
-			<span class="eyebrow-text">CONTEXT_ANXIETY.md</span>
+			<span class="eyebrow-text">MODEL_CENTRIC.liability</span>
 		</div>
-		<h2 class="section-title">Three flavors of context anxiety.</h2>
+		<h2 class="section-title">Model-Centric AI has a tax.</h2>
 		<p class="section-lede">
-			Everyone using AI coding tools feels all three, even if
-			they've never named them. CTXone's three pillars map
-			one-to-one to the three versions of the pain.
+			When the model is expected to infer state, intent, plan, and
+			memory from raw context, it compensates with reasoning. You
+			pay for that compensation — in tokens, in drift, and in bills
+			that only make sense in retrospect.
 		</p>
 
 		<div class="vignettes">
 			<article class="vignette v-stateful">
-				<div class="v-label">01 // STATEFUL</div>
-				<h3>Yesterday's context is gone.</h3>
+				<div class="v-label">01 // CONTEXT DEBT</div>
+				<h3>Every session starts in debt.</h3>
 				<p class="scene">
-					You told Claude on Tuesday that you're using
+					You told the model on Tuesday that you're using
 					SQLite, not Postgres, and why. Wednesday morning
-					you open a new chat and it's asking about your
+					you open a new session and it's asking about your
 					"Postgres schema" again. You paste the same
 					paragraph. You budget tokens for memory the model
-					should already have.
+					should already have. That's not a memory problem —
+					that's accumulated context debt, paid in reasoning
+					every single session.
 				</p>
 				<p class="fix">
-					<strong>CTXone remembers.</strong> Every fact
-					survives sessions, branches, and tool switches
-					because it's stored in a local graph, not in the
-					model's context window.
+					<strong>CTXone eliminates the debt.</strong> Every
+					fact survives sessions, branches, and tool switches
+					because it lives in a local graph — not in the
+					model's context window. The model executes within
+					context. It doesn't reconstruct it.
 				</p>
 			</article>
 
 			<article class="vignette v-sharable">
-				<div class="v-label">02 // SHARABLE</div>
-				<h3>Your teammate is flying blind.</h3>
+				<div class="v-label">02 // REASONING TAX</div>
+				<h3>Your teammate is paying twice.</h3>
 				<p class="scene">
 					You primed your Cursor install with the team's
 					architectural decisions. Priya didn't. Now she's
 					arguing with the model about whether to use Redis
 					for the job queue — a question you settled three
-					months ago in Slack and she never saw.
+					months ago. The model isn't wrong; it just doesn't
+					have the context. So it reasons. So does Priya.
+					So does the next engineer. The same reasoning tax,
+					paid over and over.
 				</p>
 				<p class="fix">
 					<strong>CTXone is shared.</strong> The graph is a
-					file. Commit it, sync it, mount it over the team's
-					lab network. Whatever you primed is what everyone
-					else sees.
+					file. Commit it, sync it, mount it across the team.
+					Whatever you primed is what everyone sees — one
+					reasoning cost, paid once.
 				</p>
 			</article>
 
 			<article class="vignette v-inspectable">
-				<div class="v-label">03 // INSPECTABLE</div>
-				<h3>Who told the model that?</h3>
+				<div class="v-label">03 // CONTEXT COMPENSATION</div>
+				<h3>The model filled in a gap you didn't know existed.</h3>
 				<p class="scene">
-					You open a file Claude edited last week and there's
-					a comment about "the new API versioning policy."
-					You don't remember a policy. Nobody on the team
-					remembers a policy. Did the model hallucinate it?
-					Did you mention it once in a side chat? Nobody can
-					check. The decision is orphaned.
+					You open a file the model edited last week and
+					there's a reference to "the new API versioning
+					policy." You don't remember a policy. Nobody
+					does. The model wasn't hallucinating — it was
+					compensating. It had no structured context, so
+					it inferred. The decision is now orphaned in
+					a file no one can audit.
 				</p>
 				<p class="fix">
-					<strong>CTXone is accountable.</strong> Every
-					commit carries an agent ID, a timestamp, an intent,
-					and reasoning. <code>ctx blame</code> shows you
-					exactly who wrote what, when, and why — git-style.
+					<strong>CTXone makes compensation visible.</strong>
+					Every write carries an agent ID, a timestamp, an
+					intent, and reasoning. <code>ctx blame</code> traces
+					it back to the session, the tool, and the fact that
+					prompted it. No orphaned decisions.
+				</p>
+			</article>
+
+			<article class="vignette v-economic">
+				<div class="v-label">04 // ECONOMIC OPACITY</div>
+				<h3>The bill arrives. You have no idea why.</h3>
+				<p class="scene">
+					Token pricing is published on the docs page.
+					It is completely opaque at the moment of use.
+					You run a session, you ship a feature, you move on.
+					Then the invoice lands and you're reverse-engineering
+					which prompts cost what. The expensive ones are
+					almost always the same: large context, reasoning
+					model, agent that lost its place and started over.
+				</p>
+				<p class="fix">
+					<strong>CTXone shifts control back to you.</strong>
+					Structured context means smaller models work.
+					Plans mean agents don't lose their place.
+					Recall means you send what's relevant —
+					not everything you've ever said.
+					The reasoning tax becomes a flat cost you understand.
 				</p>
 			</article>
 		</div>
 
 		<p class="read-more">
 			<a href="/why-ctxone/context-anxiety/">
-				Read the full context anxiety argument →
+				Read the full context compensation argument →
 			</a>
 		</p>
 	</div>
@@ -131,7 +160,7 @@
 
 	.vignettes {
 		display: grid;
-		grid-template-columns: repeat(3, 1fr);
+		grid-template-columns: repeat(2, 1fr);
 		gap: 1.25rem;
 		margin-top: 2rem;
 	}
@@ -169,6 +198,11 @@
 		box-shadow: 0 0 12px rgba(252, 211, 77, 0.5);
 	}
 
+	.v-economic::before {
+		background: #ef4444;
+		box-shadow: 0 0 12px rgba(239, 68, 68, 0.5);
+	}
+
 	.v-label {
 		font-family: var(--ctx-font-mono);
 		font-size: 0.68rem;
@@ -187,6 +221,10 @@
 
 	.v-inspectable .v-label {
 		color: var(--ctx-warn);
+	}
+
+	.v-economic .v-label {
+		color: #ef4444;
 	}
 
 	.vignette h3 {
@@ -231,7 +269,7 @@
 		font-size: 0.9rem;
 	}
 
-	@media (max-width: 920px) {
+	@media (max-width: 720px) {
 		.vignettes {
 			grid-template-columns: 1fr;
 		}
