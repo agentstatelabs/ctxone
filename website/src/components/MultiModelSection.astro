@@ -1,0 +1,259 @@
+---
+/**
+ * Multi-model / cross-model coordination section.
+ *
+ * The differentiator: CTXone is the only system where Claude, GPT,
+ * Gemini, a local Ollama model, and a Python script can all share
+ * the same memory graph and plan — with no glue code, no custom
+ * orchestration layer, no framework lock-in.
+ *
+ * The model doesn't hold the state. The system does. That's what
+ * makes true multi-model coordination possible without code.
+ */
+---
+
+<section class="section multimodel">
+	<div class="container">
+		<div class="eyebrow">
+			<span class="eyebrow-text">MULTI-MODEL //</span>
+		</div>
+
+		<div class="layout">
+			<div class="copy">
+				<h2>One memory graph.<br />Every model you use.</h2>
+				<p class="lede">
+					Most teams don't use one AI tool. They use Claude for
+					complex reasoning, a local model for routine work,
+					Gemini for search-grounded tasks. Each one starts
+					every session knowing nothing about the others.
+				</p>
+				<p class="lede">
+					CTXone is the shared context layer they all draw from —
+					no glue code, no custom orchestration, no framework
+					lock-in. Claude remembers a decision. Cursor picks it
+					up. A Python script acts on it. They're all working
+					from the same plan, the same memory, the same branch.
+				</p>
+				<ul class="claims">
+					<li>
+						<span class="claim-dot"></span>
+						Any MCP-capable tool reads and writes the same graph
+					</li>
+					<li>
+						<span class="claim-dot"></span>
+						Plans are model-agnostic — any agent picks up the next task
+					</li>
+					<li>
+						<span class="claim-dot"></span>
+						No orchestration code required — coordination happens through shared state
+					</li>
+					<li>
+						<span class="claim-dot"></span>
+						Switch models mid-project — context follows, not the model
+					</li>
+				</ul>
+			</div>
+
+			<div class="diagram">
+				<div class="hub">
+					<div class="hub-label">CTXone Hub</div>
+					<div class="hub-sub">memory · plans · branches</div>
+				</div>
+
+				<div class="spokes">
+					<div class="spoke spoke-1">
+						<div class="spoke-line"></div>
+						<div class="spoke-node">Claude Code</div>
+					</div>
+					<div class="spoke spoke-2">
+						<div class="spoke-line"></div>
+						<div class="spoke-node">Cursor</div>
+					</div>
+					<div class="spoke spoke-3">
+						<div class="spoke-line"></div>
+						<div class="spoke-node">Gemini</div>
+					</div>
+					<div class="spoke spoke-4">
+						<div class="spoke-line"></div>
+						<div class="spoke-node">Local model</div>
+					</div>
+					<div class="spoke spoke-5">
+						<div class="spoke-line"></div>
+						<div class="spoke-node">Python script</div>
+					</div>
+				</div>
+
+				<p class="diagram-note">
+					All agents. Same memory graph. Same plan. No code connecting them.
+				</p>
+			</div>
+		</div>
+	</div>
+</section>
+
+<style>
+	.multimodel {
+		background:
+			radial-gradient(
+				ellipse 70% 50% at 50% 50%,
+				rgba(59, 130, 246, 0.06),
+				transparent 65%
+			),
+			var(--ctx-bg);
+		border-top: 1px solid var(--ctx-border-lo);
+	}
+
+	.eyebrow {
+		display: inline-block;
+		padding: 0.3rem 0.8rem;
+		background: rgba(59, 130, 246, 0.08);
+		border: 1px solid rgba(59, 130, 246, 0.28);
+		border-radius: 999px;
+		font-family: var(--ctx-font-mono);
+		font-size: 0.68rem;
+		letter-spacing: 0.1em;
+		color: var(--ctx-accent);
+		font-weight: 700;
+		margin-bottom: 1.5rem;
+	}
+
+	.layout {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 4rem;
+		align-items: center;
+	}
+
+	.copy h2 {
+		font-size: clamp(1.5rem, 3vw, 2.25rem);
+		font-weight: 800;
+		color: #ffffff;
+		margin: 0 0 1.25rem 0;
+		line-height: 1.1;
+		letter-spacing: -0.02em;
+	}
+
+	.copy h2 br {
+		display: block;
+	}
+
+	.lede {
+		font-size: 0.95rem;
+		color: var(--ctx-text-dim);
+		line-height: 1.65;
+		margin: 0 0 1rem 0;
+		max-width: 36rem;
+	}
+
+	.claims {
+		list-style: none;
+		margin: 1.5rem 0 0 0;
+		padding: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.7rem;
+	}
+
+	.claims li {
+		display: flex;
+		align-items: flex-start;
+		gap: 0.75rem;
+		font-size: 0.88rem;
+		color: var(--ctx-text-dim);
+		line-height: 1.45;
+	}
+
+	.claim-dot {
+		flex-shrink: 0;
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		background: var(--ctx-accent);
+		box-shadow: 0 0 8px rgba(59, 130, 246, 0.6);
+		margin-top: 0.45rem;
+	}
+
+	/* Hub-and-spokes diagram */
+	.diagram {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 0;
+	}
+
+	.hub {
+		background: var(--ctx-panel);
+		border: 1px solid rgba(59, 130, 246, 0.45);
+		border-radius: var(--ctx-radius-lg);
+		padding: 1rem 1.75rem;
+		text-align: center;
+		box-shadow:
+			0 0 0 4px rgba(59, 130, 246, 0.06),
+			0 0 24px rgba(59, 130, 246, 0.12);
+		position: relative;
+		z-index: 1;
+	}
+
+	.hub-label {
+		font-family: var(--ctx-font-mono);
+		font-size: 0.85rem;
+		font-weight: 700;
+		color: var(--ctx-accent);
+		letter-spacing: 0.04em;
+	}
+
+	.hub-sub {
+		font-size: 0.72rem;
+		color: var(--ctx-text-faint);
+		font-family: var(--ctx-font-mono);
+		margin-top: 0.2rem;
+	}
+
+	.spokes {
+		display: flex;
+		gap: 0.6rem;
+		flex-wrap: wrap;
+		justify-content: center;
+		margin-top: 1.25rem;
+	}
+
+	.spoke {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 0.4rem;
+	}
+
+	.spoke-line {
+		width: 1px;
+		height: 1.5rem;
+		background: linear-gradient(to bottom, rgba(59, 130, 246, 0.4), rgba(59, 130, 246, 0.1));
+	}
+
+	.spoke-node {
+		background: var(--ctx-panel);
+		border: 1px solid var(--ctx-border);
+		border-radius: var(--ctx-radius-md);
+		padding: 0.4rem 0.75rem;
+		font-size: 0.75rem;
+		color: var(--ctx-text-dim);
+		font-family: var(--ctx-font-mono);
+		white-space: nowrap;
+	}
+
+	.diagram-note {
+		margin-top: 1.25rem;
+		font-size: 0.78rem;
+		color: var(--ctx-text-faint);
+		text-align: center;
+		font-family: var(--ctx-font-mono);
+		font-style: italic;
+	}
+
+	@media (max-width: 860px) {
+		.layout {
+			grid-template-columns: 1fr;
+			gap: 2.5rem;
+		}
+	}
+</style>
