@@ -71,6 +71,20 @@ const MAPPING = [
 		order: 3,
 		title: 'Memory MCP design',
 	},
+	{
+		src: 'AGENTS.md',
+		section: 'how-it-works',
+		slug: 'agents',
+		order: 4,
+		title: 'Multi-agent systems',
+	},
+	{
+		src: 'MEMORY_BRANCH_SCOPING.md',
+		section: 'how-it-works',
+		slug: 'memory-branch-scoping',
+		order: 5,
+		title: 'Memory branch scoping',
+	},
 
 	// Reference
 	{
@@ -296,9 +310,10 @@ import { Card, CardGrid } from '@astrojs/starlight/components';
   </Card>
 
   <Card title="How it works" icon="puzzle">
-    Read [Architecture](/how-it-works/architecture/) for the mental model
-    and [Token savings](/how-it-works/token-savings/) for the math behind
-    the live savings ratio.
+    Read [Architecture](/how-it-works/architecture/) for the mental model,
+    [Multi-agent systems](/how-it-works/agents/) for the system-centric
+    architecture guide, and [Token savings](/how-it-works/token-savings/)
+    for the context compensation argument.
   </Card>
 
   <Card title="Integrate" icon="setting">
