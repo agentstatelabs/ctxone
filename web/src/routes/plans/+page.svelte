@@ -143,6 +143,10 @@
 	let newPlanName = $state('');
 	let newPlanDesc = $state('');
 
+	// Plan-header actions dropdown (Mark complete / Archive). One toggle
+	// instead of stacked buttons keeps the header tidy as more actions land.
+	let showPlanActions = $state(false);
+
 	// Add-task form
 	let showAddTask = $state(false);
 	let newTaskTitle = $state('');
@@ -863,10 +867,49 @@
 						</label>
 					{/if}
 					{#if selectedPlan.status === 'active'}
-						<button class="btn-secondary btn-complete" onclick={handleForceComplete}>
-							Mark complete
-						</button>
-						<button class="btn-secondary" onclick={handleArchive}>Archive</button>
+						<div class="actions-menu">
+							<button
+								class="btn-secondary actions-toggle"
+								type="button"
+								aria-haspopup="menu"
+								aria-expanded={showPlanActions}
+								onclick={() => (showPlanActions = !showPlanActions)}
+							>
+								Actions <span class="caret" aria-hidden="true">▾</span>
+							</button>
+							{#if showPlanActions}
+								<!-- svelte-ignore a11y_click_events_have_key_events -->
+								<!-- svelte-ignore a11y_no_static_element_interactions -->
+								<div
+									class="actions-backdrop"
+									onclick={() => (showPlanActions = false)}
+								></div>
+								<div class="actions-menu-list" role="menu">
+									<button
+										role="menuitem"
+										type="button"
+										class="actions-menu-item complete"
+										onclick={() => {
+											showPlanActions = false;
+											handleForceComplete();
+										}}
+									>
+										Mark complete
+									</button>
+									<button
+										role="menuitem"
+										type="button"
+										class="actions-menu-item"
+										onclick={() => {
+											showPlanActions = false;
+											handleArchive();
+										}}
+									>
+										Archive
+									</button>
+								</div>
+							{/if}
+						</div>
 					{/if}
 				</div>
 			</header>
@@ -1212,6 +1255,56 @@
 	}
 	.btn-complete:hover {
 		background: color-mix(in srgb, var(--success) 24%, transparent);
+	}
+	.actions-menu {
+		position: relative;
+		display: inline-block;
+	}
+	.actions-toggle .caret {
+		margin-left: 0.25rem;
+		font-size: 0.75em;
+		opacity: 0.75;
+	}
+	/* Invisible full-viewport layer so a click anywhere outside the menu
+	   closes it. Sits behind the popover but above the rest of the page. */
+	.actions-backdrop {
+		position: fixed;
+		inset: 0;
+		z-index: 40;
+		background: transparent;
+	}
+	.actions-menu-list {
+		position: absolute;
+		top: calc(100% + 4px);
+		right: 0;
+		z-index: 50;
+		min-width: 11rem;
+		display: flex;
+		flex-direction: column;
+		background: var(--bg-1);
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+		padding: 0.25rem;
+	}
+	.actions-menu-item {
+		text-align: left;
+		background: transparent;
+		border: none;
+		border-radius: 4px;
+		padding: 0.4rem 0.6rem;
+		color: var(--text-1);
+		font-size: 0.85rem;
+		cursor: pointer;
+	}
+	.actions-menu-item:hover {
+		background: var(--accent-bg);
+	}
+	.actions-menu-item.complete {
+		color: var(--success);
+	}
+	.actions-menu-item.complete:hover {
+		background: color-mix(in srgb, var(--success) 18%, transparent);
 	}
 	.btn-sm {
 		padding: 0.25rem 0.6rem;
