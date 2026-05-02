@@ -19,17 +19,20 @@
 //! Both pieces are best-effort. The lockfile uses an atomic
 //! create-if-missing open so two simultaneous hubs racing for the
 //! same db get a deterministic loser. The watchdog never panics.
+//!
+//! **Windows note:** `pid_is_alive` falls back to a `tasklist`-based
+//! check and the inode watchdog is a no-op (Windows inodes are not
+//! stable across renames the same way Unix inodes are).
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 /// Lock filename for a given db path: `<db>.lock`.
 pub fn lock_path(db_path: &str) -> PathBuf {
@@ -137,21 +140,40 @@ fn read_pid(path: &Path) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// `kill -0 <pid>` — true if the process exists and we have permission
-/// to signal it. False if the kernel says ESRCH (no such process).
+/// Returns true if `pid` is a running process.
+///
+/// Unix: `kill -0 <pid>` — zero cost, no signal sent.
+/// Windows: `tasklist /FI "PID eq <pid>"` — heavier but correct.
 fn pid_is_alive(pid: u32) -> bool {
-    Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    #[cfg(unix)]
+    {
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+    #[cfg(windows)]
+    {
+        let out = Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+            .output();
+        match out {
+            Ok(o) => {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                stdout.contains(&pid.to_string())
+            }
+            Err(_) => false,
+        }
+    }
 }
 
 // -- Inode-drift watchdog --
 
-/// (device, inode) pair — what `stat` returns and what we compare.
+/// (device, inode) pair — what `stat` returns on Unix.
+/// On Windows this is always `(0, 0)`; the watchdog is a no-op there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DbFingerprint {
     pub dev: u64,
@@ -159,22 +181,31 @@ pub struct DbFingerprint {
 }
 
 /// Capture the current (dev, ino) of a path. None if the file is
-/// missing or unreadable.
+/// missing or unreadable. On Windows always returns `Some((0, 0))`.
 pub fn fingerprint(path: &str) -> Option<DbFingerprint> {
-    let meta = fs::metadata(path).ok()?;
-    Some(DbFingerprint {
-        dev: meta.dev(),
-        ino: meta.ino(),
-    })
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = fs::metadata(path).ok()?;
+        Some(DbFingerprint {
+            dev: meta.dev(),
+            ino: meta.ino(),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows: file exists check only; inode tracking not supported.
+        fs::metadata(path).ok()?;
+        Some(DbFingerprint { dev: 0, ino: 0 })
+    }
 }
 
 /// Spawn the inode-drift watchdog as a tokio task.
 ///
-/// Stats `db_path` every `interval_secs` and compares against
-/// `baseline`. On drift (file replaced or missing), logs a single
-/// WARN and updates the baseline so we don't spam. The hub keeps
-/// running — surfacing the warning is the win; refusing writes would
-/// likely make things worse during a recovery operation.
+/// On Unix: stats `db_path` every `interval_secs` and compares against
+/// `baseline`. On drift (file replaced or missing), logs a single WARN.
+/// On Windows: no-op (inode semantics differ; the file-missing check
+/// still fires via `fingerprint` returning None).
 pub fn spawn_watchdog(db_path: String, baseline: DbFingerprint, interval_secs: u64) {
     if interval_secs == 0 {
         return;
@@ -187,7 +218,7 @@ pub fn spawn_watchdog(db_path: String, baseline: DbFingerprint, interval_secs: u
             interval.tick().await;
             match fingerprint(&db_path) {
                 None => {
-                    error!(
+                    tracing::error!(
                         path = %db_path,
                         "database file is missing — likely deleted under a running hub. \
                          Writes still hit the orphaned inode but will be lost on restart. \
@@ -197,6 +228,7 @@ pub fn spawn_watchdog(db_path: String, baseline: DbFingerprint, interval_secs: u
                     // reappears so the operator can't miss it.
                 }
                 Some(now) if now != last => {
+                    #[cfg(unix)]
                     warn!(
                         path = %db_path,
                         old_dev = last.dev, old_ino = last.ino,
@@ -274,12 +306,16 @@ mod tests {
         let db = unique_db_path("fp");
         fs::write(&db, b"v1").unwrap();
         let fp1 = fingerprint(db.to_str().unwrap()).expect("fp1");
-        // Atomic replace via rename produces a new inode.
+        // Atomic replace via rename produces a new inode on Unix.
+        // On Windows dev/ino are both 0 so fp1 == fp2; skip the assert there.
         let tmp = unique_db_path("fp_tmp");
         fs::write(&tmp, b"v2").unwrap();
         fs::rename(&tmp, &db).unwrap();
         let fp2 = fingerprint(db.to_str().unwrap()).expect("fp2");
+        #[cfg(unix)]
         assert_ne!(fp1.ino, fp2.ino, "rename should change inode");
+        #[cfg(not(unix))]
+        let _ = (fp1, fp2); // no-op on Windows
         let _ = fs::remove_file(&db);
     }
 }
