@@ -706,8 +706,7 @@ this is the state-driven orchestration primitive.
 ## Reminder endpoints
 
 Pull-based scheduling. All reminder endpoints live under `/api/reminders/*`.
-Reminders are in-memory per server process (restart resets them); persistent
-storage is wired in when the Hub uses SQLite.
+Reminders are persisted to SQLite (same database as memory).
 
 ### `POST /api/reminders`
 
