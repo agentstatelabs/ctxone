@@ -29,6 +29,7 @@ use crate::memory_tools::{
 };
 use crate::plan_tools;
 use crate::rate_limit;
+use crate::reminder_tools;
 
 /// Hub-wide HTTP configuration.
 ///
@@ -245,6 +246,15 @@ fn router_with_config_inner(
             post(force_complete_plan),
         )
         .route("/api/plans/{name}/move", post(move_plan_handler))
+        // Reminder endpoints
+        .route("/api/reminders", get(list_reminders_handler).post(create_reminder_handler))
+        .route("/api/reminders/due", get(remind_me_handler))
+        .route("/api/reminders/{id}", get(get_reminder_handler))
+        .route("/api/reminders/{id}/snooze", post(snooze_reminder_handler))
+        .route("/api/reminders/{id}/approve", post(approve_reminder_handler))
+        .route("/api/reminders/{id}/cancel", post(cancel_reminder_handler))
+        .route("/api/reminders/{id}/start", post(start_reminder_handler))
+        .route("/api/reminders/{id}/record", post(record_reminder_handler))
         // Session turn capture (full request/response/tool/usage JSON)
         .route("/api/sessions/{sid}/turns", get(list_session_turns))
         .route("/api/sessions/{sid}/turns/{idx}", post(put_session_turn).get(get_session_turn))
@@ -1841,6 +1851,131 @@ async fn list_session_turns(
         }
     }
     Ok(Json(roots.into_iter().collect()))
+}
+
+// -- Reminder endpoints -------------------------------------------------
+
+fn reminder_error_to_response(e: reminder_tools::ReminderToolError) -> (StatusCode, String) {
+    (StatusCode::BAD_REQUEST, e.to_string())
+}
+
+async fn list_reminders_handler(
+    State(s): State<HubState>,
+    Query(q): Query<reminder_tools::ReminderListParams>,
+) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+    let mgr = reminder_tools::make_manager(s.repo.clone());
+    let reminders = reminder_tools::list_reminders(&mgr, q).map_err(reminder_error_to_response)?;
+    Ok(Json(reminders.iter().map(reminder_tools::reminder_to_json).collect()))
+}
+
+async fn create_reminder_handler(
+    State(s): State<HubState>,
+    agent_id: AgentId,
+    Json(req): Json<reminder_tools::ReminderCreateParams>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
+    let mgr = reminder_tools::make_manager(s.repo.clone());
+    let r = reminder_tools::create_reminder(&mgr, req, &agent_id.0)
+        .map_err(reminder_error_to_response)?;
+    Ok((StatusCode::CREATED, Json(reminder_tools::reminder_to_json(&r))))
+}
+
+async fn remind_me_handler(
+    State(s): State<HubState>,
+) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+    let mgr = reminder_tools::make_manager(s.repo.clone());
+    let reminders = mgr.remind_me().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(reminders.iter().map(reminder_tools::reminder_to_json).collect()))
+}
+
+async fn get_reminder_handler(
+    State(s): State<HubState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let mgr = reminder_tools::make_manager(s.repo.clone());
+    match mgr.get(&id) {
+        Ok(r) => Ok(Json(reminder_tools::reminder_to_json(&r))),
+        Err(agentstategraph_reminders::ReminderError::NotFound(_)) => {
+            Err((StatusCode::NOT_FOUND, format!("reminder '{}' not found", id)))
+        }
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+#[derive(Deserialize)]
+struct SnoozeBody {
+    until: String,
+}
+
+async fn snooze_reminder_handler(
+    State(s): State<HubState>,
+    Path(id): Path<String>,
+    Json(body): Json<SnoozeBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let mgr = reminder_tools::make_manager(s.repo.clone());
+    let until = reminder_tools::parse_datetime(&body.until).map_err(reminder_error_to_response)?;
+    let r = mgr.snooze(&id, until).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(reminder_tools::reminder_to_json(&r)))
+}
+
+#[derive(Deserialize)]
+struct ApproveBody {
+    approved_by: Option<String>,
+}
+
+async fn approve_reminder_handler(
+    State(s): State<HubState>,
+    agent_id: AgentId,
+    Path(id): Path<String>,
+    body: Option<Json<ApproveBody>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let mgr = reminder_tools::make_manager(s.repo.clone());
+    let approver = body
+        .and_then(|b| b.0.approved_by)
+        .unwrap_or(agent_id.0);
+    let r = mgr.approve(&id, &approver).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(reminder_tools::reminder_to_json(&r)))
+}
+
+async fn cancel_reminder_handler(
+    State(s): State<HubState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let mgr = reminder_tools::make_manager(s.repo.clone());
+    let r = mgr.cancel(&id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(reminder_tools::reminder_to_json(&r)))
+}
+
+#[derive(Deserialize)]
+struct StartBody {
+    agent_id: Option<String>,
+}
+
+async fn start_reminder_handler(
+    State(s): State<HubState>,
+    agent_id: AgentId,
+    Path(id): Path<String>,
+    body: Option<Json<StartBody>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let mgr = reminder_tools::make_manager(s.repo.clone());
+    let acting_agent = body.and_then(|b| b.0.agent_id).unwrap_or(agent_id.0);
+    let r = mgr.start(&id, &acting_agent).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(reminder_tools::reminder_to_json(&r)))
+}
+
+async fn record_reminder_handler(
+    State(s): State<HubState>,
+    agent_id: AgentId,
+    Path(id): Path<String>,
+    Json(mut req): Json<reminder_tools::ReminderRecordParams>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // Inject server agent id as default if caller didn't supply one.
+    if req.agent_id.is_none() {
+        req.agent_id = Some(agent_id.0);
+    }
+    let mgr = reminder_tools::make_manager(s.repo.clone());
+    let r = reminder_tools::record_execution(&mgr, req, DEFAULT_AGENT_ID)
+        .map_err(reminder_error_to_response)?;
+    Ok(Json(reminder_tools::reminder_to_json(&r)))
 }
 
 // -- Admin endpoints --

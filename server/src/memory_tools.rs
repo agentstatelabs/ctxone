@@ -2573,6 +2573,194 @@ impl CtxOneServer {
             Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
         }
     }
+
+    // -- Reminder tools -------------------------------------------------
+    // These wrap `agentstategraph-reminders` via helpers in `reminder_tools.rs`.
+
+    #[tool(
+        description = "Schedule a reminder for yourself or another agent. Reminders are pull-based: create them now and call `remind_me` at any future checkpoint to retrieve what's actionable. \
+        \
+        CALL THIS WHEN the user asks you to follow up on something later, when you identify a recurring operational task (weekly review, metric check, etc.), when you want to revisit a decision after a soak period, or whenever 'I should check this again' would be useful. \
+        \
+        `autonomous: true` (default) means you may act without asking. `autonomous: false` surfaces as `awaiting_permission` — use for actions the user should approve. \
+        Recurrence: set a `schedule` with `kind: interval|daily|weekly` to re-fire after each execution. Omit for a one-shot."
+    )]
+    async fn reminder_create(
+        &self,
+        params: Parameters<crate::reminder_tools::ReminderCreateParams>,
+    ) -> String {
+        use crate::reminder_tools as rt;
+        let mgr = rt::make_manager(self.repo.clone());
+        match rt::create_reminder(&mgr, params.0, &self.agent_id) {
+            Ok(r) => serde_json::to_string(&rt::reminder_to_json(&r))
+                .unwrap_or_else(|_| "{}".into()),
+            Err(e) => rt::err_json(e),
+        }
+    }
+
+    #[tool(
+        description = "Return all reminders that are currently actionable (status `due` or `awaiting_permission`), ordered by priority. \
+        \
+        CALL THIS AT SESSION START, after completing a task, when switching branches, or whenever you want to know 'what should I be doing that I scheduled for later?'. This is the primary reminder surface — create reminders with `reminder_create` and consume them here. \
+        \
+        Lazily promotes any `pending` reminders whose `due_at` has passed to `due`. Non-autonomous reminders appear as `awaiting_permission` — call `reminder_approve` before acting on them."
+    )]
+    async fn remind_me(
+        &self,
+        _params: Parameters<crate::reminder_tools::RemindMeParams>,
+    ) -> String {
+        use crate::reminder_tools as rt;
+        let mgr = rt::make_manager(self.repo.clone());
+        match mgr.remind_me() {
+            Ok(reminders) => {
+                let out: Vec<serde_json::Value> =
+                    reminders.iter().map(rt::reminder_to_json).collect();
+                serde_json::to_string(&out).unwrap_or_else(|_| "[]".into())
+            }
+            Err(e) => rt::err_json(e),
+        }
+    }
+
+    #[tool(
+        description = "List reminders with optional filters. Returns matching reminders ordered by priority then due_at. \
+        \
+        CALL THIS WHEN you need to browse reminders by status, priority, tag, or associated ref. For actionable items prefer `remind_me` — it handles lazy promotion automatically."
+    )]
+    async fn reminder_list(
+        &self,
+        params: Parameters<crate::reminder_tools::ReminderListParams>,
+    ) -> String {
+        use crate::reminder_tools as rt;
+        let mgr = rt::make_manager(self.repo.clone());
+        match rt::list_reminders(&mgr, params.0) {
+            Ok(reminders) => {
+                let out: Vec<serde_json::Value> =
+                    reminders.iter().map(rt::reminder_to_json).collect();
+                serde_json::to_string(&out).unwrap_or_else(|_| "[]".into())
+            }
+            Err(e) => rt::err_json(e),
+        }
+    }
+
+    #[tool(
+        description = "Get a single reminder by id. Returns the full record including execution history."
+    )]
+    async fn reminder_get(
+        &self,
+        params: Parameters<crate::reminder_tools::ReminderGetParams>,
+    ) -> String {
+        use crate::reminder_tools as rt;
+        let mgr = rt::make_manager(self.repo.clone());
+        match mgr.get(&params.0.id) {
+            Ok(r) => serde_json::to_string(&rt::reminder_to_json(&r))
+                .unwrap_or_else(|_| "{}".into()),
+            Err(e) => rt::err_json(e),
+        }
+    }
+
+    #[tool(
+        description = "Snooze a reminder until a later time. The reminder returns to `due` after the snooze expires and will appear again on the next `remind_me` call. \
+        \
+        CALL THIS WHEN the reminder is not actionable right now but you don't want to cancel it — e.g. you're waiting on a PR to merge, a deploy to finish, or the user to be available."
+    )]
+    async fn reminder_snooze(
+        &self,
+        params: Parameters<crate::reminder_tools::ReminderSnoozeParams>,
+    ) -> String {
+        use crate::reminder_tools as rt;
+        let mgr = rt::make_manager(self.repo.clone());
+        let p = params.0;
+        let until = match rt::parse_datetime(&p.until) {
+            Ok(t) => t,
+            Err(e) => return rt::err_json(e),
+        };
+        match mgr.snooze(&p.id, until) {
+            Ok(r) => serde_json::to_string(&rt::reminder_to_json(&r))
+                .unwrap_or_else(|_| "{}".into()),
+            Err(e) => rt::err_json(e),
+        }
+    }
+
+    #[tool(
+        description = "Approve a non-autonomous reminder for execution. Transitions `awaiting_permission` → `due`. \
+        \
+        CALL THIS WHEN the user explicitly okays a reminder that was created with `autonomous: false`. After approval, call `remind_me` or `reminder_start` to begin execution."
+    )]
+    async fn reminder_approve(
+        &self,
+        params: Parameters<crate::reminder_tools::ReminderApproveParams>,
+    ) -> String {
+        use crate::reminder_tools as rt;
+        let mgr = rt::make_manager(self.repo.clone());
+        let p = params.0;
+        let approver = p.approved_by.unwrap_or_else(|| self.agent_id.clone());
+        match mgr.approve(&p.id, &approver) {
+            Ok(r) => serde_json::to_string(&rt::reminder_to_json(&r))
+                .unwrap_or_else(|_| "{}".into()),
+            Err(e) => rt::err_json(e),
+        }
+    }
+
+    #[tool(
+        description = "Cancel a reminder permanently. Use `reminder_snooze` to defer instead of cancelling. \
+        \
+        CALL THIS WHEN the reminder is no longer relevant and should never fire again."
+    )]
+    async fn reminder_cancel(
+        &self,
+        params: Parameters<crate::reminder_tools::ReminderCancelParams>,
+    ) -> String {
+        use crate::reminder_tools as rt;
+        let mgr = rt::make_manager(self.repo.clone());
+        match mgr.cancel(&params.0.id) {
+            Ok(r) => serde_json::to_string(&rt::reminder_to_json(&r))
+                .unwrap_or_else(|_| "{}".into()),
+            Err(e) => rt::err_json(e),
+        }
+    }
+
+    #[tool(
+        description = "Mark a reminder as in-progress. Opens a partial execution record. \
+        \
+        CALL THIS just before you begin acting on a `due` reminder — it records the start time and agent. Follow with `reminder_record` when you finish."
+    )]
+    async fn reminder_start(
+        &self,
+        params: Parameters<crate::reminder_tools::ReminderStartParams>,
+    ) -> String {
+        use crate::reminder_tools as rt;
+        let mgr = rt::make_manager(self.repo.clone());
+        let p = params.0;
+        let agent = p.agent_id.unwrap_or_else(|| self.agent_id.clone());
+        match mgr.start(&p.id, &agent) {
+            Ok(r) => serde_json::to_string(&rt::reminder_to_json(&r))
+                .unwrap_or_else(|_| "{}".into()),
+            Err(e) => rt::err_json(e),
+        }
+    }
+
+    #[tool(
+        description = "Record the outcome of a reminder execution. Closes the execution record opened by `reminder_start`. \
+        \
+        `result` must be one of: `success` | `failed` | `deferred` | `snoozed` | `cancelled`. \
+        \
+        On `success`: if the reminder has a repeating schedule, it resets to `pending` with a new `due_at`; otherwise it becomes `completed`. \
+        On `failed` or `deferred`: status returns to `due` — the reminder will appear again on the next `remind_me`. \
+        \
+        CALL THIS after every execution attempt, even failed ones. The execution history is the audit trail."
+    )]
+    async fn reminder_record(
+        &self,
+        params: Parameters<crate::reminder_tools::ReminderRecordParams>,
+    ) -> String {
+        use crate::reminder_tools as rt;
+        let mgr = rt::make_manager(self.repo.clone());
+        match rt::record_execution(&mgr, params.0, &self.agent_id) {
+            Ok(r) => serde_json::to_string(&rt::reminder_to_json(&r))
+                .unwrap_or_else(|_| "{}".into()),
+            Err(e) => rt::err_json(e),
+        }
+    }
 }
 
 #[tool_handler]

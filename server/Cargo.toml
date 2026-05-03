@@ -25,6 +25,7 @@ agentstategraph-core = { workspace = true }
 agentstategraph-storage = { workspace = true }
 agentstategraph-tasks = { workspace = true }
 agentstategraph-taint = { workspace = true }
+agentstategraph-reminders = { workspace = true }
 agentstategraph-migrate = { workspace = true }
 rmcp = { workspace = true }
 schemars = { workspace = true }

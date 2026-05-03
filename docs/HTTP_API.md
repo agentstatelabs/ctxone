@@ -703,6 +703,68 @@ this is the state-driven orchestration primitive.
 
 ---
 
+## Reminder endpoints
+
+Pull-based scheduling. All reminder endpoints live under `/api/reminders/*`.
+Reminders are in-memory per server process (restart resets them); persistent
+storage is wired in when the Hub uses SQLite.
+
+### `POST /api/reminders`
+
+Create a reminder.
+
+```
+POST /api/reminders
+X-CTXone-Agent: claude-code
+
+{
+  "title": "Check feature flag rollout",
+  "instructions": "Query the metrics dashboard and report adoption %.",
+  "due_at": "2026-05-10T09:00:00Z",
+  "priority": "medium",
+  "autonomous": false
+}
+```
+
+→ 201 Created with the reminder JSON.
+
+### `GET /api/reminders`
+
+List reminders. Accepts query params: `status`, `priority_at_most`,
+`created_by`, `due_before`, `ref_id`, `tags`.
+
+### `GET /api/reminders/due`
+
+Return all actionable reminders (`due` or `awaiting_permission`),
+ordered by priority. Lazily promotes pending reminders whose `due_at`
+has passed.
+
+### `GET /api/reminders/{id}`
+
+Get a single reminder by id.
+
+### `POST /api/reminders/{id}/snooze`
+
+Defer to a later time. Body: `{ "until": "<ISO 8601>" }`.
+
+### `POST /api/reminders/{id}/approve`
+
+Approve a non-autonomous reminder. Body: `{ "approved_by"?: "..." }`.
+
+### `POST /api/reminders/{id}/cancel`
+
+Cancel permanently.
+
+### `POST /api/reminders/{id}/start`
+
+Mark in-progress. Body: `{ "agent_id"?: "..." }`.
+
+### `POST /api/reminders/{id}/record`
+
+Record execution outcome. Body: `{ "result": "success|failed|deferred|snoozed|cancelled", "notes"?: [...], "task_id"?: "...", "agent_id"?: "..." }`.
+
+---
+
 ## Authentication
 
 The HTTP API currently has **no authentication**. Run the Hub on a

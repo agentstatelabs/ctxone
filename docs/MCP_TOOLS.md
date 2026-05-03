@@ -1,13 +1,16 @@
 # MCP Tools Reference
 
-The CTXone Hub exposes **33 MCP tools** over the stdio transport, in
-five groups:
+The CTXone Hub exposes **42 MCP tools** over the stdio transport, in
+six groups:
 
 - **Memory** (7): `remember`, `recall`, `prime`, `context`,
   `summarize_session`, `what_changed_since`, `why_did_we`
 - **Plans** (11): `plan_new`, `plan_add`, `plan_start`,
   `plan_done`, `plan_abandon`, `plan_next`, `plan_list`,
   `plan_show`, `plan_tasks`, `plan_complete`, `plan_archive`
+- **Reminders** (9): `reminder_create`, `remind_me`, `reminder_list`,
+  `reminder_get`, `reminder_snooze`, `reminder_approve`, `reminder_cancel`,
+  `reminder_start`, `reminder_record`
 - **Governance** (8): `forget`, `branches`, `branch`, `merge`,
   `taint_list`, `taint_check`, `taint_apply`, `taint_remove`
 - **Read primitives** (6): `get`, `ls`,
@@ -566,6 +569,96 @@ Resolve (lift) an active taint, quarantine, or watch by id. The
 record isn't deleted — it's marked resolved with a reason for audit.
 
 **Parameters:** `taint_id`, `reason`.
+
+---
+
+## Reminders
+
+Pull-based scheduling primitives. Create a reminder now; call
+`remind_me` at any future checkpoint to retrieve what's due. Reminders
+are ordered by priority then `due_at`. The `autonomous` flag controls
+whether execution requires user approval first.
+
+### `reminder_create`
+
+Schedule a reminder for yourself or another agent.
+
+**Parameters:** `title`, `instructions`, `due_at` (ISO 8601),
+`priority?` (critical|high|medium|low|minimal, default medium),
+`autonomous?` (default true), `schedule?` (once|interval|daily|weekly),
+`commands?`, `refs?`, `tags?`.
+
+---
+
+### `remind_me`
+
+Return all currently actionable reminders (`due` or
+`awaiting_permission`), ordered by priority. Lazily promotes any
+`pending` reminders whose `due_at` has passed. **Call this at session
+start and after completing any task.**
+
+**Parameters:** none.
+
+---
+
+### `reminder_list`
+
+List reminders with optional filters.
+
+**Parameters:** `status?`, `priority_at_most?`, `created_by?`,
+`due_before?`, `ref_id?`, `tags?`.
+
+---
+
+### `reminder_get`
+
+Retrieve a single reminder by id, including its full execution history.
+
+**Parameters:** `id`.
+
+---
+
+### `reminder_snooze`
+
+Defer a reminder to a later time without cancelling it.
+
+**Parameters:** `id`, `until` (ISO 8601).
+
+---
+
+### `reminder_approve`
+
+Approve a non-autonomous reminder for execution. Transitions
+`awaiting_permission` → `due`.
+
+**Parameters:** `id`, `approved_by?`.
+
+---
+
+### `reminder_cancel`
+
+Cancel a reminder permanently. Use `reminder_snooze` to defer instead.
+
+**Parameters:** `id`.
+
+---
+
+### `reminder_start`
+
+Mark a reminder as in-progress. Opens a partial execution record.
+Call just before acting; follow with `reminder_record` when done.
+
+**Parameters:** `id`, `agent_id?`.
+
+---
+
+### `reminder_record`
+
+Record the outcome of an execution attempt.
+`result` is one of: `success` | `failed` | `deferred` | `snoozed` | `cancelled`.
+On `success` with a repeating schedule, resets to `pending` with a new `due_at`.
+
+**Parameters:** `id`, `result`, `notes?`, `task_id?`, `agent_id?`.
 
 ---
 

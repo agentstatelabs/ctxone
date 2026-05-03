@@ -6,7 +6,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.79.1"
+version = "0.80.0"
 edition = "2024"
 authors = ["Craig Brown"]
 license = "BSL-1.1"
@@ -20,6 +20,7 @@ agentstategraph-storage = { path = "engine/crates/agentstategraph-storage", feat
 agentstategraph-tasks = { path = "engine/crates/agentstategraph-tasks" }
 agentstategraph-migrate = { path = "engine/crates/agentstategraph-migrate" }
 agentstategraph-taint = { path = "engine/crates/agentstategraph-taint" }
+agentstategraph-reminders = { path = "engine/crates/agentstategraph-reminders" }
 
 # Engine's workspace deps (required because engine crates inherit from workspace)
 blake3 = "1"
