@@ -760,7 +760,7 @@ async fn blame_returns_commit_provenance_for_path() {
 // -------- Error paths --------
 
 #[tokio::test]
-async fn create_branch_from_missing_ref_returns_500() {
+async fn create_branch_from_missing_ref_returns_404() {
     let router = test_router();
     let (status, body) = call_raw(
         router,
@@ -772,8 +772,8 @@ async fn create_branch_from_missing_ref_returns_500() {
     .await;
     assert_eq!(
         status,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "branching from missing ref should fail"
+        StatusCode::NOT_FOUND,
+        "branching from missing ref should return 404"
     );
     // Error body should mention the missing ref so users can diagnose
     assert!(
@@ -784,7 +784,7 @@ async fn create_branch_from_missing_ref_returns_500() {
 }
 
 #[tokio::test]
-async fn remember_to_missing_branch_returns_500() {
+async fn remember_to_missing_branch_returns_404() {
     let router = test_router();
     let (status, _) = call_raw(
         router,
@@ -798,7 +798,7 @@ async fn remember_to_missing_branch_returns_500() {
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

@@ -1965,10 +1965,11 @@ async fn start_reminder_handler(
 async fn record_reminder_handler(
     State(s): State<HubState>,
     agent_id: AgentId,
-    Path(id): Path<String>,
+    Path(path_id): Path<String>,
     Json(mut req): Json<reminder_tools::ReminderRecordParams>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    // Inject server agent id as default if caller didn't supply one.
+    // Path parameter is authoritative; body id is optional/overridden.
+    req.id = path_id;
     if req.agent_id.is_none() {
         req.agent_id = Some(agent_id.0);
     }
