@@ -122,7 +122,7 @@ impl SessionMetrics {
         self.units = detect_units(&self.turn_details, gap_minutes);
     }
 
-    fn dominant_model(&self) -> &str {
+    pub fn dominant_model(&self) -> &str {
         self.models
             .iter()
             .max_by_key(|&(_, &v)| v)
@@ -130,18 +130,36 @@ impl SessionMetrics {
             .unwrap_or("unknown")
     }
 
+    /// Compute cost per-turn using each turn's own model pricing, then sum.
+    /// Falls back to dominant-model pricing when turn_details is empty (aggregates).
     fn compute_cost(&self, with_cache: bool) -> f64 {
-        let p = pricing_for(self.dominant_model());
-        let output_cost = self.output_tokens as f64 * p.output / 1_000_000.0;
-        if with_cache {
-            self.input_tokens as f64 * p.input / 1_000_000.0
-                + output_cost
-                + self.cache_read_tokens as f64 * p.cache_read / 1_000_000.0
-                + self.cache_creation_tokens as f64 * p.cache_write / 1_000_000.0
+        if !self.turn_details.is_empty() {
+            self.turn_details.iter().map(|t| {
+                let p = pricing_for(&t.model);
+                if with_cache {
+                    t.input_tokens as f64 * p.input / 1_000_000.0
+                        + t.output_tokens as f64 * p.output / 1_000_000.0
+                        + t.cache_read_tokens as f64 * p.cache_read / 1_000_000.0
+                        + t.cache_creation_tokens as f64 * p.cache_write / 1_000_000.0
+                } else {
+                    let total_in = t.input_tokens + t.cache_read_tokens + t.cache_creation_tokens;
+                    total_in as f64 * p.input / 1_000_000.0
+                        + t.output_tokens as f64 * p.output / 1_000_000.0
+                }
+            }).sum()
         } else {
-            let total_input =
-                self.input_tokens + self.cache_read_tokens + self.cache_creation_tokens;
-            total_input as f64 * p.input / 1_000_000.0 + output_cost
+            let p = pricing_for(self.dominant_model());
+            let output_cost = self.output_tokens as f64 * p.output / 1_000_000.0;
+            if with_cache {
+                self.input_tokens as f64 * p.input / 1_000_000.0
+                    + output_cost
+                    + self.cache_read_tokens as f64 * p.cache_read / 1_000_000.0
+                    + self.cache_creation_tokens as f64 * p.cache_write / 1_000_000.0
+            } else {
+                let total_input =
+                    self.input_tokens + self.cache_read_tokens + self.cache_creation_tokens;
+                total_input as f64 * p.input / 1_000_000.0 + output_cost
+            }
         }
     }
 
