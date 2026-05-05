@@ -1,4 +1,5 @@
 mod ingest;
+mod metrics;
 
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
@@ -336,6 +337,16 @@ enum Commands {
         no_full_turn: bool,
     },
 
+    /// Analyze token usage, cost, and cache metrics for Claude Code sessions.
+    ///
+    /// Parses JSONL transcripts from ~/.claude/projects/ and produces a
+    /// summary of token spend, cache hit rates, cost estimates (with vs.
+    /// without caching), and unit-of-work breakdown by time gap.
+    Session {
+        #[command(subcommand)]
+        action: SessionAction,
+    },
+
     /// Capture memories and token usage from the last agent turn.
     ///
     /// Called automatically by the Claude Code / Codex Stop hook.
@@ -564,6 +575,34 @@ enum Commands {
     Db {
         #[command(subcommand)]
         action: DbAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum SessionAction {
+    /// Show token usage metrics for Claude Code sessions in this project.
+    Metrics {
+        /// Project directory to analyze (default: current directory)
+        #[arg(long)]
+        project: Option<String>,
+        /// Show a specific session by its UUID
+        #[arg(long)]
+        session: Option<String>,
+        /// List sessions without full metrics detail
+        #[arg(long)]
+        list: bool,
+        /// Analyze all projects in ~/.claude/projects/
+        #[arg(long)]
+        all: bool,
+        /// Output as JSON (machine-readable)
+        #[arg(long)]
+        json: bool,
+        /// Time-gap in minutes to split units of work (default: 5)
+        #[arg(long, default_value_t = 5.0)]
+        gap: f64,
+        /// Show per-turn detail table
+        #[arg(long)]
+        verbose: bool,
     },
 }
 
@@ -1265,6 +1304,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Demo => {
             run_demo(&cli.server, client.clone()).await?;
+        }
+
+        Commands::Session { action } => {
+            run_session_action(action).await?;
         }
 
         Commands::IngestSession { file, since, last, tokens_only, dry_run, no_full_turn } => {
@@ -3055,6 +3098,181 @@ async fn run_ingest_session(
         total_tokens.cache_read,
         total_tokens.cache_creation,
     );
+    Ok(())
+}
+
+// ── ctx session metrics ───────────────────────────────────────────────────────
+
+async fn run_session_action(action: SessionAction) -> Result<(), Box<dyn std::error::Error>> {
+    match action {
+        SessionAction::Metrics { project, session, list, all, json, gap, verbose } => {
+            run_session_metrics(project, session, list, all, json, gap, verbose).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn run_session_metrics(
+    project: Option<String>,
+    session_filter: Option<String>,
+    list: bool,
+    all: bool,
+    json_out: bool,
+    gap: f64,
+    verbose: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::metrics::{
+        all_project_sessions, find_session_files, fmt_tokens, parse_session_metrics,
+        render_list_row, render_metrics, SessionMetrics,
+    };
+
+    if all {
+        let projects = all_project_sessions();
+        if projects.is_empty() {
+            println!("No Claude Code session files found in ~/.claude/projects/");
+            return Ok(());
+        }
+
+        let mut all_sessions: Vec<(String, Vec<SessionMetrics>)> = vec![];
+        for (label, files) in &projects {
+            let sessions: Vec<SessionMetrics> = files
+                .iter()
+                .map(|f| parse_session_metrics(f, gap))
+                .filter(|s| s.turns > 0)
+                .collect();
+            if !sessions.is_empty() {
+                all_sessions.push((label.clone(), sessions));
+            }
+        }
+
+        if json_out {
+            println!("{}", serde_json::to_string_pretty(&all_sessions)?);
+            return Ok(());
+        }
+
+        let mut grand_total = SessionMetrics::default();
+        for (label, sessions) in &all_sessions {
+            let bar = "─".repeat(62);
+            println!("\n{}", bar);
+            println!("  Project: {}", label);
+            println!("{}", bar);
+            if list {
+                for sm in sessions {
+                    render_list_row(sm);
+                }
+            }
+            let mut project_total = SessionMetrics::default();
+            for sm in sessions {
+                project_total.add(sm);
+            }
+            println!(
+                "  {} sessions  {} turns  {} in  {} out  {:.1}% cache  ${:.4}",
+                sessions.len(),
+                project_total.turns,
+                fmt_tokens(project_total.input_tokens),
+                fmt_tokens(project_total.output_tokens),
+                project_total.cache_hit_rate * 100.0,
+                project_total.cost_usd,
+            );
+            grand_total.add(&project_total);
+        }
+
+        println!("\n{}", "═".repeat(62));
+        println!(
+            "  TOTAL  {} projects  {} turns  {} in  {} out  {:.1}% cache  ${:.4}",
+            all_sessions.len(),
+            grand_total.turns,
+            fmt_tokens(grand_total.input_tokens),
+            fmt_tokens(grand_total.output_tokens),
+            grand_total.cache_hit_rate * 100.0,
+            grand_total.cost_usd,
+        );
+        println!("{}", "═".repeat(62));
+        return Ok(());
+    }
+
+    // Single project
+    let project_dir = project
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
+
+    let files = find_session_files(&project_dir);
+    if files.is_empty() {
+        println!("No session files found for: {}", project_dir.display());
+        println!("  (expected ~/.claude/projects/<hash>/*.jsonl)");
+        return Ok(());
+    }
+
+    // Apply session filter
+    let files: Vec<_> = if let Some(ref sid) = session_filter {
+        files
+            .into_iter()
+            .filter(|f| {
+                f.file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.starts_with(sid.as_str()))
+                    .unwrap_or(false)
+            })
+            .collect()
+    } else {
+        files
+    };
+
+    if files.is_empty() {
+        println!("No sessions match that filter.");
+        return Ok(());
+    }
+
+    let sessions: Vec<SessionMetrics> = files
+        .iter()
+        .map(|f| parse_session_metrics(f, gap))
+        .filter(|s| s.turns > 0)
+        .collect();
+
+    let label = project_dir.file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("project")
+        .to_string();
+
+    if list {
+        let bar = "─".repeat(62);
+        println!("\n{}", bar);
+        println!("  Sessions — {}", label);
+        println!("{}", bar);
+        println!(
+            "  {:8}  {:16}  {:9}  {:8}  {:7}  {:11}  {}",
+            "UUID", "Started", "Turns", "Input", "Output", "Cache hit%", "Cost"
+        );
+        for sm in &sessions {
+            render_list_row(sm);
+        }
+        let mut total = SessionMetrics::default();
+        for sm in &sessions { total.add(sm); }
+        println!("{}", bar);
+        println!(
+            "  Total: {} sessions, {} turns, ${:.4}",
+            sessions.len(), total.turns, total.cost_usd
+        );
+        return Ok(());
+    }
+
+    if json_out {
+        println!("{}", serde_json::to_string_pretty(&sessions)?);
+        return Ok(());
+    }
+
+    // Show per-session detail only when a filter is active; otherwise show aggregate.
+    if session_filter.is_some() {
+        for sm in &sessions {
+            render_metrics(sm, &sm.session_id, gap, verbose);
+        }
+    } else {
+        let mut total = SessionMetrics::default();
+        for sm in &sessions { total.add(sm); }
+        total.session_id = format!("{} sessions", sessions.len());
+        render_metrics(&total, &label, gap, verbose);
+    }
+
     Ok(())
 }
 
