@@ -2772,10 +2772,12 @@ impl ServerHandler for CtxOneServer {}
 mod tests {
     use super::*;
     use agentstategraph::Repository;
-    use agentstategraph_storage::MemoryStorage;
+    use agentstategraph_storage::SqliteStorage;
 
     fn fresh_repo() -> Arc<Repository> {
-        let repo = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
+        let repo = Arc::new(Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        )));
         repo.init().expect("repo init");
         repo
     }
@@ -3571,7 +3573,7 @@ mod tests {
         // Seed two facts under different prefixes; scope should only
         // return the in-scope one.
         let repo = Arc::new(Repository::new(Box::new(
-            agentstategraph_storage::MemoryStorage::new(),
+            agentstategraph_storage::SqliteStorage::in_memory().expect("in-memory sqlite"),
         )));
         repo.init().unwrap();
 
@@ -3667,7 +3669,7 @@ mod tests {
     #[test]
     fn run_recall_unscoped_sees_all_and_still_envelopes() {
         let repo = Arc::new(Repository::new(Box::new(
-            agentstategraph_storage::MemoryStorage::new(),
+            agentstategraph_storage::SqliteStorage::in_memory().expect("in-memory sqlite"),
         )));
         repo.init().unwrap();
         repo.set_json(

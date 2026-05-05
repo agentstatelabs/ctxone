@@ -22,7 +22,7 @@ use ctxone_hub::{backup, http, lockfile, memory_tools, migrations};
 use std::sync::Arc;
 
 use agentstategraph::Repository;
-use agentstategraph_storage::{MemoryStorage, SqliteStorage};
+use agentstategraph_storage::SqliteStorage;
 use rmcp::ServiceExt;
 use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
@@ -231,8 +231,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let repo: Arc<Repository> = match storage_type {
         "memory" => {
-            info!(storage = "memory", "Storage: in-memory (ephemeral)");
-            Arc::new(Repository::new(Box::new(MemoryStorage::new())))
+            info!(storage = "memory", "Storage: in-memory SQLite (ephemeral)");
+            Arc::new(Repository::new(Box::new(
+                SqliteStorage::in_memory().expect("in-memory sqlite"),
+            )))
         }
         "postgres" => {
             if database_url.is_empty() {

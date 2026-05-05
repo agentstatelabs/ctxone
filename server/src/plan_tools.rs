@@ -828,10 +828,12 @@ pub fn move_plan(
 mod tests {
     use super::*;
     use agentstategraph::Repository;
-    use agentstategraph_storage::MemoryStorage;
+    use agentstategraph_storage::SqliteStorage;
 
     fn fresh_repo() -> Arc<Repository> {
-        let repo = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
+        let repo = Arc::new(Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        )));
         repo.init().expect("repo init");
         repo
     }
