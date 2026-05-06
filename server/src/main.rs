@@ -75,6 +75,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(600);
+    // Optional ASD HTTP server base URL. When set, GET /api/code/* is
+    // proxied to <asd_url>/api/v1/* so the embedded Lens can talk to ASD
+    // without CORS issues. Example: --asd-url http://localhost:8787
+    let mut asd_url: Option<String> = std::env::var("CTXONE_ASD_URL").ok().filter(|s| !s.is_empty());
     // MCP-mode agent ID. The tool that spawns ctxone-hub (Claude
     // Code, Cursor, Codex, etc.) passes --agent-id <its-name> so
     // every commit made via this MCP connection is attributed to
@@ -140,6 +144,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     agent_id = args[i].clone();
                 }
             }
+            "--asd-url" => {
+                i += 1;
+                if i < args.len() {
+                    asd_url = Some(args[i].clone());
+                }
+            }
             "--version" | "-V" => {
                 // Diagnostic — must NOT touch storage. Print and exit
                 // before any other work. (The 2026-04-28 incident
@@ -184,6 +194,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 eprintln!(
                     "      --agent-id <NAME>    Agent ID recorded on commits (default: \"ctxone\")"
+                );
+                eprintln!(
+                    "      --asd-url <URL>      ASD server base URL; proxies /api/code/* → <url>/api/v1/*"
                 );
                 eprintln!("  -h, --help            Print help");
                 eprintln!("  -V, --version         Print version and exit");
@@ -427,7 +440,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             memory_tools::SessionRegistry::new()
         });
 
-        let hub_config = http::HubConfig { rate_limit_rpm };
+        let hub_config = http::HubConfig { rate_limit_rpm, asd_url: asd_url.clone() };
 
         // Capture db_path for background flush tasks.
         let flush_db_path = if storage_type == "sqlite" {

@@ -45,3 +45,4 @@ thiserror = { workspace = true }
 lru = "0.12"
 rusqlite = { workspace = true }
 rust-embed = { version = "8", features = ["mime-guess"] }
+reqwest = { workspace = true }

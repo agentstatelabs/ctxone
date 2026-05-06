@@ -3,6 +3,8 @@
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
 	import { getBranches, createBranch } from '$lib/api';
+	import { getAsdHealth } from '$lib/codeApi';
+	import type { AsdHealth } from '$lib/codeTypes';
 	import { branchStore } from '$lib/branchStore.svelte';
 	import { themeStore, THEMES, type ThemeId } from '$lib/themeStore.svelte';
 	import { refreshStore, REFRESH_INTERVAL_MS } from '$lib/refreshStore.svelte';
@@ -44,6 +46,16 @@
 				{ href: '/branches', label: 'Branches' },
 				{ href: '/taint', label: 'Taint' }
 			]
+		},
+		{
+			label: 'Code',
+			items: [
+				{ href: '/code', label: 'Overview' },
+				{ href: '/code/search', label: 'Search' },
+				{ href: '/code/symbols', label: 'Symbols' },
+				{ href: '/code/graph', label: 'Graph' },
+				{ href: '/code/files', label: 'Files' }
+			]
 		}
 	];
 
@@ -65,6 +77,8 @@
 		}
 	}
 
+	let asdHealth = $state<AsdHealth | null>(null);
+
 	let branches: string[] = $state(['main']);
 	let newBranchName = $state('');
 	let showCreate = $state(false);
@@ -85,6 +99,7 @@
 	onMount(() => {
 		themeStore.hydrate();
 		refreshBranches();
+		getAsdHealth().then((h) => (asdHealth = h));
 	});
 
 	async function handleCreateBranch() {
@@ -125,6 +140,13 @@
 				<kbd>⌘K</kbd>
 			</button>
 		</div>
+
+		{#if asdHealth}
+			<div class="asd-badge">
+				<span class="asd-dot"></span>
+				<span class="asd-label">ASD · {asdHealth.symbol_count.toLocaleString()} symbols</span>
+			</div>
+		{/if}
 
 		<div class="branch-switcher">
 			<label for="branch-select">Branch</label>
@@ -244,6 +266,34 @@
 		color: var(--text-3);
 		text-transform: uppercase;
 		letter-spacing: 0.1em;
+	}
+
+	.asd-badge {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		margin-top: 0.6rem;
+		padding: 0.3rem 0.6rem;
+		background: var(--accent-bg);
+		border: 1px solid var(--accent-bg-hi);
+		border-radius: 4px;
+		font-size: 0.72rem;
+		color: var(--accent);
+	}
+
+	.asd-dot {
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		background: var(--accent);
+		flex-shrink: 0;
+	}
+
+	.asd-label {
+		font-family: monospace;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 
 	.cmdk-hint {

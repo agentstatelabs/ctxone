@@ -42,6 +42,11 @@ use crate::reminder_tools;
 pub struct HubConfig {
     /// Requests-per-minute per peer IP. `0` disables rate limiting.
     pub rate_limit_rpm: u32,
+    /// Optional ASD HTTP server base URL (e.g. "http://localhost:8787").
+    /// When set, GET /api/code/* is proxied to <asd_url>/api/v1/*.
+    /// When None the route is not registered and the frontend uses
+    /// VITE_ASD_API_URL directly.
+    pub asd_url: Option<String>,
 }
 
 #[derive(Clone)]
@@ -52,6 +57,9 @@ pub struct HubState {
     /// Required by the admin backup endpoint so we can VACUUM INTO
     /// without having to re-open the same path independently.
     pub db_path: Option<String>,
+    /// Base URL of the ASD HTTP server. When Some, /api/code/* is
+    /// proxied to this URL. When None the proxy route is not mounted.
+    pub asd_url: Option<String>,
 }
 
 impl HubState {
@@ -190,7 +198,8 @@ fn router_with_config_inner(
     // Rate limiter — returns None when rpm=0 (disabled).
     let governor = rate_limit::build_layer(config.rate_limit_rpm);
 
-    let state = HubState { repo, sessions, db_path };
+    let asd_url = config.asd_url.clone();
+    let state = HubState { repo, sessions, db_path, asd_url };
 
     let mut router = Router::new()
         // Health + stats
@@ -263,7 +272,14 @@ fn router_with_config_inner(
         .route("/api/taint/check", get(check_taint_handler))
         .route("/api/taint/{id}", axum::routing::delete(remove_taint_handler))
         // Admin endpoints
-        .route("/api/admin/backup", post(admin_backup))
+        .route("/api/admin/backup", post(admin_backup));
+
+    // Conditionally mount ASD proxy before finalizing state.
+    if state.asd_url.is_some() {
+        router = router.route("/api/code/{*path}", get(proxy_asd).post(proxy_asd));
+    }
+
+    let mut router = router
         .layer(trace)
         .layer(cors)
         .with_state(state);
@@ -280,6 +296,51 @@ fn router_with_config_inner(
     }
 
     router
+}
+
+// -- ASD proxy --
+
+/// Forward GET/POST /api/code/{*path} → <asd_url>/api/v1/{path}.
+/// Only mounted when `HubConfig::asd_url` is Some.
+async fn proxy_asd(
+    State(s): State<HubState>,
+    Path(path): Path<String>,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+) -> axum::response::Response {
+    let base = match &s.asd_url {
+        Some(u) => u.trim_end_matches('/').to_string(),
+        None => {
+            return (StatusCode::SERVICE_UNAVAILABLE, "ASD proxy not configured")
+                .into_response()
+        }
+    };
+    let target = match query.filter(|q| !q.is_empty()) {
+        Some(q) => format!("{}/api/v1/{}?{}", base, path, q),
+        None => format!("{}/api/v1/{}", base, path),
+    };
+
+    let client = reqwest::Client::new();
+    let upstream = match client.get(&target).send().await {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
+    };
+
+    let status_u16: u16 = upstream.status().as_u16();
+    let status = axum::http::StatusCode::from_u16(status_u16).unwrap_or(StatusCode::BAD_GATEWAY);
+    let ct: String = upstream
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+
+    match upstream.bytes().await {
+        Ok(body) => {
+            let bytes: Vec<u8> = body.into_iter().collect();
+            (status, [(axum::http::header::CONTENT_TYPE, ct)], bytes).into_response()
+        }
+        Err(e) => (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
+    }
 }
 
 // -- Helpers --
