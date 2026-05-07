@@ -1,7 +1,7 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
 	import { getSymbols } from '$lib/codeApi';
 	import type { SymbolSummary } from '$lib/codeTypes';
+	import { selectedRepo } from '$lib/repoStore';
 
 	const KINDS = ['', 'function', 'method', 'class', 'module', 'variable'];
 	const PAGE_SIZE = 50;
@@ -15,14 +15,13 @@
 	let filterLang = $state('');
 	let page = $state(0);
 
-	onMount(async () => {
-		try {
-			all = await getSymbols();
-		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
-		} finally {
-			loading = false;
-		}
+	$effect(() => {
+		const repo = $selectedRepo;
+		loading = true;
+		error = null;
+		getSymbols(repo)
+			.then((s) => { all = s; loading = false; })
+			.catch((e) => { error = e instanceof Error ? e.message : String(e); loading = false; });
 	});
 
 	let filtered = $derived(

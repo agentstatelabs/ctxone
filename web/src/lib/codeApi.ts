@@ -1,12 +1,19 @@
 /**
  * CTXone Code Lens — HTTP client for the ASD REST API.
  *
- * Dev: default to ASD server on 8787. Embedded (ctxone-hub --asd-url):
- * proxy lives at /api/code/*. Explicit VITE_ASD_API_URL overrides both.
+ * Multi-repo model:
+ *   - Dev direct:  VITE_ASD_API_URL=http://localhost:8787 → all calls go to
+ *                  <VITE_ASD_API_URL>/api/v1/*
+ *   - CTX-hub:     /api/code/{repo}/* is proxied to the named ASD instance.
+ *                  Repo list comes from GET /api/code.
+ *
+ * The `repo` parameter in each function selects which hub-registered ASD
+ * instance to target. Pass the empty string when using VITE_ASD_API_URL.
  */
 
 import type {
 	AsdHealth,
+	AsdRepoInfo,
 	CallGraphResponse,
 	FileEntry,
 	SearchResult,
@@ -14,53 +21,69 @@ import type {
 	SymbolSummary
 } from './codeTypes';
 
-const ASD_BASE: string =
-	(import.meta.env.VITE_ASD_API_URL as string | undefined) ??
-	(import.meta.env.DEV ? 'http://localhost:8787' : '/api/code');
+/** When VITE_ASD_API_URL is set we talk directly to one ASD process (dev mode). */
+const DIRECT_ASD: string | undefined = import.meta.env.VITE_ASD_API_URL as string | undefined;
 
-async function getJson<T>(path: string): Promise<T> {
-	const res = await fetch(`${ASD_BASE}${path}`);
-	if (!res.ok) {
-		throw new Error(`ASD API ${res.status} — ${path}`);
-	}
+/** Resolve the API base for a given repo name. */
+function base(repo: string): string {
+	if (DIRECT_ASD) return `${DIRECT_ASD.replace(/\/$/, '')}/api/v1`;
+	return `/api/code/${encodeURIComponent(repo)}`;
+}
+
+async function getJson<T>(repo: string, path: string): Promise<T> {
+	const url = `${base(repo)}${path}`;
+	const res = await fetch(url);
+	if (!res.ok) throw new Error(`ASD API ${res.status} — ${url}`);
 	return res.json() as Promise<T>;
 }
 
-async function getText(path: string): Promise<string> {
-	const res = await fetch(`${ASD_BASE}${path}`);
-	if (!res.ok) {
-		throw new Error(`ASD API ${res.status} — ${path}`);
-	}
+async function getText(repo: string, path: string): Promise<string> {
+	const url = `${base(repo)}${path}`;
+	const res = await fetch(url);
+	if (!res.ok) throw new Error(`ASD API ${res.status} — ${url}`);
 	return res.text();
 }
 
-export async function getAsdHealth(): Promise<AsdHealth | null> {
+/** List all ASD repos registered with CTX-hub. Returns [] when using VITE_ASD_API_URL. */
+export async function listAsdRepos(): Promise<AsdRepoInfo[]> {
+	if (DIRECT_ASD) return [];
 	try {
-		return await getJson<AsdHealth>('/api/v1/health');
+		const res = await fetch('/api/code');
+		if (!res.ok) return [];
+		return res.json() as Promise<AsdRepoInfo[]>;
+	} catch {
+		return [];
+	}
+}
+
+export async function getAsdHealth(repo: string): Promise<AsdHealth | null> {
+	try {
+		return await getJson<AsdHealth>(repo, '/health');
 	} catch {
 		return null;
 	}
 }
 
-export function getSymbols(): Promise<SymbolSummary[]> {
-	return getJson<SymbolSummary[]>('/api/v1/symbols');
+export function getSymbols(repo: string): Promise<SymbolSummary[]> {
+	return getJson<SymbolSummary[]>(repo, '/symbols');
 }
 
-export function getSymbolDetail(qname: string): Promise<SymbolDetail> {
-	return getJson<SymbolDetail>(`/api/v1/symbols/${encodeURIComponent(qname)}`);
+export function getSymbolDetail(repo: string, qname: string): Promise<SymbolDetail> {
+	return getJson<SymbolDetail>(repo, `/symbols/${encodeURIComponent(qname)}`);
 }
 
-export function getCallers(qname: string): Promise<SymbolSummary[]> {
-	return getJson<SymbolSummary[]>(`/api/v1/symbols/${encodeURIComponent(qname)}/callers`);
+export function getCallers(repo: string, qname: string): Promise<SymbolSummary[]> {
+	return getJson<SymbolSummary[]>(repo, `/symbols/${encodeURIComponent(qname)}/callers`);
 }
 
-export function getCallees(qname: string): Promise<SymbolSummary[]> {
-	return getJson<SymbolSummary[]>(`/api/v1/symbols/${encodeURIComponent(qname)}/callees`);
+export function getCallees(repo: string, qname: string): Promise<SymbolSummary[]> {
+	return getJson<SymbolSummary[]>(repo, `/symbols/${encodeURIComponent(qname)}/callees`);
 }
 
-export function getCallGraph(qname: string, hops = 1): Promise<CallGraphResponse> {
+export function getCallGraph(repo: string, qname: string, hops = 1): Promise<CallGraphResponse> {
 	return getJson<CallGraphResponse>(
-		`/api/v1/symbols/${encodeURIComponent(qname)}/callgraph?hops=${hops}`
+		repo,
+		`/symbols/${encodeURIComponent(qname)}/callgraph?hops=${hops}`
 	);
 }
 
@@ -71,22 +94,22 @@ export interface SearchParams {
 	limit?: number;
 }
 
-export function searchSymbols(params: SearchParams): Promise<SearchResult[]> {
+export function searchSymbols(repo: string, params: SearchParams): Promise<SearchResult[]> {
 	const p = new URLSearchParams({ q: params.q });
 	if (params.kind) p.set('kind', params.kind);
 	if (params.language) p.set('language', params.language);
 	if (params.limit) p.set('limit', String(params.limit));
-	return getJson<SearchResult[]>(`/api/v1/search?${p}`);
+	return getJson<SearchResult[]>(repo, `/search?${p}`);
 }
 
-export function listFiles(): Promise<FileEntry[]> {
-	return getJson<FileEntry[]>('/api/v1/files');
+export function listFiles(repo: string): Promise<FileEntry[]> {
+	return getJson<FileEntry[]>(repo, '/files');
 }
 
-export function readFile(path: string): Promise<string> {
-	return getText(`/api/v1/files/${path}`);
+export function readFile(repo: string, path: string): Promise<string> {
+	return getText(repo, `/files/${path}`);
 }
 
-export function getSymbolsByFile(file: string): Promise<SymbolSummary[]> {
-	return getSymbols().then((all) => all.filter((s) => s.file === file));
+export function getSymbolsByFile(repo: string, file: string): Promise<SymbolSummary[]> {
+	return getSymbols(repo).then((all) => all.filter((s) => s.file === file));
 }

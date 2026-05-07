@@ -42,11 +42,10 @@ use crate::reminder_tools;
 pub struct HubConfig {
     /// Requests-per-minute per peer IP. `0` disables rate limiting.
     pub rate_limit_rpm: u32,
-    /// Optional ASD HTTP server base URL (e.g. "http://localhost:8787").
-    /// When set, GET /api/code/* is proxied to <asd_url>/api/v1/*.
-    /// When None the route is not registered and the frontend uses
-    /// VITE_ASD_API_URL directly.
-    pub asd_url: Option<String>,
+    /// Named ASD repos: (name, base_url) pairs.
+    /// Each entry exposes GET /api/code/{name}/* proxied to <base_url>/api/v1/*.
+    /// Parsed from repeated --asd-url name=http://... flags or CTXONE_ASD_REPOS.
+    pub asd_repos: Vec<(String, String)>,
 }
 
 #[derive(Clone)]
@@ -54,12 +53,9 @@ pub struct HubState {
     pub repo: Arc<Repository>,
     pub sessions: Arc<SessionRegistry>,
     /// Path to the live sqlite db file, or None for memory/postgres.
-    /// Required by the admin backup endpoint so we can VACUUM INTO
-    /// without having to re-open the same path independently.
     pub db_path: Option<String>,
-    /// Base URL of the ASD HTTP server. When Some, /api/code/* is
-    /// proxied to this URL. When None the proxy route is not mounted.
-    pub asd_url: Option<String>,
+    /// Named ASD repos shared across handlers.
+    pub asd_repos: Arc<Vec<(String, String)>>,
 }
 
 impl HubState {
@@ -198,8 +194,8 @@ fn router_with_config_inner(
     // Rate limiter — returns None when rpm=0 (disabled).
     let governor = rate_limit::build_layer(config.rate_limit_rpm);
 
-    let asd_url = config.asd_url.clone();
-    let state = HubState { repo, sessions, db_path, asd_url };
+    let asd_repos = Arc::new(config.asd_repos.clone());
+    let state = HubState { repo, sessions, db_path, asd_repos };
 
     let mut router = Router::new()
         // Health + stats
@@ -274,9 +270,11 @@ fn router_with_config_inner(
         // Admin endpoints
         .route("/api/admin/backup", post(admin_backup));
 
-    // Conditionally mount ASD proxy before finalizing state.
-    if state.asd_url.is_some() {
-        router = router.route("/api/code/{*path}", get(proxy_asd).post(proxy_asd));
+    // Mount ASD repo registry + per-repo proxy routes when any repos are configured.
+    if !state.asd_repos.is_empty() {
+        router = router
+            .route("/api/code", get(list_asd_repos))
+            .route("/api/code/{repo}/{*path}", get(proxy_asd).post(proxy_asd));
     }
 
     let mut router = router
@@ -300,17 +298,33 @@ fn router_with_config_inner(
 
 // -- ASD proxy --
 
-/// Forward GET/POST /api/code/{*path} → <asd_url>/api/v1/{path}.
-/// Only mounted when `HubConfig::asd_url` is Some.
+#[derive(Serialize)]
+struct AsdRepoInfo {
+    name: String,
+    url: String,
+}
+
+/// GET /api/code — list all configured ASD repos.
+async fn list_asd_repos(State(s): State<HubState>) -> Json<Vec<AsdRepoInfo>> {
+    Json(
+        s.asd_repos
+            .iter()
+            .map(|(name, url)| AsdRepoInfo { name: name.clone(), url: url.clone() })
+            .collect(),
+    )
+}
+
+/// Forward GET/POST /api/code/{repo}/{*path} → <asd_url>/api/v1/{path}.
+/// Routes to the ASD instance registered under {repo} name.
 async fn proxy_asd(
     State(s): State<HubState>,
-    Path(path): Path<String>,
+    Path((repo, path)): Path<(String, String)>,
     axum::extract::RawQuery(query): axum::extract::RawQuery,
 ) -> axum::response::Response {
-    let base = match &s.asd_url {
-        Some(u) => u.trim_end_matches('/').to_string(),
+    let base = match s.asd_repos.iter().find(|(n, _)| n == &repo) {
+        Some((_, url)) => url.trim_end_matches('/').to_string(),
         None => {
-            return (StatusCode::SERVICE_UNAVAILABLE, "ASD proxy not configured")
+            return (StatusCode::NOT_FOUND, format!("unknown ASD repo: {}", repo))
                 .into_response()
         }
     };

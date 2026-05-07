@@ -131,6 +131,13 @@ export interface CallGraphResponse {
 
 export interface AsdHealth {
 	status: string;
+	name: string;
 	db_path: string;
 	symbol_count: number;
+}
+
+/** One entry from GET /api/code — the CTX-hub repo registry. */
+export interface AsdRepoInfo {
+	name: string;
+	url: string;
 }

@@ -2,6 +2,7 @@
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
 	import { getCallGraph, searchSymbols } from '$lib/codeApi';
+	import { selectedRepo } from '$lib/repoStore';
 	import type { CallGraphResponse, CallGraphNode, SearchResult } from '$lib/codeTypes';
 	import CallGraph from '$lib/CallGraph.svelte';
 
@@ -28,7 +29,7 @@
 		error = null;
 		selected = null;
 		try {
-			graph = await getCallGraph(qname.trim(), hops);
+			graph = await getCallGraph($selectedRepo, qname.trim(), hops);
 			// Sync URL
 			const params = new URLSearchParams({ q: qname.trim() });
 			history.replaceState(null, '', `?${params}`);
@@ -51,7 +52,7 @@
 		suggestDebounce = setTimeout(async () => {
 			if (query.trim().length < 2) { suggestions = []; return; }
 			try {
-				suggestions = await searchSymbols({ q: query, limit: 8 });
+				suggestions = await searchSymbols($selectedRepo, { q: query, limit: 8 });
 			} catch {
 				suggestions = [];
 			}

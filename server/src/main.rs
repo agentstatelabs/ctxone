@@ -75,10 +75,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(600);
-    // Optional ASD HTTP server base URL. When set, GET /api/code/* is
-    // proxied to <asd_url>/api/v1/* so the embedded Lens can talk to ASD
-    // without CORS issues. Example: --asd-url http://localhost:8787
-    let mut asd_url: Option<String> = std::env::var("CTXONE_ASD_URL").ok().filter(|s| !s.is_empty());
+    // Named ASD repos: Vec of (name, base_url).
+    // Populated from repeated --asd-url name=http://... flags.
+    // Also accepts bare URLs (name defaults to "asd") for backwards compat.
+    // Example: --asd-url asd=http://localhost:8787 --asd-url ctxone=http://localhost:8788
+    let mut asd_repos: Vec<(String, String)> = Vec::new();
     // MCP-mode agent ID. The tool that spawns ctxone-hub (Claude
     // Code, Cursor, Codex, etc.) passes --agent-id <its-name> so
     // every commit made via this MCP connection is attributed to
@@ -147,7 +148,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--asd-url" => {
                 i += 1;
                 if i < args.len() {
-                    asd_url = Some(args[i].clone());
+                    let val = args[i].clone();
+                    // Accept both "name=http://..." and bare "http://..."
+                    if let Some((name, url)) = val.split_once('=') {
+                        asd_repos.push((name.to_string(), url.to_string()));
+                    } else {
+                        asd_repos.push(("asd".to_string(), val));
+                    }
                 }
             }
             "--version" | "-V" => {
@@ -196,7 +203,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "      --agent-id <NAME>    Agent ID recorded on commits (default: \"ctxone\")"
                 );
                 eprintln!(
-                    "      --asd-url <URL>      ASD server base URL; proxies /api/code/* → <url>/api/v1/*"
+                    "      --asd-url <name=URL>  Register an ASD repo; repeatable."
+                );
+                eprintln!(
+                    "                            Proxies /api/code/<name>/* → <URL>/api/v1/*"
+                );
+                eprintln!(
+                    "                            Bare URL (no name=) defaults to name \"asd\""
                 );
                 eprintln!("  -h, --help            Print help");
                 eprintln!("  -V, --version         Print version and exit");
@@ -440,7 +453,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             memory_tools::SessionRegistry::new()
         });
 
-        let hub_config = http::HubConfig { rate_limit_rpm, asd_url: asd_url.clone() };
+        let hub_config = http::HubConfig { rate_limit_rpm, asd_repos: asd_repos.clone() };
 
         // Capture db_path for background flush tasks.
         let flush_db_path = if storage_type == "sqlite" {

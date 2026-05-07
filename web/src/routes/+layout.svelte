@@ -3,8 +3,9 @@
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
 	import { getBranches, createBranch } from '$lib/api';
-	import { getAsdHealth } from '$lib/codeApi';
-	import type { AsdHealth } from '$lib/codeTypes';
+	import { getAsdHealth, listAsdRepos } from '$lib/codeApi';
+	import type { AsdHealth, AsdRepoInfo } from '$lib/codeTypes';
+	import { selectedRepo } from '$lib/repoStore';
 	import { branchStore } from '$lib/branchStore.svelte';
 	import { themeStore, THEMES, type ThemeId } from '$lib/themeStore.svelte';
 	import { refreshStore, REFRESH_INTERVAL_MS } from '$lib/refreshStore.svelte';
@@ -77,6 +78,7 @@
 		}
 	}
 
+	let asdRepos = $state<AsdRepoInfo[]>([]);
 	let asdHealth = $state<AsdHealth | null>(null);
 
 	let branches: string[] = $state(['main']);
@@ -96,10 +98,30 @@
 		}
 	}
 
+	async function loadAsdRepos() {
+		const repos = await listAsdRepos();
+		asdRepos = repos;
+		// Auto-select: restore from localStorage, else pick first repo.
+		const saved = localStorage.getItem('ctxone_asd_repo');
+		const initial = repos.find((r) => r.name === saved) ?? repos[0];
+		if (initial) $selectedRepo = initial.name;
+		// Load health for the selected repo.
+		if ($selectedRepo) getAsdHealth($selectedRepo).then((h) => (asdHealth = h));
+	}
+
 	onMount(() => {
 		themeStore.hydrate();
 		refreshBranches();
-		getAsdHealth().then((h) => (asdHealth = h));
+		loadAsdRepos();
+	});
+
+	// Persist selection and reload health whenever the repo changes.
+	$effect(() => {
+		const repo = $selectedRepo;
+		if (!repo) return;
+		localStorage.setItem('ctxone_asd_repo', repo);
+		asdHealth = null;
+		getAsdHealth(repo).then((h) => (asdHealth = h));
 	});
 
 	async function handleCreateBranch() {
@@ -141,10 +163,24 @@
 			</button>
 		</div>
 
-		{#if asdHealth}
-			<div class="asd-badge">
-				<span class="asd-dot"></span>
-				<span class="asd-label">ASD · {asdHealth.symbol_count.toLocaleString()} symbols</span>
+		{#if asdRepos.length > 0}
+			<div class="repo-selector">
+				<label for="repo-select" class="repo-label">Repo</label>
+				<select
+					id="repo-select"
+					value={$selectedRepo}
+					onchange={(e) => ($selectedRepo = (e.currentTarget as HTMLSelectElement).value)}
+				>
+					{#each asdRepos as r}
+						<option value={r.name}>{r.name}</option>
+					{/each}
+				</select>
+				{#if asdHealth}
+					<span class="repo-health">
+						<span class="asd-dot"></span>
+						{asdHealth.symbol_count.toLocaleString()} symbols
+					</span>
+				{/if}
 			</div>
 		{/if}
 
@@ -268,17 +304,38 @@
 		letter-spacing: 0.1em;
 	}
 
-	.asd-badge {
+	.repo-selector {
+		margin-top: 0.75rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+	}
+
+	.repo-label {
+		font-size: 0.7rem;
+		text-transform: uppercase;
+		letter-spacing: 0.07em;
+		color: var(--text-3);
+	}
+
+	.repo-selector select {
+		width: 100%;
+		background: var(--bg-0);
+		border: 1px solid var(--border);
+		border-radius: 4px;
+		color: var(--text-1);
+		padding: 0.3rem 0.5rem;
+		font-size: 0.82rem;
+		font-family: monospace;
+	}
+
+	.repo-health {
 		display: flex;
 		align-items: center;
-		gap: 0.4rem;
-		margin-top: 0.6rem;
-		padding: 0.3rem 0.6rem;
-		background: var(--accent-bg);
-		border: 1px solid var(--accent-bg-hi);
-		border-radius: 4px;
-		font-size: 0.72rem;
+		gap: 0.35rem;
+		font-size: 0.7rem;
 		color: var(--accent);
+		padding: 0 0.1rem;
 	}
 
 	.asd-dot {
@@ -287,13 +344,6 @@
 		border-radius: 50%;
 		background: var(--accent);
 		flex-shrink: 0;
-	}
-
-	.asd-label {
-		font-family: monospace;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
 	}
 
 	.cmdk-hint {

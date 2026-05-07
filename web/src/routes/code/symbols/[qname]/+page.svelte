@@ -2,6 +2,7 @@
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
 	import { getSymbolDetail, getCallers, getCallees, getCallGraph } from '$lib/codeApi';
+	import { selectedRepo } from '$lib/repoStore';
 	import type { SymbolDetail, SymbolSummary, CallGraphResponse, CallGraphNode } from '$lib/codeTypes';
 	import CallGraph from '$lib/CallGraph.svelte';
 
@@ -25,10 +26,10 @@
 		graph = null;
 
 		Promise.all([
-			getSymbolDetail(q),
-			getCallers(q),
-			getCallees(q),
-			getCallGraph(q, 1)
+			getSymbolDetail($selectedRepo, q),
+			getCallers($selectedRepo, q),
+			getCallees($selectedRepo, q),
+			getCallGraph($selectedRepo, q, 1)
 		])
 			.then(([d, c, ce, g]) => {
 				detail = d;

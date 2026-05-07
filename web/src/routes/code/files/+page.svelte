@@ -1,21 +1,20 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
 	import { listFiles } from '$lib/codeApi';
 	import type { FileEntry } from '$lib/codeTypes';
+	import { selectedRepo } from '$lib/repoStore';
 
 	let files = $state<FileEntry[]>([]);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 	let filter = $state('');
 
-	onMount(async () => {
-		try {
-			files = await listFiles();
-		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
-		} finally {
-			loading = false;
-		}
+	$effect(() => {
+		const repo = $selectedRepo;
+		loading = true;
+		error = null;
+		listFiles(repo)
+			.then((f) => { files = f; loading = false; })
+			.catch((e) => { error = e instanceof Error ? e.message : String(e); loading = false; });
 	});
 
 	// Build a tree from flat file paths.

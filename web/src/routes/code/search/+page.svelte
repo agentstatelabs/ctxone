@@ -2,6 +2,7 @@
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
 	import { searchSymbols } from '$lib/codeApi';
+	import { selectedRepo } from '$lib/repoStore';
 	import type { SearchResult } from '$lib/codeTypes';
 
 	const KINDS = ['', 'function', 'method', 'class', 'module', 'variable'];
@@ -29,7 +30,7 @@
 		error = null;
 		searched = true;
 		try {
-			results = await searchSymbols({
+			results = await searchSymbols($selectedRepo, {
 				q: query,
 				kind: kind || undefined,
 				language: lang || undefined,

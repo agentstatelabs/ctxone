@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/stores';
 	import { readFile, getSymbolsByFile } from '$lib/codeApi';
+	import { selectedRepo } from '$lib/repoStore';
 	import type { SymbolSummary } from '$lib/codeTypes';
 	import { goto } from '$app/navigation';
 
@@ -18,7 +19,7 @@
 		source = null;
 		symbols = [];
 
-		Promise.all([readFile(p), getSymbolsByFile(p)])
+		Promise.all([readFile($selectedRepo, p), getSymbolsByFile($selectedRepo, p)])
 			.then(([src, syms]) => {
 				source = src;
 				symbols = syms.sort((a, b) => a.start.line - b.start.line);

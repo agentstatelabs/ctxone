@@ -1,7 +1,7 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
 	import { getAsdHealth, getSymbols, listFiles } from '$lib/codeApi';
 	import type { AsdHealth, FileEntry, SymbolSummary } from '$lib/codeTypes';
+	import { selectedRepo } from '$lib/repoStore';
 
 	let health = $state<AsdHealth | null>(null);
 	let symbols = $state<SymbolSummary[]>([]);
@@ -9,18 +9,21 @@
 	let error = $state<string | null>(null);
 	let loading = $state(true);
 
-	onMount(async () => {
-		try {
-			[health, symbols, files] = await Promise.all([
-				getAsdHealth(),
-				getSymbols(),
-				listFiles()
-			]);
-		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
-		} finally {
-			loading = false;
-		}
+	$effect(() => {
+		const repo = $selectedRepo;
+		loading = true;
+		error = null;
+		Promise.all([getAsdHealth(repo), getSymbols(repo), listFiles(repo)])
+			.then(([h, s, f]) => {
+				health = h;
+				symbols = s;
+				files = f;
+				loading = false;
+			})
+			.catch((e) => {
+				error = e instanceof Error ? e.message : String(e);
+				loading = false;
+			});
 	});
 
 	type KindCounts = Record<string, number>;
