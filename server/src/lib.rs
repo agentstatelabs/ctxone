@@ -5,6 +5,7 @@
 //! without a separate process.
 
 pub mod backup;
+pub mod code_tools;
 pub mod http;
 pub mod lens;
 pub mod lockfile;

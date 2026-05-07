@@ -580,7 +580,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .enable_all()
             .build()?
             .block_on(async {
-                let service = memory_tools::CtxOneServer::with_agent_id(repo, agent_id.clone())
+                let service = memory_tools::CtxOneServer::with_agent_id_and_repos(
+                    repo,
+                    agent_id.clone(),
+                    asd_repos.clone(),
+                )
                     .serve(rmcp::transport::stdio())
                     .await
                     .map_err(|e| {

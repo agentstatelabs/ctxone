@@ -1225,6 +1225,50 @@ fn default_check_confidence() -> f64 {
     1.0
 }
 
+// -- Code intelligence param types --
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CodeReposParams {}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CodeSearchParams {
+    /// Natural-language query scored across symbol name, signature, doc,
+    /// file path, and ledger summaries.
+    pub query: String,
+    /// ASD repo name to search. Omit when only one repo is registered.
+    pub repo: Option<String>,
+    /// Filter by symbol kind: function, method, class, module, variable.
+    pub kind: Option<String>,
+    /// Filter by language (e.g. "rust", "python").
+    pub language: Option<String>,
+    /// Max results (default: 20).
+    pub limit: Option<u32>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CodeReadParams {
+    /// Fully-qualified symbol name (qname), e.g. "my_crate::http::health".
+    pub qname: String,
+    /// ASD repo name. Omit when only one repo is registered.
+    pub repo: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CallersOfParams {
+    /// Fully-qualified symbol name.
+    pub qname: String,
+    /// ASD repo name. Omit when only one repo is registered.
+    pub repo: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CalleesOfParams {
+    /// Fully-qualified symbol name.
+    pub qname: String,
+    /// ASD repo name. Omit when only one repo is registered.
+    pub repo: Option<String>,
+}
+
 // -- MCP-parity param types (forget, branches, taints) --
 
 #[derive(Deserialize, JsonSchema)]
@@ -1478,6 +1522,9 @@ pub struct CtxOneServer {
     /// server. Set via `ctxone-hub --agent-id <name>` when the tool
     /// embedding the MCP server spawns it. Defaults to "ctxone".
     pub agent_id: String,
+    /// Registered ASD repos: (name, base_url). Code tools route by name.
+    /// Empty when --asd-url was not supplied — code tools return an error.
+    pub asd_repos: Arc<Vec<(String, String)>>,
     #[allow(dead_code)] // used by rmcp tool_router macro
     tool_router: ToolRouter<Self>,
 }
@@ -1492,12 +1539,21 @@ impl CtxOneServer {
     /// agent ID. This is the MCP-side equivalent of the HTTP
     /// `X-CtxOne-Agent` header.
     pub fn with_agent_id(repo: Arc<Repository>, agent_id: String) -> Self {
+        Self::with_agent_id_and_repos(repo, agent_id, Vec::new())
+    }
+
+    /// Full constructor — agent ID + ASD repo registry.
+    pub fn with_agent_id_and_repos(
+        repo: Arc<Repository>,
+        agent_id: String,
+        asd_repos: Vec<(String, String)>,
+    ) -> Self {
         let session = Arc::new(SessionStats::new());
-        // session starts dirty; first read will populate it.
         Self {
             repo,
             session,
             agent_id,
+            asd_repos: Arc::new(asd_repos),
             tool_router: Self::tool_router(),
         }
     }
@@ -2759,6 +2815,81 @@ impl CtxOneServer {
             Ok(r) => serde_json::to_string(&rt::reminder_to_json(&r))
                 .unwrap_or_else(|_| "{}".into()),
             Err(e) => rt::err_json(e),
+        }
+    }
+
+    // ---- Code intelligence tools (proxy to ASD) ----
+
+    #[tool(description = "List all ASD code repos registered with this hub. \
+        Returns [{name, url}]. Pass the name as the `repo` param to other code tools. \
+        When only one repo is registered, all code tools default to it automatically.")]
+    async fn code_repos(&self, _params: Parameters<CodeReposParams>) -> String {
+        crate::code_tools::list_repos_json(&self.asd_repos)
+    }
+
+    #[tool(description = "Search code symbols by concept or keyword across name, signature, \
+        doc comment, file path, and ledger summaries. Returns ranked results. \
+        Use this for feature archaeology when you don't yet know exact symbol names. \
+        `repo` is optional when only one repo is registered.")]
+    async fn code_search(&self, params: Parameters<CodeSearchParams>) -> String {
+        let p = params.0;
+        let base = match crate::code_tools::resolve_base(&self.asd_repos, p.repo.as_deref()) {
+            Ok(b) => b.to_string(),
+            Err(e) => return serde_json::json!({ "error": e }).to_string(),
+        };
+        let mut path = format!("search?q={}", urlencoding::encode(&p.query));
+        if let Some(k) = &p.kind { path.push_str(&format!("&kind={}", urlencoding::encode(k))); }
+        if let Some(l) = &p.language { path.push_str(&format!("&language={}", urlencoding::encode(l))); }
+        if let Some(n) = p.limit { path.push_str(&format!("&limit={}", n)); }
+        match crate::code_tools::asd_get(&base, &path).await {
+            Ok(body) => body,
+            Err(e) => serde_json::json!({ "error": e }).to_string(),
+        }
+    }
+
+    #[tool(description = "Read a symbol by qualified name. Returns { symbol, effects, ledger } — \
+        the full context needed to reason about a code unit: its signature, doc, declared effects, \
+        and all ledger decisions. `repo` is optional when only one repo is registered.")]
+    async fn code_read(&self, params: Parameters<CodeReadParams>) -> String {
+        let p = params.0;
+        let base = match crate::code_tools::resolve_base(&self.asd_repos, p.repo.as_deref()) {
+            Ok(b) => b.to_string(),
+            Err(e) => return serde_json::json!({ "error": e }).to_string(),
+        };
+        let path = format!("symbols/{}", urlencoding::encode(&p.qname));
+        match crate::code_tools::asd_get(&base, &path).await {
+            Ok(body) => body,
+            Err(e) => serde_json::json!({ "error": e }).to_string(),
+        }
+    }
+
+    #[tool(description = "List symbols that call the given symbol (inbound call edges). \
+        `repo` is optional when only one repo is registered.")]
+    async fn callers_of(&self, params: Parameters<CallersOfParams>) -> String {
+        let p = params.0;
+        let base = match crate::code_tools::resolve_base(&self.asd_repos, p.repo.as_deref()) {
+            Ok(b) => b.to_string(),
+            Err(e) => return serde_json::json!({ "error": e }).to_string(),
+        };
+        let path = format!("symbols/{}/callers", urlencoding::encode(&p.qname));
+        match crate::code_tools::asd_get(&base, &path).await {
+            Ok(body) => body,
+            Err(e) => serde_json::json!({ "error": e }).to_string(),
+        }
+    }
+
+    #[tool(description = "List symbols called by the given symbol (outbound call edges). \
+        `repo` is optional when only one repo is registered.")]
+    async fn callees_of(&self, params: Parameters<CalleesOfParams>) -> String {
+        let p = params.0;
+        let base = match crate::code_tools::resolve_base(&self.asd_repos, p.repo.as_deref()) {
+            Ok(b) => b.to_string(),
+            Err(e) => return serde_json::json!({ "error": e }).to_string(),
+        };
+        let path = format!("symbols/{}/callees", urlencoding::encode(&p.qname));
+        match crate::code_tools::asd_get(&base, &path).await {
+            Ok(body) => body,
+            Err(e) => serde_json::json!({ "error": e }).to_string(),
         }
     }
 }
