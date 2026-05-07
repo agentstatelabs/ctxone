@@ -542,23 +542,40 @@ pub fn render_metrics(sm: &SessionMetrics, label: &str, gap: f64, verbose: bool)
 
     println!();
     println!("  Token Usage");
-    println!("    Input          {:>10}", fmt_tokens(sm.input_tokens));
+    println!("    Input (fresh)  {:>10}", fmt_tokens(sm.input_tokens));
     println!("    Output         {:>10}", fmt_tokens(sm.output_tokens));
+    let total_in = sm.input_tokens + sm.cache_read_tokens + sm.cache_creation_tokens;
+    let effective = total_in + sm.output_tokens;
     println!(
-        "    Cache read     {:>10}  ({:.1}% hit rate)",
+        "    Cache read     {:>10}  ({:.1}% hit rate, billed at ~10% input rate)",
         fmt_tokens(sm.cache_read_tokens),
         sm.cache_hit_rate * 100.0
     );
-    println!("    Cache write    {:>10}", fmt_tokens(sm.cache_creation_tokens));
-    let total_in = sm.input_tokens + sm.cache_read_tokens + sm.cache_creation_tokens;
-    println!("    Total input    {:>10}", fmt_tokens(total_in));
+    println!(
+        "    Cache write    {:>10}  (billed at ~125% input rate)",
+        fmt_tokens(sm.cache_creation_tokens)
+    );
+    println!("    Total input    {:>10}  (fresh + cache read + cache write)", fmt_tokens(total_in));
+    println!("    Effective      {:>10}  (total input + output processed)", fmt_tokens(effective));
+
+    // Effective rate = actual cost per million effective tokens (reveals true discount)
+    let eff_rate = if effective > 0 {
+        sm.cost_usd / effective as f64 * 1_000_000.0
+    } else {
+        0.0
+    };
+    let list_rate = if effective > 0 {
+        sm.cost_no_cache_usd / effective as f64 * 1_000_000.0
+    } else {
+        0.0
+    };
 
     println!();
-    println!("  Cost");
-    println!("    With cache     {:>10}", format!("${:.4}", sm.cost_usd));
-    println!("    Without cache  {:>10}", format!("${:.4}", sm.cost_no_cache_usd));
+    println!("  Cost  (per-turn model pricing)");
+    println!("    With cache     {:>10}  (${:.2}/M effective)", format!("${:.4}", sm.cost_usd), eff_rate);
+    println!("    Without cache  {:>10}  (${:.2}/M effective)", format!("${:.4}", sm.cost_no_cache_usd), list_rate);
     println!(
-        "    Savings        {:>10}  ({:.1}%)",
+        "    Savings        {:>10}  ({:.1}% reduction from cache discount)",
         format!("${:.4}", sm.cache_savings_usd),
         if sm.cost_no_cache_usd > 0.0 {
             sm.cache_savings_usd / sm.cost_no_cache_usd * 100.0
@@ -566,6 +583,9 @@ pub fn render_metrics(sm: &SessionMetrics, label: &str, gap: f64, verbose: bool)
             0.0
         }
     );
+    if sm.turns > 0 {
+        println!("    Avg / turn     {:>10}", format!("${:.5}", sm.cost_usd / sm.turns as f64));
+    }
 
     if !sm.units.is_empty() {
         println!();
@@ -613,8 +633,13 @@ pub fn render_metrics(sm: &SessionMetrics, label: &str, gap: f64, verbose: bool)
 /// Render a compact list row for `--list` mode.
 pub fn render_list_row(sm: &SessionMetrics) {
     let ts = fmt_ts_short(&sm.first_ts);
+    let savings_pct = if sm.cost_no_cache_usd > 0.0 {
+        sm.cache_savings_usd / sm.cost_no_cache_usd * 100.0
+    } else {
+        0.0
+    };
     println!(
-        "  {}  {:16}  {:>3} turns  {:>8} in  {:>7} out  {:>5.1}% cache  ${:.4}",
+        "  {}  {:16}  {:>3} turns  {:>8} in  {:>7} out  {:>5.1}% cache  ${:.4}  (saved {:.0}%)",
         &sm.session_id[..8.min(sm.session_id.len())],
         ts,
         sm.turns,
@@ -622,5 +647,12 @@ pub fn render_list_row(sm: &SessionMetrics) {
         fmt_tokens(sm.output_tokens),
         sm.cache_hit_rate * 100.0,
         sm.cost_usd,
+        savings_pct,
     );
+}
+
+/// Format a savings summary: "$X.XX (saved Y.Y%)" for compact views.
+pub fn fmt_cost_with_savings(cost: f64, savings: f64, no_cache: f64) -> String {
+    let pct = if no_cache > 0.0 { savings / no_cache * 100.0 } else { 0.0 };
+    format!("${:.2}  (saved {:.0}% vs no-cache)", cost, pct)
 }

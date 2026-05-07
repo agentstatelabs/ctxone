@@ -3165,29 +3165,40 @@ async fn run_session_metrics(
             for sm in sessions {
                 project_total.add(sm);
             }
+            let savings_pct = if project_total.cost_no_cache_usd > 0.0 {
+                project_total.cache_savings_usd / project_total.cost_no_cache_usd * 100.0
+            } else { 0.0 };
             println!(
-                "  {} sessions  {} turns  {} in  {} out  {:.1}% cache  ${:.4}",
+                "  {} sessions  {} turns  {:.1}% cache  ${:.2} actual  (saved {:.0}% vs no-cache ${:.2})",
                 sessions.len(),
                 project_total.turns,
-                fmt_tokens(project_total.input_tokens),
-                fmt_tokens(project_total.output_tokens),
                 project_total.cache_hit_rate * 100.0,
                 project_total.cost_usd,
+                savings_pct,
+                project_total.cost_no_cache_usd,
             );
             grand_total.add(&project_total);
         }
 
-        println!("\n{}", "═".repeat(62));
+        let grand_savings_pct = if grand_total.cost_no_cache_usd > 0.0 {
+            grand_total.cache_savings_usd / grand_total.cost_no_cache_usd * 100.0
+        } else { 0.0 };
+        println!("\n{}", "═".repeat(70));
         println!(
-            "  TOTAL  {} projects  {} turns  {} in  {} out  {:.1}% cache  ${:.4}",
-            all_sessions.len(),
-            grand_total.turns,
-            fmt_tokens(grand_total.input_tokens),
-            fmt_tokens(grand_total.output_tokens),
-            grand_total.cache_hit_rate * 100.0,
+            "  TOTAL  {} projects  {} turns  {:.1}% cache",
+            all_sessions.len(), grand_total.turns, grand_total.cache_hit_rate * 100.0,
+        );
+        println!(
+            "         Actual cost:   ${:.2}  (per-turn pricing with cache discount applied)",
             grand_total.cost_usd,
         );
-        println!("{}", "═".repeat(62));
+        println!(
+            "         Without cache: ${:.2}  (saved ${:.2}  = {:.1}% reduction)",
+            grand_total.cost_no_cache_usd,
+            grand_total.cache_savings_usd,
+            grand_savings_pct,
+        );
+        println!("{}", "═".repeat(70));
         return Ok(());
     }
 
