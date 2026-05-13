@@ -1,7 +1,7 @@
 # MCP Tools Reference
 
-The CTXone Hub exposes **42 MCP tools** over the stdio transport, in
-six groups:
+The CTXone Hub exposes **47 MCP tools** over the stdio transport, in
+seven groups:
 
 - **Memory** (7): `remember`, `recall`, `prime`, `context`,
   `summarize_session`, `what_changed_since`, `why_did_we`
@@ -15,6 +15,8 @@ six groups:
   `taint_list`, `taint_check`, `taint_apply`, `taint_remove`
 - **Read primitives** (6): `get`, `ls`,
   `search`, `log`, `blame`, `diff`
+- **Code intelligence** (5): `code_repos`, `code_search`, `code_read`,
+  `callers_of`, `callees_of`  _(requires `--asd-repo` or `--asd-url` at hub startup)_
 - **Accounting** (1): `record_llm_usage`
 
 Any MCP-compatible agent (Claude Code, Cursor, VS Code Copilot with
@@ -718,9 +720,204 @@ Compute the structural diff between two refs (branches or commits).
 
 ---
 
+---
+
+## Code intelligence tools
+
+Code intelligence tools proxy read requests to an
+[AgentStateDeveloper (ASD)](https://github.com/agentstatelabs/AgentStateDeveloper)
+server. They require the hub to be started with at least one ASD repo
+configured — either via `--asd-repo` (hub manages `asd-serve` processes) or
+`--asd-url` (you run `asd-serve` yourself).
+
+### Wiring ASD into the hub
+
+**Option A — hub-managed process pool (recommended):**
+
+```bash
+ctxone-hub --http \
+  --asd-repo myproject=/home/user/myproject/.asd-state.db \
+  --asd-repo otherlib=/home/user/otherlib/.asd-state.db
+```
+
+The hub spawns one `asd-serve` process per repo on first use, kills it after
+5 minutes of idle, and restarts it transparently on the next request.
+
+**Option B — pre-running `asd-serve` (manual):**
+
+```bash
+asd-serve --db /home/user/myproject/.asd-state.db &
+# Prints: listening on 127.0.0.1:4120
+
+ctxone-hub --http --asd-url myproject=http://127.0.0.1:4120
+```
+
+Multiple `--asd-repo` / `--asd-url` flags can be mixed. The repo `name` you
+supply becomes the value for the `repo` parameter in every code tool call.
+
+---
+
+### `code_repos`
+
+List all ASD repos registered with this hub.
+
+**Parameters:** _(none)_
+
+**Returns:** JSON array `[{ name, url }]`.
+
+```json
+// response
+[
+  { "name": "myproject", "url": "http://127.0.0.1:54321" },
+  { "name": "otherlib",  "url": "pool:otherlib" }
+]
+```
+
+`url` is the resolved endpoint for pre-running repos; pool-managed repos show
+`pool:<name>` until the process is first requested.
+
+---
+
+### `code_search`
+
+Search code symbols by concept or keyword across name, signature, doc
+comment, file path, and ledger summaries. Returns ranked results.
+
+Use this for feature archaeology when you don't know the exact symbol name.
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `query` | string | — | Search terms (concept, function name, effect label, …) |
+| `repo` | string | first registered | Repo name from `code_repos`. Omit when only one repo is registered. |
+| `kind` | string | — | Filter to `function`, `method`, `class`, `module`, `variable` |
+| `language` | string | — | Filter to `python` or `typescript` |
+| `limit` | number | 20 | Max results |
+
+**Returns:** JSON array of matching symbol records with relevance scores.
+
+```json
+// request
+{ "query": "charge card payment", "repo": "myproject", "limit": 5 }
+
+// response
+[
+  {
+    "qname": "payments.charge_card",
+    "kind": "function",
+    "file": "payments.py",
+    "signature": "def charge_card(user_id: str, amount: float)",
+    "score": 0.92
+  }
+]
+```
+
+---
+
+### `code_read`
+
+Read a symbol by qualified name. Returns the symbol, its declared and
+transitive effects, and all ledger decisions — the full context needed to
+reason about a code unit.
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `qname` | string | — | Fully-qualified symbol name (e.g. `payments.charge_card`) |
+| `repo` | string | first registered | Repo name |
+
+**Returns:** `{ symbol, effects, ledger }`.
+
+```json
+// request
+{ "qname": "payments.charge_card", "repo": "myproject" }
+
+// response
+{
+  "symbol": {
+    "qname": "payments.charge_card",
+    "kind": "function",
+    "file": "payments.py",
+    "signature": "def charge_card(user_id: str, amount: float)"
+  },
+  "effects": {
+    "declared": [
+      { "effect": "io.db.write", "note": "INSERT INTO charges" },
+      { "effect": "log" },
+      { "effect": "throw" }
+    ],
+    "transitive": [],
+    "verification": { "status": "unverified" }
+  },
+  "ledger": [
+    {
+      "kind": "hazard",
+      "summary": "boundary at 10000 is undocumented",
+      "tags": ["approved", "approved-by:alice@example.com"]
+    }
+  ]
+}
+```
+
+---
+
+### `callers_of`
+
+List symbols that call the given symbol (inbound call edges).
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `qname` | string | — | Target symbol |
+| `repo` | string | first registered | Repo name |
+
+**Returns:** JSON array of calling symbol records.
+
+```json
+// request
+{ "qname": "payments.charge_card", "repo": "myproject" }
+
+// response
+[
+  { "qname": "driver.main", "kind": "function", "file": "_driver.py" }
+]
+```
+
+---
+
+### `callees_of`
+
+List symbols called by the given symbol (outbound call edges).
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `qname` | string | — | Target symbol |
+| `repo` | string | first registered | Repo name |
+
+**Returns:** JSON array of callee symbol records.
+
+```json
+// request
+{ "qname": "driver.main", "repo": "myproject" }
+
+// response
+[
+  { "qname": "payments.charge_card", "kind": "function", "file": "payments.py" },
+  { "qname": "payments.get_balance", "kind": "function", "file": "payments.py" }
+]
+```
+
+---
+
 ## See also
 
 - [HTTP_API.md](HTTP_API.md) — same logic exposed over REST
 - [INTEGRATIONS.md](INTEGRATIONS.md) — how to wire these tools into specific AI clients
+- [ASD_INTEGRATION.md](ASD_INTEGRATION.md) — full guide to the ASD code intelligence integration
 - [ARCHITECTURE.md](ARCHITECTURE.md) — the underlying graph model
 - [AGENTS.md](AGENTS.md) — guidance on when to reach for plans vs. inline work

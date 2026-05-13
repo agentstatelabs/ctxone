@@ -4,6 +4,7 @@
 //! runner so integration tests and downstream embedders can reuse them
 //! without a separate process.
 
+pub mod asd_pool;
 pub mod backup;
 pub mod code_tools;
 pub mod http;

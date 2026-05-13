@@ -21,6 +21,8 @@ use serde::{Deserialize, Serialize};
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::IntentCategory;
 
+use crate::asd_pool::AsdProcessPool;
+
 /// The session ID used when a request doesn't set `X-CtxOne-Session`.
 pub const DEFAULT_SESSION_ID: &str = "default";
 
@@ -1522,9 +1524,12 @@ pub struct CtxOneServer {
     /// server. Set via `ctxone-hub --agent-id <name>` when the tool
     /// embedding the MCP server spawns it. Defaults to "ctxone".
     pub agent_id: String,
-    /// Registered ASD repos: (name, base_url). Code tools route by name.
-    /// Empty when --asd-url was not supplied — code tools return an error.
+    /// Registered ASD repos with pre-known base URLs: (name, base_url).
+    /// Populated from --asd-url flags. Code tools route by name.
     pub asd_repos: Arc<Vec<(String, String)>>,
+    /// Process pool for dynamically spawned `asd-serve` instances.
+    /// Used when --asd-repo flags are given; provides lazy-spawn + idle eviction.
+    pub asd_pool: Option<Arc<AsdProcessPool>>,
     #[allow(dead_code)] // used by rmcp tool_router macro
     tool_router: ToolRouter<Self>,
 }
@@ -1554,8 +1559,16 @@ impl CtxOneServer {
             session,
             agent_id,
             asd_repos: Arc::new(asd_repos),
+            asd_pool: None,
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// Attach a process pool.  Called after `with_agent_id_and_repos`
+    /// when `--asd-repo` flags were supplied.
+    pub fn with_pool(mut self, pool: Arc<AsdProcessPool>) -> Self {
+        self.asd_pool = Some(pool);
+        self
     }
 
     #[tool(
@@ -2833,8 +2846,8 @@ impl CtxOneServer {
         `repo` is optional when only one repo is registered.")]
     async fn code_search(&self, params: Parameters<CodeSearchParams>) -> String {
         let p = params.0;
-        let base = match crate::code_tools::resolve_base(&self.asd_repos, p.repo.as_deref()) {
-            Ok(b) => b.to_string(),
+        let base = match self.code_base(p.repo.as_deref()).await {
+            Ok(b) => b,
             Err(e) => return serde_json::json!({ "error": e }).to_string(),
         };
         let mut path = format!("search?q={}", urlencoding::encode(&p.query));
@@ -2852,8 +2865,8 @@ impl CtxOneServer {
         and all ledger decisions. `repo` is optional when only one repo is registered.")]
     async fn code_read(&self, params: Parameters<CodeReadParams>) -> String {
         let p = params.0;
-        let base = match crate::code_tools::resolve_base(&self.asd_repos, p.repo.as_deref()) {
-            Ok(b) => b.to_string(),
+        let base = match self.code_base(p.repo.as_deref()).await {
+            Ok(b) => b,
             Err(e) => return serde_json::json!({ "error": e }).to_string(),
         };
         let path = format!("symbols/{}", urlencoding::encode(&p.qname));
@@ -2867,8 +2880,8 @@ impl CtxOneServer {
         `repo` is optional when only one repo is registered.")]
     async fn callers_of(&self, params: Parameters<CallersOfParams>) -> String {
         let p = params.0;
-        let base = match crate::code_tools::resolve_base(&self.asd_repos, p.repo.as_deref()) {
-            Ok(b) => b.to_string(),
+        let base = match self.code_base(p.repo.as_deref()).await {
+            Ok(b) => b,
             Err(e) => return serde_json::json!({ "error": e }).to_string(),
         };
         let path = format!("symbols/{}/callers", urlencoding::encode(&p.qname));
@@ -2882,8 +2895,8 @@ impl CtxOneServer {
         `repo` is optional when only one repo is registered.")]
     async fn callees_of(&self, params: Parameters<CalleesOfParams>) -> String {
         let p = params.0;
-        let base = match crate::code_tools::resolve_base(&self.asd_repos, p.repo.as_deref()) {
-            Ok(b) => b.to_string(),
+        let base = match self.code_base(p.repo.as_deref()).await {
+            Ok(b) => b,
             Err(e) => return serde_json::json!({ "error": e }).to_string(),
         };
         let path = format!("symbols/{}/callees", urlencoding::encode(&p.qname));
@@ -2891,6 +2904,39 @@ impl CtxOneServer {
             Ok(body) => body,
             Err(e) => serde_json::json!({ "error": e }).to_string(),
         }
+    }
+}
+
+impl CtxOneServer {
+    /// Resolve a repo name to a base URL, trying static URLs first then the
+    /// process pool.  Returns an owned `String` so callers can `.await` it.
+    async fn code_base(&self, repo: Option<&str>) -> Result<String, String> {
+        // Static URL wins — no process management needed
+        if let Ok(base) = crate::code_tools::resolve_base(&self.asd_repos, repo) {
+            return Ok(base.to_string());
+        }
+        // Fall back to pool
+        if let Some(pool) = &self.asd_pool {
+            // Resolve the repo name: explicit > first pool repo (if only one)
+            let names = pool.repo_names().await;
+            let name = match repo {
+                Some(n) if !n.is_empty() => n.to_string(),
+                _ if names.len() == 1 => names[0].clone(),
+                _ => {
+                    return Err(if names.is_empty() {
+                        "No ASD repos in pool. Pass --asd-repo name=/path or --asd-url name=URL.".to_string()
+                    } else {
+                        format!(
+                            "Multiple pool repos; specify `repo`. Known: {}",
+                            names.join(", ")
+                        )
+                    });
+                }
+            };
+            return pool.base_url(&name).await;
+        }
+        // Neither static nor pool
+        Err("No ASD repos registered. Pass --asd-url name=http://... or --asd-repo name=/path/db.".to_string())
     }
 }
 

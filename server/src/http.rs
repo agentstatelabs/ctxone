@@ -23,6 +23,7 @@ use tracing::{debug, info, instrument, warn};
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::IntentCategory;
 
+use crate::asd_pool::AsdProcessPool;
 use crate::memory_tools::{
     DEFAULT_AGENT_ID, DEFAULT_SESSION_ID, SessionRegistry, SessionSnapshot, SessionStats,
     ensure_flat_size, run_prime, run_recall,
@@ -42,10 +43,16 @@ use crate::reminder_tools;
 pub struct HubConfig {
     /// Requests-per-minute per peer IP. `0` disables rate limiting.
     pub rate_limit_rpm: u32,
-    /// Named ASD repos: (name, base_url) pairs.
+    /// Named ASD repos with pre-known base URLs: (name, base_url) pairs.
     /// Each entry exposes GET /api/code/{name}/* proxied to <base_url>/api/v1/*.
-    /// Parsed from repeated --asd-url name=http://... flags or CTXONE_ASD_REPOS.
+    /// Parsed from repeated --asd-url name=http://... flags.
     pub asd_repos: Vec<(String, String)>,
+    /// Named ASD repos managed by the process pool: (name, db_path) pairs.
+    /// The hub spawns `asd-serve` on demand for each repo and kills it after
+    /// idle timeout.  Parsed from repeated --asd-repo name=/path/db flags.
+    pub asd_pool_repos: Vec<(String, String)>,
+    /// Override path to the `asd-serve` binary. `None` → use PATH.
+    pub asd_serve_binary: Option<String>,
 }
 
 #[derive(Clone)]
@@ -54,8 +61,10 @@ pub struct HubState {
     pub sessions: Arc<SessionRegistry>,
     /// Path to the live sqlite db file, or None for memory/postgres.
     pub db_path: Option<String>,
-    /// Named ASD repos shared across handlers.
+    /// Named ASD repos with pre-known base URLs (static, no pool).
     pub asd_repos: Arc<Vec<(String, String)>>,
+    /// Process pool for dynamically spawned `asd-serve` instances.
+    pub asd_pool: Option<Arc<AsdProcessPool>>,
 }
 
 impl HubState {
@@ -195,7 +204,18 @@ fn router_with_config_inner(
     let governor = rate_limit::build_layer(config.rate_limit_rpm);
 
     let asd_repos = Arc::new(config.asd_repos.clone());
-    let state = HubState { repo, sessions, db_path, asd_repos };
+
+    // Build a process pool if any pool repos were configured.
+    let asd_pool = if config.asd_pool_repos.is_empty() {
+        None
+    } else {
+        Some(Arc::new(AsdProcessPool::new(
+            config.asd_pool_repos.clone(),
+            config.asd_serve_binary.clone(),
+        )))
+    };
+
+    let state = HubState { repo, sessions, db_path, asd_repos, asd_pool };
 
     let mut router = Router::new()
         // Health + stats
@@ -270,8 +290,9 @@ fn router_with_config_inner(
         // Admin endpoints
         .route("/api/admin/backup", post(admin_backup));
 
-    // Mount ASD repo registry + per-repo proxy routes when any repos are configured.
-    if !state.asd_repos.is_empty() {
+    // Mount ASD repo registry + per-repo proxy routes when any repos are configured
+    // (either static URLs or pool-managed repos).
+    if !state.asd_repos.is_empty() || state.asd_pool.is_some() {
         router = router
             .route("/api/code", get(list_asd_repos))
             .route("/api/code/{repo}/{*path}", get(proxy_asd).post(proxy_asd));
@@ -304,30 +325,57 @@ struct AsdRepoInfo {
     url: String,
 }
 
-/// GET /api/code — list all configured ASD repos.
+/// GET /api/code — list all configured ASD repos (static + pool-managed).
 async fn list_asd_repos(State(s): State<HubState>) -> Json<Vec<AsdRepoInfo>> {
-    Json(
-        s.asd_repos
-            .iter()
-            .map(|(name, url)| AsdRepoInfo { name: name.clone(), url: url.clone() })
-            .collect(),
-    )
+    let mut out: Vec<AsdRepoInfo> = s
+        .asd_repos
+        .iter()
+        .map(|(name, url)| AsdRepoInfo { name: name.clone(), url: url.clone() })
+        .collect();
+    // Append pool repos (without resolving their port — they may not be running yet).
+    if let Some(pool) = &s.asd_pool {
+        // list repos that aren't already covered by a static URL
+        let static_names: std::collections::HashSet<&str> =
+            s.asd_repos.iter().map(|(n, _)| n.as_str()).collect();
+        let pool_names = {
+            // We need an async block but handlers can't be async closures easily —
+            // just spawn a short block.
+            pool.repo_names().await
+        };
+        for name in pool_names {
+            if !static_names.contains(name.as_str()) {
+                out.push(AsdRepoInfo { name: name.clone(), url: format!("pool:{name}") });
+            }
+        }
+    }
+    Json(out)
+}
+
+/// Resolve the base URL for a repo, trying static URLs first then the pool.
+async fn resolve_asd_base(s: &HubState, repo: &str) -> Result<String, String> {
+    // Static URL wins (user-configured, no process management needed)
+    if let Some((_, url)) = s.asd_repos.iter().find(|(n, _)| n == repo) {
+        return Ok(url.trim_end_matches('/').to_string());
+    }
+    // Fall back to process pool
+    if let Some(pool) = &s.asd_pool {
+        return pool.base_url(repo).await;
+    }
+    Err(format!("unknown ASD repo: {repo}"))
 }
 
 /// Forward GET/POST /api/code/{repo}/{*path} → <asd_url>/api/v1/{path}.
-/// Routes to the ASD instance registered under {repo} name.
+/// Routes to the ASD instance registered under {repo} name (static or pool).
 async fn proxy_asd(
     State(s): State<HubState>,
     Path((repo, path)): Path<(String, String)>,
     axum::extract::RawQuery(query): axum::extract::RawQuery,
 ) -> axum::response::Response {
-    let base = match s.asd_repos.iter().find(|(n, _)| n == &repo) {
-        Some((_, url)) => url.trim_end_matches('/').to_string(),
-        None => {
-            return (StatusCode::NOT_FOUND, format!("unknown ASD repo: {}", repo))
-                .into_response()
-        }
+    let base = match resolve_asd_base(&s, &repo).await {
+        Ok(b) => b,
+        Err(msg) => return (StatusCode::NOT_FOUND, msg).into_response(),
     };
+
     let target = match query.filter(|q| !q.is_empty()) {
         Some(q) => format!("{}/api/v1/{}?{}", base, path, q),
         None => format!("{}/api/v1/{}", base, path),

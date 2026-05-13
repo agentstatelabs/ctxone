@@ -80,6 +80,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Also accepts bare URLs (name defaults to "asd") for backwards compat.
     // Example: --asd-url asd=http://localhost:8787 --asd-url ctxone=http://localhost:8788
     let mut asd_repos: Vec<(String, String)> = Vec::new();
+    // Pool-managed ASD repos: Vec of (name, db_path).
+    // Hub spawns asd-serve on demand, kills after idle timeout.
+    // Example: --asd-repo myproject=/path/to/myproject/.asd-state.db
+    let mut asd_pool_repos: Vec<(String, String)> = Vec::new();
     // MCP-mode agent ID. The tool that spawns ctxone-hub (Claude
     // Code, Cursor, Codex, etc.) passes --agent-id <its-name> so
     // every commit made via this MCP connection is attributed to
@@ -157,6 +161,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
+            "--asd-repo" => {
+                i += 1;
+                if i < args.len() {
+                    let val = args[i].clone();
+                    // Required format: "name=/path/to/.asd-state.db"
+                    if let Some((name, path)) = val.split_once('=') {
+                        asd_pool_repos.push((name.to_string(), path.to_string()));
+                    } else {
+                        eprintln!("ctxone-hub: --asd-repo requires name=path format, got: {val}");
+                        std::process::exit(64);
+                    }
+                }
+            }
             "--version" | "-V" => {
                 // Diagnostic — must NOT touch storage. Print and exit
                 // before any other work. (The 2026-04-28 incident
@@ -203,13 +220,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "      --agent-id <NAME>    Agent ID recorded on commits (default: \"ctxone\")"
                 );
                 eprintln!(
-                    "      --asd-url <name=URL>  Register an ASD repo; repeatable."
+                    "      --asd-url <name=URL>  Register an ASD repo with a pre-running server; repeatable."
                 );
                 eprintln!(
                     "                            Proxies /api/code/<name>/* → <URL>/api/v1/*"
                 );
                 eprintln!(
                     "                            Bare URL (no name=) defaults to name \"asd\""
+                );
+                eprintln!(
+                    "      --asd-repo <name=PATH> Register an ASD repo db for the process pool; repeatable."
+                );
+                eprintln!(
+                    "                            Hub spawns asd-serve on demand, kills after 5 min idle."
+                );
+                eprintln!(
+                    "                            Example: --asd-repo myproject=/path/.asd-state.db"
                 );
                 eprintln!("  -h, --help            Print help");
                 eprintln!("  -V, --version         Print version and exit");
@@ -453,7 +479,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             memory_tools::SessionRegistry::new()
         });
 
-        let hub_config = http::HubConfig { rate_limit_rpm, asd_repos: asd_repos.clone() };
+        let hub_config = http::HubConfig {
+            rate_limit_rpm,
+            asd_repos: asd_repos.clone(),
+            asd_pool_repos: asd_pool_repos.clone(),
+            asd_serve_binary: None, // use PATH
+        };
 
         // Capture db_path for background flush tasks.
         let flush_db_path = if storage_type == "sqlite" {
@@ -580,12 +611,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .enable_all()
             .build()?
             .block_on(async {
-                let service = memory_tools::CtxOneServer::with_agent_id_and_repos(
+                let mut ctx_server = memory_tools::CtxOneServer::with_agent_id_and_repos(
                     repo,
                     agent_id.clone(),
                     asd_repos.clone(),
-                )
-                    .serve(rmcp::transport::stdio())
+                );
+                // Attach pool if any --asd-repo flags were given
+                if !asd_pool_repos.is_empty() {
+                    let pool = std::sync::Arc::new(
+                        ctxone_hub::asd_pool::AsdProcessPool::new(
+                            asd_pool_repos.clone(),
+                            None,
+                        )
+                    );
+                    ctx_server = ctx_server.with_pool(pool);
+                }
+                let service = ctx_server.serve(rmcp::transport::stdio())
                     .await
                     .map_err(|e| {
                         error!(error = %e, "MCP server failed to start");

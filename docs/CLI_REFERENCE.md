@@ -369,11 +369,35 @@ Start the Hub. Delegates to the `ctxone-hub` binary.
 USAGE: ctx serve [OPTIONS]
 
 OPTIONS:
-  -p, --port <PORT>        Port  [default: 3001]
-      --storage <TYPE>     sqlite | postgres | memory  [default: sqlite]
-      --path <PATH>        Database path  [default: ~/.ctxone/memory.db]
-      --http               Also start HTTP API (otherwise stdio MCP only)
+  -p, --port <PORT>             Port  [default: 3001]
+      --storage <TYPE>          sqlite | postgres | memory  [default: sqlite]
+      --path <PATH>             Database path  [default: ~/.ctxone/memory.db]
+      --http                    Also start HTTP API (otherwise stdio MCP only)
+      --asd-repo <NAME=PATH>    Register an ASD repo for the code-intelligence
+                                process pool. Repeatable. The hub spawns
+                                asd-serve on demand and kills it after 5 min
+                                idle. Example:
+                                  --asd-repo myproject=/home/user/myproject/.asd-state.db
+      --asd-url <NAME=URL>      Register a pre-running asd-serve endpoint.
+                                Repeatable. Proxies /api/code/<name>/* to
+                                <URL>/api/v1/*. Example:
+                                  --asd-url myproject=http://127.0.0.1:4120
 ```
+
+**ASD code intelligence example:**
+
+```bash
+# Hub manages asd-serve processes — recommended for most setups
+ctxone-hub --http \
+  --asd-repo myproject=/home/user/myproject/.asd-state.db \
+  --asd-repo otherlib=/home/user/otherlib/.asd-state.db
+
+# Pre-running asd-serve (useful when you want full control over the process)
+asd-serve --db /home/user/myproject/.asd-state.db &
+ctxone-hub --http --asd-url myproject=http://127.0.0.1:4120
+```
+
+See [ASD_INTEGRATION.md](ASD_INTEGRATION.md) for the full setup guide.
 
 ### `ctx init [options]`
 
