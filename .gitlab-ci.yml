@@ -1,0 +1,42 @@
+# CI for CTXone (Rust Cargo workspace; depends on ASG via GitLab git dep)
+stages:
+  - check
+  - test
+
+default:
+  image: rust:1-bookworm
+  cache:
+    key:
+      files:
+        - Cargo.lock
+    paths:
+      - .cargo/
+      - target/
+  before_script:
+    - export CARGO_HOME="$CI_PROJECT_DIR/.cargo"
+    # Fetch the private ASG git dependency using the CI job token
+    - export CARGO_NET_GIT_FETCH_WITH_CLI=true
+    - git config --global url."https://gitlab-ci-token:${CI_JOB_TOKEN}@git.internal.example/".insteadOf "https://git.internal.example/"
+    - rustc --version && cargo --version
+
+fmt:
+  stage: check
+  script:
+    - cargo fmt --all -- --check
+  allow_failure: true
+
+clippy:
+  stage: check
+  script:
+    - cargo clippy --workspace --all-targets -- -D warnings
+  allow_failure: true
+
+build:
+  stage: check
+  script:
+    - cargo build --workspace --locked
+
+test:
+  stage: test
+  script:
+    - cargo test --workspace --locked
