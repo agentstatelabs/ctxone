@@ -1,8 +1,32 @@
-# CI for CTXone (Rust Cargo workspace; depends on ASG via GitLab git dep)
+# CI for CTXone (Rust Cargo workspace + SvelteKit "Lens" frontend).
+# The Hub (server) embeds web/build/ at compile time via rust-embed, so the
+# frontend must be built BEFORE cargo. Vite 8 / Svelte 5 need Node >= 20.19.
 stages:
+  - frontend
   - check
   - test
 
+# --- Frontend: build the SvelteKit static app -> web/build/ (artifact) -------
+frontend:
+  stage: frontend
+  image: node:22-bookworm
+  before_script: []
+  cache:
+    key:
+      files:
+        - web/package-lock.json
+    paths:
+      - web/node_modules/
+  script:
+    - cd web
+    - npm ci
+    - npm run build
+  artifacts:
+    paths:
+      - web/build/
+    expire_in: 1h
+
+# --- Rust jobs (web/build/ artifact flows down from the frontend stage) -------
 default:
   image: rust:1-bookworm
   cache:
