@@ -1,5 +1,7 @@
-// Pre-render all pages at build time. Required for adapter-static.
-// All data fetching is client-side (onMount), so prerendering just
-// produces the HTML shell — data loads in the browser as before.
-export const prerender = true;
+// Lens is a pure client-side SPA. It fetches all data from the same-origin
+// /api at runtime; the Hub (axum) serves index.html for any non-/api route
+// (adapter-static `fallback: index.html`). We do NOT prerender or SSR —
+// dynamic pages (e.g. /code/graph reads url.searchParams) can't be prerendered.
+export const prerender = false;
+export const ssr = false;
 export const trailingSlash = 'always';
