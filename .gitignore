@@ -16,3 +16,5 @@
 htmlcov/
 bindings/python/build/
 bindings/python/dist/
+.claude/worktrees/
+ctxone.db.bak.*
