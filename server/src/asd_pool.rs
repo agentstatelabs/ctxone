@@ -12,10 +12,10 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
-use std::sync::Arc;
 
 /// How long a process may be idle before the eviction task kills it.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes

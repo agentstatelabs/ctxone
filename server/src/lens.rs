@@ -57,9 +57,8 @@ pub async fn lens_handler(req: Request<Body>) -> Response {
 
             resp.headers_mut().insert(
                 header::CONTENT_TYPE,
-                HeaderValue::from_str(mime).unwrap_or_else(|_| {
-                    HeaderValue::from_static("application/octet-stream")
-                }),
+                HeaderValue::from_str(mime)
+                    .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
             );
 
             // Immutable assets (content-hashed filenames) get long cache.
@@ -71,10 +70,8 @@ pub async fn lens_handler(req: Request<Body>) -> Response {
                     HeaderValue::from_static("public, max-age=31536000, immutable"),
                 );
             } else {
-                resp.headers_mut().insert(
-                    header::CACHE_CONTROL,
-                    HeaderValue::from_static("no-cache"),
-                );
+                resp.headers_mut()
+                    .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
             }
 
             resp

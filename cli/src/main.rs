@@ -1004,7 +1004,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 body["tags"] = serde_json::json!(tags);
             }
 
-            let resp = match client.clone()
+            let resp = match client
+                .clone()
                 .post(format!("{}/api/memory/remember", cli.server))
                 .json(&body)
                 .send()
@@ -1310,22 +1311,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             run_session_action(action).await?;
         }
 
-        Commands::IngestSession { file, since, last, tokens_only, dry_run, no_full_turn } => {
+        Commands::IngestSession {
+            file,
+            since,
+            last,
+            tokens_only,
+            dry_run,
+            no_full_turn,
+        } => {
             run_ingest_session(
-                &cli.server, &cli.branch, cli.session.as_deref(),
-                file, since, last, tokens_only, dry_run, !no_full_turn, client.clone(),
-            ).await?;
+                &cli.server,
+                &cli.branch,
+                cli.session.as_deref(),
+                file,
+                since,
+                last,
+                tokens_only,
+                dry_run,
+                !no_full_turn,
+                client.clone(),
+            )
+            .await?;
         }
 
-        Commands::CaptureTurn { transcript, session, turns, tokens_only, no_full_turn } => {
+        Commands::CaptureTurn {
+            transcript,
+            session,
+            turns,
+            tokens_only,
+            no_full_turn,
+        } => {
             // Prefer explicit --session flag, then CLI global, then CTX_SESSION env.
             let sid = session
                 .or(cli.session.clone())
                 .or_else(|| std::env::var("CTX_SESSION").ok());
             run_capture_turn(
-                &cli.server, &cli.branch, sid.as_deref(),
-                transcript, turns, tokens_only, !no_full_turn, client.clone(),
-            ).await?;
+                &cli.server,
+                &cli.branch,
+                sid.as_deref(),
+                transcript,
+                turns,
+                tokens_only,
+                !no_full_turn,
+                client.clone(),
+            )
+            .await?;
         }
         Commands::Pinned => {
             let resp = match reqwest::get(format!("{}/api/memory/pinned", cli.server)).await {
@@ -1469,7 +1499,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "ref": cli.branch,
             });
 
-            let resp = match client.clone()
+            let resp = match client
+                .clone()
                 .post(format!("{}/api/memory/prime", cli.server))
                 .json(&body)
                 .send()
@@ -1567,7 +1598,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 body["description"] = serde_json::json!(m);
             }
 
-            let resp = match client.clone()
+            let resp = match client
+                .clone()
                 .post(format!("{}/api/merge", cli.server))
                 .json(&body)
                 .send()
@@ -1621,7 +1653,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 body["reason"] = serde_json::json!(r);
             }
 
-            let resp = match client.clone()
+            let resp = match client
+                .clone()
                 .post(format!("{}/api/memory/forget", cli.server))
                 .json(&body)
                 .send()
@@ -1686,17 +1719,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             });
         }
-        Commands::SummarizeSession {
-            points,
-            decisions,
-        } => {
+        Commands::SummarizeSession { points, decisions } => {
             // Mirrors the summarize_session MCP tool. Session id comes
             // from the global --session flag (or CTX_SESSION env); when
             // absent we error so the capture is always anchored.
-            let session_id = cli.session.clone()
-                .ok_or_else(|| {
-                    "no session id (pass --session <id> or set CTX_SESSION)".to_string()
-                })?;
+            let session_id = cli.session.clone().ok_or_else(|| {
+                "no session id (pass --session <id> or set CTX_SESSION)".to_string()
+            })?;
             let body = serde_json::json!({
                 "session_id": session_id,
                 "key_points": points,
@@ -1756,7 +1785,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             emit(cli.format, &parsed, |v| {
                 // SessionSnapshot field names — be defensive across
                 // schema drift.
-                let total = v["total_tokens"].as_u64()
+                let total = v["total_tokens"]
+                    .as_u64()
                     .or_else(|| v["llm_total_tokens"].as_u64())
                     .unwrap_or(0);
                 let session = v["session_id"].as_str().unwrap_or("?");
@@ -1913,7 +1943,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Branch { name, from } => {
             let body = serde_json::json!({ "name": name, "from": from });
-            let resp = match client.clone()
+            let resp = match client
+                .clone()
                 .post(format!("{}/api/branches", cli.server))
                 .json(&body)
                 .send()
@@ -1985,7 +2016,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // graph) and when the user passed --no-agents.
             if !dry_run && !no_agents {
                 println!();
-                if let Err(e) = agents_install_prompt(&server, &branch, format, client.clone()).await {
+                if let Err(e) =
+                    agents_install_prompt(&server, &branch, format, client.clone()).await
+                {
                     eprintln!("  \u{2717} agents: {}", e);
                 }
             }
@@ -2123,7 +2156,11 @@ async fn agents_status(
 
 /// Remove the primed AGENTS.md from the Hub (via forget). Does not
 /// touch the local file. Blame history preserves the prior content.
-async fn agents_remove(server: &str, branch: &str, client: reqwest::Client) -> Result<(), Box<dyn std::error::Error>> {
+async fn agents_remove(
+    server: &str,
+    branch: &str,
+    client: reqwest::Client,
+) -> Result<(), Box<dyn std::error::Error>> {
     let paths_url = format!(
         "{}/api/state/{}/paths?prefix=/memory/pinned/{}",
         server, branch, AGENTS_SOURCE
@@ -2267,7 +2304,8 @@ async fn agents_install(
         "ref": branch,
     });
 
-    let resp = match client.clone()
+    let resp = match client
+        .clone()
         .post(format!("{}/api/memory/prime", server))
         .json(&body)
         .send()
@@ -2779,7 +2817,11 @@ async fn run_doctor(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         let pid: Option<u32> = body
             .split("\"pid\":")
             .nth(1)
-            .map(|s| s.chars().take_while(|c| c.is_ascii_digit()).collect::<String>())
+            .map(|s| {
+                s.chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<String>()
+            })
             .and_then(|s| s.parse().ok());
         let alive = pid
             .map(|p| {
@@ -2871,7 +2913,10 @@ async fn run_doctor(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 if let Ok(meta) = e.metadata()
                     && let Ok(mtime) = meta.modified()
-                    && now.duration_since(mtime).map(|d| d < one_day).unwrap_or(false)
+                    && now
+                        .duration_since(mtime)
+                        .map(|d| d < one_day)
+                        .unwrap_or(false)
                 {
                     recent_count += 1;
                 }
@@ -2970,7 +3015,9 @@ async fn run_ingest_session(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
     if api_key.is_empty() && !tokens_only {
-        eprintln!("warn: ANTHROPIC_API_KEY not set — memory extraction disabled (use --tokens-only to suppress)");
+        eprintln!(
+            "warn: ANTHROPIC_API_KEY not set — memory extraction disabled (use --tokens-only to suppress)"
+        );
     }
 
     let files: Vec<std::path::PathBuf> = if let Some(f) = file {
@@ -3008,7 +3055,11 @@ async fn run_ingest_session(
                 Some(derived_sid.as_str())
             }
         };
-        println!("→ {}  (session: {})", fname, effective_session.unwrap_or("default"));
+        println!(
+            "→ {}  (session: {})",
+            fname,
+            effective_session.unwrap_or("default")
+        );
 
         let mut turns = crate::ingest::parse_turns(path);
 
@@ -3023,7 +3074,11 @@ async fn run_ingest_session(
             turns = turns.into_iter().skip(skip).collect();
         }
 
-        let source_file = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let source_file = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         for (idx, turn) in turns.iter().enumerate() {
             total_tokens.add(&turn.tokens);
 
@@ -3039,8 +3094,13 @@ async fn run_ingest_session(
                     );
                 } else {
                     crate::ingest::record_turn_tokens(
-                        &turn.tokens, &turn.model, server, effective_session, &client,
-                    ).await;
+                        &turn.tokens,
+                        &turn.model,
+                        server,
+                        effective_session,
+                        &client,
+                    )
+                    .await;
                 }
             }
 
@@ -3055,8 +3115,15 @@ async fn run_ingest_session(
                     );
                 } else {
                     crate::ingest::store_full_turn(
-                        turn, idx, &source_file, server, branch, effective_session, &client,
-                    ).await;
+                        turn,
+                        idx,
+                        &source_file,
+                        server,
+                        branch,
+                        effective_session,
+                        &client,
+                    )
+                    .await;
                     total_full_turns += 1;
                 }
             }
@@ -3073,7 +3140,8 @@ async fn run_ingest_session(
                         mem.path, mem.importance, mem.title
                     );
                 } else {
-                    crate::ingest::store_memory(mem, server, branch, effective_session, &client).await;
+                    crate::ingest::store_memory(mem, server, branch, effective_session, &client)
+                        .await;
                     print!(".");
                     let _ = std::io::Write::flush(&mut std::io::stdout());
                 }
@@ -3105,7 +3173,15 @@ async fn run_ingest_session(
 
 async fn run_session_action(action: SessionAction) -> Result<(), Box<dyn std::error::Error>> {
     match action {
-        SessionAction::Metrics { project, session, list, all, json, gap, verbose } => {
+        SessionAction::Metrics {
+            project,
+            session,
+            list,
+            all,
+            json,
+            gap,
+            verbose,
+        } => {
             run_session_metrics(project, session, list, all, json, gap, verbose).await?;
         }
     }
@@ -3122,8 +3198,8 @@ async fn run_session_metrics(
     verbose: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use crate::metrics::{
-        all_project_sessions, find_session_files, fmt_tokens, parse_session_metrics,
-        render_list_row, render_metrics, SessionMetrics,
+        SessionMetrics, all_project_sessions, find_session_files, fmt_tokens,
+        parse_session_metrics, render_list_row, render_metrics,
     };
 
     if all {
@@ -3167,7 +3243,9 @@ async fn run_session_metrics(
             }
             let savings_pct = if project_total.cost_no_cache_usd > 0.0 {
                 project_total.cache_savings_usd / project_total.cost_no_cache_usd * 100.0
-            } else { 0.0 };
+            } else {
+                0.0
+            };
             println!(
                 "  {} sessions  {} turns  {:.1}% cache  ${:.2} actual  (saved {:.0}% vs no-cache ${:.2})",
                 sessions.len(),
@@ -3182,11 +3260,15 @@ async fn run_session_metrics(
 
         let grand_savings_pct = if grand_total.cost_no_cache_usd > 0.0 {
             grand_total.cache_savings_usd / grand_total.cost_no_cache_usd * 100.0
-        } else { 0.0 };
+        } else {
+            0.0
+        };
         println!("\n{}", "═".repeat(70));
         println!(
             "  TOTAL  {} projects  {} turns  {:.1}% cache",
-            all_sessions.len(), grand_total.turns, grand_total.cache_hit_rate * 100.0,
+            all_sessions.len(),
+            grand_total.turns,
+            grand_total.cache_hit_rate * 100.0,
         );
         println!(
             "         Actual cost:   ${:.2}  (per-turn pricing with cache discount applied)",
@@ -3194,18 +3276,16 @@ async fn run_session_metrics(
         );
         println!(
             "         Without cache: ${:.2}  (saved ${:.2}  = {:.1}% reduction)",
-            grand_total.cost_no_cache_usd,
-            grand_total.cache_savings_usd,
-            grand_savings_pct,
+            grand_total.cost_no_cache_usd, grand_total.cache_savings_usd, grand_savings_pct,
         );
         println!("{}", "═".repeat(70));
         return Ok(());
     }
 
     // Single project
-    let project_dir = project
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
+    let project_dir = project.map(std::path::PathBuf::from).unwrap_or_else(|| {
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    });
 
     let files = find_session_files(&project_dir);
     if files.is_empty() {
@@ -3240,7 +3320,8 @@ async fn run_session_metrics(
         .filter(|s| s.turns > 0)
         .collect();
 
-    let label = project_dir.file_name()
+    let label = project_dir
+        .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("project")
         .to_string();
@@ -3258,11 +3339,15 @@ async fn run_session_metrics(
             render_list_row(sm);
         }
         let mut total = SessionMetrics::default();
-        for sm in &sessions { total.add(sm); }
+        for sm in &sessions {
+            total.add(sm);
+        }
         println!("{}", bar);
         println!(
             "  Total: {} sessions, {} turns, ${:.4}",
-            sessions.len(), total.turns, total.cost_usd
+            sessions.len(),
+            total.turns,
+            total.cost_usd
         );
         return Ok(());
     }
@@ -3279,7 +3364,9 @@ async fn run_session_metrics(
         }
     } else {
         let mut total = SessionMetrics::default();
-        for sm in &sessions { total.add(sm); }
+        for sm in &sessions {
+            total.add(sm);
+        }
         total.session_id = format!("{} sessions", sessions.len());
         render_metrics(&total, &label, gap, verbose);
     }
@@ -3306,7 +3393,11 @@ async fn run_capture_turn(
         if let Some(path) = stdin_payload
             .as_deref()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-            .and_then(|v| v.get("transcript_path").and_then(|p| p.as_str()).map(|s| s.to_string()))
+            .and_then(|v| {
+                v.get("transcript_path")
+                    .and_then(|p| p.as_str())
+                    .map(|s| s.to_string())
+            })
         {
             std::path::PathBuf::from(path)
         } else {
@@ -3351,13 +3442,25 @@ async fn run_capture_turn(
         let idx = base_idx + offset;
         if !turn.tokens.is_empty() {
             crate::ingest::record_turn_tokens(
-                &turn.tokens, &turn.model, server, effective_session, &client,
-            ).await;
+                &turn.tokens,
+                &turn.model,
+                server,
+                effective_session,
+                &client,
+            )
+            .await;
         }
         if full_turn {
             crate::ingest::store_full_turn(
-                turn, idx, &source_file, server, branch, effective_session, &client,
-            ).await;
+                turn,
+                idx,
+                &source_file,
+                server,
+                branch,
+                effective_session,
+                &client,
+            )
+            .await;
         }
         if tokens_only || api_key.is_empty() || !turn.is_substantial() {
             continue;
@@ -3381,7 +3484,11 @@ fn read_stdin_nonblocking() -> Option<String> {
     }
     let mut buf = String::new();
     let _ = std::io::stdin().take(4096).read_to_string(&mut buf);
-    if buf.trim().is_empty() { None } else { Some(buf) }
+    if buf.trim().is_empty() {
+        None
+    } else {
+        Some(buf)
+    }
 }
 
 async fn run_demo(server: &str, client: reqwest::Client) -> Result<(), Box<dyn std::error::Error>> {
@@ -4837,10 +4944,11 @@ async fn handle_db(
             let lock_path = format!("{}.lock", to);
             if std::path::Path::new(&lock_path).exists() {
                 if let Ok(body) = std::fs::read_to_string(&lock_path)
-                    && let Some(pid_str) = body
-                        .split("\"pid\":")
-                        .nth(1)
-                        .map(|s| s.chars().take_while(|c| c.is_ascii_digit()).collect::<String>())
+                    && let Some(pid_str) = body.split("\"pid\":").nth(1).map(|s| {
+                        s.chars()
+                            .take_while(|c| c.is_ascii_digit())
+                            .collect::<String>()
+                    })
                     && let Ok(pid) = pid_str.parse::<u32>()
                     && std::process::Command::new("kill")
                         .args(["-0", &pid.to_string()])
@@ -4895,9 +5003,8 @@ async fn handle_db(
             // Move current → preserved (only if it exists; first
             // restore against an empty dir is fine).
             if std::path::Path::new(&to).exists() {
-                std::fs::rename(&to, &preserved).map_err(|e| {
-                    format!("could not rename {} → {}: {}", to, preserved, e)
-                })?;
+                std::fs::rename(&to, &preserved)
+                    .map_err(|e| format!("could not rename {} → {}: {}", to, preserved, e))?;
                 eprintln!("preserved current db at {}", preserved);
             }
 

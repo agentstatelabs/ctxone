@@ -212,7 +212,11 @@ fn extract_tool_calls(msg: &Value) -> Vec<String> {
                 .and_then(|v| v.as_str())
                 .map(|c| {
                     let c = c.trim();
-                    if c.len() > 120 { format!("{}…", &c[..120]) } else { c.to_string() }
+                    if c.len() > 120 {
+                        format!("{}…", &c[..120])
+                    } else {
+                        c.to_string()
+                    }
                 })
                 .unwrap_or_default(),
             "Write" | "Read" | "Edit" | "Glob" | "Grep" => input
@@ -383,7 +387,11 @@ pub async fn extract_memories(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        eprintln!("  warn: Haiku returned {}: {}", status, &body[..body.len().min(200)]);
+        eprintln!(
+            "  warn: Haiku returned {}: {}",
+            status,
+            &body[..body.len().min(200)]
+        );
         return vec![];
     }
 
@@ -441,7 +449,9 @@ pub async fn record_turn_tokens(
         "model": model,
         "provider": "anthropic",
     });
-    let mut req = client.post(format!("{}/api/stats/llm_usage", hub)).json(&body);
+    let mut req = client
+        .post(format!("{}/api/stats/llm_usage", hub))
+        .json(&body);
     if let Some(sid) = session {
         req = req.header("X-CTXone-Session", sid);
     }
@@ -521,9 +531,7 @@ pub async fn store_memory(
 pub fn find_session_files(project_dir: &Path) -> Vec<PathBuf> {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
     // Claude Code hashes the project path: replace '/' with '-'.
-    let hash = project_dir
-        .to_string_lossy()
-        .replace('/', "-");
+    let hash = project_dir.to_string_lossy().replace('/', "-");
     let sessions_dir = home.join(".claude").join("projects").join(&hash);
 
     if !sessions_dir.exists() {
@@ -539,11 +547,7 @@ pub fn find_session_files(project_dir: &Path) -> Vec<PathBuf> {
         .collect();
 
     // Sort by modification time, oldest first.
-    files.sort_by_key(|p| {
-        p.metadata()
-            .and_then(|m| m.modified())
-            .ok()
-    });
+    files.sort_by_key(|p| p.metadata().and_then(|m| m.modified()).ok());
 
     files
 }

@@ -26,8 +26,8 @@ use std::sync::Arc;
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::IntentCategory;
 use agentstategraph_tasks::{
-    paths, Plan, PlanStatus, Priority, Proof, ProofKind, Task, TaskId, TaskStatus, TaskStore,
-    TaskStoreError,
+    Plan, PlanStatus, Priority, Proof, ProofKind, Task, TaskId, TaskStatus, TaskStore,
+    TaskStoreError, paths,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -882,14 +882,44 @@ mod tests {
     fn force_complete_abandons_open_tasks_and_promotes_plan() {
         let (_repo, store) = fresh_store();
         create_plan(&store, "main", "p1", None).unwrap();
-        let t1 = add_task(&store, "main", "p1", "first", None, None, None, None, vec![]).unwrap();
-        let _t2 =
-            add_task(&store, "main", "p1", "second", None, None, None, None, vec![]).unwrap();
-        let t3 = add_task(&store, "main", "p1", "third", None, None, None, None, vec![]).unwrap();
+        let t1 = add_task(
+            &store,
+            "main",
+            "p1",
+            "first",
+            None,
+            None,
+            None,
+            None,
+            vec![],
+        )
+        .unwrap();
+        let _t2 = add_task(
+            &store,
+            "main",
+            "p1",
+            "second",
+            None,
+            None,
+            None,
+            None,
+            vec![],
+        )
+        .unwrap();
+        let t3 = add_task(
+            &store,
+            "main",
+            "p1",
+            "third",
+            None,
+            None,
+            None,
+            None,
+            vec![],
+        )
+        .unwrap();
         // Mark one task as already done — force_complete should leave it alone.
-        store
-            .start_task("main", "p1", &t1.id)
-            .expect("start task");
+        store.start_task("main", "p1", &t1.id).expect("start task");
         store
             .complete_task(
                 "main",
@@ -923,7 +953,18 @@ mod tests {
     fn force_complete_is_idempotent_on_completed_plan() {
         let (_repo, store) = fresh_store();
         create_plan(&store, "main", "p1", None).unwrap();
-        let t1 = add_task(&store, "main", "p1", "first", None, None, None, None, vec![]).unwrap();
+        let t1 = add_task(
+            &store,
+            "main",
+            "p1",
+            "first",
+            None,
+            None,
+            None,
+            None,
+            vec![],
+        )
+        .unwrap();
         store.start_task("main", "p1", &t1.id).unwrap();
         store
             .complete_task(
@@ -959,8 +1000,8 @@ mod tests {
     fn force_complete_rejects_empty_plan() {
         let (_repo, store) = fresh_store();
         create_plan(&store, "main", "p1", None).unwrap();
-        let err = force_complete_plan(&store, "main", "p1", None)
-            .expect_err("empty plan should reject");
+        let err =
+            force_complete_plan(&store, "main", "p1", None).expect_err("empty plan should reject");
         assert!(matches!(err, PlanToolError::InvalidInput(_)));
     }
 
@@ -968,16 +1009,25 @@ mod tests {
     fn force_complete_uses_custom_reason() {
         let (_repo, store) = fresh_store();
         create_plan(&store, "main", "p1", None).unwrap();
-        let t1 = add_task(&store, "main", "p1", "first", None, None, None, None, vec![]).unwrap();
-        let _ = force_complete_plan(
+        let t1 = add_task(
             &store,
             "main",
             "p1",
-            Some("scope cut for v2".into()),
+            "first",
+            None,
+            None,
+            None,
+            None,
+            vec![],
         )
-        .expect("force complete");
+        .unwrap();
+        let _ = force_complete_plan(&store, "main", "p1", Some("scope cut for v2".into()))
+            .expect("force complete");
         let t1_after = store.get_task("main", "p1", &t1.id).expect("get t1");
-        assert_eq!(t1_after.abandoned_reason.as_deref(), Some("scope cut for v2"));
+        assert_eq!(
+            t1_after.abandoned_reason.as_deref(),
+            Some("scope cut for v2")
+        );
     }
 
     #[test]
@@ -987,9 +1037,30 @@ mod tests {
         repo.branch("feature/x", "main").expect("branch");
 
         create_plan(&store, "main", "p1", Some("desc".into())).unwrap();
-        let t1 = add_task(&store, "main", "p1", "first", None, None, None, None, vec![]).unwrap();
-        let t2 =
-            add_task(&store, "main", "p1", "second", None, None, None, None, vec![]).unwrap();
+        let t1 = add_task(
+            &store,
+            "main",
+            "p1",
+            "first",
+            None,
+            None,
+            None,
+            None,
+            vec![],
+        )
+        .unwrap();
+        let t2 = add_task(
+            &store,
+            "main",
+            "p1",
+            "second",
+            None,
+            None,
+            None,
+            None,
+            vec![],
+        )
+        .unwrap();
         // Mark one task as in-progress so we can confirm status carries.
         store.start_task("main", "p1", &t2.id).unwrap();
 
@@ -1021,8 +1092,8 @@ mod tests {
     fn move_plan_rejects_same_ref() {
         let (repo, store) = fresh_store();
         create_plan(&store, "main", "p1", None).unwrap();
-        let err = move_plan(&repo, &store, "main", "main", "p1")
-            .expect_err("same ref should reject");
+        let err =
+            move_plan(&repo, &store, "main", "main", "p1").expect_err("same ref should reject");
         assert!(matches!(err, PlanToolError::InvalidInput(_)));
     }
 
@@ -1387,12 +1458,7 @@ mod tests {
     fn complete_task(store: &TaskStore, plan: &str, task: &Task) {
         store.start_task("main", plan, &task.id).unwrap();
         store
-            .complete_task(
-                "main",
-                plan,
-                &task.id,
-                Proof::commit("deadbeef"),
-            )
+            .complete_task("main", plan, &task.id, Proof::commit("deadbeef"))
             .unwrap();
     }
 
@@ -1411,9 +1477,7 @@ mod tests {
         let _t4 = add_task(&store, "main", "p", "d", None, None, None, None, vec![]).unwrap();
 
         complete_task(&store, "p", &t1);
-        store
-            .abandon_task("main", "p", &t2.id, "nope")
-            .unwrap();
+        store.abandon_task("main", "p", &t2.id, "nope").unwrap();
 
         let tasks = store.list_tasks("main", "p").unwrap();
         let r = terminal_ratio(&tasks);

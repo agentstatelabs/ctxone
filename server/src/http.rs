@@ -169,8 +169,7 @@ pub fn router_with_lens(
     sessions: Arc<SessionRegistry>,
     config: HubConfig,
 ) -> Router {
-    router_with_config(repo, sessions, config)
-        .fallback(crate::lens::lens_handler)
+    router_with_config(repo, sessions, config).fallback(crate::lens::lens_handler)
 }
 
 /// Build the Hub router with explicit HTTP configuration. Convenience
@@ -215,7 +214,13 @@ fn router_with_config_inner(
         )))
     };
 
-    let state = HubState { repo, sessions, db_path, asd_repos, asd_pool };
+    let state = HubState {
+        repo,
+        sessions,
+        db_path,
+        asd_repos,
+        asd_pool,
+    };
 
     let mut router = Router::new()
         // Health + stats
@@ -272,21 +277,36 @@ fn router_with_config_inner(
         )
         .route("/api/plans/{name}/move", post(move_plan_handler))
         // Reminder endpoints
-        .route("/api/reminders", get(list_reminders_handler).post(create_reminder_handler))
+        .route(
+            "/api/reminders",
+            get(list_reminders_handler).post(create_reminder_handler),
+        )
         .route("/api/reminders/due", get(remind_me_handler))
         .route("/api/reminders/{id}", get(get_reminder_handler))
         .route("/api/reminders/{id}/snooze", post(snooze_reminder_handler))
-        .route("/api/reminders/{id}/approve", post(approve_reminder_handler))
+        .route(
+            "/api/reminders/{id}/approve",
+            post(approve_reminder_handler),
+        )
         .route("/api/reminders/{id}/cancel", post(cancel_reminder_handler))
         .route("/api/reminders/{id}/start", post(start_reminder_handler))
         .route("/api/reminders/{id}/record", post(record_reminder_handler))
         // Session turn capture (full request/response/tool/usage JSON)
         .route("/api/sessions/{sid}/turns", get(list_session_turns))
-        .route("/api/sessions/{sid}/turns/{idx}", post(put_session_turn).get(get_session_turn))
+        .route(
+            "/api/sessions/{sid}/turns/{idx}",
+            post(put_session_turn).get(get_session_turn),
+        )
         // Taint / quarantine / watch
-        .route("/api/taint", get(list_taints_handler).post(apply_taint_handler))
+        .route(
+            "/api/taint",
+            get(list_taints_handler).post(apply_taint_handler),
+        )
         .route("/api/taint/check", get(check_taint_handler))
-        .route("/api/taint/{id}", axum::routing::delete(remove_taint_handler))
+        .route(
+            "/api/taint/{id}",
+            axum::routing::delete(remove_taint_handler),
+        )
         // Admin endpoints
         .route("/api/admin/backup", post(admin_backup));
 
@@ -298,10 +318,7 @@ fn router_with_config_inner(
             .route("/api/code/{repo}/{*path}", get(proxy_asd).post(proxy_asd));
     }
 
-    let mut router = router
-        .layer(trace)
-        .layer(cors)
-        .with_state(state);
+    let mut router = router.layer(trace).layer(cors).with_state(state);
 
     // Apply the rate limiter LAST so it runs FIRST in the request
     // lifecycle (tower layers execute in reverse insertion order).
@@ -330,7 +347,10 @@ async fn list_asd_repos(State(s): State<HubState>) -> Json<Vec<AsdRepoInfo>> {
     let mut out: Vec<AsdRepoInfo> = s
         .asd_repos
         .iter()
-        .map(|(name, url)| AsdRepoInfo { name: name.clone(), url: url.clone() })
+        .map(|(name, url)| AsdRepoInfo {
+            name: name.clone(),
+            url: url.clone(),
+        })
         .collect();
     // Append pool repos (without resolving their port — they may not be running yet).
     if let Some(pool) = &s.asd_pool {
@@ -344,7 +364,10 @@ async fn list_asd_repos(State(s): State<HubState>) -> Json<Vec<AsdRepoInfo>> {
         };
         for name in pool_names {
             if !static_names.contains(name.as_str()) {
-                out.push(AsdRepoInfo { name: name.clone(), url: format!("pool:{name}") });
+                out.push(AsdRepoInfo {
+                    name: name.clone(),
+                    url: format!("pool:{name}"),
+                });
             }
         }
     }
@@ -1558,9 +1581,7 @@ async fn force_complete_plan(
     let reason = body.and_then(|Json(b)| b.reason);
     let result = plan_tools::force_complete_plan(&store, &q.ref_name, &name, reason)
         .map_err(plan_error_to_response)?;
-    let tasks = store
-        .list_tasks(&q.ref_name, &name)
-        .unwrap_or_default();
+    let tasks = store.list_tasks(&q.ref_name, &name).unwrap_or_default();
     s.sessions.mark_all_dirty();
     Ok(Json(serde_json::json!({
         "plan": plan_tools::plan_to_json(&result.plan, &tasks, true),
@@ -1653,7 +1674,10 @@ async fn check_taint_handler(
             })
         });
     let (effect, matching_taint_id) = match blocking {
-        Some(t) => (Some(taint_effect_str(t.effect).to_string()), Some(t.id.clone())),
+        Some(t) => (
+            Some(taint_effect_str(t.effect).to_string()),
+            Some(t.id.clone()),
+        ),
         None => (None, None),
     };
     Ok(Json(CheckTaintResponse {
@@ -1693,9 +1717,7 @@ async fn apply_taint_handler(
     State(s): State<HubState>,
     Json(body): Json<ApplyTaintBody>,
 ) -> Result<Json<ApplyTaintResponse>, (StatusCode, String)> {
-    use agentstategraph_taint::{
-        QuarantineParams, TaintKind, TaintParams, WatchParams,
-    };
+    use agentstategraph_taint::{QuarantineParams, TaintKind, TaintParams, WatchParams};
     let kind = parse_kind(Some(&body.kind))?
         .ok_or((StatusCode::BAD_REQUEST, "kind required".to_string()))?;
     let severity = parse_severity(body.severity.as_deref())?;
@@ -1832,10 +1854,7 @@ fn parse_kind(
         Some("taint") => Ok(Some(TaintKind::Taint)),
         Some("quarantine") => Ok(Some(TaintKind::Quarantine)),
         Some("watch") => Ok(Some(TaintKind::Watch)),
-        Some(other) => Err((
-            StatusCode::BAD_REQUEST,
-            format!("invalid kind: {other}"),
-        )),
+        Some(other) => Err((StatusCode::BAD_REQUEST, format!("invalid kind: {other}"))),
     }
 }
 
@@ -1847,10 +1866,7 @@ fn parse_effect(s: &str) -> Result<agentstategraph_taint::TaintEffect, (StatusCo
         "review" => Ok(TaintEffect::Review),
         "isolate" => Ok(TaintEffect::Isolate),
         "advisory" => Ok(TaintEffect::Advisory),
-        other => Err((
-            StatusCode::BAD_REQUEST,
-            format!("invalid effect: {other}"),
-        )),
+        other => Err((StatusCode::BAD_REQUEST, format!("invalid effect: {other}"))),
     }
 }
 
@@ -1909,13 +1925,16 @@ async fn put_session_turn(
     Query(q): Query<SessionTurnQuery>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let bytes = serde_json::to_vec(&body)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let bytes = serde_json::to_vec(&body).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     if bytes.len() > SESSION_TURNS_MAX_BYTES {
-        return Err((StatusCode::PAYLOAD_TOO_LARGE, format!(
-            "turn payload {} bytes exceeds {} byte cap",
-            bytes.len(), SESSION_TURNS_MAX_BYTES
-        )));
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "turn payload {} bytes exceeds {} byte cap",
+                bytes.len(),
+                SESSION_TURNS_MAX_BYTES
+            ),
+        ));
     }
     let path = session_turn_path(&sid, idx);
     let intent = format!("capture session {} turn {:04}", sid, idx);
@@ -1947,7 +1966,10 @@ async fn get_session_turn(
     Query(q): Query<SessionTurnQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let path = session_turn_path(&sid, idx);
-    s.repo.get_json(&q.ref_name, &path).map(Json).map_err(internal_error)
+    s.repo
+        .get_json(&q.ref_name, &path)
+        .map(Json)
+        .map_err(internal_error)
 }
 
 async fn list_session_turns(
@@ -1988,7 +2010,12 @@ async fn list_reminders_handler(
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
     let mgr = reminder_tools::make_manager(s.repo.clone());
     let reminders = reminder_tools::list_reminders(&mgr, q).map_err(reminder_error_to_response)?;
-    Ok(Json(reminders.iter().map(reminder_tools::reminder_to_json).collect()))
+    Ok(Json(
+        reminders
+            .iter()
+            .map(reminder_tools::reminder_to_json)
+            .collect(),
+    ))
 }
 
 async fn create_reminder_handler(
@@ -1999,15 +2026,25 @@ async fn create_reminder_handler(
     let mgr = reminder_tools::make_manager(s.repo.clone());
     let r = reminder_tools::create_reminder(&mgr, req, &agent_id.0)
         .map_err(reminder_error_to_response)?;
-    Ok((StatusCode::CREATED, Json(reminder_tools::reminder_to_json(&r))))
+    Ok((
+        StatusCode::CREATED,
+        Json(reminder_tools::reminder_to_json(&r)),
+    ))
 }
 
 async fn remind_me_handler(
     State(s): State<HubState>,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
     let mgr = reminder_tools::make_manager(s.repo.clone());
-    let reminders = mgr.remind_me().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(reminders.iter().map(reminder_tools::reminder_to_json).collect()))
+    let reminders = mgr
+        .remind_me()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(
+        reminders
+            .iter()
+            .map(reminder_tools::reminder_to_json)
+            .collect(),
+    ))
 }
 
 async fn get_reminder_handler(
@@ -2017,9 +2054,10 @@ async fn get_reminder_handler(
     let mgr = reminder_tools::make_manager(s.repo.clone());
     match mgr.get(&id) {
         Ok(r) => Ok(Json(reminder_tools::reminder_to_json(&r))),
-        Err(agentstategraph_reminders::ReminderError::NotFound(_)) => {
-            Err((StatusCode::NOT_FOUND, format!("reminder '{}' not found", id)))
-        }
+        Err(agentstategraph_reminders::ReminderError::NotFound(_)) => Err((
+            StatusCode::NOT_FOUND,
+            format!("reminder '{}' not found", id),
+        )),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
     }
 }
@@ -2036,7 +2074,9 @@ async fn snooze_reminder_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let mgr = reminder_tools::make_manager(s.repo.clone());
     let until = reminder_tools::parse_datetime(&body.until).map_err(reminder_error_to_response)?;
-    let r = mgr.snooze(&id, until).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let r = mgr
+        .snooze(&id, until)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     Ok(Json(reminder_tools::reminder_to_json(&r)))
 }
 
@@ -2052,10 +2092,10 @@ async fn approve_reminder_handler(
     body: Option<Json<ApproveBody>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let mgr = reminder_tools::make_manager(s.repo.clone());
-    let approver = body
-        .and_then(|b| b.0.approved_by)
-        .unwrap_or(agent_id.0);
-    let r = mgr.approve(&id, &approver).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let approver = body.and_then(|b| b.0.approved_by).unwrap_or(agent_id.0);
+    let r = mgr
+        .approve(&id, &approver)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     Ok(Json(reminder_tools::reminder_to_json(&r)))
 }
 
@@ -2064,7 +2104,9 @@ async fn cancel_reminder_handler(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let mgr = reminder_tools::make_manager(s.repo.clone());
-    let r = mgr.cancel(&id).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let r = mgr
+        .cancel(&id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     Ok(Json(reminder_tools::reminder_to_json(&r)))
 }
 
@@ -2081,7 +2123,9 @@ async fn start_reminder_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let mgr = reminder_tools::make_manager(s.repo.clone());
     let acting_agent = body.and_then(|b| b.0.agent_id).unwrap_or(agent_id.0);
-    let r = mgr.start(&id, &acting_agent).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let r = mgr
+        .start(&id, &acting_agent)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     Ok(Json(reminder_tools::reminder_to_json(&r)))
 }
 
@@ -2128,11 +2172,10 @@ async fn admin_backup(
     // VACUUM INTO can take a moment on a large db — run on a blocking
     // thread so we don't park the async runtime.
     let db_path_owned = db_path.to_string();
-    let result = tokio::task::spawn_blocking(move || {
-        crate::backup::snapshot_now(&db_path_owned, &suffix)
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {}", e)))?;
+    let result =
+        tokio::task::spawn_blocking(move || crate::backup::snapshot_now(&db_path_owned, &suffix))
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {}", e)))?;
 
     let path = result.map_err(|msg| (StatusCode::INTERNAL_SERVER_ERROR, msg))?;
     Ok(Json(serde_json::json!({

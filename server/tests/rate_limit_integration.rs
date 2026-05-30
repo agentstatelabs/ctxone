@@ -26,7 +26,10 @@ async fn start_hub(rate_limit_rpm: u32) -> String {
     repo.init().expect("repo init");
     let sessions = Arc::new(SessionRegistry::new());
 
-    let config = http::HubConfig { rate_limit_rpm, ..Default::default() };
+    let config = http::HubConfig {
+        rate_limit_rpm,
+        ..Default::default()
+    };
     let app = http::router_with_config(repo, sessions, config);
 
     // :0 → OS picks a free port

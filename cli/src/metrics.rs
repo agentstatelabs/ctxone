@@ -17,27 +17,60 @@ struct ModelPricing {
 
 fn pricing_for(model: &str) -> ModelPricing {
     if model.contains("claude-opus-4") {
-        ModelPricing { input: 15.00, output: 75.00, cache_write: 18.75, cache_read: 1.50 }
+        ModelPricing {
+            input: 15.00,
+            output: 75.00,
+            cache_write: 18.75,
+            cache_read: 1.50,
+        }
     } else if model.contains("claude-sonnet-4")
         || model.contains("claude-sonnet-3-7")
         || model.contains("claude-3-7-sonnet")
         || model.contains("claude-sonnet-3-5")
         || model.contains("claude-3-5-sonnet")
     {
-        ModelPricing { input: 3.00, output: 15.00, cache_write: 3.75, cache_read: 0.30 }
-    } else if model.contains("claude-haiku-4")
-        || model.contains("claude-3-5-haiku")
-    {
-        ModelPricing { input: 0.80, output: 4.00, cache_write: 1.00, cache_read: 0.08 }
+        ModelPricing {
+            input: 3.00,
+            output: 15.00,
+            cache_write: 3.75,
+            cache_read: 0.30,
+        }
+    } else if model.contains("claude-haiku-4") || model.contains("claude-3-5-haiku") {
+        ModelPricing {
+            input: 0.80,
+            output: 4.00,
+            cache_write: 1.00,
+            cache_read: 0.08,
+        }
     } else if model.contains("claude-haiku") {
-        ModelPricing { input: 0.25, output: 1.25, cache_write: 0.30, cache_read: 0.03 }
+        ModelPricing {
+            input: 0.25,
+            output: 1.25,
+            cache_write: 0.30,
+            cache_read: 0.03,
+        }
     } else if model.contains("claude-opus") {
-        ModelPricing { input: 15.00, output: 75.00, cache_write: 18.75, cache_read: 1.50 }
+        ModelPricing {
+            input: 15.00,
+            output: 75.00,
+            cache_write: 18.75,
+            cache_read: 1.50,
+        }
     } else if model.contains("claude") {
-        ModelPricing { input: 3.00, output: 15.00, cache_write: 3.75, cache_read: 0.30 }
+        ModelPricing {
+            input: 3.00,
+            output: 15.00,
+            cache_write: 3.75,
+            cache_read: 0.30,
+        }
     } else {
         // Unknown / non-Anthropic
-        ModelPricing { input: 3.00, output: 15.00, cache_write: 0.00, cache_read: 0.00 }
+        ModelPricing {
+            input: 3.00,
+            output: 15.00,
+            cache_write: 0.00,
+            cache_read: 0.00,
+        }
     }
 }
 
@@ -134,19 +167,23 @@ impl SessionMetrics {
     /// Falls back to dominant-model pricing when turn_details is empty (aggregates).
     fn compute_cost(&self, with_cache: bool) -> f64 {
         if !self.turn_details.is_empty() {
-            self.turn_details.iter().map(|t| {
-                let p = pricing_for(&t.model);
-                if with_cache {
-                    t.input_tokens as f64 * p.input / 1_000_000.0
-                        + t.output_tokens as f64 * p.output / 1_000_000.0
-                        + t.cache_read_tokens as f64 * p.cache_read / 1_000_000.0
-                        + t.cache_creation_tokens as f64 * p.cache_write / 1_000_000.0
-                } else {
-                    let total_in = t.input_tokens + t.cache_read_tokens + t.cache_creation_tokens;
-                    total_in as f64 * p.input / 1_000_000.0
-                        + t.output_tokens as f64 * p.output / 1_000_000.0
-                }
-            }).sum()
+            self.turn_details
+                .iter()
+                .map(|t| {
+                    let p = pricing_for(&t.model);
+                    if with_cache {
+                        t.input_tokens as f64 * p.input / 1_000_000.0
+                            + t.output_tokens as f64 * p.output / 1_000_000.0
+                            + t.cache_read_tokens as f64 * p.cache_read / 1_000_000.0
+                            + t.cache_creation_tokens as f64 * p.cache_write / 1_000_000.0
+                    } else {
+                        let total_in =
+                            t.input_tokens + t.cache_read_tokens + t.cache_creation_tokens;
+                        total_in as f64 * p.input / 1_000_000.0
+                            + t.output_tokens as f64 * p.output / 1_000_000.0
+                    }
+                })
+                .sum()
         } else {
             let p = pricing_for(self.dominant_model());
             let output_cost = self.output_tokens as f64 * p.output / 1_000_000.0;
@@ -208,16 +245,19 @@ pub fn detect_units(turns: &[TurnMetrics], gap_minutes: f64) -> Vec<UnitOfWork> 
     let mut bucket: Vec<&TurnMetrics> = vec![];
 
     for turn in turns {
-        let split = bucket.last().map(|prev| {
-            if let (Ok(t0), Ok(t1)) = (
-                prev.timestamp.parse::<DateTime<Utc>>(),
-                turn.timestamp.parse::<DateTime<Utc>>(),
-            ) {
-                (t1 - t0).num_seconds() as f64 > gap_secs
-            } else {
-                false
-            }
-        }).unwrap_or(false);
+        let split = bucket
+            .last()
+            .map(|prev| {
+                if let (Ok(t0), Ok(t1)) = (
+                    prev.timestamp.parse::<DateTime<Utc>>(),
+                    turn.timestamp.parse::<DateTime<Utc>>(),
+                ) {
+                    (t1 - t0).num_seconds() as f64 > gap_secs
+                } else {
+                    false
+                }
+            })
+            .unwrap_or(false);
 
         if split {
             units.push(build_unit(units.len(), &bucket));
@@ -232,8 +272,14 @@ pub fn detect_units(turns: &[TurnMetrics], gap_minutes: f64) -> Vec<UnitOfWork> 
 }
 
 fn build_unit(index: usize, turns: &[&TurnMetrics]) -> UnitOfWork {
-    let start_ts = turns.first().map(|t| t.timestamp.clone()).unwrap_or_default();
-    let end_ts = turns.last().map(|t| t.timestamp.clone()).unwrap_or_default();
+    let start_ts = turns
+        .first()
+        .map(|t| t.timestamp.clone())
+        .unwrap_or_default();
+    let end_ts = turns
+        .last()
+        .map(|t| t.timestamp.clone())
+        .unwrap_or_default();
 
     let duration_seconds = if let (Ok(t0), Ok(t1)) = (
         start_ts.parse::<DateTime<Utc>>(),
@@ -342,8 +388,14 @@ pub fn parse_session_metrics(path: &Path, gap_minutes: f64) -> SessionMetrics {
             None => continue,
         };
 
-        let input = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-        let output = usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        let input = usage
+            .get("input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let output = usage
+            .get("output_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         let cache_read = usage
             .get("cache_read_input_tokens")
             .and_then(|v| v.as_u64())
@@ -555,8 +607,14 @@ pub fn render_metrics(sm: &SessionMetrics, label: &str, gap: f64, verbose: bool)
         "    Cache write    {:>10}  (billed at ~125% input rate)",
         fmt_tokens(sm.cache_creation_tokens)
     );
-    println!("    Total input    {:>10}  (fresh + cache read + cache write)", fmt_tokens(total_in));
-    println!("    Effective      {:>10}  (total input + output processed)", fmt_tokens(effective));
+    println!(
+        "    Total input    {:>10}  (fresh + cache read + cache write)",
+        fmt_tokens(total_in)
+    );
+    println!(
+        "    Effective      {:>10}  (total input + output processed)",
+        fmt_tokens(effective)
+    );
 
     // Effective rate = actual cost per million effective tokens (reveals true discount)
     let eff_rate = if effective > 0 {
@@ -572,8 +630,16 @@ pub fn render_metrics(sm: &SessionMetrics, label: &str, gap: f64, verbose: bool)
 
     println!();
     println!("  Cost  (per-turn model pricing)");
-    println!("    With cache     {:>10}  (${:.2}/M effective)", format!("${:.4}", sm.cost_usd), eff_rate);
-    println!("    Without cache  {:>10}  (${:.2}/M effective)", format!("${:.4}", sm.cost_no_cache_usd), list_rate);
+    println!(
+        "    With cache     {:>10}  (${:.2}/M effective)",
+        format!("${:.4}", sm.cost_usd),
+        eff_rate
+    );
+    println!(
+        "    Without cache  {:>10}  (${:.2}/M effective)",
+        format!("${:.4}", sm.cost_no_cache_usd),
+        list_rate
+    );
     println!(
         "    Savings        {:>10}  ({:.1}% reduction from cache discount)",
         format!("${:.4}", sm.cache_savings_usd),
@@ -584,7 +650,10 @@ pub fn render_metrics(sm: &SessionMetrics, label: &str, gap: f64, verbose: bool)
         }
     );
     if sm.turns > 0 {
-        println!("    Avg / turn     {:>10}", format!("${:.5}", sm.cost_usd / sm.turns as f64));
+        println!(
+            "    Avg / turn     {:>10}",
+            format!("${:.5}", sm.cost_usd / sm.turns as f64)
+        );
     }
 
     if !sm.units.is_empty() {
@@ -653,6 +722,10 @@ pub fn render_list_row(sm: &SessionMetrics) {
 
 /// Format a savings summary: "$X.XX (saved Y.Y%)" for compact views.
 pub fn fmt_cost_with_savings(cost: f64, savings: f64, no_cache: f64) -> String {
-    let pct = if no_cache > 0.0 { savings / no_cache * 100.0 } else { 0.0 };
+    let pct = if no_cache > 0.0 {
+        savings / no_cache * 100.0
+    } else {
+        0.0
+    };
     format!("${:.2}  (saved {:.0}% vs no-cache)", cost, pct)
 }

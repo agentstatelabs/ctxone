@@ -619,7 +619,8 @@ impl SessionRegistry {
         {
             let mut lru = registry.sessions.lock().expect("sessions lock");
             for row in rows.flatten() {
-                let (id, sent, saved, llm_in, llm_out, llm_cr, llm_cc, calls, model, provider) = row;
+                let (id, sent, saved, llm_in, llm_out, llm_cr, llm_cc, calls, model, provider) =
+                    row;
                 let stats = Arc::new(SessionStats::with_values(
                     sent, saved, llm_in, llm_out, llm_cr, llm_cc, calls, model, provider,
                 ));
@@ -1475,9 +1476,7 @@ fn parse_taint_effect(s: &str) -> Result<agentstategraph_taint::TaintEffect, Str
     }
 }
 
-fn parse_taint_severity(
-    s: Option<&str>,
-) -> Result<agentstategraph_taint::TaintSeverity, String> {
+fn parse_taint_severity(s: Option<&str>) -> Result<agentstategraph_taint::TaintSeverity, String> {
     use agentstategraph_taint::TaintSeverity;
     match s {
         None | Some("") | Some("medium") => Ok(TaintSeverity::Medium),
@@ -1938,10 +1937,7 @@ impl CtxOneServer {
         \
         CALL THIS WHEN you finish a task. Proof kinds in order of preference: `commit` (a git SHA — strongest), `file` (a path you created/edited), `test` (a test that now exists or passes), `text` (human-attested last-resort). The proof is stored but not verified at call time. Completing the last open task in the plan automatically promotes the plan to `completed`."
     )]
-    async fn plan_done(
-        &self,
-        params: Parameters<crate::plan_tools::PlanCompleteParams>,
-    ) -> String {
+    async fn plan_done(&self, params: Parameters<crate::plan_tools::PlanCompleteParams>) -> String {
         use crate::plan_tools as pt;
         use agentstategraph_tasks::TaskId;
         let p = params.0;
@@ -2090,10 +2086,7 @@ impl CtxOneServer {
         \
         CALL THIS WHEN promoting a sandboxed plan onto `main`, pulling someone else's plan onto a feature branch for collaboration, or refiling work after a branch-strategy change. Refuses when source and target are the same ref or when a plan with the same name already exists on the target ref."
     )]
-    async fn plan_move(
-        &self,
-        params: Parameters<crate::plan_tools::PlanMoveParams>,
-    ) -> String {
+    async fn plan_move(&self, params: Parameters<crate::plan_tools::PlanMoveParams>) -> String {
         use crate::plan_tools as pt;
         let p = params.0;
         let store = pt::make_store(self.repo.clone(), &self.agent_id);
@@ -2300,11 +2293,9 @@ impl CtxOneServer {
         }
     }
 
-    #[tool(
-        description = "List taints / quarantines / watches across the graph. \
+    #[tool(description = "List taints / quarantines / watches across the graph. \
         \
-        CALL THIS to inspect what guardrails are active before writing into a sensitive subtree. Filter by `path_prefix` to scope to one area, by `kind` to one category, or set `include_resolved=true` to see history."
-    )]
+        CALL THIS to inspect what guardrails are active before writing into a sensitive subtree. Filter by `path_prefix` to scope to one area, by `kind` to one category, or set `include_resolved=true` to see history.")]
     async fn taint_list(&self, params: Parameters<TaintListParams>) -> String {
         let p = params.0;
         let kind = match parse_taint_kind_opt(p.kind.as_deref()) {
@@ -2385,9 +2376,7 @@ impl CtxOneServer {
         CALL THIS WHEN you discover bad data, an untrusted source, or an area that needs review before further writes. Effects: `block` and `review` stop writes; `warn` and `advisory` log; `isolate` confines to authorized agents."
     )]
     async fn taint_apply(&self, params: Parameters<TaintApplyParams>) -> String {
-        use agentstategraph_taint::{
-            QuarantineParams, TaintKind, TaintParams, WatchParams,
-        };
+        use agentstategraph_taint::{QuarantineParams, TaintKind, TaintParams, WatchParams};
         let p = params.0;
         let kind = match parse_taint_kind(&p.kind) {
             Ok(k) => k,
@@ -2568,7 +2557,10 @@ impl CtxOneServer {
     )]
     async fn search(&self, params: Parameters<SearchValuesParams>) -> String {
         let p = params.0;
-        match self.repo.search_values(&p.ref_name, &p.query, p.max_results) {
+        match self
+            .repo
+            .search_values(&p.ref_name, &p.query, p.max_results)
+        {
             Ok(results) => {
                 let out: Vec<serde_json::Value> = results
                     .into_iter()
@@ -2661,8 +2653,9 @@ impl CtxOneServer {
         use crate::reminder_tools as rt;
         let mgr = rt::make_manager(self.repo.clone());
         match rt::create_reminder(&mgr, params.0, &self.agent_id) {
-            Ok(r) => serde_json::to_string(&rt::reminder_to_json(&r))
-                .unwrap_or_else(|_| "{}".into()),
+            Ok(r) => {
+                serde_json::to_string(&rt::reminder_to_json(&r)).unwrap_or_else(|_| "{}".into())
+            }
             Err(e) => rt::err_json(e),
         }
     }
@@ -2721,8 +2714,9 @@ impl CtxOneServer {
         use crate::reminder_tools as rt;
         let mgr = rt::make_manager(self.repo.clone());
         match mgr.get(&params.0.id) {
-            Ok(r) => serde_json::to_string(&rt::reminder_to_json(&r))
-                .unwrap_or_else(|_| "{}".into()),
+            Ok(r) => {
+                serde_json::to_string(&rt::reminder_to_json(&r)).unwrap_or_else(|_| "{}".into())
+            }
             Err(e) => rt::err_json(e),
         }
     }
@@ -2744,8 +2738,9 @@ impl CtxOneServer {
             Err(e) => return rt::err_json(e),
         };
         match mgr.snooze(&p.id, until) {
-            Ok(r) => serde_json::to_string(&rt::reminder_to_json(&r))
-                .unwrap_or_else(|_| "{}".into()),
+            Ok(r) => {
+                serde_json::to_string(&rt::reminder_to_json(&r)).unwrap_or_else(|_| "{}".into())
+            }
             Err(e) => rt::err_json(e),
         }
     }
@@ -2764,8 +2759,9 @@ impl CtxOneServer {
         let p = params.0;
         let approver = p.approved_by.unwrap_or_else(|| self.agent_id.clone());
         match mgr.approve(&p.id, &approver) {
-            Ok(r) => serde_json::to_string(&rt::reminder_to_json(&r))
-                .unwrap_or_else(|_| "{}".into()),
+            Ok(r) => {
+                serde_json::to_string(&rt::reminder_to_json(&r)).unwrap_or_else(|_| "{}".into())
+            }
             Err(e) => rt::err_json(e),
         }
     }
@@ -2782,8 +2778,9 @@ impl CtxOneServer {
         use crate::reminder_tools as rt;
         let mgr = rt::make_manager(self.repo.clone());
         match mgr.cancel(&params.0.id) {
-            Ok(r) => serde_json::to_string(&rt::reminder_to_json(&r))
-                .unwrap_or_else(|_| "{}".into()),
+            Ok(r) => {
+                serde_json::to_string(&rt::reminder_to_json(&r)).unwrap_or_else(|_| "{}".into())
+            }
             Err(e) => rt::err_json(e),
         }
     }
@@ -2802,8 +2799,9 @@ impl CtxOneServer {
         let p = params.0;
         let agent = p.agent_id.unwrap_or_else(|| self.agent_id.clone());
         match mgr.start(&p.id, &agent) {
-            Ok(r) => serde_json::to_string(&rt::reminder_to_json(&r))
-                .unwrap_or_else(|_| "{}".into()),
+            Ok(r) => {
+                serde_json::to_string(&rt::reminder_to_json(&r)).unwrap_or_else(|_| "{}".into())
+            }
             Err(e) => rt::err_json(e),
         }
     }
@@ -2825,8 +2823,9 @@ impl CtxOneServer {
         use crate::reminder_tools as rt;
         let mgr = rt::make_manager(self.repo.clone());
         match rt::record_execution(&mgr, params.0, &self.agent_id) {
-            Ok(r) => serde_json::to_string(&rt::reminder_to_json(&r))
-                .unwrap_or_else(|_| "{}".into()),
+            Ok(r) => {
+                serde_json::to_string(&rt::reminder_to_json(&r)).unwrap_or_else(|_| "{}".into())
+            }
             Err(e) => rt::err_json(e),
         }
     }
@@ -2840,10 +2839,12 @@ impl CtxOneServer {
         crate::code_tools::list_repos_json(&self.asd_repos)
     }
 
-    #[tool(description = "Search code symbols by concept or keyword across name, signature, \
+    #[tool(
+        description = "Search code symbols by concept or keyword across name, signature, \
         doc comment, file path, and ledger summaries. Returns ranked results. \
         Use this for feature archaeology when you don't yet know exact symbol names. \
-        `repo` is optional when only one repo is registered.")]
+        `repo` is optional when only one repo is registered."
+    )]
     async fn code_search(&self, params: Parameters<CodeSearchParams>) -> String {
         let p = params.0;
         let base = match self.code_base(p.repo.as_deref()).await {
@@ -2851,18 +2852,26 @@ impl CtxOneServer {
             Err(e) => return serde_json::json!({ "error": e }).to_string(),
         };
         let mut path = format!("search?q={}", urlencoding::encode(&p.query));
-        if let Some(k) = &p.kind { path.push_str(&format!("&kind={}", urlencoding::encode(k))); }
-        if let Some(l) = &p.language { path.push_str(&format!("&language={}", urlencoding::encode(l))); }
-        if let Some(n) = p.limit { path.push_str(&format!("&limit={}", n)); }
+        if let Some(k) = &p.kind {
+            path.push_str(&format!("&kind={}", urlencoding::encode(k)));
+        }
+        if let Some(l) = &p.language {
+            path.push_str(&format!("&language={}", urlencoding::encode(l)));
+        }
+        if let Some(n) = p.limit {
+            path.push_str(&format!("&limit={}", n));
+        }
         match crate::code_tools::asd_get(&base, &path).await {
             Ok(body) => body,
             Err(e) => serde_json::json!({ "error": e }).to_string(),
         }
     }
 
-    #[tool(description = "Read a symbol by qualified name. Returns { symbol, effects, ledger } — \
+    #[tool(
+        description = "Read a symbol by qualified name. Returns { symbol, effects, ledger } — \
         the full context needed to reason about a code unit: its signature, doc, declared effects, \
-        and all ledger decisions. `repo` is optional when only one repo is registered.")]
+        and all ledger decisions. `repo` is optional when only one repo is registered."
+    )]
     async fn code_read(&self, params: Parameters<CodeReadParams>) -> String {
         let p = params.0;
         let base = match self.code_base(p.repo.as_deref()).await {
@@ -2876,8 +2885,10 @@ impl CtxOneServer {
         }
     }
 
-    #[tool(description = "List symbols that call the given symbol (inbound call edges). \
-        `repo` is optional when only one repo is registered.")]
+    #[tool(
+        description = "List symbols that call the given symbol (inbound call edges). \
+        `repo` is optional when only one repo is registered."
+    )]
     async fn callers_of(&self, params: Parameters<CallersOfParams>) -> String {
         let p = params.0;
         let base = match self.code_base(p.repo.as_deref()).await {
@@ -2891,8 +2902,10 @@ impl CtxOneServer {
         }
     }
 
-    #[tool(description = "List symbols called by the given symbol (outbound call edges). \
-        `repo` is optional when only one repo is registered.")]
+    #[tool(
+        description = "List symbols called by the given symbol (outbound call edges). \
+        `repo` is optional when only one repo is registered."
+    )]
     async fn callees_of(&self, params: Parameters<CalleesOfParams>) -> String {
         let p = params.0;
         let base = match self.code_base(p.repo.as_deref()).await {
@@ -2924,7 +2937,8 @@ impl CtxOneServer {
                 _ if names.len() == 1 => names[0].clone(),
                 _ => {
                     return Err(if names.is_empty() {
-                        "No ASD repos in pool. Pass --asd-repo name=/path or --asd-url name=URL.".to_string()
+                        "No ASD repos in pool. Pass --asd-repo name=/path or --asd-url name=URL."
+                            .to_string()
                     } else {
                         format!(
                             "Multiple pool repos; specify `repo`. Known: {}",
@@ -2936,7 +2950,10 @@ impl CtxOneServer {
             return pool.base_url(&name).await;
         }
         // Neither static nor pool
-        Err("No ASD repos registered. Pass --asd-url name=http://... or --asd-repo name=/path/db.".to_string())
+        Err(
+            "No ASD repos registered. Pass --asd-url name=http://... or --asd-repo name=/path/db."
+                .to_string(),
+        )
     }
 }
 

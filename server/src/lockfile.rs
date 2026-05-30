@@ -269,7 +269,10 @@ mod tests {
         let guard = acquire(db.to_str().unwrap(), "test").expect("acquire ok");
         assert!(lock_path(db.to_str().unwrap()).exists());
         drop(guard);
-        assert!(!lock_path(db.to_str().unwrap()).exists(), "drop should remove lockfile");
+        assert!(
+            !lock_path(db.to_str().unwrap()).exists(),
+            "drop should remove lockfile"
+        );
     }
 
     #[test]
@@ -277,8 +280,7 @@ mod tests {
         let db = unique_db_path("conflict");
         let _ = fs::remove_file(lock_path(db.to_str().unwrap()));
         let _g1 = acquire(db.to_str().unwrap(), "test").expect("first acquire ok");
-        let err =
-            acquire(db.to_str().unwrap(), "test").expect_err("second acquire should fail");
+        let err = acquire(db.to_str().unwrap(), "test").expect_err("second acquire should fail");
         assert!(err.contains("already locked"), "got: {}", err);
     }
 
@@ -292,7 +294,11 @@ mod tests {
         // unlikely. We use a very high PID that exceeds typical
         // pid_max on macOS and Linux).
         let mut f = File::create(&lock).unwrap();
-        writeln!(f, "{{\"pid\":2147483646,\"started_at_unix\":0,\"hub_version\":\"x\"}}").unwrap();
+        writeln!(
+            f,
+            "{{\"pid\":2147483646,\"started_at_unix\":0,\"hub_version\":\"x\"}}"
+        )
+        .unwrap();
         drop(f);
         let guard = acquire(db.to_str().unwrap(), "test").expect("stale lock should be reclaimed");
         // Sanity — guard now owns the (rewritten) lockfile.

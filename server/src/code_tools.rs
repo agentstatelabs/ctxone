@@ -27,7 +27,11 @@ pub fn resolve_base<'a>(
             .map(|(_, u)| u.as_str())
             .ok_or_else(|| {
                 let names: Vec<&str> = asd_repos.iter().map(|(n, _)| n.as_str()).collect();
-                format!("unknown repo \"{}\". Known repos: {}", name, names.join(", "))
+                format!(
+                    "unknown repo \"{}\". Known repos: {}",
+                    name,
+                    names.join(", ")
+                )
             }),
         _ => {
             if asd_repos.len() == 1 {

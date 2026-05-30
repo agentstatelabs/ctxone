@@ -200,8 +200,7 @@ mod tests {
         conn.execute("INSERT INTO t VALUES (1)", []).unwrap();
         drop(conn);
 
-        let snap =
-            snapshot_now(db.to_str().unwrap(), "20260428T000000Z").expect("snapshot ok");
+        let snap = snapshot_now(db.to_str().unwrap(), "20260428T000000Z").expect("snapshot ok");
         assert!(snap.exists(), "snapshot file should exist");
         assert!(snap.to_string_lossy().ends_with(".bak.20260428T000000Z"));
 

@@ -213,10 +213,7 @@ pub fn parse_datetime(s: &str) -> Result<DateTime<Utc>, ReminderToolError> {
 /// Parse an `HH:MM` time string for Daily/Weekly schedules.
 fn parse_hhmm(s: &str) -> Result<NaiveTime, ReminderToolError> {
     NaiveTime::parse_from_str(s, "%H:%M").map_err(|_| {
-        ReminderToolError::InvalidInput(format!(
-            "invalid time '{}' — use HH:MM (e.g. 09:00)",
-            s
-        ))
+        ReminderToolError::InvalidInput(format!("invalid time '{}' — use HH:MM (e.g. 09:00)", s))
     })
 }
 
@@ -263,13 +260,17 @@ impl ScheduleParam {
                         "interval schedule requires every_seconds".into(),
                     )
                 })?;
-                Ok(Schedule::Interval { every_seconds: secs })
+                Ok(Schedule::Interval {
+                    every_seconds: secs,
+                })
             }
             "daily" => {
                 let t = self.time.ok_or_else(|| {
                     ReminderToolError::InvalidInput("daily schedule requires time (HH:MM)".into())
                 })?;
-                Ok(Schedule::Daily { time: parse_hhmm(&t)? })
+                Ok(Schedule::Daily {
+                    time: parse_hhmm(&t)?,
+                })
             }
             "weekly" => {
                 let t = self.time.ok_or_else(|| {
@@ -286,7 +287,10 @@ impl ScheduleParam {
                         d_str
                     ))
                 })?;
-                Ok(Schedule::Weekly { day, time: parse_hhmm(&t)? })
+                Ok(Schedule::Weekly {
+                    day,
+                    time: parse_hhmm(&t)?,
+                })
             }
             other => Err(ReminderToolError::InvalidInput(format!(
                 "unknown schedule kind '{}' — use once|interval|daily|weekly",
@@ -504,9 +508,8 @@ pub fn list_reminders(
         .priority_at_most
         .as_deref()
         .map(|s| {
-            parse_priority(s).ok_or_else(|| {
-                ReminderToolError::InvalidInput(format!("unknown priority '{}'", s))
-            })
+            parse_priority(s)
+                .ok_or_else(|| ReminderToolError::InvalidInput(format!("unknown priority '{}'", s)))
         })
         .transpose()?;
 
@@ -543,9 +546,7 @@ pub fn record_execution(
     let record = ExecutionRecord {
         started_at: Utc::now(),
         completed_at: None,
-        agent_id: params
-            .agent_id
-            .unwrap_or_else(|| default_agent.to_string()),
+        agent_id: params.agent_id.unwrap_or_else(|| default_agent.to_string()),
         approved_by: None,
         result,
         notes: params.notes,

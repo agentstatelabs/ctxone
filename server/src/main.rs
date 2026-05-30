@@ -202,9 +202,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!(
                     "  -p, --path <PATH>     SQLite database path (default: ./target/ctxone.db)"
                 );
-                eprintln!(
-                    "      --init            Create the sqlite db file if it doesn't exist"
-                );
+                eprintln!("      --init            Create the sqlite db file if it doesn't exist");
                 eprintln!(
                     "                        (without --init, missing files exit 66 — guards against typos)"
                 );
@@ -323,7 +321,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // --init implies "yes, set up the world" — create the
             // parent directory if needed so the default ./target/ path
             // works on a fresh checkout before `cargo build` has run.
-            if init_flag && !path_obj.exists()
+            if init_flag
+                && !path_obj.exists()
                 && let Some(parent) = path_obj.parent()
                 && !parent.as_os_str().is_empty()
                 && !parent.exists()
@@ -510,9 +509,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let sessions_bg = sessions.clone();
                     let path_bg = path.clone();
                     tokio::spawn(async move {
-                        let mut interval = tokio::time::interval(
-                            std::time::Duration::from_secs(30)
-                        );
+                        let mut interval =
+                            tokio::time::interval(std::time::Duration::from_secs(30));
                         interval.tick().await; // skip the immediate first tick
                         loop {
                             interval.tick().await;
@@ -535,9 +533,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 {
                     let path_bg = path.clone();
                     tokio::spawn(async move {
-                        let mut interval = tokio::time::interval(
-                            std::time::Duration::from_secs(backup_interval)
-                        );
+                        let mut interval =
+                            tokio::time::interval(std::time::Duration::from_secs(backup_interval));
                         interval.tick().await; // skip the immediate first tick
                         loop {
                             interval.tick().await;
@@ -569,7 +566,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .unwrap_or(30);
                     if watch_interval > 0 {
                         lockfile::spawn_watchdog(path.clone(), baseline, watch_interval);
-                        info!(interval_secs = watch_interval, "inode-drift watchdog scheduled");
+                        info!(
+                            interval_secs = watch_interval,
+                            "inode-drift watchdog scheduled"
+                        );
                     }
                 }
 
@@ -618,15 +618,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 // Attach pool if any --asd-repo flags were given
                 if !asd_pool_repos.is_empty() {
-                    let pool = std::sync::Arc::new(
-                        ctxone_hub::asd_pool::AsdProcessPool::new(
-                            asd_pool_repos.clone(),
-                            None,
-                        )
-                    );
+                    let pool = std::sync::Arc::new(ctxone_hub::asd_pool::AsdProcessPool::new(
+                        asd_pool_repos.clone(),
+                        None,
+                    ));
                     ctx_server = ctx_server.with_pool(pool);
                 }
-                let service = ctx_server.serve(rmcp::transport::stdio())
+                let service = ctx_server
+                    .serve(rmcp::transport::stdio())
                     .await
                     .map_err(|e| {
                         error!(error = %e, "MCP server failed to start");

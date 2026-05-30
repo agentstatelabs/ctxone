@@ -51,7 +51,6 @@ fmt:
   stage: check
   script:
     - cargo fmt --all -- --check
-  allow_failure: true
 
 clippy:
   stage: check
