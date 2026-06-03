@@ -183,6 +183,11 @@ pub struct SessionStats {
     // Last-observed metadata for display.
     last_model: RwLock<Option<String>>,
     last_provider: RwLock<Option<String>>,
+
+    /// ASD repo selected as the active context for this session. Used by the
+    /// code tools to default the `repo` parameter when the caller omits it.
+    /// Set via the `set_active_repo` MCP tool / HTTP equivalent.
+    active_repo: RwLock<Option<String>>,
 }
 
 impl Default for SessionStats {
@@ -205,6 +210,7 @@ impl SessionStats {
             llm_call_count: AtomicU64::new(0),
             last_model: RwLock::new(None),
             last_provider: RwLock::new(None),
+            active_repo: RwLock::new(None),
         }
     }
 
@@ -232,6 +238,22 @@ impl SessionStats {
             llm_call_count: AtomicU64::new(llm_call_count),
             last_model: RwLock::new(last_model),
             last_provider: RwLock::new(last_provider),
+            active_repo: RwLock::new(None),
+        }
+    }
+
+    /// Currently active ASD repo for this session, if any.
+    pub fn active_repo(&self) -> Option<String> {
+        self.active_repo
+            .read()
+            .ok()
+            .and_then(|g| g.as_ref().cloned())
+    }
+
+    /// Set the active repo for this session. Pass `None` to clear.
+    pub fn set_active_repo(&self, repo: Option<String>) {
+        if let Ok(mut g) = self.active_repo.write() {
+            *g = repo;
         }
     }
 
@@ -1232,6 +1254,12 @@ fn default_check_confidence() -> f64 {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct CodeReposParams {}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SetActiveRepoParams {
+    /// Name of a registered ASD repo. Pass an empty string to clear.
+    pub repo: String,
+}
 
 #[derive(Deserialize, JsonSchema)]
 pub struct CodeSearchParams {
@@ -2918,30 +2946,82 @@ impl CtxOneServer {
             Err(e) => serde_json::json!({ "error": e }).to_string(),
         }
     }
+
+    #[tool(
+        description = "Set the active ASD repo for this session. Subsequent \
+        code tool calls (code_search, code_read, callers_of, callees_of) will \
+        default to this repo when their `repo` parameter is omitted. \
+        Errors if the repo is not registered. Pass an empty string to clear."
+    )]
+    async fn set_active_repo(&self, params: Parameters<SetActiveRepoParams>) -> String {
+        let p = params.0;
+        let trimmed = p.repo.trim();
+        if trimmed.is_empty() {
+            self.session.set_active_repo(None);
+            return serde_json::json!({ "active_repo": null }).to_string();
+        }
+        if !self.is_registered_repo(trimmed).await {
+            let known = self.registered_repo_names().await;
+            return serde_json::json!({
+                "error": format!("unknown repo \"{}\". Known: {}", trimmed, known.join(", "))
+            })
+            .to_string();
+        }
+        self.session.set_active_repo(Some(trimmed.to_string()));
+        serde_json::json!({ "active_repo": trimmed }).to_string()
+    }
+
+    #[tool(
+        description = "Return the active ASD repo for this session (set via \
+        set_active_repo), or null if none is set. Also returns the list of \
+        registered repo names so the agent can pick one if needed."
+    )]
+    async fn get_active_repo(&self) -> String {
+        let active = self.session.active_repo();
+        let known = self.registered_repo_names().await;
+        serde_json::json!({
+            "active_repo": active,
+            "known_repos": known,
+        })
+        .to_string()
+    }
 }
 
 impl CtxOneServer {
     /// Resolve a repo name to a base URL, trying static URLs first then the
     /// process pool.  Returns an owned `String` so callers can `.await` it.
+    ///
+    /// Resolution order (per t-010):
+    /// 1. Explicit `repo` argument.
+    /// 2. Session active repo (set via `set_active_repo`).
+    /// 3. Single registered repo (static-only, or pool-only).
+    /// 4. Error.
     async fn code_base(&self, repo: Option<&str>) -> Result<String, String> {
-        // Static URL wins — no process management needed
-        if let Ok(base) = crate::code_tools::resolve_base(&self.asd_repos, repo) {
+        // Step 1 + 2: prefer explicit, then session.
+        let session_active = self.session.active_repo();
+        let resolved: Option<String> = match repo {
+            Some(n) if !n.is_empty() => Some(n.to_string()),
+            _ => session_active,
+        };
+        let resolved_ref = resolved.as_deref();
+
+        // Static URL wins when matched by name — no process management needed.
+        if let Ok(base) = crate::code_tools::resolve_base(&self.asd_repos, resolved_ref) {
             return Ok(base.to_string());
         }
-        // Fall back to pool
+        // Fall back to pool.
         if let Some(pool) = &self.asd_pool {
-            // Resolve the repo name: explicit > first pool repo (if only one)
             let names = pool.repo_names().await;
-            let name = match repo {
+            let name = match resolved_ref {
                 Some(n) if !n.is_empty() => n.to_string(),
                 _ if names.len() == 1 => names[0].clone(),
                 _ => {
                     return Err(if names.is_empty() {
-                        "No ASD repos in pool. Pass --asd-repo name=/path or --asd-url name=URL."
+                        "No ASD repos in pool. Pass --asd-path name=/path or --asd-url name=URL."
                             .to_string()
                     } else {
                         format!(
-                            "Multiple pool repos; specify `repo`. Known: {}",
+                            "Multiple pool repos; specify `repo` or call set_active_repo. Known: {}",
                             names.join(", ")
                         )
                     });
@@ -2951,9 +3031,31 @@ impl CtxOneServer {
         }
         // Neither static nor pool
         Err(
-            "No ASD repos registered. Pass --asd-url name=http://... or --asd-repo name=/path/db."
+            "No ASD repos registered. Pass --asd-url name=http://... or --asd-path name=/path/db."
                 .to_string(),
         )
+    }
+
+    async fn registered_repo_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.asd_repos.iter().map(|(n, _)| n.clone()).collect();
+        if let Some(pool) = &self.asd_pool {
+            for n in pool.repo_names().await {
+                if !names.contains(&n) {
+                    names.push(n);
+                }
+            }
+        }
+        names
+    }
+
+    async fn is_registered_repo(&self, name: &str) -> bool {
+        if self.asd_repos.iter().any(|(n, _)| n == name) {
+            return true;
+        }
+        if let Some(pool) = &self.asd_pool {
+            return pool.repo_names().await.iter().any(|n| n == name);
+        }
+        false
     }
 }
 
