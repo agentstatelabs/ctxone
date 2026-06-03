@@ -5,6 +5,7 @@
 //! without a separate process.
 
 pub mod asd_pool;
+pub mod asd_registry;
 pub mod backup;
 pub mod code_tools;
 pub mod http;

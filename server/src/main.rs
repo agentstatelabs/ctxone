@@ -299,6 +299,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!(version = env!("CARGO_PKG_VERSION"), "CtxOne Hub starting");
 
+    // Auto-discovery: when the user gave no --asd-url / --asd-path flags,
+    // populate the pool from ~/.config/asd/repos.toml so `ctxone-hub --http`
+    // works without arguments once `asd repo add` has been run. Explicit
+    // flags always win.
+    if asd_repos.is_empty() && asd_pool_repos.is_empty() {
+        if let Some(d) = ctxone_hub::asd_registry::discover() {
+            for r in &d.repos {
+                asd_pool_repos.push((r.name.clone(), r.path.display().to_string()));
+            }
+            if !d.repos.is_empty() {
+                let names: Vec<&str> = d.repos.iter().map(|r| r.name.as_str()).collect();
+                info!(
+                    count = d.repos.len(),
+                    active = d.active.as_deref().unwrap_or("(none)"),
+                    repos = ?names,
+                    "auto-discovered asd repos from ~/.config/asd/repos.toml",
+                );
+            }
+        }
+    }
+
     // Check for DATABASE_URL env var as fallback for postgres
     if database_url.is_empty()
         && let Ok(url) = std::env::var("DATABASE_URL")

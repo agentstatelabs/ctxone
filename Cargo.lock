@@ -577,6 +577,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "toml",
  "tower",
  "tower-http",
  "tower_governor",
