@@ -17,14 +17,17 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
-/// How long a process may be idle before the eviction task kills it.
-const IDLE_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes
+/// Default idle timeout if the caller passes `None`.
+const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(600); // 10 minutes
 
 /// How often the eviction task wakes up to reap idle processes.
 const EVICTION_INTERVAL: Duration = Duration::from_secs(60);
 
-/// How long to wait for `asd-serve` to print its listening port.
+/// How long to wait for `asd-serve` to print its listening port and pass /health.
 const SPAWN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Interval between /health polls after capturing the port.
+const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 // ---------------------------------------------------------------------------
 // Internals
@@ -43,6 +46,8 @@ struct PoolInner {
     entries: HashMap<String, (PathBuf, Option<AsdEntry>)>,
     /// Path to the `asd-serve` binary.
     binary: String,
+    /// Idle eviction threshold.
+    idle_timeout: Duration,
 }
 
 // ---------------------------------------------------------------------------
@@ -60,7 +65,13 @@ impl AsdProcessPool {
     ///
     /// `repos` — list of `(name, db_path)` pairs from config or registry.
     /// `binary` — path to `asd-serve`; `None` → look up on `$PATH`.
-    pub fn new(repos: Vec<(String, String)>, binary: Option<String>) -> Self {
+    /// `idle_timeout` — kill a process after it has been idle this long;
+    /// `None` → [`DEFAULT_IDLE_TIMEOUT`].
+    pub fn new(
+        repos: Vec<(String, String)>,
+        binary: Option<String>,
+        idle_timeout: Option<Duration>,
+    ) -> Self {
         let entries = repos
             .into_iter()
             .map(|(name, path)| (name, (PathBuf::from(path), None::<AsdEntry>)))
@@ -70,6 +81,7 @@ impl AsdProcessPool {
             inner: Arc::new(Mutex::new(PoolInner {
                 entries,
                 binary: binary.unwrap_or_else(|| "asd-serve".to_string()),
+                idle_timeout: idle_timeout.unwrap_or(DEFAULT_IDLE_TIMEOUT),
             })),
         };
 
@@ -108,7 +120,7 @@ impl AsdProcessPool {
             (db.clone(), guard.binary.clone())
         };
 
-        let (child, base_url) = spawn_asd_serve(&binary, &db_path).await?;
+        let (child, base_url) = spawn_asd_serve(&binary, name, &db_path).await?;
 
         {
             let mut guard = self.inner.lock().await;
@@ -124,12 +136,13 @@ impl AsdProcessPool {
         Ok(base_url)
     }
 
-    /// Kill any process that has been idle longer than [`IDLE_TIMEOUT`].
+    /// Kill any process that has been idle longer than the configured timeout.
     async fn evict_idle(&self) {
         let mut guard = self.inner.lock().await;
+        let timeout = guard.idle_timeout;
         for (_, (_, slot)) in guard.entries.iter_mut() {
             if let Some(entry) = slot {
-                if entry.last_used.elapsed() > IDLE_TIMEOUT {
+                if entry.last_used.elapsed() > timeout {
                     *slot = None; // Drop kills the child
                 }
             }
@@ -171,15 +184,18 @@ impl AsdProcessPool {
 // ---------------------------------------------------------------------------
 
 /// Spawn `asd-serve --db <db_path> --addr 127.0.0.1:0`, read the bound port
-/// from its stderr, and return `(Child, base_url)`.
+/// from its stderr, poll `/health` until it returns 200, and return
+/// `(Child, base_url)`.
 async fn spawn_asd_serve(
     binary: &str,
+    name: &str,
     db_path: &std::path::Path,
 ) -> Result<(Child, String), String> {
     let mut child = Command::new(binary)
         .arg("--db")
         .arg(db_path)
         .env("ASD_SERVE_ADDR", "127.0.0.1:0")
+        .env("ASD_NAME", name)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -193,13 +209,31 @@ async fn spawn_asd_serve(
     let mut lines = BufReader::new(stderr).lines();
 
     let base_url = tokio::time::timeout(SPAWN_TIMEOUT, async {
+        // Phase 1: capture port from stderr.
+        let mut url = None;
         while let Ok(Some(line)) = lines.next_line().await {
-            // Expected: "listening on 127.0.0.1:<port>"
             if let Some(addr) = extract_listening_addr(&line) {
-                return Ok(format!("http://{addr}"));
+                url = Some(format!("http://{addr}"));
+                break;
             }
         }
-        Err("asd-serve exited before printing its listening address".to_string())
+        let url = url.ok_or_else(|| {
+            "asd-serve exited before printing its listening address".to_string()
+        })?;
+
+        // Phase 2: poll /health until it 200s. The "listening on" log can be
+        // emitted between bind() and the actual accept loop being ready —
+        // hitting an axum/hyper server in that gap reliably gives ECONNRESET
+        // for the first request. Cheaper to poll here once than to retry every
+        // proxied call upstream.
+        let health = format!("{url}/health");
+        let client = reqwest::Client::new();
+        loop {
+            match client.get(&health).send().await {
+                Ok(r) if r.status().is_success() => return Ok::<_, String>(url),
+                _ => tokio::time::sleep(HEALTH_POLL_INTERVAL).await,
+            }
+        }
     })
     .await
     .map_err(|_| {
@@ -208,6 +242,8 @@ async fn spawn_asd_serve(
             SPAWN_TIMEOUT.as_secs()
         )
     })??;
+
+    tracing::info!(repo = name, url = %base_url, "asd-serve spawned");
 
     Ok((child, base_url))
 }

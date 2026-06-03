@@ -621,6 +621,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let pool = std::sync::Arc::new(ctxone_hub::asd_pool::AsdProcessPool::new(
                         asd_pool_repos.clone(),
                         None,
+                        None,
                     ));
                     ctx_server = ctx_server.with_pool(pool);
                 }

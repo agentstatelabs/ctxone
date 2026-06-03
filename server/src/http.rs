@@ -211,6 +211,7 @@ fn router_with_config_inner(
         Some(Arc::new(AsdProcessPool::new(
             config.asd_pool_repos.clone(),
             config.asd_serve_binary.clone(),
+            None,
         )))
     };
 
