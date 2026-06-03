@@ -3,7 +3,7 @@
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
 	import { getBranches, createBranch } from '$lib/api';
-	import { getAsdHealth, listAsdRepos } from '$lib/codeApi';
+	import { getAsdHealth, listAsdRepos, prefetchAsdRepo } from '$lib/codeApi';
 	import type { AsdHealth, AsdRepoInfo } from '$lib/codeTypes';
 	import { selectedRepo } from '$lib/repoStore';
 	import { branchStore } from '$lib/branchStore.svelte';
@@ -116,13 +116,20 @@
 	});
 
 	// Persist selection and reload health whenever the repo changes.
+	// Also fire a prefetch so pool-managed repos warm before /code is hit.
 	$effect(() => {
 		const repo = $selectedRepo;
 		if (!repo) return;
 		localStorage.setItem('ctxone_asd_repo', repo);
 		asdHealth = null;
+		prefetchAsdRepo(repo)
+			.then(() => listAsdRepos())
+			.then((repos) => (asdRepos = repos));
 		getAsdHealth(repo).then((h) => (asdHealth = h));
 	});
+
+	// Repo currently bound to the picker, with its live status (running/idle).
+	let selectedRepoInfo = $derived(asdRepos.find((r) => r.name === $selectedRepo));
 
 	async function handleCreateBranch() {
 		const name = newBranchName.trim();
@@ -172,12 +179,18 @@
 					onchange={(e) => ($selectedRepo = (e.currentTarget as HTMLSelectElement).value)}
 				>
 					{#each asdRepos as r}
-						<option value={r.name}>{r.name}</option>
+						<option value={r.name}>
+							{r.status === 'idle' ? '○' : '●'} {r.name}
+						</option>
 					{/each}
 				</select>
+				<span
+					class="asd-dot"
+					class:idle={selectedRepoInfo?.status === 'idle'}
+					title={selectedRepoInfo?.status === 'idle' ? 'idle (not yet spawned)' : 'running'}
+				></span>
 				{#if asdHealth}
 					<span class="repo-health">
-						<span class="asd-dot"></span>
 						{asdHealth.symbol_count.toLocaleString()} symbols
 					</span>
 				{/if}
@@ -344,6 +357,10 @@
 		border-radius: 50%;
 		background: var(--accent);
 		flex-shrink: 0;
+	}
+	.asd-dot.idle {
+		background: transparent;
+		border: 1px solid var(--border);
 	}
 
 	.cmdk-hint {

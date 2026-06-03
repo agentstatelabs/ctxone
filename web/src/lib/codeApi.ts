@@ -56,6 +56,17 @@ export async function listAsdRepos(): Promise<AsdRepoInfo[]> {
 	}
 }
 
+/** Warm a pool-managed repo by spawning its asd-serve child. No-op (200) for
+ *  static URLs and for already-running pool entries. */
+export async function prefetchAsdRepo(repo: string): Promise<void> {
+	if (DIRECT_ASD) return;
+	try {
+		await fetch(`/api/code/${encodeURIComponent(repo)}/prefetch`, { method: 'POST' });
+	} catch {
+		// best-effort warm — surfacing a fetch error here would be noisier than useful
+	}
+}
+
 export async function getAsdHealth(repo: string): Promise<AsdHealth | null> {
 	try {
 		return await getJson<AsdHealth>(repo, '/health');

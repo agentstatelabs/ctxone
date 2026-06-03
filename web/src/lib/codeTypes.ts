@@ -140,4 +140,8 @@ export interface AsdHealth {
 export interface AsdRepoInfo {
 	name: string;
 	url: string;
+	/** "static" (pre-running URL) or "pool" (hub spawns asd-serve on demand). */
+	source?: 'static' | 'pool';
+	/** "running" (process live or static URL) or "idle" (pool, not yet spawned). */
+	status?: 'running' | 'idle';
 }

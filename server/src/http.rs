@@ -319,6 +319,7 @@ fn router_with_config_inner(
     if !state.asd_repos.is_empty() || state.asd_pool.is_some() {
         router = router
             .route("/api/code", get(list_asd_repos))
+            .route("/api/code/{repo}/prefetch", post(prefetch_asd_repo))
             .route("/api/code/{repo}/{*path}", get(proxy_asd).post(proxy_asd));
     }
 
@@ -344,9 +345,16 @@ fn router_with_config_inner(
 struct AsdRepoInfo {
     name: String,
     url: String,
+    /// "static" for pre-running URLs registered via --asd-url; "pool" for
+    /// pool-managed children registered via --asd-path.
+    source: &'static str,
+    /// "running" if a process exists (or the static URL is always assumed
+    /// running); "idle" if pool-managed but not yet spawned.
+    status: &'static str,
 }
 
-/// GET /api/code — list all configured ASD repos (static + pool-managed).
+/// GET /api/code — list all configured ASD repos (static + pool-managed),
+/// each annotated with its `source` and live `status`.
 async fn list_asd_repos(State(s): State<HubState>) -> Json<Vec<AsdRepoInfo>> {
     let mut out: Vec<AsdRepoInfo> = s
         .asd_repos
@@ -354,28 +362,50 @@ async fn list_asd_repos(State(s): State<HubState>) -> Json<Vec<AsdRepoInfo>> {
         .map(|(name, url)| AsdRepoInfo {
             name: name.clone(),
             url: url.clone(),
+            source: "static",
+            status: "running",
         })
         .collect();
     // Append pool repos (without resolving their port — they may not be running yet).
     if let Some(pool) = &s.asd_pool {
-        // list repos that aren't already covered by a static URL
         let static_names: std::collections::HashSet<&str> =
             s.asd_repos.iter().map(|(n, _)| n.as_str()).collect();
-        let pool_names = {
-            // We need an async block but handlers can't be async closures easily —
-            // just spawn a short block.
-            pool.repo_names().await
-        };
-        for name in pool_names {
-            if !static_names.contains(name.as_str()) {
-                out.push(AsdRepoInfo {
-                    name: name.clone(),
-                    url: format!("pool:{name}"),
-                });
+        for name in pool.repo_names().await {
+            if static_names.contains(name.as_str()) {
+                continue;
             }
+            let status = if pool.is_running(&name).await {
+                "running"
+            } else {
+                "idle"
+            };
+            out.push(AsdRepoInfo {
+                name: name.clone(),
+                url: format!("pool:{name}"),
+                source: "pool",
+                status,
+            });
         }
     }
     Json(out)
+}
+
+/// POST /api/code/{repo}/prefetch — warm a pool-managed repo by spawning its
+/// `asd-serve` child (if not already running). Returns 200 with the base URL
+/// once /health passes. Idempotent.
+async fn prefetch_asd_repo(
+    State(s): State<HubState>,
+    Path(repo): Path<String>,
+) -> axum::response::Response {
+    match resolve_asd_base(&s, &repo).await {
+        Ok(base) => (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            format!(r#"{{"name":"{}","url":"{}","status":"running"}}"#, repo, base),
+        )
+            .into_response(),
+        Err(msg) => (StatusCode::NOT_FOUND, msg).into_response(),
+    }
 }
 
 /// Resolve the base URL for a repo, trying static URLs first then the pool.
