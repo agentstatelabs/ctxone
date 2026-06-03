@@ -13,6 +13,7 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
@@ -182,55 +183,62 @@ impl AsdProcessPool {
 // Spawn helper
 // ---------------------------------------------------------------------------
 
-/// Reserve a free port by binding to `127.0.0.1:0`, reading the resolved
-/// port, then closing the listener immediately. The kernel may reuse the
-/// same port for the next bind from our child within milliseconds — racy
-/// against unrelated processes but acceptable for a local dev pool.
-fn reserve_local_port() -> Result<u16, String> {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")
-        .map_err(|e| format!("could not reserve a local port: {e}"))?;
-    listener
-        .local_addr()
-        .map(|a| a.port())
-        .map_err(|e| format!("could not read reserved port: {e}"))
-}
-
 /// Spawn `asd-serve` for a registered repo and return `(Child, base_url)`.
 ///
-/// asd-serve takes its db via `ASD_DB`, its bind address via
-/// `ASD_SERVE_ADDR`, and logs its bind string literally — so it can't tell
-/// us back which port the OS chose when we pass `:0`. We reserve a free
-/// port locally (bind+drop), pass it explicitly, and then poll /health
-/// until the child accepts. The reserve-and-pass race is acceptable for a
-/// dev pool; a stricter design would patch asd-serve to log
-/// `listener.local_addr()` after bind.
+/// We ask the kernel to pick the port (`ASD_SERVE_ADDR=127.0.0.1:0`) and
+/// read the resolved address back from asd-serve's stderr "listening on
+/// host:port" log line — asd-serve sets the format from
+/// `listener.local_addr()` after bind, so the port is real even when we
+/// passed `:0`. After we have the URL, we poll `/api/v1/health` until the
+/// child accepts (asd-serve mounts everything under /api/v1, so bare
+/// `/health` 404s through the SPA fallback).
 async fn spawn_asd_serve(
     binary: &str,
     name: &str,
     db_path: &std::path::Path,
 ) -> Result<(Child, String), String> {
-    let port = reserve_local_port()?;
-    let addr = format!("127.0.0.1:{port}");
-    let base_url = format!("http://{addr}");
-
-    let child = Command::new(binary)
+    let mut child = Command::new(binary)
         .env("ASD_DB", db_path)
-        .env("ASD_SERVE_ADDR", &addr)
+        .env("ASD_SERVE_ADDR", "127.0.0.1:0")
         .env("ASD_NAME", name)
-        .stdout(Stdio::null())
+        // tracing-subscriber emits ANSI escapes by default; NO_COLOR=1
+        // disables them so our "listening on host:port" parse sees a clean
+        // address. (We also strip-tolerantly in extract_listening_addr.)
+        .env("NO_COLOR", "1")
+        // asd-serve initializes tracing-subscriber with the default fmt
+        // writer, which is stdout — not stderr. Pipe both so we don't lose
+        // diagnostic output if tracing ever moves; read from stdout for the
+        // "listening on …" line.
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| format!("failed to spawn asd-serve: {e}"))?;
 
-    // Poll /api/v1/health until the child accepts. asd-serve mounts every
-    // route under /api/v1, including health — using a bare /health hits the
-    // SPA fallback and 404s. Hammer until 200 or the timeout fires.
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "asd-serve stdout not captured".to_string())?;
+    let mut lines = BufReader::new(stdout).lines();
+
     let base_url = tokio::time::timeout(SPAWN_TIMEOUT, async {
-        let health = format!("{base_url}/api/v1/health");
+        // Phase 1: capture the resolved bind address.
+        let mut url = None;
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Some(addr) = extract_listening_addr(&line) {
+                url = Some(format!("http://{addr}"));
+                break;
+            }
+        }
+        let url = url.ok_or_else(|| {
+            "asd-serve exited before printing its listening address".to_string()
+        })?;
+
+        // Phase 2: gate on /api/v1/health so callers never see a not-yet-ready URL.
+        let health = format!("{url}/api/v1/health");
         let client = reqwest::Client::new();
         loop {
             match client.get(&health).send().await {
-                Ok(r) if r.status().is_success() => return Ok::<_, String>(base_url),
+                Ok(r) if r.status().is_success() => return Ok::<_, String>(url),
                 _ => tokio::time::sleep(HEALTH_POLL_INTERVAL).await,
             }
         }
@@ -246,4 +254,45 @@ async fn spawn_asd_serve(
     tracing::info!(repo = name, url = %base_url, "asd-serve spawned");
 
     Ok((child, base_url))
+}
+
+/// Extract `host:port` from a tracing-formatted "listening on host:port" line.
+/// asd-serve logs this after `listener.local_addr()`, so the port reflects
+/// what the OS actually assigned (even when we passed `:0`).
+fn extract_listening_addr(line: &str) -> Option<&str> {
+    let idx = line.find("listening on ")?;
+    let rest = &line[idx + "listening on ".len()..];
+    let addr = rest.split_whitespace().next()?;
+    // Reject the bind template form: an addr ending in `:0` means we caught
+    // an old asd-serve that hadn't been rebuilt with the fix. Force a retry
+    // by treating it as no-match — the timeout will fire with a clear error.
+    if !addr.contains(':') || addr.ends_with(":0") {
+        return None;
+    }
+    Some(addr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_real_resolved_port() {
+        let line = "  INFO asd_serve: listening on 127.0.0.1:60647";
+        assert_eq!(extract_listening_addr(line), Some("127.0.0.1:60647"));
+    }
+
+    #[test]
+    fn rejects_the_zero_port_template() {
+        // Old asd-serve logged this when ASD_SERVE_ADDR=host:0 — meaningless
+        // to the pool; treat as no-match so the spawn times out loudly.
+        let line = "  INFO asd_serve: listening on 127.0.0.1:0";
+        assert_eq!(extract_listening_addr(line), None);
+    }
+
+    #[test]
+    fn ignores_non_listening_lines() {
+        let line = "  INFO asd_serve: starting asd-serve db_path=\"/tmp/x\"";
+        assert_eq!(extract_listening_addr(line), None);
+    }
 }
