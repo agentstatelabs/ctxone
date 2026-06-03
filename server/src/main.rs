@@ -84,6 +84,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Hub spawns asd-serve on demand, kills after idle timeout.
     // Example: --asd-repo myproject=/path/to/myproject/.asd-state.db
     let mut asd_pool_repos: Vec<(String, String)> = Vec::new();
+    // Idle timeout before the pool kills an asd-serve child (seconds).
+    // None → AsdProcessPool default (600s).
+    let mut asd_idle_timeout_secs: Option<u64> = None;
     // MCP-mode agent ID. The tool that spawns ctxone-hub (Claude
     // Code, Cursor, Codex, etc.) passes --agent-id <its-name> so
     // every commit made via this MCP connection is attributed to
@@ -161,16 +164,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
-            "--asd-repo" => {
+            // `--asd-path` is the documented name (matches the `path` field in
+            // ~/.config/asd/repos.toml). `--asd-repo` is the original spelling,
+            // kept as an alias.
+            "--asd-path" | "--asd-repo" => {
+                let flag = args[i].clone();
                 i += 1;
                 if i < args.len() {
                     let val = args[i].clone();
-                    // Required format: "name=/path/to/.asd-state.db"
                     if let Some((name, path)) = val.split_once('=') {
                         asd_pool_repos.push((name.to_string(), path.to_string()));
                     } else {
-                        eprintln!("ctxone-hub: --asd-repo requires name=path format, got: {val}");
+                        eprintln!("ctxone-hub: {flag} requires name=path format, got: {val}");
                         std::process::exit(64);
+                    }
+                }
+            }
+            "--asd-idle-timeout" => {
+                i += 1;
+                if i < args.len() {
+                    match args[i].parse::<u64>() {
+                        Ok(secs) => asd_idle_timeout_secs = Some(secs),
+                        Err(_) => {
+                            eprintln!(
+                                "ctxone-hub: --asd-idle-timeout requires a non-negative integer (seconds), got: {}",
+                                args[i]
+                            );
+                            std::process::exit(64);
+                        }
                     }
                 }
             }
@@ -227,13 +248,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "                            Bare URL (no name=) defaults to name \"asd\""
                 );
                 eprintln!(
-                    "      --asd-repo <name=PATH> Register an ASD repo db for the process pool; repeatable."
+                    "      --asd-path <name=PATH> Register an ASD repo db for the process pool; repeatable."
                 );
                 eprintln!(
-                    "                            Hub spawns asd-serve on demand, kills after 5 min idle."
+                    "                            Hub spawns asd-serve on demand, kills after idle timeout."
                 );
                 eprintln!(
-                    "                            Example: --asd-repo myproject=/path/.asd-state.db"
+                    "                            Example: --asd-path myproject=/path/.asd-state.db"
+                );
+                eprintln!(
+                    "                            (--asd-repo is accepted as a legacy alias.)"
+                );
+                eprintln!(
+                    "      --asd-idle-timeout <SECS>  Pool idle timeout before killing an asd-serve"
+                );
+                eprintln!(
+                    "                            child (default 600)."
                 );
                 eprintln!("  -h, --help            Print help");
                 eprintln!("  -V, --version         Print version and exit");
@@ -483,6 +513,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             asd_repos: asd_repos.clone(),
             asd_pool_repos: asd_pool_repos.clone(),
             asd_serve_binary: None, // use PATH
+            asd_idle_timeout_secs,
         };
 
         // Capture db_path for background flush tasks.
@@ -621,7 +652,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let pool = std::sync::Arc::new(ctxone_hub::asd_pool::AsdProcessPool::new(
                         asd_pool_repos.clone(),
                         None,
-                        None,
+                        asd_idle_timeout_secs.map(std::time::Duration::from_secs),
                     ));
                     ctx_server = ctx_server.with_pool(pool);
                 }

@@ -53,6 +53,9 @@ pub struct HubConfig {
     pub asd_pool_repos: Vec<(String, String)>,
     /// Override path to the `asd-serve` binary. `None` → use PATH.
     pub asd_serve_binary: Option<String>,
+    /// Idle timeout (seconds) before the pool kills a spawned asd-serve child.
+    /// `None` → AsdProcessPool default.
+    pub asd_idle_timeout_secs: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -211,7 +214,7 @@ fn router_with_config_inner(
         Some(Arc::new(AsdProcessPool::new(
             config.asd_pool_repos.clone(),
             config.asd_serve_binary.clone(),
-            None,
+            config.asd_idle_timeout_secs.map(std::time::Duration::from_secs),
         )))
     };
 
