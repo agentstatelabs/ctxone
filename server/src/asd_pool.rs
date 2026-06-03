@@ -13,7 +13,6 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
@@ -183,54 +182,55 @@ impl AsdProcessPool {
 // Spawn helper
 // ---------------------------------------------------------------------------
 
-/// Spawn `asd-serve --db <db_path> --addr 127.0.0.1:0`, read the bound port
-/// from its stderr, poll `/health` until it returns 200, and return
-/// `(Child, base_url)`.
+/// Reserve a free port by binding to `127.0.0.1:0`, reading the resolved
+/// port, then closing the listener immediately. The kernel may reuse the
+/// same port for the next bind from our child within milliseconds — racy
+/// against unrelated processes but acceptable for a local dev pool.
+fn reserve_local_port() -> Result<u16, String> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| format!("could not reserve a local port: {e}"))?;
+    listener
+        .local_addr()
+        .map(|a| a.port())
+        .map_err(|e| format!("could not read reserved port: {e}"))
+}
+
+/// Spawn `asd-serve` for a registered repo and return `(Child, base_url)`.
+///
+/// asd-serve takes its db via `ASD_DB`, its bind address via
+/// `ASD_SERVE_ADDR`, and logs its bind string literally — so it can't tell
+/// us back which port the OS chose when we pass `:0`. We reserve a free
+/// port locally (bind+drop), pass it explicitly, and then poll /health
+/// until the child accepts. The reserve-and-pass race is acceptable for a
+/// dev pool; a stricter design would patch asd-serve to log
+/// `listener.local_addr()` after bind.
 async fn spawn_asd_serve(
     binary: &str,
     name: &str,
     db_path: &std::path::Path,
 ) -> Result<(Child, String), String> {
-    let mut child = Command::new(binary)
-        .arg("--db")
-        .arg(db_path)
-        .env("ASD_SERVE_ADDR", "127.0.0.1:0")
+    let port = reserve_local_port()?;
+    let addr = format!("127.0.0.1:{port}");
+    let base_url = format!("http://{addr}");
+
+    let child = Command::new(binary)
+        .env("ASD_DB", db_path)
+        .env("ASD_SERVE_ADDR", &addr)
         .env("ASD_NAME", name)
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
         .map_err(|e| format!("failed to spawn asd-serve: {e}"))?;
 
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "asd-serve stderr not captured".to_string())?;
-
-    let mut lines = BufReader::new(stderr).lines();
-
+    // Poll /api/v1/health until the child accepts. asd-serve mounts every
+    // route under /api/v1, including health — using a bare /health hits the
+    // SPA fallback and 404s. Hammer until 200 or the timeout fires.
     let base_url = tokio::time::timeout(SPAWN_TIMEOUT, async {
-        // Phase 1: capture port from stderr.
-        let mut url = None;
-        while let Ok(Some(line)) = lines.next_line().await {
-            if let Some(addr) = extract_listening_addr(&line) {
-                url = Some(format!("http://{addr}"));
-                break;
-            }
-        }
-        let url = url.ok_or_else(|| {
-            "asd-serve exited before printing its listening address".to_string()
-        })?;
-
-        // Phase 2: poll /health until it 200s. The "listening on" log can be
-        // emitted between bind() and the actual accept loop being ready —
-        // hitting an axum/hyper server in that gap reliably gives ECONNRESET
-        // for the first request. Cheaper to poll here once than to retry every
-        // proxied call upstream.
-        let health = format!("{url}/health");
+        let health = format!("{base_url}/api/v1/health");
         let client = reqwest::Client::new();
         loop {
             match client.get(&health).send().await {
-                Ok(r) if r.status().is_success() => return Ok::<_, String>(url),
+                Ok(r) if r.status().is_success() => return Ok::<_, String>(base_url),
                 _ => tokio::time::sleep(HEALTH_POLL_INTERVAL).await,
             }
         }
@@ -246,13 +246,4 @@ async fn spawn_asd_serve(
     tracing::info!(repo = name, url = %base_url, "asd-serve spawned");
 
     Ok((child, base_url))
-}
-
-/// Extract the `host:port` portion from a "listening on host:port" log line.
-fn extract_listening_addr(line: &str) -> Option<&str> {
-    let idx = line.find("listening on ")?;
-    let rest = &line[idx + "listening on ".len()..];
-    let addr = rest.split_whitespace().next()?;
-    // Require a colon — distinguishes "127.0.0.1:54321" from random words
-    if addr.contains(':') { Some(addr) } else { None }
 }

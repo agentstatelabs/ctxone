@@ -3,6 +3,8 @@
 /web/.svelte-kit
 /web/build
 *.db
+*.db-shm
+*.db-wal
 .env
 .DS_Store
 
