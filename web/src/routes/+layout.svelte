@@ -14,48 +14,68 @@
 
 	let { children }: { children: Snippet } = $props();
 
-	// Sidebar groups — order is intent-driven, not alphabetical:
-	// "Now" = current work, "Memory" = stored knowledge,
-	// "Changes" = audit, "Governance" = control surfaces.
-	const NAV_GROUPS: { label: string; items: { href: string; label: string }[] }[] = [
+	// Sidebar layout — top-level by *which backend serves it*:
+	// CtxOne (memory + plans + branches; this hub's own data) vs.
+	// ASD (code-intelligence proxied to per-repo asd-serve children).
+	// The ASD section gets the repo picker; the CtxOne section gets the
+	// branch picker. Inside each section, groups stay intent-driven.
+	type NavItem = { href: string; label: string };
+	type NavGroup = { label: string; items: NavItem[] };
+	type NavSection = { label: string; groups: NavGroup[] };
+
+	const NAV_SECTIONS: NavSection[] = [
 		{
-			label: 'Now',
-			items: [
-				{ href: '/', label: 'Dashboard' },
-				{ href: '/plans', label: 'Plans' },
-				{ href: '/sessions', label: 'Sessions' }
+			label: 'CtxOne',
+			groups: [
+				{
+					label: 'Now',
+					items: [
+						{ href: '/', label: 'Dashboard' },
+						{ href: '/plans', label: 'Plans' },
+						{ href: '/sessions', label: 'Sessions' }
+					]
+				},
+				{
+					label: 'Memory',
+					items: [
+						{ href: '/pinned', label: 'Pinned' },
+						{ href: '/browse', label: 'Browse' },
+						{ href: '/search', label: 'Search' }
+					]
+				},
+				{
+					label: 'Changes',
+					items: [
+						{ href: '/history', label: 'History' },
+						{ href: '/diff', label: 'Diff' }
+					]
+				},
+				{
+					label: 'Governance',
+					items: [
+						{ href: '/branches', label: 'Branches' },
+						{ href: '/taint', label: 'Taint' }
+					]
+				}
 			]
 		},
 		{
-			label: 'Memory',
-			items: [
-				{ href: '/pinned', label: 'Pinned' },
-				{ href: '/browse', label: 'Browse' },
-				{ href: '/search', label: 'Search' }
-			]
-		},
-		{
-			label: 'Changes',
-			items: [
-				{ href: '/history', label: 'History' },
-				{ href: '/diff', label: 'Diff' }
-			]
-		},
-		{
-			label: 'Governance',
-			items: [
-				{ href: '/branches', label: 'Branches' },
-				{ href: '/taint', label: 'Taint' }
-			]
-		},
-		{
-			label: 'Code',
-			items: [
-				{ href: '/code', label: 'Overview' },
-				{ href: '/code/search', label: 'Search' },
-				{ href: '/code/symbols', label: 'Symbols' },
-				{ href: '/code/graph', label: 'Graph' },
-				{ href: '/code/files', label: 'Files' }
+			label: 'ASD',
+			groups: [
+				{
+					label: 'Code',
+					items: [
+						{ href: '/code', label: 'Overview' },
+						{ href: '/code/search', label: 'Search' },
+						{ href: '/code/symbols', label: 'Symbols' },
+						{ href: '/code/graph', label: 'Graph' },
+						{ href: '/code/files', label: 'Files' }
+					]
+				},
+				{
+					label: 'Reasoning',
+					items: [{ href: '/code/thinking', label: 'Thinking' }]
+				}
 			]
 		}
 	];
@@ -170,83 +190,100 @@
 			</button>
 		</div>
 
-		{#if asdRepos.length > 0}
-			<div class="repo-selector">
-				<label for="repo-select" class="repo-label">Repo</label>
-				<select
-					id="repo-select"
-					value={$selectedRepo}
-					onchange={(e) => ($selectedRepo = (e.currentTarget as HTMLSelectElement).value)}
-				>
-					{#each asdRepos as r}
-						<option value={r.name}>
-							{r.status === 'idle' ? '○' : '●'} {r.name}
-						</option>
-					{/each}
-				</select>
-				<span
-					class="asd-dot"
-					class:idle={selectedRepoInfo?.status === 'idle'}
-					title={selectedRepoInfo?.status === 'idle' ? 'idle (not yet spawned)' : 'running'}
-				></span>
-				{#if asdHealth}
-					<span class="repo-health">
-						{asdHealth.symbol_count.toLocaleString()} symbols
-					</span>
-				{/if}
-			</div>
-		{/if}
+		<nav class="nav-sections">
+			{#each NAV_SECTIONS as section}
+				<div class="nav-section nav-section-{section.label.toLowerCase()}">
+					<h2 class="nav-section-label">{section.label}</h2>
 
-		<div class="branch-switcher">
-			<label for="branch-select">Branch</label>
-			<select id="branch-select" bind:value={branchStore.current}>
-				{#each branches as name}
-					<option value={name}>{name}</option>
-				{/each}
-			</select>
-			<button
-				type="button"
-				class="new-branch-btn"
-				onclick={() => (showCreate = !showCreate)}
-				title="Create a new branch"
-			>
-				{showCreate ? '− Cancel' : '+ New branch'}
-			</button>
-			{#if showCreate}
-				<form
-					class="new-branch-form"
-					onsubmit={(e) => {
-						e.preventDefault();
-						handleCreateBranch();
-					}}
-				>
-					<input type="text" bind:value={newBranchName} placeholder="new branch name" />
-					<button type="submit">Create</button>
-				</form>
-				{#if branchError}
-					<p class="branch-error">{branchError}</p>
-				{/if}
-			{/if}
-		</div>
-
-		<nav class="nav-groups">
-			{#each NAV_GROUPS as group}
-				<div class="nav-group">
-					<span class="nav-group-label">{group.label}</span>
-					<ul>
-						{#each group.items as item}
-							{@const active = isActive(item.href, $page.url.pathname)}
-							<li>
-								<a
-									href={item.href}
-									class:active
-									aria-current={active ? 'page' : undefined}
+					{#if section.label === 'CtxOne'}
+						<div class="section-picker branch-switcher">
+							<label for="branch-select">Branch</label>
+							<select id="branch-select" bind:value={branchStore.current}>
+								{#each branches as name}
+									<option value={name}>{name}</option>
+								{/each}
+							</select>
+							<button
+								type="button"
+								class="new-branch-btn"
+								onclick={() => (showCreate = !showCreate)}
+								title="Create a new branch"
+							>
+								{showCreate ? '− Cancel' : '+ New branch'}
+							</button>
+							{#if showCreate}
+								<form
+									class="new-branch-form"
+									onsubmit={(e) => {
+										e.preventDefault();
+										handleCreateBranch();
+									}}
 								>
-									{item.label}
-								</a>
-							</li>
+									<input
+										type="text"
+										bind:value={newBranchName}
+										placeholder="new branch name"
+									/>
+									<button type="submit">Create</button>
+								</form>
+								{#if branchError}
+									<p class="branch-error">{branchError}</p>
+								{/if}
+							{/if}
+						</div>
+					{/if}
+
+					{#if section.label === 'ASD' && asdRepos.length > 0}
+						<div class="section-picker repo-selector">
+							<label for="repo-select" class="repo-label">Repo</label>
+							<select
+								id="repo-select"
+								value={$selectedRepo}
+								onchange={(e) =>
+									($selectedRepo = (e.currentTarget as HTMLSelectElement).value)}
+							>
+								{#each asdRepos as r}
+									<option value={r.name}>
+										{r.status === 'idle' ? '○' : '●'} {r.name}
+									</option>
+								{/each}
+							</select>
+							<span
+								class="asd-dot"
+								class:idle={selectedRepoInfo?.status === 'idle'}
+								title={selectedRepoInfo?.status === 'idle'
+									? 'idle (not yet spawned)'
+									: 'running'}
+							></span>
+							{#if asdHealth}
+								<span class="repo-health">
+									{asdHealth.symbol_count.toLocaleString()} symbols
+								</span>
+							{/if}
+						</div>
+					{/if}
+
+					<div class="nav-groups">
+						{#each section.groups as group}
+							<div class="nav-group">
+								<span class="nav-group-label">{group.label}</span>
+								<ul>
+									{#each group.items as item}
+										{@const active = isActive(item.href, $page.url.pathname)}
+										<li>
+											<a
+												href={item.href}
+												class:active
+												aria-current={active ? 'page' : undefined}
+											>
+												{item.label}
+											</a>
+										</li>
+									{/each}
+								</ul>
+							</div>
 						{/each}
-					</ul>
+					</div>
 				</div>
 			{/each}
 		</nav>
@@ -496,11 +533,38 @@
 		margin: 0.35rem 0 0 0;
 	}
 
-	.nav-groups {
-		margin-top: 1.5rem;
+	.nav-sections {
+		margin-top: 1rem;
 		display: flex;
 		flex-direction: column;
-		gap: 1.1rem;
+		gap: 1.25rem;
+	}
+
+	.nav-section + .nav-section {
+		border-top: 1px solid var(--border);
+		padding-top: 1.1rem;
+	}
+
+	.nav-section-label {
+		display: block;
+		font-size: 0.7rem;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.12em;
+		color: var(--text-2);
+		margin: 0 0 0.6rem;
+		padding: 0 0.75rem;
+	}
+
+	.section-picker {
+		margin: 0 0.5rem 0.85rem;
+	}
+
+	.nav-groups {
+		margin-top: 0.25rem;
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
 	}
 
 	.nav-group-label {
