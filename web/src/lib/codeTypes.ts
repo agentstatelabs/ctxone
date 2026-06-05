@@ -145,3 +145,60 @@ export interface AsdRepoInfo {
 	/** "running" (process live or static URL) or "idle" (pool, not yet spawned). */
 	status?: 'running' | 'idle';
 }
+
+// ---------------------------------------------------------------------------
+// Plan G / K — captured "thinking" (hypotheses, mental models, open
+// questions, failed attempts). Mirrors PriorThinking / ThinkingSummary
+// from agentstatedeveloper_core::thinking.
+// ---------------------------------------------------------------------------
+
+export type ThinkingKind = 'hypothesis' | 'mental_model' | 'open_question' | 'failed_attempt';
+
+export interface ThinkingHypothesis {
+	qname: string;
+	summary: string;
+	confidence: number;
+	body?: string;
+}
+export interface ThinkingMentalModel {
+	name?: string;
+	summary: string;
+	symbols?: string[];
+	body?: string;
+}
+export interface ThinkingOpenQuestion {
+	qname: string;
+	summary: string;
+	body?: string;
+}
+export interface ThinkingFailedAttempt {
+	qname: string;
+	summary: string;
+	body?: string;
+}
+
+/** `entries` is `null` when nothing surfaces; otherwise the projection object. */
+export interface ThinkingEntries {
+	hypotheses?: ThinkingHypothesis[];
+	mental_models?: ThinkingMentalModel[];
+	open_questions?: ThinkingOpenQuestion[];
+	failed_attempts?: ThinkingFailedAttempt[];
+}
+
+/** Always-emitted metadata. `surfaced > 0` is the boolean for "show entries". */
+export interface ThinkingSummary {
+	scanned_qnames?: number;
+	matched_for_query?: number;
+	surfaced?: number;
+	by_kind?: Partial<Record<ThinkingKind, number>>;
+	/** Load-bearing: when `by_kind_dropped.hypothesis > 0` and
+	 *  `by_kind.hypothesis === 0`, hypotheses exist but fell below the
+	 *  confidence floor. */
+	by_kind_dropped?: Partial<Record<ThinkingKind, number>>;
+	entries_in_workspace?: number;
+}
+
+export interface PriorThinking {
+	entries: ThinkingEntries | null;
+	summary: ThinkingSummary;
+}

@@ -16,6 +16,7 @@ import type {
 	AsdRepoInfo,
 	CallGraphResponse,
 	FileEntry,
+	PriorThinking,
 	SearchResult,
 	SymbolDetail,
 	SymbolSummary
@@ -123,4 +124,33 @@ export function readFile(repo: string, path: string): Promise<string> {
 
 export function getSymbolsByFile(repo: string, file: string): Promise<SymbolSummary[]> {
 	return getSymbols(repo).then((all) => all.filter((s) => s.file === file));
+}
+
+// ---------------------------------------------------------------------------
+// Plan G / K thinking projection
+// ---------------------------------------------------------------------------
+
+/** Workspace-wide thinking projection. `qnames` filters to specific symbols;
+ *  omit to scan everything in the index. */
+export function getThinking(
+	repo: string,
+	qnames?: string[],
+	minConfidence?: number
+): Promise<PriorThinking> {
+	const p = new URLSearchParams();
+	if (qnames && qnames.length) p.set('qnames', qnames.join(','));
+	if (minConfidence !== undefined) p.set('min_confidence', String(minConfidence));
+	const qs = p.toString();
+	return getJson<PriorThinking>(repo, `/thinking${qs ? `?${qs}` : ''}`);
+}
+
+/** Single-symbol thinking — for the "Inherited thinking" panel on the
+ *  symbol detail page. */
+export function getSymbolThinking(
+	repo: string,
+	qname: string,
+	minConfidence?: number
+): Promise<PriorThinking> {
+	const qs = minConfidence !== undefined ? `?min_confidence=${minConfidence}` : '';
+	return getJson<PriorThinking>(repo, `/symbols/${encodeURIComponent(qname)}/thinking${qs}`);
 }

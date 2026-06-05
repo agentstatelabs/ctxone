@@ -1,15 +1,28 @@
 <script lang="ts">
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
-	import { getSymbolDetail, getCallers, getCallees, getCallGraph } from '$lib/codeApi';
+	import {
+		getSymbolDetail,
+		getCallers,
+		getCallees,
+		getCallGraph,
+		getSymbolThinking
+	} from '$lib/codeApi';
 	import { selectedRepo } from '$lib/repoStore';
-	import type { SymbolDetail, SymbolSummary, CallGraphResponse, CallGraphNode } from '$lib/codeTypes';
+	import type {
+		SymbolDetail,
+		SymbolSummary,
+		CallGraphResponse,
+		CallGraphNode,
+		PriorThinking
+	} from '$lib/codeTypes';
 	import CallGraph from '$lib/CallGraph.svelte';
 
 	let detail = $state<SymbolDetail | null>(null);
 	let callers = $state<SymbolSummary[]>([]);
 	let callees = $state<SymbolSummary[]>([]);
 	let graph = $state<CallGraphResponse | null>(null);
+	let thinking = $state<PriorThinking | null>(null);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 
@@ -29,13 +42,18 @@
 			getSymbolDetail($selectedRepo, q),
 			getCallers($selectedRepo, q),
 			getCallees($selectedRepo, q),
-			getCallGraph($selectedRepo, q, 1)
+			getCallGraph($selectedRepo, q, 1),
+			// Thinking is best-effort — older asd-serve installs don't have
+			// the /thinking route. Swallow errors so the rest of the page
+			// still renders.
+			getSymbolThinking($selectedRepo, q).catch(() => null)
 		])
-			.then(([d, c, ce, g]) => {
+			.then(([d, c, ce, g, t]) => {
 				detail = d;
 				callers = c;
 				callees = ce;
 				graph = g;
+				thinking = t;
 				loading = false;
 			})
 			.catch((e) => {
@@ -97,6 +115,66 @@
 			<p class="doc">{s.doc}</p>
 		{/if}
 	</div>
+
+	<!-- Inherited thinking (Plan G/K) -->
+	{#if thinking && thinking.entries && (thinking.summary.surfaced ?? 0) > 0}
+		<section class="thinking-section">
+			<h3>
+				Inherited thinking
+				<span class="count-badge">{thinking.summary.surfaced}</span>
+			</h3>
+			{#if thinking.entries.hypotheses?.length}
+				<div class="thinking-block">
+					<h4>Hypotheses</h4>
+					<ul>
+						{#each thinking.entries.hypotheses as h}
+							<li>
+								<span class="conf">{h.confidence.toFixed(2)}</span> {h.summary}
+							</li>
+						{/each}
+					</ul>
+				</div>
+			{/if}
+			{#if thinking.entries.mental_models?.length}
+				<div class="thinking-block">
+					<h4>Mental models</h4>
+					<ul>
+						{#each thinking.entries.mental_models as m}
+							<li>{m.summary}</li>
+						{/each}
+					</ul>
+				</div>
+			{/if}
+			{#if thinking.entries.open_questions?.length}
+				<div class="thinking-block">
+					<h4>Open questions</h4>
+					<ul>
+						{#each thinking.entries.open_questions as q}
+							<li>{q.summary}</li>
+						{/each}
+					</ul>
+				</div>
+			{/if}
+			{#if thinking.entries.failed_attempts?.length}
+				<div class="thinking-block">
+					<h4>Failed attempts</h4>
+					<ul>
+						{#each thinking.entries.failed_attempts as f}
+							<li>{f.summary}</li>
+						{/each}
+					</ul>
+				</div>
+			{/if}
+		</section>
+	{:else if thinking && (thinking.summary.by_kind_dropped?.hypothesis ?? 0) > 0}
+		<section class="thinking-section subtle">
+			<p class="thinking-hint">
+				{thinking.summary.by_kind_dropped?.hypothesis} hypothesis entries exist
+				below the confidence floor — see them on
+				<a href="/code/thinking">Thinking</a>.
+			</p>
+		</section>
+	{/if}
 
 	<!-- Mini call graph -->
 	{#if graph && (graph.nodes.length > 1 || graph.edges.length > 0)}
@@ -321,6 +399,52 @@
 
 	.graph-section .graph-wrap {
 		overflow-x: auto;
+	}
+
+	.thinking-section {
+		margin: 1rem 0;
+		padding: 0.85rem 1rem;
+		border: 1px solid var(--border);
+		border-left: 3px solid var(--accent);
+		border-radius: 4px;
+		background: var(--bg-1);
+	}
+	.thinking-section.subtle {
+		border-left-color: var(--border);
+		background: transparent;
+	}
+	.thinking-section h3 {
+		margin: 0 0 0.5rem;
+		font-size: 0.95rem;
+	}
+	.thinking-block {
+		margin-top: 0.6rem;
+	}
+	.thinking-block h4 {
+		margin: 0 0 0.25rem;
+		font-size: 0.78rem;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--text-3);
+	}
+	.thinking-block ul {
+		margin: 0;
+		padding-left: 1.1rem;
+		font-size: 0.88rem;
+	}
+	.thinking-block .conf {
+		font-family: monospace;
+		font-size: 0.75rem;
+		color: var(--text-3);
+		margin-right: 0.4rem;
+	}
+	.thinking-hint {
+		margin: 0;
+		font-size: 0.82rem;
+		color: var(--text-2);
+	}
+	.thinking-hint a {
+		color: var(--accent);
 	}
 
 	.graph-hint {
