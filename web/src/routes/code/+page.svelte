@@ -11,6 +11,16 @@
 
 	$effect(() => {
 		const repo = $selectedRepo;
+		// Skip when no repo is selected yet — the sidebar's loadAsdRepos()
+		// will set one on mount, which re-runs this effect with a real name.
+		if (!repo) {
+			loading = false;
+			health = null;
+			symbols = [];
+			files = [];
+			error = null;
+			return;
+		}
 		loading = true;
 		error = null;
 		Promise.all([getAsdHealth(repo), getSymbols(repo), listFiles(repo)])
@@ -61,13 +71,24 @@
 <div class="page">
 	<h2>Code Overview</h2>
 
-	{#if loading}
+	{#if !$selectedRepo}
+		<div class="offline-card">
+			<div class="offline-title">No repo selected</div>
+			<p class="muted">
+				Pick one from the sidebar's <strong>ASD</strong> section, or run
+				<code>asd repo add</code> in a project to register it.
+			</p>
+		</div>
+	{:else if loading}
 		<p class="muted">loading…</p>
 	{:else if error || !health}
 		<div class="offline-card">
 			<div class="offline-title">ASD server unreachable</div>
 			<p class="muted">
-				Start it with <code>asd-serve</code> (default port 8787), then refresh.
+				The hub's process pool couldn't open
+				<code>{$selectedRepo}</code>'s <code>.asd-state.db</code>. Check that
+				the path in <code>~/.config/asd/repos.toml</code> still exists, then
+				reload.
 			</p>
 		</div>
 	{:else}

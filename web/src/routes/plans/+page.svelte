@@ -827,45 +827,48 @@
 			<p class="empty">Select a plan to see its tasks.</p>
 		{:else}
 			<header class="plan-header">
-				<div>
+				<div class="plan-title">
 					<h3>{selectedPlan.name}</h3>
 					{#if selectedPlan.description}
 						<p class="plan-desc">{selectedPlan.description}</p>
 					{/if}
 				</div>
 				<div class="plan-actions">
-					<label class="task-sort-row">
-						<span>Sort tasks</span>
-						<select bind:value={taskSort} aria-label="Sort tasks">
-							<option value="default">Open + priority (default)</option>
-							<option value="status">Status</option>
-							<option value="priority">Priority</option>
-							<option value="date-new">Date — newest</option>
-							<option value="date-old">Date — oldest</option>
-							<option value="name">Title (A→Z)</option>
-						</select>
-					</label>
-					<button onclick={() => (showAddTask = !showAddTask)}>
-						{showAddTask ? 'Cancel' : '+ Add task'}
-					</button>
-					{#if movableBranches.length > 0}
-						<label class="move-row">
-							<span>Move to</span>
-							<select bind:value={moveTarget} aria-label="Target branch">
-								<option value="">— pick branch —</option>
-								{#each movableBranches as b}
-									<option value={b}>{b}</option>
-								{/each}
+					<div class="plan-actions-group plan-actions-tasks">
+						<label class="task-sort-row">
+							<span>Sort tasks</span>
+							<select bind:value={taskSort} aria-label="Sort tasks">
+								<option value="default">Open + priority (default)</option>
+								<option value="status">Status</option>
+								<option value="priority">Priority</option>
+								<option value="date-new">Date — newest</option>
+								<option value="date-old">Date — oldest</option>
+								<option value="name">Title (A→Z)</option>
 							</select>
-							<button
-								class="btn-secondary btn-xs"
-								onclick={handleMovePlan}
-								disabled={!moveTarget}
-							>
-								Go
-							</button>
 						</label>
-					{/if}
+						<button onclick={() => (showAddTask = !showAddTask)}>
+							{showAddTask ? 'Cancel' : '+ Add task'}
+						</button>
+					</div>
+					<div class="plan-actions-group plan-actions-plan">
+						{#if movableBranches.length > 0}
+							<label class="move-row">
+								<span>Move to</span>
+								<select bind:value={moveTarget} aria-label="Target branch">
+									<option value="">— pick branch —</option>
+									{#each movableBranches as b}
+										<option value={b}>{b}</option>
+									{/each}
+								</select>
+								<button
+									class="btn-secondary btn-xs"
+									onclick={handleMovePlan}
+									disabled={!moveTarget}
+								>
+									Go
+								</button>
+							</label>
+						{/if}
 					{#if selectedPlan.status === 'active'}
 						<div class="actions-menu">
 							<button
@@ -911,6 +914,7 @@
 							{/if}
 						</div>
 					{/if}
+					</div>
 				</div>
 			</header>
 
@@ -1553,10 +1557,12 @@
 	}
 	.plan-header {
 		display: flex;
-		justify-content: space-between;
-		align-items: flex-start;
-		gap: 1rem;
+		flex-direction: column;
+		gap: 0.75rem;
 		margin-bottom: 1rem;
+	}
+	.plan-title {
+		min-width: 0;
 	}
 	.plan-header h3 {
 		margin: 0;
@@ -1569,6 +1575,14 @@
 	}
 	.plan-actions {
 		display: flex;
+		justify-content: space-between;
+		flex-wrap: wrap;
+		gap: 0.6rem 1rem;
+	}
+	.plan-actions-group {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
 		gap: 0.4rem;
 	}
 	.task-list {
