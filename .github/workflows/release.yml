@@ -64,6 +64,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The Hub (server) embeds web/build/ at compile time via rust-embed.
+      # The frontend MUST be built before cargo, or `LensAssets::get`
+      # disappears from the generated code (silent macro fallback for an
+      # absent folder) and `cargo build -p ctxone-hub` fails with
+      # "no associated function `get` found for struct `LensAssets`".
+      # Mirrors the `frontend` stage in .gitlab-ci.yml.
+      - name: setup node (for SvelteKit frontend)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: build SvelteKit frontend → web/build/
+        shell: bash
+        run: |
+          cd web
+          npm ci
+          npm run build
+          ls -la build | head -5
+
       - name: install rust
         uses: dtolnay/rust-toolchain@stable
         with:
