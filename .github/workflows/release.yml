@@ -1,0 +1,166 @@
+# Release workflow for CtxOne — Plan N t-001 / Windows distribution
+#
+# Mirrors the ASD pipeline (git.internal.example origin → private
+# GitHub mirror at agentstatelabs/ctxone → release tag → this workflow).
+#
+# Builds `ctx` and `ctxone-hub` for five targets (mac arm64/x86_64,
+# linux x86_64/arm64, windows x86_64) and publishes both layouts:
+#
+#   1. Tarball (consumed by Homebrew formula):
+#        ctxone-<TAG>-<TARGET>/{ctx,ctxone-hub}
+#        → ctxone-<TAG>-<TARGET>.tar.gz
+#
+#   2. Flat per-binary downloads (consumed by install.sh / install.ps1):
+#        ctx-<TARGET>            (or .exe on Windows)
+#        ctxone-hub-<TARGET>     (or .exe on Windows)
+#
+# Tarballs + flat artifacts are uploaded to the SEPARATE public mirror
+# repo `agentstatelabs/ctxone-releases` using a PAT
+# (RELEASES_REPO_TOKEN). The source repo stays private; only the
+# artifacts are public.
+#
+# Required secrets on agentstatelabs/ctxone:
+#   GITLAB_TOKEN         — read_repository scope on agentstategraph (CTXone
+#                          fetches the ASG cargo dep from private GitLab).
+#   RELEASES_REPO_TOKEN  — write access to agentstatelabs/ctxone-releases.
+#
+# Windows: `windows-latest` runs Git Bash by default, so the `shell: bash`
+# stage step works as-is. Binaries get a `.exe` suffix via matrix.ext.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+env:
+  RELEASES_REPO: agentstatelabs/ctxone-releases
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-14
+            ext: ""
+          - target: x86_64-apple-darwin
+            os: macos-14
+            ext: ""
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            ext: ""
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04
+            ext: ""
+            cross: true
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            ext: ".exe"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: ensure rust std for ${{ matrix.target }}
+        run: rustup target add ${{ matrix.target }}
+
+      - name: install aarch64 cross-toolchain (linux-arm64 only)
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+
+      - name: configure git.internal.example auth
+        shell: bash
+        env:
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+        run: |
+          if [ -z "${GITLAB_TOKEN}" ]; then
+            echo "::error::GITLAB_TOKEN secret is unset — cargo will fail to fetch the agentstategraph git dep from private GitLab."
+            exit 1
+          fi
+          git config --global \
+            url."https://oauth2:${GITLAB_TOKEN}@git.internal.example/".insteadOf \
+            "https://git.internal.example/"
+          echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "$GITHUB_ENV"
+
+      - name: build ctx
+        run: cargo build --release --locked --target ${{ matrix.target }} -p ctx
+
+      - name: build ctxone-hub
+        run: cargo build --release --locked --target ${{ matrix.target }} -p ctxone-hub
+
+      - name: stage + tarball + flat artifacts
+        shell: bash
+        env:
+          EXT: ${{ matrix.ext }}
+        run: |
+          set -eu
+          TAG="${GITHUB_REF_NAME}"
+          TGT="${{ matrix.target }}"
+          STAGE_DIR="ctxone-${TAG}-${TGT}"
+
+          # Tarball for Homebrew: ctxone-<TAG>-<TARGET>/{ctx,ctxone-hub}
+          mkdir -p "$STAGE_DIR"
+          cp "target/${TGT}/release/ctx${EXT}"        "$STAGE_DIR/ctx${EXT}"
+          cp "target/${TGT}/release/ctxone-hub${EXT}" "$STAGE_DIR/ctxone-hub${EXT}"
+          tar -czf "${STAGE_DIR}.tar.gz" "$STAGE_DIR"
+
+          # Flat per-binary downloads for install.sh / install.ps1.
+          # Naming: <bin>-<TARGET>[.exe]
+          cp "target/${TGT}/release/ctx${EXT}"        "ctx-${TGT}${EXT}"
+          cp "target/${TGT}/release/ctxone-hub${EXT}" "ctxone-hub-${TGT}${EXT}"
+
+          ls -la "${STAGE_DIR}.tar.gz" "ctx-${TGT}${EXT}" "ctxone-hub-${TGT}${EXT}"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${STAGE_DIR}.tar.gz"
+          else
+            shasum -a 256 "${STAGE_DIR}.tar.gz"
+          fi
+
+      - name: upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctxone-${{ matrix.target }}
+          path: |
+            ctxone-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+            ctx-${{ matrix.target }}${{ matrix.ext }}
+            ctxone-hub-${{ matrix.target }}${{ matrix.ext }}
+          if-no-files-found: error
+
+  publish:
+    name: publish to ctxone-releases
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - name: download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: list staged artifacts
+        run: ls -la dist
+
+      - name: publish cross-repo release
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: ${{ env.RELEASES_REPO }}
+          token: ${{ secrets.RELEASES_REPO_TOKEN }}
+          tag_name: ${{ github.ref_name }}
+          name: CtxOne ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/ctx-*
+            dist/ctxone-hub-*
+          fail_on_unmatched_files: true
