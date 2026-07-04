@@ -21,3 +21,6 @@ tiktoken-rs = { workspace = true }
 tokio = { workspace = true }
 toml = { workspace = true }
 chrono = { workspace = true }
+# Shared agent-onboarding engine (suite-onboarding). Sibling repo; path dep for
+# local dev — becomes a git/tag dep once published.
+agent-skillgen = { path = "../../agent-skillgen" }

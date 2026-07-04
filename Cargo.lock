@@ -3,6 +3,10 @@
 version = 4
 
 [[package]]
+name = "agent-skillgen"
+version = "0.1.0"
+
+[[package]]
 name = "agentstategraph"
 version = "0.9.2"
 source = "git+https://git.internal.example/agentstategroup/agentstategraph.git?tag=v0.9.2#36946657da2700b31ab1f6a4c0fae206f7d28967"
@@ -540,6 +544,7 @@ dependencies = [
 name = "ctx"
 version = "0.9.13"
 dependencies = [
+ "agent-skillgen",
  "chrono",
  "clap",
  "clap_complete",
