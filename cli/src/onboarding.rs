@@ -12,8 +12,8 @@
 use std::path::{Path, PathBuf};
 
 use agent_skillgen::{
-    Action, SkillScope, SkillSpec, SkillState, already_nudged, binary_on_path, place_skills,
-    record_nudge, should_nudge, skill_status,
+    Action, SkillScope, SkillSpec, SkillState, already_nudged, binary_on_path, install_suite,
+    place_skills, record_nudge, should_nudge, skill_status,
 };
 
 /// CTXone's onboarding content — the single source the shared engine renders
@@ -60,6 +60,7 @@ pub fn run_skill(
     remove: bool,
     status: bool,
     no_nudge: bool,
+    emit_spec: bool,
     dry_run: bool,
 ) -> std::io::Result<()> {
     let home = std::env::var_os("HOME")
@@ -72,6 +73,11 @@ pub fn run_skill(
         SkillScope::Home
     };
     let spec = ctx_skill_spec();
+
+    if emit_spec {
+        println!("{}", spec.to_json());
+        return Ok(());
+    }
 
     if status {
         let states = skill_status(&spec, &home, &root, scope, tool);
@@ -99,6 +105,12 @@ pub fn run_skill(
             Action::SkippedNewer => "skipped (newer on disk)",
         };
         println!("  {verb:>22}  {:<12}  {}", p.tool, p.path.display());
+    }
+
+    // Combined suite skill when the sibling (ASD) is installed — canonical +
+    // idempotent (identical content whichever product installs it).
+    if !remove {
+        maybe_install_combined(&spec, &home, &root, scope, dry_run);
     }
 
     if !dry_run && !remove {
@@ -139,6 +151,48 @@ pub fn run_bootstrap() {
 
 fn ctx_state_dir(home: &Path) -> PathBuf {
     home.join(".config").join("ctxone")
+}
+
+/// If ASD is on PATH, fetch its spec and install the canonical combined suite
+/// skill. Best-effort — silent on any failure.
+fn maybe_install_combined(
+    spec: &SkillSpec,
+    home: &Path,
+    root: &Path,
+    scope: SkillScope,
+    dry_run: bool,
+) {
+    let Some(sib) = spec.sibling.as_ref() else {
+        return;
+    };
+    if !binary_on_path(&sib.bin) {
+        return;
+    }
+    let Ok(output) = std::process::Command::new(&sib.bin)
+        .args(["skill", "--emit-spec"])
+        .output()
+    else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+    let Some(sib_spec) = SkillSpec::from_json(&String::from_utf8_lossy(&output.stdout)) else {
+        return;
+    };
+    if let Ok((name, placed)) = install_suite(spec, &sib_spec, home, root, scope, dry_run) {
+        if !placed.is_empty() {
+            let verb = if dry_run {
+                "would install"
+            } else {
+                "installed"
+            };
+            println!(
+                "\n✓ {verb} combined suite skill `{name}` to {} host(s)",
+                placed.len()
+            );
+        }
+    }
 }
 
 fn describe_state(state: &SkillState) -> String {

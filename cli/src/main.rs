@@ -264,6 +264,10 @@ enum Commands {
         /// Suppress the one-time suggestion to add ASD (also CTX_NO_SUGGEST=1).
         #[arg(long)]
         no_nudge: bool,
+        /// Print CTX's SkillSpec as JSON and exit (cross-CLI contract for the
+        /// combined suite skill).
+        #[arg(long)]
+        emit_spec: bool,
         /// Print what would happen without touching the filesystem.
         #[arg(long)]
         dry_run: bool,
@@ -998,9 +1002,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             remove,
             status,
             no_nudge,
+            emit_spec,
             dry_run,
         } => {
-            onboarding::run_skill(project, tool.as_deref(), remove, status, no_nudge, dry_run)?;
+            onboarding::run_skill(
+                project,
+                tool.as_deref(),
+                remove,
+                status,
+                no_nudge,
+                emit_spec,
+                dry_run,
+            )?;
         }
         Commands::Bootstrap => {
             onboarding::run_bootstrap();
