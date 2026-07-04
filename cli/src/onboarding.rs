@@ -128,6 +128,15 @@ pub fn run_skill(
     Ok(())
 }
 
+/// Print CTX's paste-into-your-agent bootstrap block (suite-onboarding-ctx
+/// t-006) — the agent installs + primes CTX, and is pointed at ASD.
+pub fn run_bootstrap() {
+    match agent_skillgen::render_bootstrap(&ctx_skill_spec()) {
+        Some(block) => print!("{block}"),
+        None => println!("No bootstrap steps are defined."),
+    }
+}
+
 fn ctx_state_dir(home: &Path) -> PathBuf {
     home.join(".config").join("ctxone")
 }

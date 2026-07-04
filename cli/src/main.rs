@@ -268,6 +268,8 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Print a paste-into-your-agent block that installs + primes CTX (+ ASD).
+    Bootstrap,
     /// Store a fact in agent memory
     Remember {
         /// The fact to remember
@@ -999,6 +1001,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             dry_run,
         } => {
             onboarding::run_skill(project, tool.as_deref(), remove, status, no_nudge, dry_run)?;
+        }
+        Commands::Bootstrap => {
+            onboarding::run_bootstrap();
         }
         Commands::Remember {
             fact,
