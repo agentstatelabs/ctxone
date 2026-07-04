@@ -247,6 +247,27 @@ enum ConfigAction {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Install CTXone's agent Skill (SKILL.md) into detected agent skill dirs.
+    Skill {
+        /// Install project-scoped (into the repo) instead of user-wide.
+        #[arg(long)]
+        project: bool,
+        /// Only install for one host key (e.g. claude-code).
+        #[arg(long)]
+        tool: Option<String>,
+        /// Remove installed skill files instead of writing them.
+        #[arg(long)]
+        remove: bool,
+        /// Report install state without changing anything.
+        #[arg(long)]
+        status: bool,
+        /// Suppress the one-time suggestion to add ASD (also CTX_NO_SUGGEST=1).
+        #[arg(long)]
+        no_nudge: bool,
+        /// Print what would happen without touching the filesystem.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Store a fact in agent memory
     Remember {
         /// The fact to remember
@@ -969,6 +990,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = cli.http_client();
 
     match cli.command {
+        Commands::Skill {
+            project,
+            tool,
+            remove,
+            status,
+            no_nudge,
+            dry_run,
+        } => {
+            onboarding::run_skill(project, tool.as_deref(), remove, status, no_nudge, dry_run)?;
+        }
         Commands::Remember {
             fact,
             importance,
