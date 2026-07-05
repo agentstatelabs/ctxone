@@ -5,6 +5,11 @@ version = 4
 [[package]]
 name = "agent-skillgen"
 version = "0.1.0"
+source = "git+https://git.internal.example/agentstategroup/agent-skillgen.git?tag=v0.1.0#67637614997237b92bcd20cd14addab27e937796"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "agentstategraph"
