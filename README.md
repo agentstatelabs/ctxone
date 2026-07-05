@@ -2,6 +2,11 @@
 
 Persistent, searchable, accountable memory for AI agents. Eliminate context anxiety.
 
+**Part of a suite:** CTXone is the shared **team layer** for
+**[AgentStateDeveloper](https://github.com/agentstatelabs/AgentStateDeveloper)**
+(per-developer code context). Installing either offers the other — see
+[Pairs with AgentStateDeveloper](#pairs-with-agentstatedeveloper).
+
 ## Components
 
 | Component | Directory | Description |
@@ -11,6 +16,26 @@ Persistent, searchable, accountable memory for AI agents. Eliminate context anxi
 | **CTXone Lens** | `web/` | Web UI: dashboard, plans, sessions, browse, history, branches, taint, diff. ⌘K palette, 15s auto-refresh, multi-theme |
 | **ctx** | `cli/` | CLI for memory, plans, branches, taint, and team operations |
 | **ctxone (Python)** | `bindings/python/` | Python client library (`pip install ctxone`) |
+
+## Pairs with AgentStateDeveloper
+
+CTXone is the **team layer** for
+**[AgentStateDeveloper](https://github.com/agentstatelabs/AgentStateDeveloper)** —
+they're built as a suite:
+
+- **ASD** — per-developer **code context**: decision ledger, effect
+  declarations, call graph, and impact analysis.
+- **CTXone** — **shared team memory**: decisions, plans, and context that travel
+  across the whole team.
+
+Each works standalone, but together:
+
+- Installing either one **offers to set up the other** — a one-time, dismissable
+  nudge (suppress with `--no-nudge` or `CTX_NO_SUGGEST=1`).
+- When both are installed, `ctx skill` also installs a **combined suite skill**
+  that teaches the agent the joint workflow: use ASD for the code specifics, and
+  record what you decide into CTXone so the team inherits it.
+- `ctx bootstrap` offers to install **both**.
 
 ## Quick Start
 
@@ -76,13 +101,28 @@ cd web && npm install && npm run build
 
 ## Setup
 
-```bash
-# Auto-detect and configure your AI tools
-ctx init
+Wire CTXone into your coding agent. The fastest path is to let the agent do it.
 
-# Or target a specific tool
-ctx init --tool claude
-ctx init --tool cursor
+### Paste-to-your-agent (recommended)
+
+```bash
+ctx bootstrap
+```
+
+Prints a block you paste into whatever agent you're already in; it installs and
+primes CTXone — and offers to set up **AgentStateDeveloper** (code context) too.
+
+### Individual commands
+
+| Command | Sets up |
+|---|---|
+| `ctx init` | Auto-detect and configure your AI tools (MCP). Target one with `ctx init --tool claude` / `--tool cursor`. |
+| `ctx agents install` | Write the shared `AGENTS.md` and prime it as pinned memory in the Hub. |
+| `ctx skill` | Install CTXone's **Agent Skill** (`SKILL.md`) into each host's skills directory — teaches the agent to record decisions, plans, and memory. Version-stamped. When the `asd` CLI is present, it also installs the combined **CTXone + ASD** suite skill. |
+
+```bash
+ctx skill --status    # what's installed, per host
+ctx skill --dry-run   # preview without writing
 ```
 
 ## Usage
