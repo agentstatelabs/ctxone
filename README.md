@@ -11,7 +11,7 @@ Persistent, searchable, accountable memory for AI agents. Eliminate context anxi
 
 | Component | Directory | Description |
 |-----------|-----------|-------------|
-| **CTXone Hub** | `server/` | MCP server (42 tools) + HTTP API — the memory interface for AI tools |
+| **CTXone Hub** | `server/` | MCP server (50 tools) + HTTP API — the memory interface for AI tools |
 | **CTXone Engine** | `engine/` | Core memory + graph layer (AgentStateGraph) |
 | **CTXone Lens** | `web/` | Web UI: dashboard, plans, sessions, browse, history, branches, taint, diff. ⌘K palette, 15s auto-refresh, multi-theme |
 | **ctx** | `cli/` | CLI for memory, plans, branches, taint, and team operations |
@@ -199,6 +199,7 @@ ctxone/
 
 **Get started:**
 - [Quickstart](docs/QUICKSTART.md) — from nothing to live token savings in 5 minutes
+- [Walkthrough](docs/WALKTHROUGH.md) — install → daily loop → what happens under the covers → using CTXone + ASD together
 - [Windows guide](docs/WINDOWS.md) — full install, background service, and troubleshooting for Windows
 - [Architecture](docs/ARCHITECTURE.md) — the mental model (pinned vs primed, how recall ranks, why O(log n))
 - [Token Savings](docs/TOKEN_SAVINGS.md) — how the ratio is computed, how to read it, how to maximize it
@@ -206,6 +207,7 @@ ctxone/
 - [Data Safety](docs/DATA_SAFETY.md) — snapshots, lockfile, watchdog, and `ctx db backup`/`restore`
 
 **Reference:**
+- [Features & Command Reference](docs/FEATURES.md) — what CTXone does, grouped by capability
 - [CLI Reference](docs/CLI_REFERENCE.md) — every `ctx` command, flag, and exit code
 - [HTTP API](docs/HTTP_API.md) — REST endpoints exposed by the Hub
 - [MCP Tools](docs/MCP_TOOLS.md) — MCP tools exposed to agents
@@ -222,19 +224,29 @@ ctxone/
 - [Use Cases](docs/USE_CASES.md)
 - [Memory MCP Design](docs/MEMORY_MCP_DESIGN.md) — technical design
 
-## License
+## License & editions
 
-CTXone is licensed under the **Business Source License 1.1 (BSL 1.1)**.
+CTXone is **open source, commercially supported**, and ships in three editions:
 
-**You can** use CTXone in production, embed it in your products, self-host it on
-your own infrastructure, modify it, and build commercial products on top of it —
-all without a commercial license.
+- **OSS** (this repo) — the full self-hosted Hub: memory, plans, recall,
+  branches, token-savings accounting, and Lens UI. No account required.
+- **Team** — a shared team Hub as the collaboration layer (shared memory,
+  plans, and decisions across the team), paired with
+  **[AgentStateDeveloper](https://github.com/agentstatelabs/AgentStateDeveloper)**
+  as the suite's code-context half.
+- **Enterprise** — org-scale operation: multi-tenancy, RBAC/SSO, audit, and
+  compliance controls.
 
-**You cannot** offer CTXone itself as a competing commercial managed service.
+The code is licensed under the **Business Source License 1.1 (BSL 1.1)**.
+**You can** use CTXone in production, self-host it, modify it, and build on top
+of it — all without a commercial license. **You cannot** offer CTXone itself as
+a competing managed service or redistribute it inside a product you sell. Each
+version converts to **Apache License 2.0** four years after release.
 
-Each version automatically converts to **Apache License 2.0** four years after
-release. See [LICENSING.md](LICENSING.md) for the full plain-English summary and
-[LICENSE](LICENSE) for the legal text.
+Full plain-English summary and the edition breakdown:
+[LICENSING.md](LICENSING.md) ([LICENSE](LICENSE) is the legal text).
+Team/Enterprise or commercial questions:
+[licensing@agentstatelabs.com](mailto:licensing@agentstatelabs.com).
 
 ## Contributing
 

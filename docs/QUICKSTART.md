@@ -176,5 +176,5 @@ You probably haven't started it. Run `ctx serve --http` in another terminal.
 Stop the hub, delete `~/.ctxone/memory.db`, start the hub again.
 
 **I want to share memory across a team.**
-Use the Postgres backend: `ctx serve --http --storage postgres --database-url postgres://...`
+Use the Postgres backend: `export DATABASE_URL=postgres://... && ctx serve --http --storage postgres` (the connection string is read from the `DATABASE_URL` env var, not a flag).
 See the [Cookbook](COOKBOOK.md#team-shared-memory) for the full recipe.

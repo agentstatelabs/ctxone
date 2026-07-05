@@ -2947,12 +2947,10 @@ impl CtxOneServer {
         }
     }
 
-    #[tool(
-        description = "Set the active ASD repo for this session. Subsequent \
+    #[tool(description = "Set the active ASD repo for this session. Subsequent \
         code tool calls (code_search, code_read, callers_of, callees_of) will \
         default to this repo when their `repo` parameter is omitted. \
-        Errors if the repo is not registered. Pass an empty string to clear."
-    )]
+        Errors if the repo is not registered. Pass an empty string to clear.")]
     async fn set_active_repo(&self, params: Parameters<SetActiveRepoParams>) -> String {
         let p = params.0;
         let trimmed = p.repo.trim();
@@ -2971,11 +2969,9 @@ impl CtxOneServer {
         serde_json::json!({ "active_repo": trimmed }).to_string()
     }
 
-    #[tool(
-        description = "Return the active ASD repo for this session (set via \
+    #[tool(description = "Return the active ASD repo for this session (set via \
         set_active_repo), or null if none is set. Also returns the list of \
-        registered repo names so the agent can pick one if needed."
-    )]
+        registered repo names so the agent can pick one if needed.")]
     async fn get_active_repo(&self) -> String {
         let active = self.session.active_repo();
         let known = self.registered_repo_names().await;

@@ -229,9 +229,8 @@ async fn spawn_asd_serve(
                 break;
             }
         }
-        let url = url.ok_or_else(|| {
-            "asd-serve exited before printing its listening address".to_string()
-        })?;
+        let url = url
+            .ok_or_else(|| "asd-serve exited before printing its listening address".to_string())?;
 
         // Phase 2: gate on /api/v1/health so callers never see a not-yet-ready URL.
         let health = format!("{url}/api/v1/health");

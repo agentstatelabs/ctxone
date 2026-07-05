@@ -262,9 +262,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!(
                     "      --asd-idle-timeout <SECS>  Pool idle timeout before killing an asd-serve"
                 );
-                eprintln!(
-                    "                            child (default 600)."
-                );
+                eprintln!("                            child (default 600).");
                 eprintln!("  -h, --help            Print help");
                 eprintln!("  -V, --version         Print version and exit");
                 eprintln!();

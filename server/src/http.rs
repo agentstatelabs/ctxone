@@ -214,7 +214,9 @@ fn router_with_config_inner(
         Some(Arc::new(AsdProcessPool::new(
             config.asd_pool_repos.clone(),
             config.asd_serve_binary.clone(),
-            config.asd_idle_timeout_secs.map(std::time::Duration::from_secs),
+            config
+                .asd_idle_timeout_secs
+                .map(std::time::Duration::from_secs),
         )))
     };
 
@@ -401,7 +403,10 @@ async fn prefetch_asd_repo(
         Ok(base) => (
             StatusCode::OK,
             [(axum::http::header::CONTENT_TYPE, "application/json")],
-            format!(r#"{{"name":"{}","url":"{}","status":"running"}}"#, repo, base),
+            format!(
+                r#"{{"name":"{}","url":"{}","status":"running"}}"#,
+                repo, base
+            ),
         )
             .into_response(),
         Err(msg) => (StatusCode::NOT_FOUND, msg).into_response(),

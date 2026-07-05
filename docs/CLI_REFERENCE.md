@@ -373,18 +373,16 @@ OPTIONS:
       --storage <TYPE>          sqlite | postgres | memory  [default: sqlite]
       --path <PATH>             Database path  [default: ~/.ctxone/memory.db]
       --http                    Also start HTTP API (otherwise stdio MCP only)
-      --asd-repo <NAME=PATH>    Register an ASD repo for the code-intelligence
-                                process pool. Repeatable. The hub spawns
-                                asd-serve on demand and kills it after 5 min
-                                idle. Example:
-                                  --asd-repo myproject=/home/user/myproject/.asd-state.db
-      --asd-url <NAME=URL>      Register a pre-running asd-serve endpoint.
-                                Repeatable. Proxies /api/code/<name>/* to
-                                <URL>/api/v1/*. Example:
-                                  --asd-url myproject=http://127.0.0.1:4120
+      --lens                    Serve the Lens web UI at / (requires --http)
 ```
 
-**ASD code intelligence example:**
+For the Postgres backend, the connection string is read from the
+`DATABASE_URL` environment variable, not a flag:
+`export DATABASE_URL=postgres://… && ctx serve --http --storage postgres`.
+
+**ASD code intelligence.** The ASD code-pool flags `--asd-repo` and
+`--asd-url` are **not** on `ctx serve` — they're passthrough flags on the
+`ctxone-hub` binary directly:
 
 ```bash
 # Hub manages asd-serve processes — recommended for most setups
@@ -396,6 +394,12 @@ ctxone-hub --http \
 asd-serve --db /home/user/myproject/.asd-state.db &
 ctxone-hub --http --asd-url myproject=http://127.0.0.1:4120
 ```
+
+- `--asd-repo <NAME=PATH>` — register an ASD repo for the code-intelligence
+  process pool (repeatable). The hub spawns `asd-serve` on demand and kills
+  it after 5 min idle.
+- `--asd-url <NAME=URL>` — register a pre-running `asd-serve` endpoint
+  (repeatable). Proxies `/api/code/<name>/*` to `<URL>/api/v1/*`.
 
 See [ASD_INTEGRATION.md](ASD_INTEGRATION.md) for the full setup guide.
 
@@ -424,6 +428,44 @@ Gemini CLI, Grok CLI.
 `ctx init` doesn't directly support. It writes the standard
 `mcpServers` JSON shape to any path you specify, merging with any
 existing file.
+
+`ctx init` also prompts to install the `AGENTS.md` guidance unless you
+pass `--no-agents`.
+
+### `ctx skill [options]`
+
+Install CTXone's **Agent Skill** (`SKILL.md`) into each detected host's
+skills directory — teaches the agent *when* to record decisions, open
+plans, and recall context. Version-stamped; won't clobber a newer
+on-disk skill. When the `asd` CLI is also on PATH, it additionally
+installs the combined **CTXone + ASD** suite skill.
+
+```
+USAGE: ctx skill [OPTIONS]
+
+OPTIONS:
+      --project      Install project-scoped (into the repo) instead of user-wide
+      --tool <KEY>   Only install for one host key (e.g. claude-code)
+      --remove       Remove installed skill files instead of writing them
+      --status       Report install state without changing anything
+      --dry-run      Print what would happen without touching the filesystem
+      --no-nudge     Suppress the one-time suggestion to add ASD (also CTX_NO_SUGGEST=1)
+      --emit-spec    Print CTX's SkillSpec as JSON and exit (cross-CLI contract
+                     for the combined suite skill)
+```
+
+### `ctx bootstrap`
+
+Print a paste-into-your-agent block that installs and primes CTXone —
+and offers to set up **AgentStateDeveloper** (code context) too. The
+fastest path to wiring CTXone into whatever agent you're already in.
+
+### `ctx agents <action>`
+
+Manage the `AGENTS.md` guidance file — a short, pinned document that
+teaches AI tools how to use CTXone. `ctx agents show` prints the full
+text; `ctx agents install` writes it and primes it as pinned memory
+(prompts unless `--yes`). See also [AGENTS.md](AGENTS.md).
 
 ### `ctx db backup [--suffix <NAME>]`
 

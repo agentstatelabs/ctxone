@@ -1,13 +1,13 @@
 # MCP Tools Reference
 
-The CTXone Hub exposes **47 MCP tools** over the stdio transport, in
+The CTXone Hub exposes **50 MCP tools** over the stdio transport, in
 seven groups:
 
 - **Memory** (7): `remember`, `recall`, `prime`, `context`,
   `summarize_session`, `what_changed_since`, `why_did_we`
-- **Plans** (11): `plan_new`, `plan_add`, `plan_start`,
+- **Plans** (12): `plan_new`, `plan_add`, `plan_start`,
   `plan_done`, `plan_abandon`, `plan_next`, `plan_list`,
-  `plan_show`, `plan_tasks`, `plan_complete`, `plan_archive`
+  `plan_show`, `plan_tasks`, `plan_move`, `plan_complete`, `plan_archive`
 - **Reminders** (9): `reminder_create`, `remind_me`, `reminder_list`,
   `reminder_get`, `reminder_snooze`, `reminder_approve`, `reminder_cancel`,
   `reminder_start`, `reminder_record`
@@ -15,8 +15,9 @@ seven groups:
   `taint_list`, `taint_check`, `taint_apply`, `taint_remove`
 - **Read primitives** (6): `get`, `ls`,
   `search`, `log`, `blame`, `diff`
-- **Code intelligence** (5): `code_repos`, `code_search`, `code_read`,
-  `callers_of`, `callees_of`  _(requires `--asd-repo` or `--asd-url` at hub startup)_
+- **Code intelligence** (7): `code_repos`, `code_search`, `code_read`,
+  `callers_of`, `callees_of`, `get_active_repo`, `set_active_repo`
+  _(requires `--asd-repo` or `--asd-url` at hub startup)_
 - **Accounting** (1): `record_llm_usage`
 
 Any MCP-compatible agent (Claude Code, Cursor, VS Code Copilot with
@@ -306,7 +307,7 @@ unambiguous.
 
 ## Plan tools
 
-Ten MCP tools wrap the plan primitives from the
+Twelve MCP tools wrap the plan primitives from the
 `agentstategraph-tasks` crate and surface them with proactive
 "CALL THIS WHEN" descriptions. Plans persist under `/plans/<name>/`
 and survive session boundaries — the same plan can be picked up by
@@ -449,6 +450,22 @@ Fetch a plan with its full task list.
 List the tasks of a plan, flat.
 
 **Parameters:** `plan_id`, `ref?`.
+
+---
+
+### `plan_move`
+
+Move a plan and every task it contains from one branch (`ref`) to
+another. Task ids, statuses, proofs, and the plan-meta envelope are
+preserved bit-for-bit — only the ref changes.
+
+**When to call:** promoting a sandboxed plan onto `main`, pulling
+someone else's plan onto a feature branch to collaborate, or refiling
+work after a branch-strategy change. Refuses when source and target are
+the same ref, or when a plan with the same name already exists on the
+target ref.
+
+**Parameters:** `plan_id`, `target_ref`, `ref?` (source branch, default `main`).
 
 ---
 
@@ -911,6 +928,32 @@ List symbols called by the given symbol (outbound call edges).
   { "qname": "payments.get_balance", "kind": "function", "file": "payments.py" }
 ]
 ```
+
+---
+
+### `get_active_repo`
+
+Return the active ASD repo for this session (set via `set_active_repo`),
+or `null` if none is set. Also returns the list of registered repo names
+so the agent can pick one.
+
+**Parameters:** none.
+
+**Returns:** `{ "active_repo": <name|null>, "known_repos": [ … ] }`.
+
+---
+
+### `set_active_repo`
+
+Set the active ASD repo for this session. Subsequent code tools
+(`code_search`, `code_read`, `callers_of`, `callees_of`) default to this
+repo when their `repo` parameter is omitted — so you don't repeat `repo`
+on every call in a single-repo session.
+
+**When to call:** at the start of a session focused on one registered
+repo. Errors if the repo isn't registered; pass an empty string to clear.
+
+**Parameters:** `repo` (registered repo name; empty string clears).
 
 ---
 
