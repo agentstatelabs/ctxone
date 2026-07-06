@@ -1256,6 +1256,46 @@ fn default_check_confidence() -> f64 {
 pub struct CodeReposParams {}
 
 #[derive(Deserialize, JsonSchema)]
+pub struct CrossRepoEdgesParams {}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CodeImpactParams {
+    /// The endpoint being changed: a route-handler qname (e.g.
+    /// `app.routes.get_orders` or just `get_orders`) or a contract like
+    /// `http:GET /api/orders/{}`.
+    pub target: String,
+}
+
+/// Run `asd <args>` (the ASD CLI, expected on the hub's PATH) and return its
+/// stdout — the `--agent` JSON — or an error object. Uses a blocking spawn so we
+/// don't depend on tokio's `process` feature.
+async fn run_asd_json(args: Vec<String>) -> String {
+    let joined = args.join(" ");
+    match tokio::task::spawn_blocking(move || {
+        std::process::Command::new("asd").args(&args).output()
+    })
+    .await
+    {
+        Ok(Ok(out)) if out.status.success() => {
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        }
+        Ok(Ok(out)) => serde_json::json!({
+            "error": format!(
+                "`asd {joined}` exited {}: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            )
+        })
+        .to_string(),
+        Ok(Err(e)) => serde_json::json!({
+            "error": format!("could not run `asd` (is the ASD CLI on the hub's PATH?): {e}")
+        })
+        .to_string(),
+        Err(e) => serde_json::json!({ "error": format!("asd task join error: {e}") }).to_string(),
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct SetActiveRepoParams {
     /// Name of a registered ASD repo. Pass an empty string to clear.
     pub repo: String,
@@ -2865,6 +2905,33 @@ impl CtxOneServer {
         When only one repo is registered, all code tools default to it automatically.")]
     async fn code_repos(&self, _params: Parameters<CodeReposParams>) -> String {
         crate::code_tools::list_repos_json(&self.asd_repos)
+    }
+
+    #[tool(
+        description = "Cross-repo service edges across all ASD-registered repos: a client \
+        call in one repo matched to a route served by another, joined on contract hash. \
+        Reads the shared ASD repo registry; index each repo first so its contracts are \
+        current. The federated (Team) view over the hub's registered repos."
+    )]
+    async fn code_cross_repo_edges(&self, _params: Parameters<CrossRepoEdgesParams>) -> String {
+        run_asd_json(vec!["repo".into(), "edges".into(), "--agent".into()]).await
+    }
+
+    #[tool(
+        description = "Decision-aware federated impact: given an endpoint you're about to \
+        change — a route-handler qname (e.g. `get_orders`) or a contract \
+        (`http:GET /api/orders/{}`) — return the downstream consumers in OTHER repos AND the \
+        invariants/hazards those consuming symbols carry, read from each consumer repo's own \
+        ledger. Answers \"what breaks if I change this, and what did those callers promise?\""
+    )]
+    async fn code_impact(&self, params: Parameters<CodeImpactParams>) -> String {
+        run_asd_json(vec![
+            "repo".into(),
+            "impact".into(),
+            params.0.target,
+            "--agent".into(),
+        ])
+        .await
     }
 
     #[tool(

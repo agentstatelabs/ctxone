@@ -1,6 +1,6 @@
 # MCP Tools Reference
 
-The CTXone Hub exposes **50 MCP tools** over the stdio transport, in
+The CTXone Hub exposes **52 MCP tools** over the stdio transport, in
 seven groups:
 
 - **Memory** (7): `remember`, `recall`, `prime`, `context`,
@@ -15,9 +15,12 @@ seven groups:
   `taint_list`, `taint_check`, `taint_apply`, `taint_remove`
 - **Read primitives** (6): `get`, `ls`,
   `search`, `log`, `blame`, `diff`
-- **Code intelligence** (7): `code_repos`, `code_search`, `code_read`,
-  `callers_of`, `callees_of`, `get_active_repo`, `set_active_repo`
-  _(requires `--asd-repo` or `--asd-url` at hub startup)_
+- **Code intelligence** (9): `code_repos`, `code_search`, `code_read`,
+  `callers_of`, `callees_of`, `get_active_repo`, `set_active_repo`,
+  `code_cross_repo_edges`, `code_impact`
+  _(requires `--asd-repo` or `--asd-url` at hub startup; the federated
+  `code_cross_repo_edges` / `code_impact` shell out to the `asd` CLI over the
+  shared repo registry)_
 - **Accounting** (1): `record_llm_usage`
 
 Any MCP-compatible agent (Claude Code, Cursor, VS Code Copilot with
