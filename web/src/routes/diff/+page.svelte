@@ -1,8 +1,8 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
 	import { getBranches, getDiff, mergeRefs } from '$lib/api';
 	import type { DiffOp, DiffResponse, MergeResult } from '$lib/api';
 	import { branchStore } from '$lib/branchStore.svelte';
+	import { namespaceStore } from '$lib/namespaceStore.svelte';
 	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 
 	let branches: string[] = $state(['main']);
@@ -48,7 +48,7 @@
 		}
 	}
 
-	onMount(async () => {
+	async function loadBranches() {
 		try {
 			const list = await getBranches();
 			branches = list.map((b) => b.name);
@@ -58,6 +58,14 @@
 		// Default: current branch vs main, or two most recent branches
 		refA = 'main';
 		refB = branchStore.current !== 'main' ? branchStore.current : branches[1] ?? 'main';
+	}
+
+	// Load on mount and re-load whenever the active namespace changes —
+	// branch refs (and any shown diff) are namespace-scoped.
+	$effect(() => {
+		void namespaceStore.current;
+		diff = null;
+		loadBranches();
 	});
 
 	// Re-run the diff on each tick if the user has chosen two different

@@ -2,10 +2,24 @@
  * CtxOne Lens — HTTP client for the Hub REST API.
  */
 
+import { namespaceStore } from './namespaceStore.svelte';
+
 // Dev: default to Hub on 3001. Embedded (adapter-static build served from Hub):
 // same-origin relative URLs. Explicit VITE_CTXONE_API_URL overrides both.
 const API_BASE: string = import.meta.env.VITE_CTXONE_API_URL
 	?? (import.meta.env.DEV ? 'http://localhost:3001' : '');
+
+/**
+ * Single choke point for Hub requests: prefixes API_BASE and threads
+ * the current namespace via the `X-CTXone-Namespace` header, so no
+ * call site needs to know about namespaces. The ASD `/api/code/*`
+ * proxy (codeApi.ts) intentionally does NOT go through here.
+ */
+export function hubFetch(path: string, init?: RequestInit): Promise<Response> {
+	const headers = new Headers(init?.headers);
+	headers.set('X-CTXone-Namespace', namespaceStore.current);
+	return fetch(`${API_BASE}${path}`, { ...init, headers });
+}
 
 export interface StatsResponse {
 	commit_count: number;
@@ -67,7 +81,7 @@ export interface SearchResult {
 }
 
 async function fetchJson<T>(path: string): Promise<T> {
-	const resp = await fetch(`${API_BASE}${path}`);
+	const resp = await hubFetch(path);
 	if (!resp.ok) {
 		throw new Error(`API error: ${resp.status} ${resp.statusText}`);
 	}
@@ -75,7 +89,7 @@ async function fetchJson<T>(path: string): Promise<T> {
 }
 
 async function fetchText(path: string): Promise<string> {
-	const resp = await fetch(`${API_BASE}${path}`);
+	const resp = await hubFetch(path);
 	if (!resp.ok) {
 		throw new Error(`API error: ${resp.status} ${resp.statusText}`);
 	}
@@ -139,7 +153,7 @@ export interface RememberRequest {
 }
 
 export async function remember(req: RememberRequest): Promise<{ path: string; commit_id: string }> {
-	const resp = await fetch(`${API_BASE}/api/memory/remember`, {
+	const resp = await hubFetch(`/api/memory/remember`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify(req)
@@ -163,7 +177,7 @@ export interface ForgetRequest {
 }
 
 export async function forget(req: ForgetRequest): Promise<{ path: string; commit_id: string }> {
-	const resp = await fetch(`${API_BASE}/api/memory/forget`, {
+	const resp = await hubFetch(`/api/memory/forget`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({
@@ -222,7 +236,7 @@ export type MergeResult = MergeOk | MergeConflict;
 
 /** POST /api/merge. Returns ok on success, conflict on 409. Throws for other errors. */
 export async function mergeRefs(req: MergeRequest): Promise<MergeResult> {
-	const resp = await fetch(`${API_BASE}/api/merge`, {
+	const resp = await hubFetch(`/api/merge`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify(req)
@@ -251,7 +265,7 @@ export interface CreateBranchRequest {
 export async function createBranch(
 	req: CreateBranchRequest
 ): Promise<{ status: string; name: string; commit_id: string }> {
-	const resp = await fetch(`${API_BASE}/api/branches`, {
+	const resp = await hubFetch(`/api/branches`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ name: req.name, from: req.from ?? 'main' })
@@ -290,13 +304,57 @@ export async function primeSections(
 	pinned: boolean,
 	sections: PrimeSection[]
 ): Promise<PrimeResult> {
-	const resp = await fetch(`${API_BASE}/api/memory/prime`, {
+	const resp = await hubFetch(`/api/memory/prime`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ source, pinned, sections })
 	});
 	if (!resp.ok) {
 		throw new Error(`prime failed: ${resp.status}`);
+	}
+	return resp.json();
+}
+
+/**
+ * A registered project: maps a code repo to the ASG namespace holding
+ * its branches, plans, memory, taints, and history.
+ */
+export interface Project {
+	id: string;
+	remote_url: string | null;
+	namespace: string;
+	display_name: string | null;
+	created_at: string;
+	local_paths: string[];
+	asd_repos: string[];
+}
+
+export async function listProjects(): Promise<Project[]> {
+	return fetchJson('/api/projects');
+}
+
+export async function getProject(id: string): Promise<Project> {
+	return fetchJson(`/api/projects/${encodeURIComponent(id)}`);
+}
+
+export interface RegisterProjectRequest {
+	id: string;
+	remote_url?: string;
+	namespace?: string;
+	display_name?: string;
+	local_path?: string;
+}
+
+/** POST /api/projects — creates the namespace; 409 on duplicate id/remote_url. */
+export async function registerProject(req: RegisterProjectRequest): Promise<Project> {
+	const resp = await hubFetch('/api/projects', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(req)
+	});
+	if (!resp.ok) {
+		const msg = await resp.text();
+		throw new Error(`register project failed: ${resp.status} ${msg}`);
 	}
 	return resp.json();
 }

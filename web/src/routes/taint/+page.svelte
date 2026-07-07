@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
 	import {
 		listTaints,
 		checkTaint,
@@ -7,6 +6,7 @@
 		removeTaint
 	} from '$lib/teamApi';
 	import type { TaintRecord, TaintCheck } from '$lib/teamApi';
+	import { namespaceStore } from '$lib/namespaceStore.svelte';
 	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 
 	// ── Active taints ────────────────────────────────────────────────────────
@@ -26,7 +26,11 @@
 		}
 	}
 
-	onMount(refresh);
+	// Load on mount and re-load whenever the active namespace changes.
+	$effect(() => {
+		void namespaceStore.current;
+		refresh();
+	});
 
 	const auto = useAutoRefresh(refresh);
 

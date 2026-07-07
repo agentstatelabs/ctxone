@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { branchStore } from '$lib/branchStore.svelte';
+	import { namespaceStore } from '$lib/namespaceStore.svelte';
 	import { getBranches } from '$lib/api';
 	import {
 		listPlans,
@@ -234,6 +235,7 @@
 
 	$effect(() => {
 		void branchStore.current;
+		void namespaceStore.current;
 		selectedName = null;
 		selectedPlan = null;
 		selectedTask = null;

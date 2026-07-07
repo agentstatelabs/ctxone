@@ -2,6 +2,7 @@
 	import { getLog } from '$lib/api';
 	import type { CommitEntry } from '$lib/api';
 	import { branchStore } from '$lib/branchStore.svelte';
+	import { namespaceStore } from '$lib/namespaceStore.svelte';
 	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 
 	let commits: CommitEntry[] = $state([]);
@@ -20,8 +21,9 @@
 	}
 
 	$effect(() => {
-		// Re-load whenever the active branch changes
+		// Re-load whenever the active branch or namespace changes
 		void branchStore.current;
+		void namespaceStore.current;
 		loadLog();
 	});
 

@@ -5,8 +5,7 @@
  * here without re-discovering the error conventions.
  */
 
-const API_BASE: string = import.meta.env.VITE_CTXONE_API_URL
-	?? (import.meta.env.DEV ? 'http://localhost:3001' : '');
+import { hubFetch } from './api';
 
 export type TaskStatus = 'pending' | 'in_progress' | 'done' | 'abandoned';
 export type PlanStatus = 'active' | 'completed' | 'archived';
@@ -58,7 +57,7 @@ export interface Plan {
 }
 
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
-	const resp = await fetch(`${API_BASE}${path}`, init);
+	const resp = await hubFetch(path, init);
 	if (!resp.ok) {
 		const text = await resp.text().catch(() => '');
 		throw new Error(text || `${resp.status} ${resp.statusText}`);

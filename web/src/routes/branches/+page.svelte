@@ -1,9 +1,9 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { getBranches, createBranch } from '$lib/api';
 	import { listPlans } from '$lib/plansApi';
 	import { branchStore } from '$lib/branchStore.svelte';
+	import { namespaceStore } from '$lib/namespaceStore.svelte';
 	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 
 	interface BranchRow {
@@ -46,7 +46,12 @@
 		}
 	}
 
-	onMount(load);
+	// Load on mount and re-load whenever the active namespace changes —
+	// branch refs are namespace-scoped.
+	$effect(() => {
+		void namespaceStore.current;
+		load();
+	});
 
 	const auto = useAutoRefresh(load);
 

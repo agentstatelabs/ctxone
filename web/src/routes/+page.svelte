@@ -1,9 +1,9 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
 	import { getHealth, getStats, getLog, getTokenStats, remember } from '$lib/api';
 	import type { StatsResponse, CommitEntry, TokenStats, SessionSnapshot } from '$lib/api';
 	import { listPlans, type Plan } from '$lib/plansApi';
 	import LlmConsumptionPanel from '$lib/LlmConsumptionPanel.svelte';
+	import { namespaceStore } from '$lib/namespaceStore.svelte';
 	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 
 	let connected = $state(false);
@@ -43,11 +43,15 @@
 		return { active, pending, inProgress };
 	}
 
-	onMount(async () => {
-		connected = await getHealth();
-		if (connected) {
-			await refresh();
-		}
+	// Load on mount and re-load whenever the active namespace changes.
+	$effect(() => {
+		void namespaceStore.current;
+		void (async () => {
+			connected = await getHealth();
+			if (connected) {
+				await refresh();
+			}
+		})();
 	});
 
 	const auto = useAutoRefresh(async () => {

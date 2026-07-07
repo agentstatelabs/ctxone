@@ -2,11 +2,10 @@
  * CtxOne Lens — HTTP client for Hub taint / quarantine / watch endpoints.
  */
 
-const API_BASE: string = import.meta.env.VITE_CTXONE_API_URL
-	?? (import.meta.env.DEV ? 'http://localhost:3001' : '');
+import { hubFetch } from './api';
 
 async function fetchJson<T>(path: string): Promise<T> {
-	const resp = await fetch(`${API_BASE}${path}`);
+	const resp = await hubFetch(path);
 	if (!resp.ok) {
 		throw new Error(`API error: ${resp.status} ${resp.statusText}`);
 	}
@@ -70,7 +69,7 @@ export async function applyTaint(body: {
 	agent_id: string;
 	authorized_agents?: string[];
 }): Promise<{ taint_id: string; path: string; created_at: string }> {
-	const resp = await fetch(`${API_BASE}/api/taint`, {
+	const resp = await hubFetch(`/api/taint`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify(body)
@@ -86,7 +85,7 @@ export async function removeTaint(
 	reason: string,
 	agentId: string
 ): Promise<{ resolved_at: string }> {
-	const resp = await fetch(`${API_BASE}/api/taint/${encodeURIComponent(id)}`, {
+	const resp = await hubFetch(`/api/taint/${encodeURIComponent(id)}`, {
 		method: 'DELETE',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ reason, agent_id: agentId })

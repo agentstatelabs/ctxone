@@ -1,7 +1,7 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
 	import { getPinned, primeSections, parseMarkdownSections } from '$lib/api';
 	import type { PinnedItem } from '$lib/api';
+	import { namespaceStore } from '$lib/namespaceStore.svelte';
 	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 
 	let pinned: PinnedItem[] = $state([]);
@@ -43,7 +43,11 @@
 		}
 	}
 
-	onMount(refresh);
+	// Load on mount and re-load whenever the active namespace changes.
+	$effect(() => {
+		void namespaceStore.current;
+		refresh();
+	});
 
 	const auto = useAutoRefresh(refresh);
 

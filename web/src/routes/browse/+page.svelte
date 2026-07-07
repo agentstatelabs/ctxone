@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { listPaths, getState, getBlame, forget } from '$lib/api';
 	import { branchStore } from '$lib/branchStore.svelte';
+	import { namespaceStore } from '$lib/namespaceStore.svelte';
 	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 
 	type ViewMode = 'tree' | 'flat';
@@ -95,6 +96,7 @@
 
 	$effect(() => {
 		void branchStore.current;
+		void namespaceStore.current;
 		selectedPath = null;
 		selectedValue = null;
 		blame = null;

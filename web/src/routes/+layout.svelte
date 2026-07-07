@@ -2,11 +2,12 @@
 	import type { Snippet } from 'svelte';
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
-	import { getBranches, createBranch } from '$lib/api';
+	import { getBranches, createBranch, listProjects, type Project } from '$lib/api';
 	import { getAsdHealth, listAsdRepos, prefetchAsdRepo } from '$lib/codeApi';
 	import type { AsdHealth, AsdRepoInfo } from '$lib/codeTypes';
 	import { selectedRepo } from '$lib/repoStore';
 	import { branchStore } from '$lib/branchStore.svelte';
+	import { namespaceStore, DEFAULT_NAMESPACE } from '$lib/namespaceStore.svelte';
 	import { themeStore, THEMES, type ThemeId } from '$lib/themeStore.svelte';
 	import { refreshStore, REFRESH_INTERVAL_MS } from '$lib/refreshStore.svelte';
 	import CmdK from '$lib/CmdK.svelte';
@@ -53,6 +54,7 @@
 				{
 					label: 'Governance',
 					items: [
+						{ href: '/projects', label: 'Projects' },
 						{ href: '/branches', label: 'Branches' },
 						{ href: '/taint', label: 'Taint' }
 					]
@@ -106,6 +108,20 @@
 	let showCreate = $state(false);
 	let branchError: string | null = $state(null);
 
+	let projects = $state<Project[]>([]);
+
+	async function loadProjects() {
+		try {
+			projects = await listProjects();
+			namespaceStore.hydrate([
+				DEFAULT_NAMESPACE,
+				...projects.map((p) => p.namespace)
+			]);
+		} catch {
+			projects = [];
+		}
+	}
+
 	async function refreshBranches() {
 		try {
 			const list = await getBranches();
@@ -131,8 +147,15 @@
 
 	onMount(() => {
 		themeStore.hydrate();
-		refreshBranches();
+		loadProjects();
 		loadAsdRepos();
+	});
+
+	// (Re)load the branch list on mount and whenever the namespace
+	// changes — branch refs are namespace-scoped.
+	$effect(() => {
+		void namespaceStore.current;
+		refreshBranches();
 	});
 
 	// Persist selection and reload health whenever the repo changes.
@@ -196,6 +219,20 @@
 					<h2 class="nav-section-label">{section.label}</h2>
 
 					{#if section.label === 'CtxOne'}
+						<div class="section-picker namespace-switcher">
+							<label for="namespace-select">Project</label>
+							<select
+								id="namespace-select"
+								value={namespaceStore.current}
+								onchange={(e) =>
+									(namespaceStore.current = (e.currentTarget as HTMLSelectElement).value)}
+							>
+								<option value={DEFAULT_NAMESPACE}>default</option>
+								{#each projects as p}
+									<option value={p.namespace}>{p.display_name ?? p.id}</option>
+								{/each}
+							</select>
+						</div>
 						<div class="section-picker branch-switcher">
 							<label for="branch-select">Branch</label>
 							<select id="branch-select" bind:value={branchStore.current}>
@@ -420,12 +457,17 @@
 		color: var(--accent);
 	}
 
-	.branch-switcher {
+	.namespace-switcher {
 		margin-top: 1.5rem;
+	}
+
+	.branch-switcher {
+		margin-top: 0.75rem;
 		padding-bottom: 1rem;
 		border-bottom: 1px solid var(--border);
 	}
 
+	.namespace-switcher label,
 	.branch-switcher label,
 	.theme-picker label {
 		display: block;
@@ -436,6 +478,7 @@
 		margin-bottom: 0.35rem;
 	}
 
+	.namespace-switcher select,
 	.branch-switcher select,
 	.theme-picker select {
 		width: 100%;

@@ -1,9 +1,7 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { hubFetch } from '$lib/api';
+	import { namespaceStore } from '$lib/namespaceStore.svelte';
 	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
-
-	const API_BASE: string = import.meta.env.VITE_CTXONE_API_URL
-		?? (import.meta.env.DEV ? 'http://localhost:3001' : '');
 
 	interface Session {
 		session_id: string;
@@ -44,7 +42,7 @@
 	async function loadMemories(sessionId: string) {
 		memoriesLoading = true;
 		try {
-			const r = await fetch(`${API_BASE}/api/log/main?limit=500`);
+			const r = await hubFetch('/api/log/main?limit=500');
 			if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
 			const all: MemoryCommit[] = await r.json();
 			const tag = `session:${sessionId}`;
@@ -60,7 +58,7 @@
 		loading = true;
 		error = null;
 		try {
-			const r = await fetch(`${API_BASE}/api/stats/sessions`);
+			const r = await hubFetch('/api/stats/sessions');
 			if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
 			sessions = await r.json();
 			sessions.sort((a, b) => b.session_tokens_used - a.session_tokens_used);
@@ -71,7 +69,12 @@
 		}
 	}
 
-	onMount(load);
+	$effect(() => {
+		// Re-load whenever the active namespace changes
+		void namespaceStore.current;
+		selected = null;
+		load();
+	});
 
 	const auto = useAutoRefresh(async () => {
 		await load();

@@ -20,6 +20,7 @@
 	import { listPaths, getBranches } from '$lib/api';
 	import { listPlans, type Plan } from '$lib/plansApi';
 	import { branchStore } from '$lib/branchStore.svelte';
+	import { namespaceStore } from '$lib/namespaceStore.svelte';
 
 	type ResultKind = 'route' | 'plan' | 'path' | 'branch';
 	interface Result {
@@ -50,6 +51,7 @@
 		{ href: '/search', label: 'Search' },
 		{ href: '/history', label: 'History' },
 		{ href: '/diff', label: 'Diff' },
+		{ href: '/projects', label: 'Projects' },
 		{ href: '/branches', label: 'Branches' },
 		{ href: '/taint', label: 'Taint' }
 	];
@@ -61,7 +63,9 @@
 	}
 
 	async function reindex(branch: string) {
-		indexedFor = branch;
+		// Index key includes the namespace — same branch name in another
+		// namespace holds entirely different plans/paths.
+		indexedFor = `${namespaceStore.current}:${branch}`;
 		// Fire all three in parallel; tolerate any one failing — partial
 		// results are better than an empty palette.
 		const [p, paths_, b] = await Promise.allSettled([
@@ -75,7 +79,7 @@
 	}
 
 	$effect(() => {
-		if (open && indexedFor !== branchStore.current) {
+		if (open && indexedFor !== `${namespaceStore.current}:${branchStore.current}`) {
 			void reindex(branchStore.current);
 		}
 		if (open) {
