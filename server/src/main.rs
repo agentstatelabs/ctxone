@@ -93,6 +93,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // that tool in blame history. Defaults to "ctxone" when unset.
     let mut agent_id: String =
         std::env::var("CTX_AGENT_ID").unwrap_or_else(|_| "ctxone".to_string());
+    // MCP-mode namespace override. When unset, the project detection
+    // chain runs from the process cwd at startup (the spawning tool
+    // starts us in the project directory, so this Just Works once the
+    // repo is registered via `ctx project add`).
+    let mut namespace_flag: Option<String> = std::env::var("CTX_NAMESPACE").ok();
 
     let mut i = 1;
     while i < args.len() {
@@ -150,6 +155,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 i += 1;
                 if i < args.len() {
                     agent_id = args[i].clone();
+                }
+            }
+            "--namespace" => {
+                i += 1;
+                if i < args.len() {
+                    namespace_flag = Some(args[i].clone());
                 }
             }
             "--asd-url" => {
@@ -237,6 +248,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 eprintln!(
                     "      --agent-id <NAME>    Agent ID recorded on commits (default: \"ctxone\")"
+                );
+                eprintln!(
+                    "      --namespace <NS>     MCP mode: namespace to operate in (default: detect \
+                     project from cwd, else \"default\")"
                 );
                 eprintln!(
                     "      --asd-url <name=URL>  Register an ASD repo with a pre-running server; repeatable."
@@ -657,6 +672,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
              summarize_session, what_changed_since, why_did_we)"
         );
 
+        // Resolve the namespace this MCP session operates in: an explicit
+        // --namespace / CTX_NAMESPACE wins; otherwise run the project
+        // detection chain from the process cwd (.ctxproject walk-up, then
+        // git remote lookup in the registry). No match → "default".
+        let namespace: String = namespace_flag.clone().or_else(|| {
+            if storage_type != "sqlite" {
+                return None;
+            }
+            let cwd = std::env::current_dir().ok()?;
+            match ctxone_hub::project::detect_project(&cwd, Some(&db_path)) {
+                ctxone_hub::project::DetectResult::FoundByFile {
+                    project_id,
+                    namespace_id,
+                } => {
+                    info!(project = %project_id, namespace = %namespace_id, via = "ctxproject", "project detected");
+                    Some(namespace_id)
+                }
+                ctxone_hub::project::DetectResult::FoundByRemote {
+                    project_id,
+                    namespace_id,
+                    ..
+                } => {
+                    info!(project = %project_id, namespace = %namespace_id, via = "git-remote", "project detected");
+                    Some(namespace_id)
+                }
+                _ => None,
+            }
+        })
+        .unwrap_or_else(|| agentstategraph_core::Namespace::DEFAULT.to_string());
+
+        // Fork the repository into the resolved namespace so every tool
+        // call in this session is scoped without further plumbing. init()
+        // is idempotent and guarantees the namespace has a main branch.
+        let repo = if namespace != agentstategraph_core::Namespace::DEFAULT {
+            let ns = agentstategraph_core::Namespace::new(namespace.as_str())
+                .map_err(|e| format!("invalid namespace '{}': {}", namespace, e))?;
+            let forked = repo.fork_namespace(ns);
+            forked.init()?;
+            Arc::new(forked)
+        } else {
+            repo
+        };
+        info!(namespace = %namespace, "MCP session namespace");
+
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?
@@ -665,7 +724,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     repo,
                     agent_id.clone(),
                     asd_repos.clone(),
-                );
+                )
+                .with_namespace(namespace.clone());
                 // Attach pool if any --asd-repo flags were given
                 if !asd_pool_repos.is_empty() {
                     let pool = std::sync::Arc::new(ctxone_hub::asd_pool::AsdProcessPool::new(

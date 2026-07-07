@@ -1591,6 +1591,12 @@ pub struct CtxOneServer {
     /// server. Set via `ctxone-hub --agent-id <name>` when the tool
     /// embedding the MCP server spawns it. Defaults to "ctxone".
     pub agent_id: String,
+    /// Namespace this MCP session operates in. Resolved at startup
+    /// (explicit --namespace flag, else the project detection chain from
+    /// the process cwd); the `repo` field is already forked to it. Kept
+    /// here so tools can report where writes land. "default" when no
+    /// project matched.
+    pub namespace: String,
     /// Registered ASD repos with pre-known base URLs: (name, base_url).
     /// Populated from --asd-url flags. Code tools route by name.
     pub asd_repos: Arc<Vec<(String, String)>>,
@@ -1625,6 +1631,7 @@ impl CtxOneServer {
             repo,
             session,
             agent_id,
+            namespace: "default".to_string(),
             asd_repos: Arc::new(asd_repos),
             asd_pool: None,
             tool_router: Self::tool_router(),
@@ -1636,6 +1643,32 @@ impl CtxOneServer {
     pub fn with_pool(mut self, pool: Arc<AsdProcessPool>) -> Self {
         self.asd_pool = Some(pool);
         self
+    }
+
+    /// Record the namespace this server was scoped to. The caller is
+    /// responsible for having forked `repo` to the same namespace —
+    /// this only sets the label tools report.
+    pub fn with_namespace(mut self, namespace: String) -> Self {
+        self.namespace = namespace;
+        self
+    }
+
+    #[tool(
+        description = "Show which project namespace this session's memory operations land in, plus the agent id stamped on commits. Call this to prove where a write went, or to debug why remembered facts seem missing (usually: they were written in a different namespace)."
+    )]
+    async fn project_status(&self) -> String {
+        serde_json::json!({
+            "namespace": self.namespace,
+            "agent_id": self.agent_id,
+            "hint": if self.namespace == "default" {
+                "No project detected — operating in the shared default namespace. \
+                 Run `ctx project add <id>` in the repo (or commit its .ctxproject) \
+                 to give it an isolated namespace."
+            } else {
+                "Writes are scoped to this project's namespace."
+            },
+        })
+        .to_string()
     }
 
     #[tool(
@@ -1685,6 +1718,7 @@ impl CtxOneServer {
                 let mut out = serde_json::json!({
                     "status": "ok",
                     "ref": p.ref_name,
+                    "namespace": self.namespace,
                     "fact": fact,
                     "path": path,
                     "commit_id": format!("{}", commit_id.short()),
