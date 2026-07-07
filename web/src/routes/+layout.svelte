@@ -11,6 +11,7 @@
 	import { themeStore, THEMES, type ThemeId } from '$lib/themeStore.svelte';
 	import { refreshStore, REFRESH_INTERVAL_MS } from '$lib/refreshStore.svelte';
 	import CmdK from '$lib/CmdK.svelte';
+	import '@agentstate/lens-core/tokens.css';
 	import '../app.css';
 
 	let { children }: { children: Snippet } = $props();

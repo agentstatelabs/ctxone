@@ -297,3 +297,26 @@ body {
 	background: var(--bg-0);
 	color: var(--text-1);
 }
+
+/* ---------------------------------------------------------------------------
+ * @agentstate/lens-core bridge — map the app theme onto the --lens-* tokens
+ * the shared code-intelligence components consume. Declared on body (not
+ * :root) so it wins over tokens.css defaults regardless of import order,
+ * and re-resolves per theme via the [data-theme] variables above.
+ * ------------------------------------------------------------------------- */
+body {
+	--lens-bg: var(--bg-0);
+	--lens-surface: var(--bg-1);
+	--lens-surface-raised: var(--bg-hover);
+	--lens-border: var(--border);
+	--lens-text-strong: var(--text-0);
+	--lens-text: var(--text-1);
+	--lens-text-secondary: var(--text-2);
+	--lens-muted: var(--text-3);
+	--lens-accent: var(--accent);
+	--lens-accent-surface: var(--accent-bg);
+	--lens-accent-surface-hi: var(--accent-bg-hi);
+	--lens-danger: var(--danger);
+	--lens-ok: var(--success);
+	--lens-warn: var(--warning);
+}
