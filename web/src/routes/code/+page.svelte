@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { Badge } from '@agentstate/lens-core';
 	import { getAsdHealth, getSymbols, listFiles } from '$lib/codeApi';
 	import type { AsdHealth, FileEntry, SymbolSummary } from '$lib/codeTypes';
 	import { selectedRepo } from '$lib/repoStore';
@@ -95,6 +96,7 @@
 		<div class="status-row">
 			<span class="dot connected"></span>
 			<span class="status-text">Connected · <code>{health.db_path}</code></span>
+			<Badge tone="ok">{health.status}</Badge>
 		</div>
 
 		<div class="stats-grid">

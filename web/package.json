@@ -13,6 +13,9 @@
 		"test:unit": "vitest run",
 		"test:unit:watch": "vitest"
 	},
+	"dependencies": {
+		"@agentstate/lens-core": "file:../../lens-core"
+	},
 	"devDependencies": {
 		"@sveltejs/adapter-auto": "^7.0.1",
 		"@sveltejs/adapter-node": "^5.5.4",
