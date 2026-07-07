@@ -12,9 +12,37 @@ All endpoints live under `http://<host>:<port>/api/`. Default host and port:
 - **Branch/ref parameter:** most endpoints take a branch name in the URL
   path (`{ref_name}`) or as a `ref` query string / body field. Defaults to
   `main`.
+- **Namespace parameter:** every ref-touching endpoint also accepts a
+  namespace (see [Namespaces](#namespaces) below). Defaults to `default`.
 - **Content type:** requests and responses use `application/json`.
 - **Error responses:** HTTP 4xx for bad input, 5xx for server errors. Body
   is plain text with a human-readable message.
+
+## Namespaces
+
+A **namespace** isolates everything ref-scoped: branches, plans, memory
+(facts / pinned / primed / sessions), taints, reminders, and history.
+One namespace typically maps to one code repo via the
+[project registry](#project-endpoints). Pre-existing data lives in the
+reserved `default` namespace; nothing migrates.
+
+Every ref-touching endpoint (`state`/`paths`/`search`, `log`, `blame`,
+`diff`, `merge`, branches, `memory/*`, `plans/*`, `taint/*`,
+`reminders/*`, session turns) resolves its namespace the same way:
+
+1. `?namespace=<ns>` query parameter (takes precedence)
+2. `X-CTXone-Namespace: <ns>` header
+3. Neither present → the `default` namespace
+
+Rules:
+
+- Namespace names are ASCII `[A-Za-z0-9_-]`, 1–64 bytes. An invalid
+  name returns **400**.
+- Namespaces are created by registering a project
+  (`POST /api/projects`); ref operations in a namespace that doesn't
+  exist return **404**.
+- Cross-namespace merge is deny-by-default: attempting it returns
+  **403** (per AgentStateGraph's isolation rules).
 
 ## Health
 
@@ -319,9 +347,21 @@ Create a new branch.
 ```json
 {
   "name": "experiment",
-  "from": "main"
+  "from": "main",
+  "if_missing": false,
+  "git_branch": "feature/experiment"
 }
 ```
+
+- `name` (required) — branch to create
+- `from` — ref to branch from (default `main`)
+- `if_missing` — idempotent ensure: an already-existing branch is
+  success, not an error (default `false`). Branch mirroring re-ensures
+  on every CLI invocation with this flag.
+- `git_branch` — optional raw git branch this ASG branch mirrors.
+  Recorded once, on actual creation, as metadata at
+  `/ctxone/branches/<name>/git_branch` on the `from` ref
+  (sanitization is lossy: `feature/x` → `feature-x`).
 
 **Response (200):**
 ```json
@@ -329,9 +369,113 @@ Create a new branch.
   "status": "ok",
   "name": "experiment",
   "from": "main",
+  "existed": false,
   "commit_id": "sg_a3b1..."
 }
 ```
+
+`existed` is `true` when `if_missing` was set and the branch already
+existed (in which case `commit_id` is omitted).
+
+---
+
+## Project endpoints
+
+A **project** maps a code repo to an ASG namespace. The registry lives
+in the Hub's sqlite database (`projects` and `project_paths` tables) —
+memory/postgres backends have no registry, so project endpoints return
+**400** there. Registered projects are what the CLI and MCP server use
+to auto-detect the namespace from a working directory.
+
+### `GET /api/projects`
+
+List registered projects.
+
+**Response (200):**
+```json
+[
+  {
+    "id": "myrepo",
+    "remote_url": "https://github.com/alice/myrepo",
+    "namespace": "myrepo",
+    "display_name": "My Repo",
+    "created_at": "2026-07-01T12:00:00Z",
+    "local_paths": ["/home/user/myrepo"],
+    "asd_repos": ["myrepo"]
+  }
+]
+```
+
+`asd_repos` lists the pool-managed ASD repos whose db path lives under
+one of the project's `local_paths`. The binding is derived, not stored —
+registering an ASD repo under a project's path is what binds it.
+
+### `POST /api/projects`
+
+Register a project and create + initialize its ASG namespace
+(idempotent — the namespace gets an initialized `main` branch so ref
+operations work immediately).
+
+**Request body:**
+```json
+{
+  "id": "myrepo",
+  "remote_url": "https://github.com/alice/myrepo",
+  "namespace": "myrepo",
+  "display_name": "My Repo",
+  "local_path": "/home/user/myrepo"
+}
+```
+
+- `id` (required) — project id (kebab-case). Doubles as the namespace
+  name unless `namespace` is given.
+- `remote_url` — git remote for detection. Normalized on write:
+  trailing `.git` and `/` are stripped.
+- `namespace` — explicit namespace name (default: the id)
+- `display_name` — human-readable name
+- `local_path` — checkout path to bind
+
+**Response (200):** the project object (same shape as `GET /api/projects`
+entries). Returns **409** on a duplicate `id` or `remote_url`, **400**
+on an invalid namespace name.
+
+### `GET /api/projects/{id}`
+
+Fetch one project. **404** if the id is unknown.
+
+### `POST /api/projects/{id}/paths`
+
+Bind another local checkout to the project.
+
+**Request body:** `{ "local_path": "/home/user/myrepo-worktree" }`
+
+**Response (200):** the updated project object. **404** if the id is
+unknown.
+
+### `GET /api/projects/detect?cwd=/abs/path`
+
+Run the detection chain for a directory and report which namespace a
+session started there would land in:
+
+1. `.ctxproject` file (first non-empty line = project id) in `cwd` or
+   any parent
+2. `git remote get-url origin` looked up in the registry (URLs
+   normalized the same way as on write)
+
+**Response (200):**
+```json
+{ "status": "found", "via": "ctxproject", "project_id": "myrepo", "namespace": "myrepo" }
+```
+
+`via` is `"ctxproject"` or `"remote"` (remote matches also carry
+`remote_url`). No match:
+
+```json
+{ "status": "not_found", "namespace": "default" }
+```
+
+Non-sqlite backends report `{ "status": "registry_unavailable",
+"namespace": "default" }`.
 
 ---
 
@@ -543,8 +687,10 @@ Search for a decision and return its blame chain.
 
 | Status | Meaning | Example body |
 |--------|---------|--------------|
-| 400 | Malformed request (missing required field) | `"missing field \`fact\`"` |
-| 404 | Path or ref not found | `"ref not found: experiment"` |
+| 400 | Malformed request (missing required field, invalid namespace name) | `"missing field \`fact\`"` |
+| 403 | Cross-namespace merge denied | `"cross-namespace merge denied: ..."` |
+| 404 | Path, ref, or namespace not found | `"ref not found: experiment"` |
+| 409 | Conflict (duplicate project id / remote_url) | `"UNIQUE constraint failed: projects.id"` |
 | 500 | Internal error (storage, engine) | `"tree error: ..."` |
 
 The body is plain text, not JSON. Clients should log and retry on 5xx.

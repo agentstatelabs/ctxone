@@ -2,9 +2,43 @@
 
 > Decision record for plan `lens-enhancements` / **t-007**.
 >
-> **Status:** Accepted (2026-04-27).
+> **Status:** Accepted (2026-04-27). Updated for namespaces
+> (plan `namespaces-ctx`, 2026-07): everything below now applies
+> **within a namespace** — see the next section.
 > **Audience:** anyone reasoning about where `remember` writes go and
 > what `recall` returns when an agent is working on a non-`main` branch.
+
+## Update: the namespace layer above branches
+
+Since the `namespaces-ctx` plan shipped, the scoping hierarchy has one
+more level. It is now:
+
+```
+namespace (= one code repo, via a registered project)
+  └── branch (default main; git-mirrored inside a project)
+        └── paths (/memory/**, /plans/**, …)
+```
+
+A **namespace** isolates everything ref-scoped: branches, plans,
+memory (facts / pinned / primed / sessions), taints, reminders, and
+history. One namespace maps to one code repo through the project
+registry (`ctx project add <id>`, `POST /api/projects`). Every
+surface — HTTP (`?namespace=` / `X-CTXone-Namespace`), CLI
+(`--namespace` / `CTX_NAMESPACE` / auto-detection from the cwd), MCP
+(resolved at server startup) — picks the namespace first; the branch
+model described in the rest of this doc then operates unchanged
+*inside* that namespace. Cross-namespace merge is deny-by-default.
+
+**Migration stance:** pre-namespace data remains in the reserved
+`default` namespace; nothing migrates. Adopt namespaces by running
+`ctx project add` once per repo. Old data stays reachable by switching
+to the default namespace (`--namespace default` / `CTX_NAMESPACE` — an
+explicit namespace always wins over detection; outside any registered
+project you're in `default` anyway).
+
+Everything below this section describes branch scoping **within a
+single namespace**. Wherever it says "the graph," read "the graph of
+the active namespace."
 
 ## TL;DR
 

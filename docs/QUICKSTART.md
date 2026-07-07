@@ -158,6 +158,27 @@ ctx pinned    # verify what's stored
 Now every `ctx recall`, regardless of topic, returns those pinned sections
 first — the "critical context for all calls" pattern.
 
+## 8. Give each repo its own namespace
+
+By default everything lands in one shared namespace. If you work across
+multiple repos, register each one as a **project** so its branches,
+plans, and memory stay isolated:
+
+```bash
+cd ~/code/myrepo
+ctx project add myrepo
+```
+
+This creates a `myrepo` namespace on the Hub and writes a `.ctxproject`
+marker at the repo root — **commit that file** so every checkout (and
+every agent) auto-detects the project. From then on, `ctx` commands run
+inside the repo target its namespace automatically; `ctx status` and
+`ctx project detect` show which one is active.
+
+Anything you stored before adopting projects stays in the reserved
+`default` namespace — nothing migrates, and it's still reachable with
+`ctx --namespace default ...`.
+
 ## Next steps
 
 - [Architecture](ARCHITECTURE.md) — the mental model for how recall and priming work

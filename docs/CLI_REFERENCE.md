@@ -18,10 +18,29 @@ variables.
 | Flag | Env var | Default | Description |
 |------|---------|---------|-------------|
 | `--server <URL>` | `CTX_SERVER` | `http://localhost:3001` | Hub HTTP endpoint |
-| `--branch <REF>` | `CTX_BRANCH` | `main` | Branch / ref to read and write |
+| `--branch <REF>` | `CTX_BRANCH` | see below | Branch / ref to read and write |
+| `--namespace <NS>` | `CTX_NAMESPACE` | auto-detect | Project namespace to operate in |
 | `--format <FMT>` | `CTX_FORMAT` | `text` | Output format: `text`, `json`, or `id` |
 | `--help` / `-h` | | | Print help |
 | `--version` / `-V` | | | Print version |
+
+**Namespace resolution.** When `--namespace` / `CTX_NAMESPACE` is
+absent, every Hub-bound command resolves the namespace via the project
+detection chain for the current directory: a `.ctxproject` file in the
+cwd or any parent, then the repo's git remote looked up in the Hub's
+project registry. No match — or Hub unreachable — silently falls back
+to the `default` namespace. See [`ctx project`](#ctx-project--map-repos-to-namespaces)
+below.
+
+**Branch resolution.** Precedence for the working branch:
+
+1. `--branch` / `CTX_BRANCH` (explicit always wins)
+2. **Git mirror** — inside a project namespace, the sanitized current
+   git branch (`feature/x` → `feature-x`), auto-created from `main` on
+   first use. Detached HEAD → no mirroring.
+3. Config-file `branch` (`~/.ctxone/config.toml`) — applies outside
+   projects only
+4. `main`
 
 ## Output formats
 
@@ -249,6 +268,58 @@ OPTIONS:
       --message <TEXT>  Commit description  [default: "Merge"]
 ```
 
+Merging across namespaces is denied by default (the Hub returns 403).
+
+---
+
+## `ctx project` — map repos to namespaces
+
+A **project** maps a code repo to its own namespace holding that repo's
+branches, plans, memory, taints, reminders, and history. Detection is
+automatic per-command (`.ctxproject` file, then git remote); run
+`ctx project add` once per repo to opt in. Repos without a project —
+and all pre-existing data — live in the reserved `default` namespace.
+
+Inside a project namespace, **branch mirroring** kicks in: the working
+branch defaults to the sanitized current git branch (see
+[Global options](#global-options)), so memory written on
+`feature/x` lands on the ASG branch `feature-x` without any flags.
+
+### `ctx project add <id>`
+
+Register the current repo as a project. Creates the namespace on the
+Hub (the id doubles as the namespace name), binds the local path,
+records the git remote for detection, and writes a `.ctxproject`
+marker (one line: the project id) at the repo root. Commit the marker
+so agents auto-detect the project in every checkout.
+
+```
+USAGE: ctx project add <ID> [OPTIONS]
+
+ARGS:
+  <ID>  Project id (kebab-case). Doubles as the namespace name.
+
+OPTIONS:
+      --display-name <NAME>  Human-readable name (defaults to the id)
+      --path <PATH>          Repo root to bind (default: git root of cwd, else cwd)
+      --no-marker            Skip writing the .ctxproject marker file
+```
+
+### `ctx project list`
+
+List registered projects with their namespaces.
+
+### `ctx project use <id>`
+
+Point this checkout at an existing project: binds the path on the Hub
+and writes `.ctxproject` at the repo root (skip with `--no-marker`).
+Use it for a second clone or worktree of an already-registered repo.
+
+### `ctx project detect`
+
+Show which project/namespace the current directory resolves to, and
+via which mechanism (`.ctxproject` file or git remote).
+
 ---
 
 ## Provenance & sessions
@@ -329,7 +400,9 @@ Resolve an existing taint.
 
 ### `ctx status`
 
-One-line Hub health check plus session token summary.
+One-line Hub health check plus session token summary. Also shows the
+active project/namespace (and how it was detected) for the current
+directory.
 
 ### `ctx stats`
 
@@ -613,6 +686,7 @@ Op tags: `SetValue`, `AddKey`, `RemoveKey`, `AppendItem`, `RemoveItem`.
 |----------|-------------|
 | `CTX_SERVER` | Default value for `--server` |
 | `CTX_BRANCH` | Default value for `--branch` |
+| `CTX_NAMESPACE` | Default value for `--namespace` (skips project detection) |
 | `CTX_FORMAT` | Default value for `--format` |
 | `HOME` | Used by `find_hub_binary` and `canonical_db_path` |
 | `DATABASE_URL` | When `ctxone-hub` is launched with `--storage postgres` |

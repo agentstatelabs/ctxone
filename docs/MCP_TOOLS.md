@@ -1,10 +1,11 @@
 # MCP Tools Reference
 
-The CTXone Hub exposes **52 MCP tools** over the stdio transport, in
+The CTXone Hub exposes **53 MCP tools** over the stdio transport, in
 seven groups:
 
-- **Memory** (7): `remember`, `recall`, `prime`, `context`,
-  `summarize_session`, `what_changed_since`, `why_did_we`
+- **Memory** (8): `remember`, `recall`, `prime`, `context`,
+  `summarize_session`, `what_changed_since`, `why_did_we`,
+  `project_status`
 - **Plans** (12): `plan_new`, `plan_add`, `plan_start`,
   `plan_done`, `plan_abandon`, `plan_next`, `plan_list`,
   `plan_show`, `plan_tasks`, `plan_move`, `plan_complete`, `plan_archive`
@@ -50,6 +51,33 @@ tool.
 The Hub runs in stdio mode when invoked without `--http`. It stays alive
 for the duration of the agent session and handles one client at a time.
 
+## Namespace & branch mirroring
+
+Every stdio session is scoped to a **namespace** — the per-repo
+isolation unit for branches, plans, memory, taints, reminders, and
+history (see [MEMORY_BRANCH_SCOPING.md](MEMORY_BRANCH_SCOPING.md)).
+The namespace is resolved once, at server startup:
+
+1. An explicit `--namespace <ns>` flag or `CTX_NAMESPACE` env var wins.
+2. Otherwise the project detection chain runs from the process cwd
+   (the spawning tool starts the MCP server in the project directory):
+   a `.ctxproject` file in the cwd or any parent, then the repo's
+   `git remote get-url origin` looked up in the Hub's project registry.
+3. No match → the reserved `default` namespace.
+
+The repository is forked to the resolved namespace for the whole
+session — every tool call reads and writes inside it.
+
+**Branch mirroring** happens at startup too: inside a project
+namespace, the session's default ref becomes the sanitized current git
+branch (`feature/x` → `feature-x`), auto-created from `main` on first
+use. Tools that omit their `ref`/branch parameter use this session
+default; explicit refs are unchanged. Detached HEAD → no mirroring,
+default stays `main`.
+
+Call `project_status` at any time to see the resolved namespace,
+agent id, and default ref.
+
 ## Tools
 
 All tools return **structured text** (usually JSON). Agents parse the
@@ -79,7 +107,8 @@ Store a fact, preference, or decision.
 | `tags` | string[] | no | — | Queryable tags |
 | `ref` | string | no | `main` | Branch to write to |
 
-**Response:** JSON object with `status`, `path`, `commit_id`, `ref`, `fact`.
+**Response:** JSON object with `status`, `path`, `commit_id`, `ref`,
+`namespace` (which project namespace the write landed in), `fact`.
 
 **When to call:** any time the agent learns a fact about the user's project
 that should persist to the next session. Agents are encouraged to call this
@@ -237,6 +266,29 @@ history showing who/when/why).
 
 **When to call:** when the user asks "why did we decide X?" or the agent
 needs to justify a past choice to the user.
+
+---
+
+### `project_status`
+
+Show which project namespace this session operates in.
+
+**Description:**
+> Show which project namespace this session's memory operations land in,
+> plus the agent id stamped on commits. Call this to prove where a write
+> went, or to debug why remembered facts seem missing (usually: they were
+> written in a different namespace).
+
+**Parameters:** none.
+
+**Response:** JSON with `namespace`, `agent_id`, `default_ref` (the
+session's mirrored git branch, or `main`), and a `hint` string. In the
+`default` namespace the hint suggests running `ctx project add <id>` in
+the repo (or committing its `.ctxproject`) to get an isolated namespace.
+
+**When to call:** whenever you need to prove where writes land — at
+session start, or when a `recall` comes back empty and you suspect the
+facts live in another namespace.
 
 ---
 

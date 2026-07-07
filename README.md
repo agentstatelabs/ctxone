@@ -143,6 +143,9 @@ ctx plan add my-feature "Wire up new endpoint"
 ctx plan next my-feature        # what should I do next?
 ctx plan done my-feature t-001 --proof commit:abc1234
 
+# Give each repo its own namespace — branches, plans, and memory isolated per repo
+ctx project add myrepo          # commit the .ctxproject marker it writes
+
 # Sandbox speculative work on its own branch (memory follows the branch)
 ctx --branch feature/x remember "API renamed from foo to bar"
 
