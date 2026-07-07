@@ -64,6 +64,12 @@ struct RawCli {
     #[arg(long, env = "CTX_SESSION", global = true)]
     session: Option<String>,
 
+    /// Namespace to operate in (env: CTX_NAMESPACE). When omitted, the
+    /// project detection chain runs for the cwd (.ctxproject walk-up,
+    /// then git remote lookup); no match → the "default" namespace.
+    #[arg(long, env = "CTX_NAMESPACE", global = true)]
+    namespace: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -75,6 +81,9 @@ struct Cli {
     branch: String,
     format: OutputFormat,
     session: Option<String>,
+    /// Explicit namespace from --namespace / CTX_NAMESPACE. `None` means
+    /// "detect from cwd" (see [`Cli::resolve_namespace`]).
+    namespace: Option<String>,
     command: Commands,
 }
 
@@ -91,20 +100,55 @@ impl Cli {
                 .unwrap_or_else(|| "main".to_string()),
             format: raw.format.or(config.format).unwrap_or(OutputFormat::Text),
             session: raw.session,
+            namespace: raw.namespace,
             command: raw.command,
         }
     }
 
-    /// Build a reqwest client with X-CTXone-Session baked in as a default header.
-    fn http_client(&self) -> reqwest::Client {
-        let mut builder = reqwest::Client::builder();
-        if let Some(ref sid) = self.session {
-            let mut headers = reqwest::header::HeaderMap::new();
-            if let Ok(val) = reqwest::header::HeaderValue::from_str(sid) {
-                headers.insert("X-CTXone-Session", val);
-            }
-            builder = builder.default_headers(headers);
+    /// Resolve the namespace for this invocation. An explicit
+    /// --namespace / CTX_NAMESPACE wins; otherwise ask the Hub to run
+    /// the project detection chain for the cwd. Returns `None` (→ the
+    /// "default" namespace, no header sent) when nothing matches or the
+    /// Hub is unreachable — namespace resolution must never block a
+    /// command, so failures here are silent by design.
+    async fn resolve_namespace(&self) -> Option<String> {
+        if let Some(ns) = &self.namespace {
+            return Some(ns.clone());
         }
+        let cwd = std::env::current_dir().ok()?;
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(1500))
+            .build()
+            .ok()?;
+        let resp = client
+            .get(format!("{}/api/projects/detect", self.server))
+            .query(&[("cwd", cwd.to_string_lossy().as_ref())])
+            .send()
+            .await
+            .ok()?;
+        let v: serde_json::Value = resp.json().await.ok()?;
+        if v["status"] == "found" {
+            v["namespace"].as_str().map(str::to_string)
+        } else {
+            None
+        }
+    }
+
+    /// Build a reqwest client with X-CTXone-Session and (when resolved)
+    /// X-CTXone-Namespace baked in as default headers.
+    fn http_client(&self, namespace: Option<&str>) -> reqwest::Client {
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Some(ref sid) = self.session
+            && let Ok(val) = reqwest::header::HeaderValue::from_str(sid)
+        {
+            headers.insert("X-CTXone-Session", val);
+        }
+        if let Some(ns) = namespace
+            && let Ok(val) = reqwest::header::HeaderValue::from_str(ns)
+        {
+            headers.insert("X-CTXone-Namespace", val);
+        }
+        let builder = reqwest::Client::builder().default_headers(headers);
         builder.build().unwrap_or_default()
     }
 }
@@ -604,6 +648,48 @@ enum Commands {
         #[command(subcommand)]
         action: DbAction,
     },
+    /// Manage projects — a project maps a code repo to its own namespace
+    /// holding that repo's branches, plans, memory, and ASD data. Detection
+    /// is automatic per-command (`.ctxproject` file, then git remote); use
+    /// `ctx project add` once per repo to opt in.
+    Project {
+        #[command(subcommand)]
+        action: ProjectAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ProjectAction {
+    /// Register the current repo (or --path) as a project. Creates the
+    /// namespace on the Hub, binds the local path, records the git remote
+    /// for detection, and writes a .ctxproject marker at the repo root.
+    Add {
+        /// Project id (kebab-case). Doubles as the namespace name
+        /// unless --namespace is given.
+        id: String,
+        /// Human-readable name (defaults to the id).
+        #[arg(long)]
+        display_name: Option<String>,
+        /// Repo root to bind (default: git root of cwd, else cwd).
+        #[arg(long)]
+        path: Option<String>,
+        /// Skip writing the .ctxproject marker file.
+        #[arg(long)]
+        no_marker: bool,
+    },
+    /// List registered projects.
+    List,
+    /// Point this checkout at an existing project: writes .ctxproject at
+    /// the repo root and binds the path on the Hub.
+    Use {
+        /// Project id to bind this checkout to.
+        id: String,
+        /// Skip writing the .ctxproject marker file.
+        #[arg(long)]
+        no_marker: bool,
+    },
+    /// Show which project/namespace the current directory resolves to.
+    Detect,
 }
 
 #[derive(Subcommand, Debug)]
@@ -993,7 +1079,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let raw = RawCli::parse();
     let config = CtxConfig::load();
     let cli = Cli::from_raw(raw, &config);
-    let client = cli.http_client();
+    // Resolve the namespace once per invocation, but only for commands
+    // that talk to the Hub — purely-local commands (and `serve`, where
+    // the Hub is by definition not up yet) skip the detection round-trip.
+    let namespace = match &cli.command {
+        Commands::Skill { .. }
+        | Commands::Bootstrap
+        | Commands::Completion { .. }
+        | Commands::Config { .. }
+        | Commands::Init { .. }
+        | Commands::Serve { .. }
+        | Commands::Session { .. }
+        | Commands::Db { .. } => None,
+        _ => cli.resolve_namespace().await,
+    };
+    let client = cli.http_client(namespace.as_deref());
 
     match cli.command {
         Commands::Skill {
@@ -1091,7 +1191,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 budget,
                 urlencoding(&cli.branch),
             );
-            let resp = match reqwest::get(&url).await {
+            let resp = match client.get(&url).send().await {
                 Ok(r) => r,
                 Err(e) => unreachable_exit(&cli.server, e),
             };
@@ -1118,7 +1218,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     cli.server,
                     urlencoding(&cli.branch)
                 );
-                let exact_flat = match reqwest::get(&flat_url).await {
+                let exact_flat = match client.get(&flat_url).send().await {
                     Ok(r) if r.status().is_success() => {
                         let body = r.text().await.unwrap_or_default();
                         count_tokens_cl100k(&body)
@@ -1225,7 +1325,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 urlencoding(&project),
                 urlencoding(&cli.branch),
             );
-            let resp = match reqwest::get(&url).await {
+            let resp = match client.get(&url).send().await {
                 Ok(r) => r,
                 Err(e) => unreachable_exit(&cli.server, e),
             };
@@ -1243,7 +1343,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Status => {
             let health_url = format!("{}/api/health", cli.server);
-            let reachable = reqwest::get(&health_url)
+            let reachable = client.get(&health_url).send()
                 .await
                 .map(|r| r.status().is_success())
                 .unwrap_or(false);
@@ -1263,14 +1363,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut out = serde_json::json!({
                 "connected": true,
                 "server": cli.server,
+                "namespace": namespace.as_deref().unwrap_or("default"),
             });
-            if let Ok(r) = reqwest::get(format!("{}/api/stats/tokens", cli.server)).await
+            if let Some(ns) = &namespace
+                && let Ok(r) = client.get(format!("{}/api/projects/detect?cwd={}",
+                    cli.server,
+                    std::env::current_dir()
+                        .map(|d| d.to_string_lossy().into_owned())
+                        .unwrap_or_default())).send()
+                    .await
+                && let Ok(det) = r.json::<Value>().await
+                && det["status"] == "found"
+                && det["namespace"].as_str() == Some(ns.as_str())
+            {
+                out["project"] = det["project_id"].clone();
+                out["project_via"] = det["via"].clone();
+            }
+            if let Ok(r) = client.get(format!("{}/api/stats/tokens", cli.server)).send().await
                 && let Ok(parsed) = r.json::<Value>().await
             {
                 out["tokens"] = parsed;
             }
             emit(cli.format, &out, |v| {
                 println!("Hub: connected ({})", cli.server);
+                match v.get("project").and_then(|p| p.as_str()) {
+                    Some(p) => println!(
+                        "Project: {} (namespace: {}, via {})",
+                        p,
+                        v["namespace"].as_str().unwrap_or("default"),
+                        v["project_via"].as_str().unwrap_or("?"),
+                    ),
+                    None => println!(
+                        "Namespace: {}",
+                        v["namespace"].as_str().unwrap_or("default")
+                    ),
+                }
                 if let Some(t) = v.get("tokens") {
                     let used = t
                         .get("session_tokens_used")
@@ -1292,7 +1419,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         }
         Commands::Stats => {
-            let resp = match reqwest::get(format!("{}/api/stats/tokens", cli.server)).await {
+            let resp = match client.get(format!("{}/api/stats/tokens", cli.server)).send().await {
                 Ok(r) => r,
                 Err(e) => unreachable_exit(&cli.server, e),
             };
@@ -1408,7 +1535,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
         }
         Commands::Pinned => {
-            let resp = match reqwest::get(format!("{}/api/memory/pinned", cli.server)).await {
+            let resp = match client.get(format!("{}/api/memory/pinned", cli.server)).send().await {
                 Ok(r) => r,
                 Err(e) => unreachable_exit(&cli.server, e),
             };
@@ -1594,7 +1721,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 urlencoding(&ref_a),
                 urlencoding(&ref_b),
             );
-            let resp = match reqwest::get(&url).await {
+            let resp = match client.get(&url).send().await {
                 Ok(r) => r,
                 Err(e) => unreachable_exit(&cli.server, e),
             };
@@ -1733,7 +1860,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cli.server,
                 urlencoding(&decision),
             );
-            let resp = match reqwest::get(&url).await {
+            let resp = match client.get(&url).send().await {
                 Ok(r) => r,
                 Err(e) => unreachable_exit(&cli.server, e),
             };
@@ -1854,7 +1981,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 urlencoding(&query),
                 max,
             );
-            let resp = match reqwest::get(&url).await {
+            let resp = match client.get(&url).send().await {
                 Ok(r) => r,
                 Err(e) => unreachable_exit(&cli.server, e),
             };
@@ -1889,7 +2016,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 urlencoding(&prefix),
                 max_depth,
             );
-            let resp = match reqwest::get(&url).await {
+            let resp = match client.get(&url).send().await {
                 Ok(r) => r,
                 Err(e) => unreachable_exit(&cli.server, e),
             };
@@ -1916,7 +2043,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 urlencoding(&cli.branch),
                 urlencoding(&path),
             );
-            let resp = match reqwest::get(&url).await {
+            let resp = match client.get(&url).send().await {
                 Ok(r) => r,
                 Err(e) => unreachable_exit(&cli.server, e),
             };
@@ -1935,7 +2062,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 urlencoding(&cli.branch),
                 limit,
             );
-            let resp = match reqwest::get(&url).await {
+            let resp = match client.get(&url).send().await {
                 Ok(r) => r,
                 Err(e) => unreachable_exit(&cli.server, e),
             };
@@ -1953,7 +2080,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 urlencoding(&cli.branch),
                 urlencoding(&path),
             );
-            let resp = match reqwest::get(&url).await {
+            let resp = match client.get(&url).send().await {
                 Ok(r) => r,
                 Err(e) => unreachable_exit(&cli.server, e),
             };
@@ -1966,10 +2093,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         }
         Commands::Tail { interval } => {
-            run_tail(&cli.server, &cli.branch, interval).await?;
+            run_tail(&cli.server, &cli.branch, interval, client.clone()).await?;
         }
         Commands::Branches => {
-            let resp = match reqwest::get(format!("{}/api/branches", cli.server)).await {
+            let resp = match client.get(format!("{}/api/branches", cli.server)).send().await {
                 Ok(r) => r,
                 Err(e) => unreachable_exit(&cli.server, e),
             };
@@ -2096,8 +2223,202 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let format = cli.format;
             handle_db(action, &server, format, client.clone()).await?;
         }
+        Commands::Project { action } => {
+            let server = cli.server.clone();
+            let format = cli.format;
+            handle_project(action, &server, format, client.clone()).await?;
+        }
     }
 
+    Ok(())
+}
+
+// -- Project command implementation --
+
+/// Find the git repository root starting from `start`, or None when not
+/// inside a git repo.
+fn find_git_root(start: &std::path::Path) -> Option<PathBuf> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(start)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let path = raw.trim();
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
+/// Read `git remote get-url origin` for detection registration.
+fn read_git_remote(dir: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let url = raw.trim().to_string();
+    (!url.is_empty()).then_some(url)
+}
+
+/// Write the `.ctxproject` marker (project id, one line) at `root`.
+fn write_ctxproject(root: &std::path::Path, id: &str) -> std::io::Result<PathBuf> {
+    let path = root.join(".ctxproject");
+    std::fs::write(&path, format!("{}\n", id))?;
+    Ok(path)
+}
+
+/// Dispatch for `ctx project <subcommand>`.
+async fn handle_project(
+    action: ProjectAction,
+    server: &str,
+    format: OutputFormat,
+    client: reqwest::Client,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match action {
+        ProjectAction::Add {
+            id,
+            display_name,
+            path,
+            no_marker,
+        } => {
+            let cwd = std::env::current_dir()?;
+            let root = path
+                .map(PathBuf::from)
+                .or_else(|| find_git_root(&cwd))
+                .unwrap_or(cwd);
+            let mut body = serde_json::json!({
+                "id": id,
+                "local_path": root.to_string_lossy(),
+            });
+            if let Some(d) = display_name {
+                body["display_name"] = serde_json::json!(d);
+            }
+            if let Some(remote) = read_git_remote(&root) {
+                body["remote_url"] = serde_json::json!(remote);
+            }
+            let resp = match client
+                .post(format!("{}/api/projects", server))
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "project add failed").await;
+            }
+            let mut parsed: Value = resp.json().await?;
+            if !no_marker {
+                let marker = write_ctxproject(&root, &id)?;
+                parsed["marker"] = serde_json::json!(marker.to_string_lossy());
+            }
+            emit(format, &parsed, |v| {
+                println!(
+                    "Registered project {} (namespace: {})",
+                    v["id"].as_str().unwrap_or("?"),
+                    v["namespace"].as_str().unwrap_or("?"),
+                );
+                println!("  path: {}", root.display());
+                if let Some(m) = v.get("marker").and_then(|m| m.as_str()) {
+                    println!("  marker: {} (commit this so agents auto-detect)", m);
+                }
+            });
+        }
+        ProjectAction::List => {
+            let resp = match client.get(format!("{}/api/projects", server)).send().await {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "project list failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(format, &parsed, |v| {
+                let items = v.as_array().cloned().unwrap_or_default();
+                if items.is_empty() {
+                    println!("No projects registered. Run `ctx project add <id>` in a repo.");
+                    return;
+                }
+                for p in items {
+                    println!(
+                        "{:<24} ns:{:<24} {}",
+                        p["id"].as_str().unwrap_or("?"),
+                        p["namespace"].as_str().unwrap_or("?"),
+                        p["remote_url"].as_str().unwrap_or("-"),
+                    );
+                }
+            });
+        }
+        ProjectAction::Use { id, no_marker } => {
+            // Verify the project exists before touching the filesystem.
+            let resp = match client
+                .get(format!("{}/api/projects/{}", server, id))
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "project use failed").await;
+            }
+            let cwd = std::env::current_dir()?;
+            let root = find_git_root(&cwd).unwrap_or(cwd);
+            // Bind this checkout's path so path-based lookups work too.
+            let _ = client
+                .post(format!("{}/api/projects/{}/paths", server, id))
+                .json(&serde_json::json!({ "local_path": root.to_string_lossy() }))
+                .send()
+                .await;
+            let mut parsed: Value = resp.json().await?;
+            if !no_marker {
+                let marker = write_ctxproject(&root, &id)?;
+                parsed["marker"] = serde_json::json!(marker.to_string_lossy());
+            }
+            emit(format, &parsed, |v| {
+                println!(
+                    "This checkout now uses project {} (namespace: {})",
+                    v["id"].as_str().unwrap_or("?"),
+                    v["namespace"].as_str().unwrap_or("?"),
+                );
+            });
+        }
+        ProjectAction::Detect => {
+            let cwd = std::env::current_dir()?;
+            let resp = match client
+                .get(format!("{}/api/projects/detect", server))
+                .query(&[("cwd", cwd.to_string_lossy().as_ref())])
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "project detect failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(format, &parsed, |v| match v["status"].as_str() {
+                Some("found") => println!(
+                    "Project {} (namespace: {}, via {})",
+                    v["project_id"].as_str().unwrap_or("?"),
+                    v["namespace"].as_str().unwrap_or("?"),
+                    v["via"].as_str().unwrap_or("?"),
+                ),
+                _ => println!(
+                    "No project here — operating in the 'default' namespace. \
+                     Run `ctx project add <id>` to give this repo its own."
+                ),
+            });
+        }
+    }
     Ok(())
 }
 
@@ -2156,7 +2477,7 @@ async fn agents_status(
         "{}/api/state/{}/paths?prefix=/memory/pinned/{}",
         server, branch, AGENTS_SOURCE
     );
-    let resp = match reqwest::get(&url).await {
+    let resp = match client.get(&url).send().await {
         Ok(r) => r,
         Err(e) => unreachable_exit(server, e),
     };
@@ -2215,7 +2536,7 @@ async fn agents_remove(
         "{}/api/state/{}/paths?prefix=/memory/pinned/{}",
         server, branch, AGENTS_SOURCE
     );
-    let paths_resp = match reqwest::get(&paths_url).await {
+    let paths_resp = match client.get(&paths_url).send().await {
         Ok(r) => r,
         Err(e) => unreachable_exit(server, e),
     };
@@ -2659,6 +2980,7 @@ async fn run_tail(
     server: &str,
     branch: &str,
     interval_ms: u64,
+    client: reqwest::Client,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::collections::HashSet;
     use std::time::Duration;
@@ -2674,7 +2996,7 @@ async fn run_tail(
 
     loop {
         let url = format!("{}/api/log/{}?limit=20", server, urlencoding(branch),);
-        match reqwest::get(&url).await {
+        match client.get(&url).send().await {
             Ok(resp) if resp.status().is_success() => {
                 if let Ok(commits) = resp.json::<Vec<serde_json::Value>>().await {
                     // Print in oldest-first order so new ones scroll at the bottom
@@ -2721,6 +3043,7 @@ async fn run_tail(
 }
 
 async fn run_doctor(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let client = reqwest::Client::new();
     let mut checks: Vec<(String, bool, String)> = Vec::new();
     let mut suggestions: Vec<String> = Vec::new();
 
@@ -2759,7 +3082,7 @@ async fn run_doctor(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Check 3: Hub HTTP reachable
-    let hub_reachable = reqwest::get(format!("{}/api/health", cli.server))
+    let hub_reachable = client.get(format!("{}/api/health", cli.server)).send()
         .await
         .map(|r| r.status().is_success())
         .unwrap_or(false);
@@ -2777,7 +3100,7 @@ async fn run_doctor(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // Check 4: memory branch exists
     let main_exists = if hub_reachable {
-        reqwest::get(format!("{}/api/stats/main", cli.server))
+        client.get(format!("{}/api/stats/main", cli.server)).send()
             .await
             .map(|r| r.status().is_success())
             .unwrap_or(false)
@@ -3543,7 +3866,7 @@ fn read_stdin_nonblocking() -> Option<String> {
 
 async fn run_demo(server: &str, client: reqwest::Client) -> Result<(), Box<dyn std::error::Error>> {
     // Verify Hub is reachable first
-    match reqwest::get(format!("{}/api/health", server)).await {
+    match client.get(format!("{}/api/health", server)).send().await {
         Ok(r) if r.status().is_success() => {}
         _ => {
             eprintln!(
@@ -3698,12 +4021,12 @@ async fn run_demo(server: &str, client: reqwest::Client) -> Result<(), Box<dyn s
     ];
 
     for (topic, budget) in queries {
-        let resp = reqwest::get(format!(
+        let resp = client.get(format!(
             "{}/api/memory/recall?topic={}&budget={}",
             server,
             urlencoding(topic),
             budget
-        ))
+        )).send()
         .await?;
 
         if let Ok(parsed) = resp.json::<serde_json::Value>().await {
@@ -3732,7 +4055,7 @@ async fn run_demo(server: &str, client: reqwest::Client) -> Result<(), Box<dyn s
     }
 
     // Final cumulative stats
-    if let Ok(resp) = reqwest::get(format!("{}/api/stats/tokens", server)).await
+    if let Ok(resp) = client.get(format!("{}/api/stats/tokens", server)).send().await
         && let Ok(parsed) = resp.json::<serde_json::Value>().await
     {
         let used = parsed
@@ -5282,6 +5605,7 @@ mod tests {
             branch: None,
             format: None,
             session: None,
+            namespace: None,
             command: Commands::Status,
         }
     }
