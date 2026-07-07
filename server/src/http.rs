@@ -313,6 +313,15 @@ fn router_with_config_inner(
             "/api/taint/{id}",
             axum::routing::delete(remove_taint_handler),
         )
+        // Projects (namespace registry) — one project = one code repo = one
+        // ASG namespace. See crate::project for the registry itself.
+        .route(
+            "/api/projects",
+            get(list_projects_handler).post(register_project_handler),
+        )
+        .route("/api/projects/detect", get(detect_project_handler))
+        .route("/api/projects/{id}", get(get_project_handler))
+        .route("/api/projects/{id}/paths", post(add_project_path_handler))
         // Admin endpoints
         .route("/api/admin/backup", post(admin_backup));
 
@@ -2221,6 +2230,201 @@ async fn admin_backup(
         "status": "ok",
         "path": path.to_string_lossy(),
     })))
+}
+
+// -- Projects (namespace registry) --
+
+/// The project registry lives in the Hub's sqlite file. Memory/postgres
+/// backends have no registry — those requests get a 400, mirroring
+/// `/api/admin/backup`.
+fn registry_db(s: &HubState) -> Result<String, (StatusCode, String)> {
+    s.db_path.clone().ok_or((
+        StatusCode::BAD_REQUEST,
+        "project registry requires sqlite storage (db_path is unset)".to_string(),
+    ))
+}
+
+/// Serialize a project, annotating the pool-managed ASD repos whose db
+/// files live under one of the project's local paths. The binding is
+/// derived, not stored — registering an ASD repo under a project's path
+/// is what binds it.
+async fn project_to_json(s: &HubState, p: crate::project::Project) -> serde_json::Value {
+    let mut asd_repos: Vec<String> = Vec::new();
+    if let Some(pool) = &s.asd_pool {
+        for (name, db_path) in pool.repo_paths().await {
+            if p.local_paths.iter().any(|lp| db_path.starts_with(lp)) {
+                asd_repos.push(name);
+            }
+        }
+    }
+    serde_json::json!({
+        "id": p.id,
+        "remote_url": p.remote_url,
+        "namespace": p.namespace_id,
+        "display_name": p.display_name,
+        "created_at": p.created_at,
+        "local_paths": p.local_paths,
+        "asd_repos": asd_repos,
+    })
+}
+
+#[derive(Deserialize)]
+struct RegisterProjectRequest {
+    /// Project id (kebab-case). Doubles as the namespace name unless
+    /// `namespace` is given explicitly.
+    id: String,
+    remote_url: Option<String>,
+    namespace: Option<String>,
+    display_name: Option<String>,
+    local_path: Option<String>,
+}
+
+#[instrument(skip_all, fields(id = %req.id))]
+async fn register_project_handler(
+    State(s): State<HubState>,
+    Json(req): Json<RegisterProjectRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let db = registry_db(&s)?;
+    let namespace = req.namespace.clone().unwrap_or_else(|| req.id.clone());
+
+    // Create the ASG namespace first — this validates the name (ASCII
+    // alnum/-/_, 1..=64 bytes) and is idempotent on re-register.
+    s.repo.create_namespace(&namespace).map_err(|e| match &e {
+        agentstategraph::RepoError::InvalidOperation(_) => (StatusCode::BAD_REQUEST, e.to_string()),
+        _ => internal_error(e),
+    })?;
+
+    let remote = req
+        .remote_url
+        .as_deref()
+        .map(crate::project::normalize_remote_url);
+    crate::project::register_project(
+        &db,
+        &req.id,
+        remote.as_deref(),
+        &namespace,
+        req.display_name.as_deref(),
+        req.local_path.as_deref(),
+    )
+    .map_err(|e| {
+        let msg = e.to_string();
+        // Duplicate id / remote_url is a client error, not a 500.
+        let status = if msg.contains("UNIQUE constraint failed") {
+            StatusCode::CONFLICT
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        (status, msg)
+    })?;
+
+    info!(id = %req.id, namespace = %namespace, "project registered");
+    let p = crate::project::resolve_by_id(&db, &req.id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "project vanished after insert".to_string(),
+        ))?;
+    Ok(Json(project_to_json(&s, p).await))
+}
+
+async fn list_projects_handler(
+    State(s): State<HubState>,
+) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+    let db = registry_db(&s)?;
+    let projects = crate::project::list_projects(&db)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let mut out = Vec::with_capacity(projects.len());
+    for p in projects {
+        out.push(project_to_json(&s, p).await);
+    }
+    Ok(Json(out))
+}
+
+async fn get_project_handler(
+    State(s): State<HubState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let db = registry_db(&s)?;
+    match crate::project::resolve_by_id(&db, &id) {
+        Ok(Some(p)) => Ok(Json(project_to_json(&s, p).await)),
+        Ok(None) => Err((StatusCode::NOT_FOUND, format!("project not found: {id}"))),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
+}
+
+#[derive(Deserialize)]
+struct AddProjectPathRequest {
+    local_path: String,
+}
+
+async fn add_project_path_handler(
+    State(s): State<HubState>,
+    Path(id): Path<String>,
+    Json(req): Json<AddProjectPathRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let db = registry_db(&s)?;
+    // sqlite doesn't enforce the FK by default — check existence explicitly
+    // so a typo'd id is a 404, not a silent orphan row.
+    if crate::project::resolve_by_id(&db, &id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .is_none()
+    {
+        return Err((StatusCode::NOT_FOUND, format!("project not found: {id}")));
+    }
+    crate::project::add_local_path(&db, &id, &req.local_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let p = crate::project::resolve_by_id(&db, &id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, format!("project not found: {id}")))?;
+    Ok(Json(project_to_json(&s, p).await))
+}
+
+#[derive(Deserialize)]
+struct DetectQuery {
+    cwd: String,
+}
+
+/// `GET /api/projects/detect?cwd=/abs/path` — run the detection chain
+/// (`.ctxproject` walk-up, then git remote lookup) and report which
+/// namespace a session started in that directory would land in.
+async fn detect_project_handler(
+    State(s): State<HubState>,
+    Query(q): Query<DetectQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    use crate::project::DetectResult;
+    let db = s.db_path.clone();
+    // Detection shells out to git — keep it off the async runtime.
+    let result = tokio::task::spawn_blocking(move || {
+        crate::project::detect_project(std::path::Path::new(&q.cwd), db.as_deref())
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {}", e)))?;
+
+    let json = match result {
+        DetectResult::FoundByFile {
+            project_id,
+            namespace_id,
+        } => serde_json::json!({
+            "status": "found", "via": "ctxproject",
+            "project_id": project_id, "namespace": namespace_id,
+        }),
+        DetectResult::FoundByRemote {
+            project_id,
+            namespace_id,
+            remote_url,
+        } => serde_json::json!({
+            "status": "found", "via": "remote",
+            "project_id": project_id, "namespace": namespace_id,
+            "remote_url": remote_url,
+        }),
+        DetectResult::NotFound => serde_json::json!({
+            "status": "not_found", "namespace": "default",
+        }),
+        DetectResult::RegistryUnavailable => serde_json::json!({
+            "status": "registry_unavailable", "namespace": "default",
+        }),
+    };
+    Ok(Json(json))
 }
 
 #[cfg(test)]

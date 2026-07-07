@@ -20,7 +20,9 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone)]
 pub struct Project {
     pub id: String,
-    pub remote_url: String,
+    /// Canonical git remote URL, if the project has one. Projects without a
+    /// remote are still registerable — they're detected via `.ctxproject`.
+    pub remote_url: Option<String>,
     pub namespace_id: String,
     pub display_name: Option<String>,
     pub created_at: String,
@@ -41,7 +43,7 @@ pub fn bootstrap(conn: &Connection) -> SqlResult<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS projects (
             id          TEXT PRIMARY KEY,
-            remote_url  TEXT UNIQUE NOT NULL,
+            remote_url  TEXT UNIQUE,
             namespace_id TEXT NOT NULL,
             display_name TEXT,
             created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
@@ -57,25 +59,27 @@ pub fn bootstrap(conn: &Connection) -> SqlResult<()> {
 
 // -- Public registry operations --
 
-/// Register a new project in the registry. Returns an error if
-/// `remote_url` is already registered.
+/// Register a new project in the registry. Returns an error if the id or
+/// a non-null `remote_url` is already registered.
 pub fn register_project(
     db_path: &str,
     id: &str,
-    remote_url: &str,
+    remote_url: Option<&str>,
     namespace_id: &str,
     display_name: Option<&str>,
-    local_path: &str,
+    local_path: Option<&str>,
 ) -> SqlResult<()> {
     let conn = open(db_path)?;
     conn.execute(
         "INSERT INTO projects (id, remote_url, namespace_id, display_name) VALUES (?1, ?2, ?3, ?4)",
         params![id, remote_url, namespace_id, display_name],
     )?;
-    conn.execute(
-        "INSERT OR IGNORE INTO project_paths (project_id, local_path) VALUES (?1, ?2)",
-        params![id, local_path],
-    )?;
+    if let Some(path) = local_path {
+        conn.execute(
+            "INSERT OR IGNORE INTO project_paths (project_id, local_path) VALUES (?1, ?2)",
+            params![id, path],
+        )?;
+    }
     Ok(())
 }
 
@@ -107,11 +111,11 @@ pub fn list_projects(db_path: &str) -> SqlResult<Vec<Project>> {
     let mut stmt = conn.prepare(
         "SELECT id, remote_url, namespace_id, display_name, created_at FROM projects ORDER BY created_at",
     )?;
-    let ids: Vec<(String, String, String, Option<String>, String)> = stmt
+    let ids: Vec<(String, Option<String>, String, Option<String>, String)> = stmt
         .query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, String>(4)?,
@@ -143,7 +147,7 @@ fn load_project_by_id(conn: &Connection, id: &str) -> SqlResult<Option<Project>>
     let mut rows = stmt.query_map(params![id], |row| {
         Ok((
             row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(1)?,
             row.get::<_, String>(2)?,
             row.get::<_, Option<String>>(3)?,
             row.get::<_, String>(4)?,
@@ -172,7 +176,7 @@ fn load_project_by_remote_url(conn: &Connection, remote_url: &str) -> SqlResult<
     let mut rows = stmt.query_map(params![remote_url], |row| {
         Ok((
             row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(1)?,
             row.get::<_, String>(2)?,
             row.get::<_, Option<String>>(3)?,
             row.get::<_, String>(4)?,
@@ -340,8 +344,9 @@ pub fn read_git_remote(dir: &Path) -> Option<String> {
 
 /// Strip trailing `.git` suffix and trailing slashes so that
 /// `https://github.com/user/repo.git` and `https://github.com/user/repo`
-/// map to the same canonical form.
-fn normalize_remote_url(url: &str) -> String {
+/// map to the same canonical form. Public so the HTTP layer normalizes
+/// user-supplied remote URLs the same way detection normalizes git's.
+pub fn normalize_remote_url(url: &str) -> String {
     let trimmed = url.trim_end_matches('/');
     trimmed
         .strip_suffix(".git")
@@ -460,17 +465,17 @@ mod tests {
     #[test]
     fn register_and_resolve_by_id() {
         let (_dir, db) = tmp_db();
-        register_project(&db, "proj-1", "https://github.com/user/repo", "user-repo", None, "/home/user/repo").unwrap();
+        register_project(&db, "proj-1", Some("https://github.com/user/repo"), "user-repo", None, Some("/home/user/repo")).unwrap();
         let p = resolve_by_id(&db, "proj-1").unwrap().unwrap();
         assert_eq!(p.namespace_id, "user-repo");
-        assert_eq!(p.remote_url, "https://github.com/user/repo");
+        assert_eq!(p.remote_url.as_deref(), Some("https://github.com/user/repo"));
         assert_eq!(p.local_paths, vec!["/home/user/repo"]);
     }
 
     #[test]
     fn register_and_resolve_by_remote_url() {
         let (_dir, db) = tmp_db();
-        register_project(&db, "proj-2", "https://github.com/user/repo2", "user-repo2", Some("My Repo"), "/home/user/repo2").unwrap();
+        register_project(&db, "proj-2", Some("https://github.com/user/repo2"), "user-repo2", Some("My Repo"), Some("/home/user/repo2")).unwrap();
         let p = resolve_by_remote_url(&db, "https://github.com/user/repo2").unwrap().unwrap();
         assert_eq!(p.id, "proj-2");
         assert_eq!(p.display_name, Some("My Repo".to_string()));
@@ -479,16 +484,16 @@ mod tests {
     #[test]
     fn duplicate_remote_url_is_rejected() {
         let (_dir, db) = tmp_db();
-        register_project(&db, "p1", "https://example.com/repo", "ns1", None, "/a").unwrap();
-        let err = register_project(&db, "p2", "https://example.com/repo", "ns2", None, "/b");
+        register_project(&db, "p1", Some("https://example.com/repo"), "ns1", None, Some("/a")).unwrap();
+        let err = register_project(&db, "p2", Some("https://example.com/repo"), "ns2", None, Some("/b"));
         assert!(err.is_err(), "duplicate remote_url should fail");
     }
 
     #[test]
     fn list_projects_returns_all() {
         let (_dir, db) = tmp_db();
-        register_project(&db, "p1", "https://github.com/u/r1", "ns1", None, "/r1").unwrap();
-        register_project(&db, "p2", "https://github.com/u/r2", "ns2", None, "/r2").unwrap();
+        register_project(&db, "p1", Some("https://github.com/u/r1"), "ns1", None, Some("/r1")).unwrap();
+        register_project(&db, "p2", Some("https://github.com/u/r2"), "ns2", None, Some("/r2")).unwrap();
         let projects = list_projects(&db).unwrap();
         assert_eq!(projects.len(), 2);
     }
@@ -496,7 +501,7 @@ mod tests {
     #[test]
     fn add_local_path_is_idempotent() {
         let (_dir, db) = tmp_db();
-        register_project(&db, "p1", "https://github.com/u/r", "ns1", None, "/r").unwrap();
+        register_project(&db, "p1", Some("https://github.com/u/r"), "ns1", None, Some("/r")).unwrap();
         add_local_path(&db, "p1", "/r").unwrap(); // duplicate
         add_local_path(&db, "p1", "/r2").unwrap();
         let p = resolve_by_id(&db, "p1").unwrap().unwrap();
@@ -553,7 +558,7 @@ mod tests {
     fn detect_project_finds_by_ctxproject_file() {
         let dir = tempdir().unwrap();
         let (_dbdir, db) = tmp_db();
-        register_project(&db, "test-proj", "https://github.com/u/r", "test-ns", None, dir.path().to_str().unwrap()).unwrap();
+        register_project(&db, "test-proj", Some("https://github.com/u/r"), "test-ns", None, Some(dir.path().to_str().unwrap())).unwrap();
         write_ctxproject_file(dir.path(), "test-proj").unwrap();
         let result = detect_project(dir.path(), Some(&db));
         assert!(

@@ -1488,3 +1488,169 @@ async fn list_pinned_returns_primed_sections() {
     // Each pinned section has /title and /body leaves = 4 items total
     assert_eq!(items.len(), 4);
 }
+
+// -- Projects (namespace registry) --
+
+/// Build a sqlite-backed Hub (the registry needs a real db file) and keep
+/// the repo handle so tests can assert on ASG namespaces directly.
+fn sqlite_router() -> (tempfile::TempDir, Arc<Repository>, axum::Router) {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("hub.db").to_string_lossy().to_string();
+    let storage = agentstategraph_storage::SqliteStorage::open(&db_path).expect("sqlite open");
+    let repo = Arc::new(Repository::new(Box::new(storage)));
+    repo.init().expect("repo init");
+    let sessions = Arc::new(SessionRegistry::new());
+    let router = http::router_with_db_path(
+        repo.clone(),
+        sessions,
+        http::HubConfig::default(),
+        Some(db_path),
+        false,
+    );
+    (dir, repo, router)
+}
+
+#[tokio::test]
+async fn project_register_creates_namespace_and_round_trips() {
+    let (_dir, repo, router) = sqlite_router();
+
+    let (status, body) = call_json(
+        router.clone(),
+        post_json(
+            "/api/projects",
+            json!({
+                "id": "exampleproj",
+                "remote_url": "https://gitlab.example.com/g/exampleproj.git",
+                "display_name": "ExampleProj",
+                "local_path": "/home/user/exampleproj"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "register failed: {body}");
+    assert_eq!(body["namespace"], "exampleproj"); // defaults to id
+    // remote_url is normalized (.git stripped)
+    assert_eq!(body["remote_url"], "https://gitlab.example.com/g/exampleproj");
+
+    // The ASG namespace exists now.
+    let namespaces = repo.list_namespaces().expect("list namespaces");
+    assert!(
+        namespaces.iter().any(|n| n.as_str() == "exampleproj"),
+        "namespace not created: {namespaces:?}"
+    );
+
+    // GET single + list both see it.
+    let (status, body) = call_json(router.clone(), get("/api/projects/exampleproj")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["local_paths"], json!(["/home/user/exampleproj"]));
+
+    let (status, body) = call_json(router.clone(), get("/api/projects")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn project_duplicate_id_is_conflict() {
+    let (_dir, _repo, router) = sqlite_router();
+    let req = json!({ "id": "dup" });
+    let (status, _) = call_json(router.clone(), post_json("/api/projects", req.clone())).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = call_raw(router.clone(), post_json("/api/projects", req)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn project_invalid_namespace_name_is_bad_request() {
+    let (_dir, _repo, router) = sqlite_router();
+    // Spaces are invalid in namespace names; validation happens before insert.
+    let (status, _) = call_raw(
+        router.clone(),
+        post_json("/api/projects", json!({ "id": "bad name!" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn project_get_unknown_is_not_found() {
+    let (_dir, _repo, router) = sqlite_router();
+    let (status, _) = call_raw(router.clone(), get("/api/projects/nope")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn project_add_path_appends() {
+    let (_dir, _repo, router) = sqlite_router();
+    let (status, _) = call_json(
+        router.clone(),
+        post_json("/api/projects", json!({ "id": "p1", "local_path": "/a" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = call_json(
+        router.clone(),
+        post_json("/api/projects/p1/paths", json!({ "local_path": "/b" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["local_paths"], json!(["/a", "/b"]));
+
+    // Unknown project → 404, not a silent orphan row.
+    let (status, _) = call_raw(
+        router.clone(),
+        post_json("/api/projects/nope/paths", json!({ "local_path": "/c" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn project_detect_unregistered_cwd_is_not_found() {
+    let (_dir, _repo, router) = sqlite_router();
+    let tmp = tempfile::tempdir().unwrap();
+    let uri = format!(
+        "/api/projects/detect?cwd={}",
+        urlencoding_encode(tmp.path().to_str().unwrap())
+    );
+    let (status, body) = call_json(router.clone(), get(&uri)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "not_found");
+    assert_eq!(body["namespace"], "default");
+}
+
+#[tokio::test]
+async fn project_detect_finds_ctxproject_file() {
+    let (_dir, _repo, router) = sqlite_router();
+    let (status, _) = call_json(
+        router.clone(),
+        post_json("/api/projects", json!({ "id": "found-me" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join(".ctxproject"), "found-me\n").unwrap();
+    let uri = format!(
+        "/api/projects/detect?cwd={}",
+        urlencoding_encode(tmp.path().to_str().unwrap())
+    );
+    let (status, body) = call_json(router.clone(), get(&uri)).await;
+    assert_eq!(status, StatusCode::OK, "detect failed: {body}");
+    assert_eq!(body["status"], "found");
+    assert_eq!(body["via"], "ctxproject");
+    assert_eq!(body["namespace"], "found-me");
+}
+
+#[tokio::test]
+async fn projects_require_sqlite_backend() {
+    // The default memory-backed test router has no db_path.
+    let (status, _) = call_raw(test_router(), get("/api/projects")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// Minimal percent-encoder for absolute paths in query strings — test
+/// paths only contain [A-Za-z0-9/._-] plus the tempdir's random suffix.
+fn urlencoding_encode(s: &str) -> String {
+    s.replace('/', "%2F")
+}

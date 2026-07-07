@@ -168,6 +168,17 @@ impl AsdProcessPool {
         guard.entries.keys().cloned().collect()
     }
 
+    /// (name, db_path) of all registered repos (running or idle). Used to
+    /// bind ASD repos to projects by path-prefix match.
+    pub async fn repo_paths(&self) -> Vec<(String, std::path::PathBuf)> {
+        let guard = self.inner.lock().await;
+        guard
+            .entries
+            .iter()
+            .map(|(name, (path, _))| (name.clone(), path.clone()))
+            .collect()
+    }
+
     /// True if a live process is currently running for this repo.
     pub async fn is_running(&self, name: &str) -> bool {
         let guard = self.inner.lock().await;
