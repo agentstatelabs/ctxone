@@ -1654,3 +1654,133 @@ async fn projects_require_sqlite_backend() {
 fn urlencoding_encode(s: &str) -> String {
     s.replace('/', "%2F")
 }
+
+// -- Namespace threading (X-CTXone-Namespace / ?namespace=) --
+
+fn post_json_ns(uri: &str, ns: &str, body: Value) -> Request<Body> {
+    Request::builder()
+        .uri(uri)
+        .method("POST")
+        .header("content-type", "application/json")
+        .header("x-ctxone-namespace", ns)
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap()
+}
+
+fn get_ns(uri: &str, ns: &str) -> Request<Body> {
+    Request::builder()
+        .uri(uri)
+        .method("GET")
+        .header("x-ctxone-namespace", ns)
+        .body(Body::empty())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn namespaces_isolate_memory_and_branches() {
+    let (_dir, _repo, router) = sqlite_router();
+
+    // Two projects → two namespaces (each gets an initialized main).
+    for id in ["repo-a", "repo-b"] {
+        let (status, body) =
+            call_json(router.clone(), post_json("/api/projects", json!({ "id": id }))).await;
+        assert_eq!(status, StatusCode::OK, "register {id} failed: {body}");
+    }
+
+    // Write a fact in repo-a's namespace.
+    let (status, body) = call_json(
+        router.clone(),
+        post_json_ns(
+            "/api/memory/remember",
+            "repo-a",
+            json!({ "fact": "the scheduler runs on tokio", "importance": "high" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "remember failed: {body}");
+
+    // Visible in repo-a...
+    let (status, body) = call_json(
+        router.clone(),
+        get_ns("/api/state/main/search?query=scheduler", "repo-a"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !body.as_array().unwrap().is_empty(),
+        "fact not found in its own namespace"
+    );
+
+    // ...invisible in repo-b and in default.
+    let (status, body) = call_json(
+        router.clone(),
+        get_ns("/api/state/main/search?query=scheduler", "repo-b"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.as_array().unwrap().is_empty(),
+        "namespace leak into repo-b: {body}"
+    );
+    let (status, body) = call_json(router.clone(), get("/api/state/main/search?query=scheduler")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.as_array().unwrap().is_empty(),
+        "namespace leak into default: {body}"
+    );
+
+    // Branches are per-namespace: create one in repo-a, absent in repo-b.
+    let (status, _) = call_json(
+        router.clone(),
+        post_json_ns("/api/branches", "repo-a", json!({ "name": "feature-x" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let branches = |body: &Value| -> Vec<String> {
+        body.as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let (_, body) = call_json(router.clone(), get_ns("/api/branches", "repo-a")).await;
+    assert!(branches(&body).contains(&"feature-x".to_string()));
+    let (_, body) = call_json(router.clone(), get_ns("/api/branches", "repo-b")).await;
+    assert!(
+        !branches(&body).contains(&"feature-x".to_string()),
+        "branch leaked across namespaces"
+    );
+}
+
+#[tokio::test]
+async fn namespace_query_param_overrides_header() {
+    let (_dir, _repo, router) = sqlite_router();
+    let (status, _) =
+        call_json(router.clone(), post_json("/api/projects", json!({ "id": "qp-ns" }))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Header says a namespace that doesn't exist; query param wins.
+    let req = Request::builder()
+        .uri("/api/branches?namespace=qp-ns")
+        .method("GET")
+        .header("x-ctxone-namespace", "nope")
+        .body(Body::empty())
+        .unwrap();
+    let (status, _) = call_json(router.clone(), req).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn unknown_namespace_is_not_found() {
+    let (_dir, _repo, router) = sqlite_router();
+    let (status, _) = call_raw(router.clone(), get_ns("/api/branches", "never-registered")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn invalid_namespace_name_is_bad_request() {
+    let (_dir, _repo, router) = sqlite_router();
+    let (status, _) = call_raw(router.clone(), get_ns("/api/branches", "bad name!")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}

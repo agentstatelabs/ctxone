@@ -21,7 +21,7 @@ use tower_http::trace::TraceLayer;
 use tracing::{debug, info, instrument, warn};
 
 use agentstategraph::{CommitOptions, Repository};
-use agentstategraph_core::IntentCategory;
+use agentstategraph_core::{IntentCategory, Namespace};
 
 use crate::asd_pool::AsdProcessPool;
 use crate::memory_tools::{
@@ -77,6 +77,21 @@ impl HubState {
     fn session_for(&self, id: &SessionId) -> Arc<SessionStats> {
         self.sessions.get_or_create(&id.0)
     }
+
+    /// Repository scoped to the request's namespace. `"default"` returns
+    /// the base repo; anything else forks a sibling Repository sharing the
+    /// same storage but keyed on `(namespace, branch)` at the ref layer.
+    /// Forking is cheap (no data copy). The namespace must already exist —
+    /// ref operations in an unknown namespace surface as 404 via
+    /// [`internal_error`]'s `NamespaceNotFound` mapping.
+    fn repo_for(&self, ns: &NamespaceId) -> Result<Arc<Repository>, (StatusCode, String)> {
+        if ns.0 == Namespace::DEFAULT {
+            return Ok(self.repo.clone());
+        }
+        let namespace =
+            Namespace::new(ns.0.as_str()).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        Ok(Arc::new(self.repo.fork_namespace(namespace)))
+    }
 }
 
 /// Extractor for the session identifier carried by the
@@ -103,6 +118,47 @@ where
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| DEFAULT_SESSION_ID.to_string());
         Ok(SessionId(id))
+    }
+}
+
+/// Extractor for the namespace this request operates in. Resolution
+/// order: `?namespace=` query parameter (explicit in the URL wins),
+/// then the `X-CTXone-Namespace` header, then `"default"`. Namespaces
+/// are created by registering a project (`POST /api/projects`) — ref
+/// operations in a namespace that doesn't exist return 404.
+#[derive(Debug, Clone)]
+pub struct NamespaceId(pub String);
+
+impl<S> axum::extract::FromRequestParts<S> for NamespaceId
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        // Valid namespace names are ASCII [A-Za-z0-9_-], so no
+        // percent-decoding is needed; an encoded (thus invalid) name
+        // fails Namespace::new with a 400 downstream.
+        let from_query = parts.uri.query().and_then(|q| {
+            q.split('&').find_map(|pair| {
+                let (k, v) = pair.split_once('=')?;
+                (k == "namespace").then(|| v.to_string())
+            })
+        });
+        let id = from_query
+            .or_else(|| {
+                parts
+                    .headers
+                    .get("x-ctxone-namespace")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.trim().to_string())
+            })
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| Namespace::DEFAULT.to_string());
+        Ok(NamespaceId(id))
     }
 }
 
@@ -488,7 +544,12 @@ fn internal_error(e: agentstategraph::RepoError) -> (StatusCode, String) {
         RepoError::Tree(TreeError::PathNotFound(_))
         | RepoError::Tree(TreeError::ObjectNotFound(_))
         | RepoError::RefNotFound(_)
-        | RepoError::BranchNotFound(_) => StatusCode::NOT_FOUND,
+        | RepoError::BranchNotFound(_)
+        | RepoError::NamespaceNotFound(_)
+        | RepoError::Storage(agentstategraph_storage::StorageError::NamespaceNotFound(_)) => {
+            StatusCode::NOT_FOUND
+        }
+        RepoError::CrossNamespaceAccessDenied => StatusCode::FORBIDDEN,
         _ => {
             warn!(error = %msg, "request returned 500");
             StatusCode::INTERNAL_SERVER_ERROR
@@ -629,9 +690,11 @@ async fn record_llm_usage(
 
 async fn stats(
     State(s): State<HubState>,
+    ns: NamespaceId,
     Path(ref_name): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    s.repo.stats(&ref_name).map(Json).map_err(internal_error)
+    let repo = s.repo_for(&ns)?;
+    repo.stats(&ref_name).map(Json).map_err(internal_error)
 }
 
 #[derive(Deserialize)]
@@ -641,11 +704,13 @@ struct PathQuery {
 
 async fn get_state(
     State(s): State<HubState>,
+    ns: NamespaceId,
     Path(ref_name): Path<String>,
     Query(q): Query<PathQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
     let path = q.path.unwrap_or_else(|| "/".to_string());
-    s.repo
+    repo
         .get_json(&ref_name, &path)
         .map(Json)
         .map_err(internal_error)
@@ -659,11 +724,13 @@ struct PrefixQuery {
 
 async fn list_paths(
     State(s): State<HubState>,
+    ns: NamespaceId,
     Path(ref_name): Path<String>,
     Query(q): Query<PrefixQuery>,
 ) -> Result<Json<Vec<String>>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
     let prefix = q.prefix.unwrap_or_else(|| "/".to_string());
-    s.repo
+    repo
         .list_paths(&ref_name, &prefix, q.max_depth)
         .map(Json)
         .map_err(internal_error)
@@ -677,11 +744,12 @@ struct SearchQuery {
 
 async fn search_values(
     State(s): State<HubState>,
+    ns: NamespaceId,
     Path(ref_name): Path<String>,
     Query(q): Query<SearchQuery>,
 ) -> Result<Json<Vec<SearchResult>>, (StatusCode, String)> {
-    let results = s
-        .repo
+    let repo = s.repo_for(&ns)?;
+    let results = repo
         .search_values(&ref_name, &q.query, q.max_results)
         .map_err(internal_error)?;
     let out = results
@@ -704,11 +772,13 @@ struct LogQuery {
 
 async fn get_log(
     State(s): State<HubState>,
+    ns: NamespaceId,
     Path(ref_name): Path<String>,
     Query(q): Query<LogQuery>,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
     let limit = q.limit.unwrap_or(20);
-    let commits = s.repo.log(&ref_name, limit).map_err(internal_error)?;
+    let commits = repo.log(&ref_name, limit).map_err(internal_error)?;
 
     let out: Vec<serde_json::Value> = commits
         .into_iter()
@@ -733,18 +803,22 @@ async fn get_log(
 
 async fn blame(
     State(s): State<HubState>,
+    ns: NamespaceId,
     Path(ref_name): Path<String>,
     Query(q): Query<PathQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
     let path = q.path.unwrap_or_else(|| "/".to_string());
-    let blame = s.repo.blame(&ref_name, &path).map_err(internal_error)?;
+    let blame = repo.blame(&ref_name, &path).map_err(internal_error)?;
     Ok(Json(serde_json::to_value(&blame).unwrap_or_default()))
 }
 
 async fn list_branches(
     State(s): State<HubState>,
+    ns: NamespaceId,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
-    let branches = s.repo.list_branches(None).map_err(internal_error)?;
+    let repo = s.repo_for(&ns)?;
+    let branches = repo.list_branches(None).map_err(internal_error)?;
     let out: Vec<serde_json::Value> = branches
         .into_iter()
         .map(|(name, id)| serde_json::json!({ "name": name, "id": format!("{}", id.short()) }))
@@ -761,10 +835,11 @@ struct CreateBranchRequest {
 
 async fn create_branch(
     State(s): State<HubState>,
+    ns: NamespaceId,
     Json(req): Json<CreateBranchRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let id = s
-        .repo
+    let repo = s.repo_for(&ns)?;
+    let id = repo
         .branch(&req.name, &req.from)
         .map_err(internal_error)?;
     Ok(Json(serde_json::json!({
@@ -785,9 +860,11 @@ struct DiffQuery {
 
 async fn diff_refs(
     State(s): State<HubState>,
+    ns: NamespaceId,
     Query(q): Query<DiffQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let ops = s.repo.diff(&q.ref_a, &q.ref_b).map_err(internal_error)?;
+    let repo = s.repo_for(&ns)?;
+    let ops = repo.diff(&q.ref_a, &q.ref_b).map_err(internal_error)?;
     let json_ops = serde_json::to_value(&ops).unwrap_or_default();
     Ok(Json(serde_json::json!({
         "ref_a": q.ref_a,
@@ -817,15 +894,17 @@ fn default_merge_description() -> String {
 #[instrument(skip_all, fields(source = %req.source, target = %req.target, agent = %agent_id.0))]
 async fn merge_refs(
     State(s): State<HubState>,
+    ns: NamespaceId,
     agent_id: AgentId,
     Json(req): Json<MergeRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
     let mut opts = CommitOptions::new(&agent_id.0, IntentCategory::Merge, &req.description);
     if let Some(r) = req.reasoning {
         opts = opts.with_reasoning(r);
     }
 
-    match s.repo.merge(&req.source, &req.target, opts) {
+    match repo.merge(&req.source, &req.target, opts) {
         Ok(commit_id) => {
             // Graph size may have changed — invalidate every session's cache.
             s.sessions.mark_all_dirty();
@@ -887,10 +966,12 @@ fn default_ref() -> String {
 )]
 async fn remember(
     State(s): State<HubState>,
+    ns: NamespaceId,
     agent_id: AgentId,
     session_id: SessionId,
     Json(req): Json<RememberRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
     let path = match &req.context {
         Some(ctx) => format!("/memory/{}/{}", ctx, timestamp_id()),
         None => format!("/memory/facts/{}", timestamp_id()),
@@ -918,8 +999,7 @@ async fn remember(
     }
 
     let value = serde_json::Value::String(req.fact.clone());
-    let commit_id = s
-        .repo
+    let commit_id = repo
         .set_json(&req.ref_name, &path, &value, opts)
         .map_err(internal_error)?;
 
@@ -951,13 +1031,14 @@ fn default_forget_reason() -> String {
 #[instrument(skip_all, fields(path = %req.path, ref_name = %req.ref_name, agent = %agent_id.0))]
 async fn forget(
     State(s): State<HubState>,
+    ns: NamespaceId,
     agent_id: AgentId,
     Json(req): Json<ForgetRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
     let opts = CommitOptions::new(&agent_id.0, IntentCategory::Rollback, &req.reason);
 
-    let commit_id = s
-        .repo
+    let commit_id = repo
         .delete(&req.ref_name, &req.path, opts)
         .map_err(internal_error)?;
 
@@ -982,12 +1063,14 @@ struct RecallQuery {
 #[instrument(skip_all, fields(ref_name = %q.ref_name, budget = q.budget.unwrap_or(1500), session = %session_id.0))]
 async fn recall(
     State(s): State<HubState>,
+    ns: NamespaceId,
     session_id: SessionId,
     Query(q): Query<RecallQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
     let budget = q.budget.unwrap_or(1500);
     let session = s.session_for(&session_id);
-    let result = run_recall(&s.repo, &session, &q.topic, budget, &q.ref_name);
+    let result = run_recall(&repo, &session, &q.topic, budget, &q.ref_name);
     // Log savings inline — at info level this gives one line per recall
     // showing the topic and the ratio. Useful for seeing the memory layer
     // earning its keep in real time.
@@ -1017,15 +1100,17 @@ struct ContextQuery {
 
 async fn context(
     State(s): State<HubState>,
+    ns: NamespaceId,
     session_id: SessionId,
     Path(project): Path<String>,
     Query(q): Query<ContextQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
     let path = format!("/memory/projects/{}", project);
-    match s.repo.get_json(&q.ref_name, &path) {
+    match repo.get_json(&q.ref_name, &path) {
         Ok(value) => {
             let session = s.session_for(&session_id);
-            ensure_flat_size(&s.repo, &session, &q.ref_name);
+            ensure_flat_size(&repo, &session, &q.ref_name);
             let flat_size = session.total_graph_size_chars.load(Ordering::Relaxed) as usize;
             let sent = serde_json::to_string(&value).unwrap_or_default().len();
             session.record(sent, flat_size);
@@ -1055,9 +1140,11 @@ struct SummarizeSessionRequest {
 
 async fn summarize_session(
     State(s): State<HubState>,
+    ns: NamespaceId,
     agent_id: AgentId,
     Json(req): Json<SummarizeSessionRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
     let summary = req.key_points.join(". ");
     let summary_opts = CommitOptions::new(
         &agent_id.0,
@@ -1067,7 +1154,7 @@ async fn summarize_session(
     .with_confidence(0.9);
 
     let summary_val = serde_json::Value::String(summary);
-    s.repo
+    repo
         .set_json(
             "main",
             &format!("/sessions/{}/summary", req.session_id),
@@ -1085,7 +1172,7 @@ async fn summarize_session(
         )
         .with_confidence(0.95);
 
-        s.repo
+        repo
             .set_json(
                 "main",
                 &format!("/sessions/{}/decisions", req.session_id),
@@ -1110,9 +1197,11 @@ struct WhatChangedQuery {
 
 async fn what_changed_since(
     State(s): State<HubState>,
+    ns: NamespaceId,
     Query(q): Query<WhatChangedQuery>,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
-    let commits = s.repo.log("main", 100).map_err(internal_error)?;
+    let repo = s.repo_for(&ns)?;
+    let commits = repo.log("main", 100).map_err(internal_error)?;
     let out: Vec<serde_json::Value> = commits
         .into_iter()
         .filter(|c| c.timestamp.to_rfc3339().as_str() >= q.since.as_str())
@@ -1135,16 +1224,17 @@ struct WhyDidWeQuery {
 
 async fn why_did_we(
     State(s): State<HubState>,
+    ns: NamespaceId,
     Query(q): Query<WhyDidWeQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let results = s
-        .repo
+    let repo = s.repo_for(&ns)?;
+    let results = repo
         .search_values("main", &q.decision, Some(5))
         .map_err(internal_error)?;
 
     let mut traces = Vec::new();
     for (path, _) in &results {
-        if let Ok(blame_info) = s.repo.blame("main", path) {
+        if let Ok(blame_info) = repo.blame("main", path) {
             traces.push(serde_json::json!({
                 "path": path,
                 "blame": serde_json::to_value(&blame_info).unwrap_or_default(),
@@ -1192,10 +1282,12 @@ struct PrimeRequest {
 )]
 async fn prime(
     State(s): State<HubState>,
+    ns: NamespaceId,
     session_id: SessionId,
     agent_id: AgentId,
     Json(req): Json<PrimeRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
     let sections: Vec<(String, String)> = req
         .sections
         .into_iter()
@@ -1205,7 +1297,7 @@ async fn prime(
 
     let session = s.session_for(&session_id);
     let result = run_prime(
-        &s.repo,
+        &repo,
         &session,
         &agent_id.0,
         &req.source,
@@ -1223,16 +1315,17 @@ async fn prime(
 
 async fn list_pinned(
     State(s): State<HubState>,
+    ns: NamespaceId,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
     // If /memory/pinned doesn't exist yet, return an empty list instead of 500.
-    let paths = s
-        .repo
+    let paths = repo
         .list_paths("main", "/memory/pinned", Some(20))
         .unwrap_or_default();
 
     let mut out = Vec::new();
     for p in &paths {
-        if let Ok(val) = s.repo.get_json("main", p) {
+        if let Ok(val) = repo.get_json("main", p) {
             out.push(serde_json::json!({
                 "path": p,
                 "value": val,
@@ -1366,9 +1459,11 @@ fn substrate_error_to_response(err: agentstategraph_tasks::TaskStoreError) -> (S
 #[instrument(skip_all, fields(ref_name = %q.ref_name, status = q.status.as_deref().unwrap_or("")))]
 async fn list_plans(
     State(s): State<HubState>,
+    ns: NamespaceId,
     Query(q): Query<PlanListQuery>,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
-    let store = plan_tools::make_store(s.repo.clone(), DEFAULT_AGENT_ID);
+    let repo = s.repo_for(&ns)?;
+    let store = plan_tools::make_store(repo.clone(), DEFAULT_AGENT_ID);
     let filter = q
         .status
         .as_deref()
@@ -1389,10 +1484,12 @@ async fn list_plans(
 #[instrument(skip_all, fields(name = %req.name, ref_name = %req.ref_name, agent = %agent_id.0))]
 async fn create_plan(
     State(s): State<HubState>,
+    ns: NamespaceId,
     agent_id: AgentId,
     Json(req): Json<CreatePlanRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
-    let store = plan_tools::make_store(s.repo.clone(), &agent_id.0);
+    let repo = s.repo_for(&ns)?;
+    let store = plan_tools::make_store(repo.clone(), &agent_id.0);
     let plan = plan_tools::create_plan(&store, &req.ref_name, &req.name, req.description)
         .map_err(plan_error_to_response)?;
     s.sessions.mark_all_dirty();
@@ -1403,10 +1500,12 @@ async fn create_plan(
 #[instrument(skip_all, fields(name = %name, ref_name = %q.ref_name))]
 async fn get_plan(
     State(s): State<HubState>,
+    ns: NamespaceId,
     Path(name): Path<String>,
     Query(q): Query<RefQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = plan_tools::make_store(s.repo.clone(), DEFAULT_AGENT_ID);
+    let repo = s.repo_for(&ns)?;
+    let store = plan_tools::make_store(repo.clone(), DEFAULT_AGENT_ID);
     let plan = store
         .get_plan(&q.ref_name, &name)
         .map_err(substrate_error_to_response)?;
@@ -1417,11 +1516,13 @@ async fn get_plan(
 #[instrument(skip_all, fields(name = %name, ref_name = %q.ref_name, agent = %agent_id.0))]
 async fn delete_plan(
     State(s): State<HubState>,
+    ns: NamespaceId,
     agent_id: AgentId,
     Path(name): Path<String>,
     Query(q): Query<RefQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = plan_tools::make_store(s.repo.clone(), &agent_id.0);
+    let repo = s.repo_for(&ns)?;
+    let store = plan_tools::make_store(repo.clone(), &agent_id.0);
     store
         .delete_plan(&q.ref_name, &name)
         .map_err(substrate_error_to_response)?;
@@ -1436,10 +1537,12 @@ async fn delete_plan(
 #[instrument(skip_all, fields(name = %name, ref_name = %q.ref_name))]
 async fn list_plan_tasks(
     State(s): State<HubState>,
+    ns: NamespaceId,
     Path(name): Path<String>,
     Query(q): Query<RefQuery>,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
-    let store = plan_tools::make_store(s.repo.clone(), DEFAULT_AGENT_ID);
+    let repo = s.repo_for(&ns)?;
+    let store = plan_tools::make_store(repo.clone(), DEFAULT_AGENT_ID);
     let tasks = store
         .list_tasks(&q.ref_name, &name)
         .map_err(substrate_error_to_response)?;
@@ -1450,11 +1553,13 @@ async fn list_plan_tasks(
 #[instrument(skip_all, fields(name = %name, title = %req.title, agent = %agent_id.0))]
 async fn add_plan_task(
     State(s): State<HubState>,
+    ns: NamespaceId,
     agent_id: AgentId,
     Path(name): Path<String>,
     Json(req): Json<CreateTaskRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
-    let store = plan_tools::make_store(s.repo.clone(), &agent_id.0);
+    let repo = s.repo_for(&ns)?;
+    let store = plan_tools::make_store(repo.clone(), &agent_id.0);
     // Enforce the "plan nearing completion" lock before mutating.
     // No-op unless `CTXONE_PLAN_LOCK_RATIO` is set; `force=true` bypasses.
     plan_tools::check_plan_lock(&store, &req.ref_name, &name, req.force)
@@ -1478,11 +1583,13 @@ async fn add_plan_task(
 #[instrument(skip_all, fields(name = %name, task_id = %task_id, ref_name = %q.ref_name))]
 async fn get_plan_task(
     State(s): State<HubState>,
+    ns: NamespaceId,
     Path((name, task_id)): Path<(String, String)>,
     Query(q): Query<RefQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
     use agentstategraph_tasks::TaskId;
-    let store = plan_tools::make_store(s.repo.clone(), DEFAULT_AGENT_ID);
+    let store = plan_tools::make_store(repo.clone(), DEFAULT_AGENT_ID);
     let task = store
         .get_task(&q.ref_name, &name, &TaskId(task_id))
         .map_err(substrate_error_to_response)?;
@@ -1492,13 +1599,15 @@ async fn get_plan_task(
 #[instrument(skip_all, fields(name = %name, task_id = %task_id, agent = %agent_id.0))]
 async fn start_plan_task(
     State(s): State<HubState>,
+    ns: NamespaceId,
     agent_id: AgentId,
     Path((name, task_id)): Path<(String, String)>,
     Json(req): Json<StartTaskRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
     use agentstategraph_tasks::TaskId;
     let _ = req.reason; // reserved for future richer blame (annotation)
-    let store = plan_tools::make_store(s.repo.clone(), &agent_id.0);
+    let store = plan_tools::make_store(repo.clone(), &agent_id.0);
     let task = store
         .start_task(&req.ref_name, &name, &TaskId(task_id))
         .map_err(substrate_error_to_response)?;
@@ -1509,15 +1618,17 @@ async fn start_plan_task(
 #[instrument(skip_all, fields(name = %name, task_id = %task_id, agent = %agent_id.0))]
 async fn complete_plan_task(
     State(s): State<HubState>,
+    ns: NamespaceId,
     agent_id: AgentId,
     Path((name, task_id)): Path<(String, String)>,
     Json(req): Json<CompleteTaskRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
     use agentstategraph_tasks::TaskId;
     let _ = req.reason;
     let proof = plan_tools::parse_proof(&req.proof.kind, &req.proof.value, req.proof.note)
         .map_err(plan_error_to_response)?;
-    let store = plan_tools::make_store(s.repo.clone(), &agent_id.0);
+    let store = plan_tools::make_store(repo.clone(), &agent_id.0);
     let task = store
         .complete_task(&req.ref_name, &name, &TaskId(task_id), proof)
         .map_err(substrate_error_to_response)?;
@@ -1528,12 +1639,14 @@ async fn complete_plan_task(
 #[instrument(skip_all, fields(name = %name, task_id = %task_id, agent = %agent_id.0))]
 async fn abandon_plan_task(
     State(s): State<HubState>,
+    ns: NamespaceId,
     agent_id: AgentId,
     Path((name, task_id)): Path<(String, String)>,
     Json(req): Json<AbandonTaskRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
     use agentstategraph_tasks::TaskId;
-    let store = plan_tools::make_store(s.repo.clone(), &agent_id.0);
+    let store = plan_tools::make_store(repo.clone(), &agent_id.0);
     let task = store
         .abandon_task(&req.ref_name, &name, &TaskId(task_id), &req.reason)
         .map_err(substrate_error_to_response)?;
@@ -1544,11 +1657,13 @@ async fn abandon_plan_task(
 #[instrument(skip_all, fields(name = %name, ref_name = %q.ref_name, assigned_to = q.assigned_to.as_deref().unwrap_or("")))]
 async fn next_plan_task(
     State(s): State<HubState>,
+    ns: NamespaceId,
     agent_id: AgentId,
     Path(name): Path<String>,
     Query(q): Query<NextTaskQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = plan_tools::make_store(s.repo.clone(), DEFAULT_AGENT_ID);
+    let repo = s.repo_for(&ns)?;
+    let store = plan_tools::make_store(repo.clone(), DEFAULT_AGENT_ID);
     let assignee = match q.assigned_to.as_deref() {
         Some("me") => Some(agent_id.0.clone()),
         Some(x) if !x.is_empty() => Some(x.to_string()),
@@ -1571,11 +1686,13 @@ async fn next_plan_task(
 #[instrument(skip_all, fields(name = %name, ref_name = %q.ref_name, agent = %agent_id.0))]
 async fn archive_plan(
     State(s): State<HubState>,
+    ns: NamespaceId,
     agent_id: AgentId,
     Path(name): Path<String>,
     Query(q): Query<RefQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = plan_tools::make_store(s.repo.clone(), &agent_id.0);
+    let repo = s.repo_for(&ns)?;
+    let store = plan_tools::make_store(repo.clone(), &agent_id.0);
     let plan = store
         .archive_plan(&q.ref_name, &name)
         .map_err(substrate_error_to_response)?;
@@ -1592,13 +1709,15 @@ struct MovePlanBody {
 #[instrument(skip_all, fields(name = %name, ref_name = %q.ref_name, agent = %agent_id.0))]
 async fn move_plan_handler(
     State(s): State<HubState>,
+    ns: NamespaceId,
     agent_id: AgentId,
     Path(name): Path<String>,
     Query(q): Query<RefQuery>,
     Json(body): Json<MovePlanBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = plan_tools::make_store(s.repo.clone(), &agent_id.0);
-    let result = plan_tools::move_plan(&s.repo, &store, &q.ref_name, &body.target_ref, &name)
+    let repo = s.repo_for(&ns)?;
+    let store = plan_tools::make_store(repo.clone(), &agent_id.0);
+    let result = plan_tools::move_plan(&repo, &store, &q.ref_name, &body.target_ref, &name)
         .map_err(plan_error_to_response)?;
     s.sessions.mark_all_dirty();
     Ok(Json(serde_json::json!({
@@ -1620,12 +1739,14 @@ struct ForceCompleteBody {
 #[instrument(skip_all, fields(name = %name, ref_name = %q.ref_name, agent = %agent_id.0))]
 async fn force_complete_plan(
     State(s): State<HubState>,
+    ns: NamespaceId,
     agent_id: AgentId,
     Path(name): Path<String>,
     Query(q): Query<RefQuery>,
     body: Option<Json<ForceCompleteBody>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = plan_tools::make_store(s.repo.clone(), &agent_id.0);
+    let repo = s.repo_for(&ns)?;
+    let store = plan_tools::make_store(repo.clone(), &agent_id.0);
     let reason = body.and_then(|Json(b)| b.reason);
     let result = plan_tools::force_complete_plan(&store, &q.ref_name, &name, reason)
         .map_err(plan_error_to_response)?;
@@ -1654,11 +1775,12 @@ struct ListTaintsResponse {
 
 async fn list_taints_handler(
     State(s): State<HubState>,
+    ns: NamespaceId,
     Query(q): Query<ListTaintsQuery>,
 ) -> Result<Json<ListTaintsResponse>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
     let kind = parse_kind(q.kind.as_deref())?;
-    let taints = s
-        .repo
+    let taints = repo
         .list_taints(q.path_prefix.as_deref(), kind, q.include_resolved)
         .map_err(internal_error)?;
     Ok(Json(ListTaintsResponse { taints }))
@@ -1690,10 +1812,11 @@ struct CheckTaintResponse {
 
 async fn check_taint_handler(
     State(s): State<HubState>,
+    ns: NamespaceId,
     Query(q): Query<CheckTaintQuery>,
 ) -> Result<Json<CheckTaintResponse>, (StatusCode, String)> {
-    let check = s
-        .repo
+    let repo = s.repo_for(&ns)?;
+    let check = repo
         .check_taint(&q.path, &q.agent_id, q.confidence)
         .map_err(internal_error)?;
     let warnings: Vec<String> = check
@@ -1763,8 +1886,10 @@ struct ApplyTaintResponse {
 
 async fn apply_taint_handler(
     State(s): State<HubState>,
+    ns: NamespaceId,
     Json(body): Json<ApplyTaintBody>,
 ) -> Result<Json<ApplyTaintResponse>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
     use agentstategraph_taint::{QuarantineParams, TaintKind, TaintParams, WatchParams};
     let kind = parse_kind(Some(&body.kind))?
         .ok_or((StatusCode::BAD_REQUEST, "kind required".to_string()))?;
@@ -1775,7 +1900,7 @@ async fn apply_taint_handler(
     let taint_id = match kind {
         TaintKind::Taint => {
             let effect = parse_effect(&body.effect)?;
-            s.repo.taint(
+            repo.taint(
                 &ref_name,
                 &body.path,
                 TaintParams {
@@ -1790,7 +1915,7 @@ async fn apply_taint_handler(
                 },
             )
         }
-        TaintKind::Quarantine => s.repo.quarantine(
+        TaintKind::Quarantine => repo.quarantine(
             &ref_name,
             &body.path,
             QuarantineParams {
@@ -1803,7 +1928,7 @@ async fn apply_taint_handler(
                 agent_id: body.agent_id,
             },
         ),
-        TaintKind::Watch => s.repo.watch_path(
+        TaintKind::Watch => repo.watch_path(
             &ref_name,
             &body.path,
             WatchParams {
@@ -1844,19 +1969,20 @@ struct RemoveTaintResponse {
 
 async fn remove_taint_handler(
     State(s): State<HubState>,
+    ns: NamespaceId,
     Path(id): Path<String>,
     Json(body): Json<RemoveTaintBody>,
 ) -> Result<Json<RemoveTaintResponse>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
     use agentstategraph_taint::{TaintKind, UntaintParams, UnwatchParams};
-    let taint = s
-        .repo
+    let taint = repo
         .get_taint(&id)
         .map_err(internal_error)?
         .ok_or((StatusCode::NOT_FOUND, format!("taint not found: {id}")))?;
     let ref_name = body.ref_name.unwrap_or_else(|| "main".to_string());
 
     match taint.kind {
-        TaintKind::Taint => s.repo.untaint(
+        TaintKind::Taint => repo.untaint(
             &ref_name,
             &taint.path,
             &taint.name,
@@ -1866,7 +1992,7 @@ async fn remove_taint_handler(
                 agent_id: body.agent_id,
             },
         ),
-        TaintKind::Quarantine => s.repo.unquarantine(
+        TaintKind::Quarantine => repo.unquarantine(
             &ref_name,
             &taint.path,
             &taint.name,
@@ -1876,7 +2002,7 @@ async fn remove_taint_handler(
                 agent_id: body.agent_id,
             },
         ),
-        TaintKind::Watch => s.repo.unwatch(
+        TaintKind::Watch => repo.unwatch(
             &ref_name,
             &taint.path,
             &taint.name,
@@ -1968,11 +2094,13 @@ struct SessionTurnQuery {
 
 async fn put_session_turn(
     State(s): State<HubState>,
+    ns: NamespaceId,
     Path((sid, idx)): Path<(String, u32)>,
     agent_id: AgentId,
     Query(q): Query<SessionTurnQuery>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
     let bytes = serde_json::to_vec(&body).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     if bytes.len() > SESSION_TURNS_MAX_BYTES {
         return Err((
@@ -1996,8 +2124,7 @@ async fn put_session_turn(
         format!("turn:{}", idx),
         "kind:full-turn".to_string(),
     ]);
-    let commit_id = s
-        .repo
+    let commit_id = repo
         .set_json(&q.ref_name, &path, &body, opts)
         .map_err(internal_error)?;
     Ok(Json(serde_json::json!({
@@ -2010,11 +2137,13 @@ async fn put_session_turn(
 
 async fn get_session_turn(
     State(s): State<HubState>,
+    ns: NamespaceId,
     Path((sid, idx)): Path<(String, u32)>,
     Query(q): Query<SessionTurnQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
     let path = session_turn_path(&sid, idx);
-    s.repo
+    repo
         .get_json(&q.ref_name, &path)
         .map(Json)
         .map_err(internal_error)
@@ -2022,12 +2151,13 @@ async fn get_session_turn(
 
 async fn list_session_turns(
     State(s): State<HubState>,
+    ns: NamespaceId,
     Path(sid): Path<String>,
     Query(q): Query<SessionTurnQuery>,
 ) -> Result<Json<Vec<String>>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
     let prefix = format!("/sessions/{}/turns", sid);
-    let all = s
-        .repo
+    let all = repo
         .list_paths(&q.ref_name, &prefix, None)
         .map_err(internal_error)?;
     // Collapse leaf paths down to one entry per turn root
@@ -2054,9 +2184,11 @@ fn reminder_error_to_response(e: reminder_tools::ReminderToolError) -> (StatusCo
 
 async fn list_reminders_handler(
     State(s): State<HubState>,
+    ns: NamespaceId,
     Query(q): Query<reminder_tools::ReminderListParams>,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
-    let mgr = reminder_tools::make_manager(s.repo.clone());
+    let repo = s.repo_for(&ns)?;
+    let mgr = reminder_tools::make_manager(repo.clone());
     let reminders = reminder_tools::list_reminders(&mgr, q).map_err(reminder_error_to_response)?;
     Ok(Json(
         reminders
@@ -2068,10 +2200,12 @@ async fn list_reminders_handler(
 
 async fn create_reminder_handler(
     State(s): State<HubState>,
+    ns: NamespaceId,
     agent_id: AgentId,
     Json(req): Json<reminder_tools::ReminderCreateParams>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
-    let mgr = reminder_tools::make_manager(s.repo.clone());
+    let repo = s.repo_for(&ns)?;
+    let mgr = reminder_tools::make_manager(repo.clone());
     let r = reminder_tools::create_reminder(&mgr, req, &agent_id.0)
         .map_err(reminder_error_to_response)?;
     Ok((
@@ -2082,8 +2216,10 @@ async fn create_reminder_handler(
 
 async fn remind_me_handler(
     State(s): State<HubState>,
+    ns: NamespaceId,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
-    let mgr = reminder_tools::make_manager(s.repo.clone());
+    let repo = s.repo_for(&ns)?;
+    let mgr = reminder_tools::make_manager(repo.clone());
     let reminders = mgr
         .remind_me()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -2097,9 +2233,11 @@ async fn remind_me_handler(
 
 async fn get_reminder_handler(
     State(s): State<HubState>,
+    ns: NamespaceId,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let mgr = reminder_tools::make_manager(s.repo.clone());
+    let repo = s.repo_for(&ns)?;
+    let mgr = reminder_tools::make_manager(repo.clone());
     match mgr.get(&id) {
         Ok(r) => Ok(Json(reminder_tools::reminder_to_json(&r))),
         Err(agentstategraph_reminders::ReminderError::NotFound(_)) => Err((
@@ -2117,10 +2255,12 @@ struct SnoozeBody {
 
 async fn snooze_reminder_handler(
     State(s): State<HubState>,
+    ns: NamespaceId,
     Path(id): Path<String>,
     Json(body): Json<SnoozeBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let mgr = reminder_tools::make_manager(s.repo.clone());
+    let repo = s.repo_for(&ns)?;
+    let mgr = reminder_tools::make_manager(repo.clone());
     let until = reminder_tools::parse_datetime(&body.until).map_err(reminder_error_to_response)?;
     let r = mgr
         .snooze(&id, until)
@@ -2135,11 +2275,13 @@ struct ApproveBody {
 
 async fn approve_reminder_handler(
     State(s): State<HubState>,
+    ns: NamespaceId,
     agent_id: AgentId,
     Path(id): Path<String>,
     body: Option<Json<ApproveBody>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let mgr = reminder_tools::make_manager(s.repo.clone());
+    let repo = s.repo_for(&ns)?;
+    let mgr = reminder_tools::make_manager(repo.clone());
     let approver = body.and_then(|b| b.0.approved_by).unwrap_or(agent_id.0);
     let r = mgr
         .approve(&id, &approver)
@@ -2149,9 +2291,11 @@ async fn approve_reminder_handler(
 
 async fn cancel_reminder_handler(
     State(s): State<HubState>,
+    ns: NamespaceId,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let mgr = reminder_tools::make_manager(s.repo.clone());
+    let repo = s.repo_for(&ns)?;
+    let mgr = reminder_tools::make_manager(repo.clone());
     let r = mgr
         .cancel(&id)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
@@ -2165,11 +2309,13 @@ struct StartBody {
 
 async fn start_reminder_handler(
     State(s): State<HubState>,
+    ns: NamespaceId,
     agent_id: AgentId,
     Path(id): Path<String>,
     body: Option<Json<StartBody>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let mgr = reminder_tools::make_manager(s.repo.clone());
+    let repo = s.repo_for(&ns)?;
+    let mgr = reminder_tools::make_manager(repo.clone());
     let acting_agent = body.and_then(|b| b.0.agent_id).unwrap_or(agent_id.0);
     let r = mgr
         .start(&id, &acting_agent)
@@ -2179,16 +2325,18 @@ async fn start_reminder_handler(
 
 async fn record_reminder_handler(
     State(s): State<HubState>,
+    ns: NamespaceId,
     agent_id: AgentId,
     Path(path_id): Path<String>,
     Json(mut req): Json<reminder_tools::ReminderRecordParams>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
     // Path parameter is authoritative; body id is optional/overridden.
     req.id = path_id;
     if req.agent_id.is_none() {
         req.agent_id = Some(agent_id.0);
     }
-    let mgr = reminder_tools::make_manager(s.repo.clone());
+    let mgr = reminder_tools::make_manager(repo.clone());
     let r = reminder_tools::record_execution(&mgr, req, DEFAULT_AGENT_ID)
         .map_err(reminder_error_to_response)?;
     Ok(Json(reminder_tools::reminder_to_json(&r)))
@@ -2287,12 +2435,13 @@ async fn register_project_handler(
     let db = registry_db(&s)?;
     let namespace = req.namespace.clone().unwrap_or_else(|| req.id.clone());
 
-    // Create the ASG namespace first — this validates the name (ASCII
-    // alnum/-/_, 1..=64 bytes) and is idempotent on re-register.
-    s.repo.create_namespace(&namespace).map_err(|e| match &e {
-        agentstategraph::RepoError::InvalidOperation(_) => (StatusCode::BAD_REQUEST, e.to_string()),
-        _ => internal_error(e),
-    })?;
+    // Create the ASG namespace first — Namespace::new validates the name
+    // (ASCII alnum/-/_, 1..=64 bytes), and init() creates the namespace row
+    // plus an initialized `main` branch so ref operations work immediately.
+    // Both are idempotent on re-register.
+    let ns = Namespace::new(namespace.as_str())
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    s.repo.fork_namespace(ns).init().map_err(internal_error)?;
 
     let remote = req
         .remote_url
