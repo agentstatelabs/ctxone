@@ -522,14 +522,29 @@ async fn proxy_asd(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/octet-stream")
         .to_string();
+    // Preserve cache-control when the upstream sets it — asd-serve's SSE
+    // endpoint sends `no-cache`, and intermediaries respect it.
+    let cache_control = upstream
+        .headers()
+        .get(reqwest::header::CACHE_CONTROL)
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
 
-    match upstream.bytes().await {
-        Ok(body) => {
-            let bytes: Vec<u8> = body.into_iter().collect();
-            (status, [(axum::http::header::CONTENT_TYPE, ct)], bytes).into_response()
-        }
-        Err(e) => (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
+    // Forward the body as a STREAM instead of buffering it. This is what
+    // lets `/api/v1/events` (SSE, text/event-stream) work through the
+    // proxy — that response never ends, so the old `.bytes().await` would
+    // hang forever. Ordinary JSON responses stream through identically
+    // (the client sees chunked transfer instead of content-length, which
+    // every HTTP client handles), so no content-type branching is needed.
+    let body = axum::body::Body::from_stream(upstream.bytes_stream());
+    let mut resp = axum::http::Response::builder()
+        .status(status)
+        .header(axum::http::header::CONTENT_TYPE, ct);
+    if let Some(cc) = cache_control {
+        resp = resp.header(axum::http::header::CACHE_CONTROL, cc);
     }
+    resp.body(body)
+        .unwrap_or_else(|e| (StatusCode::BAD_GATEWAY, e.to_string()).into_response())
 }
 
 // -- Helpers --

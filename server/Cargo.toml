@@ -19,6 +19,7 @@ tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 reqwest = { workspace = true }
+tokio-stream = "0.1"
 
 [dependencies]
 agentstategraph = { workspace = true }
