@@ -1241,7 +1241,10 @@ fn default_budget() -> usize {
     1500
 }
 fn default_ref() -> String {
-    "main".to_string()
+    // Empty = "use the session default ref" — resolved at tool entry by
+    // CtxOneServer::apply_default_ref. The session default is "main"
+    // unless branch mirroring picked the repo's git branch at startup.
+    String::new()
 }
 fn default_forget_reason() -> String {
     "forgotten via MCP".to_string()
@@ -1582,6 +1585,86 @@ fn timestamp_id() -> String {
     format!("{:x}", now.as_nanos())
 }
 
+
+/// Access to the ref/branch field of a params struct whose serde default
+/// is the [`default_ref`] sentinel. Lets [`CtxOneServer::apply_default_ref`]
+/// fill in the session default ("main", or the mirrored git branch) when
+/// the caller omitted the field.
+trait HasRefField {
+    fn ref_field_mut(&mut self) -> &mut String;
+}
+
+impl HasRefField for RememberParams {
+    fn ref_field_mut(&mut self) -> &mut String {
+        &mut self.ref_name
+    }
+}
+impl HasRefField for RecallParams {
+    fn ref_field_mut(&mut self) -> &mut String {
+        &mut self.ref_name
+    }
+}
+impl HasRefField for ContextParams {
+    fn ref_field_mut(&mut self) -> &mut String {
+        &mut self.ref_name
+    }
+}
+impl HasRefField for PrimeParams {
+    fn ref_field_mut(&mut self) -> &mut String {
+        &mut self.ref_name
+    }
+}
+impl HasRefField for ForgetParams {
+    fn ref_field_mut(&mut self) -> &mut String {
+        &mut self.ref_name
+    }
+}
+impl HasRefField for BranchCreateParams {
+    fn ref_field_mut(&mut self) -> &mut String {
+        &mut self.from
+    }
+}
+impl HasRefField for MergeParams {
+    fn ref_field_mut(&mut self) -> &mut String {
+        &mut self.target
+    }
+}
+impl HasRefField for TaintApplyParams {
+    fn ref_field_mut(&mut self) -> &mut String {
+        &mut self.ref_name
+    }
+}
+impl HasRefField for TaintRemoveParams {
+    fn ref_field_mut(&mut self) -> &mut String {
+        &mut self.ref_name
+    }
+}
+impl HasRefField for GetStateParams {
+    fn ref_field_mut(&mut self) -> &mut String {
+        &mut self.ref_name
+    }
+}
+impl HasRefField for ListPathsParams {
+    fn ref_field_mut(&mut self) -> &mut String {
+        &mut self.ref_name
+    }
+}
+impl HasRefField for SearchValuesParams {
+    fn ref_field_mut(&mut self) -> &mut String {
+        &mut self.ref_name
+    }
+}
+impl HasRefField for GetLogParams {
+    fn ref_field_mut(&mut self) -> &mut String {
+        &mut self.ref_name
+    }
+}
+impl HasRefField for GetBlameParams {
+    fn ref_field_mut(&mut self) -> &mut String {
+        &mut self.ref_name
+    }
+}
+
 /// The CtxOne memory MCP server.
 #[derive(Clone)]
 pub struct CtxOneServer {
@@ -1591,6 +1674,10 @@ pub struct CtxOneServer {
     /// server. Set via `ctxone-hub --agent-id <name>` when the tool
     /// embedding the MCP server spawns it. Defaults to "ctxone".
     pub agent_id: String,
+    /// Default ref for tools when the caller omits the ref/branch param.
+    /// "main" unless branch mirroring resolved the project's git branch
+    /// at startup. See [`HasRefField`].
+    pub default_ref: String,
     /// Namespace this MCP session operates in. Resolved at startup
     /// (explicit --namespace flag, else the project detection chain from
     /// the process cwd); the `repo` field is already forked to it. Kept
@@ -1631,6 +1718,7 @@ impl CtxOneServer {
             repo,
             session,
             agent_id,
+            default_ref: "main".to_string(),
             namespace: "default".to_string(),
             asd_repos: Arc::new(asd_repos),
             asd_pool: None,
@@ -1653,6 +1741,23 @@ impl CtxOneServer {
         self
     }
 
+    /// Set the session default ref (branch mirroring). Tools that receive
+    /// no explicit ref/branch operate on this one.
+    pub fn with_default_ref(mut self, default_ref: String) -> Self {
+        self.default_ref = default_ref;
+        self
+    }
+
+    /// Resolve the [`default_ref`] sentinel: an omitted ref/branch param
+    /// (deserialized as "") becomes the session default.
+    fn apply_default_ref<P: HasRefField>(&self, mut p: P) -> P {
+        let r = p.ref_field_mut();
+        if r.is_empty() {
+            *r = self.default_ref.clone();
+        }
+        p
+    }
+
     #[tool(
         description = "Show which project namespace this session's memory operations land in, plus the agent id stamped on commits. Call this to prove where a write went, or to debug why remembered facts seem missing (usually: they were written in a different namespace)."
     )]
@@ -1660,6 +1765,7 @@ impl CtxOneServer {
         serde_json::json!({
             "namespace": self.namespace,
             "agent_id": self.agent_id,
+            "default_ref": self.default_ref,
             "hint": if self.namespace == "default" {
                 "No project detected — operating in the shared default namespace. \
                  Run `ctx project add <id>` in the repo (or commit its .ctxproject) \
@@ -1680,6 +1786,7 @@ impl CtxOneServer {
     )]
     async fn remember(&self, params: Parameters<RememberParams>) -> String {
         let p = params.0;
+        let p = self.apply_default_ref(p);
 
         // Reject overlong / path-smuggling `context` and unbounded
         // `tags` before we construct the path or CommitOptions. These
@@ -1745,6 +1852,7 @@ impl CtxOneServer {
     )]
     async fn recall(&self, params: Parameters<RecallParams>) -> String {
         let p = params.0;
+        let p = self.apply_default_ref(p);
         let result = run_recall_scoped(
             &self.repo,
             &self.session,
@@ -1763,6 +1871,7 @@ impl CtxOneServer {
     )]
     async fn prime(&self, params: Parameters<PrimeParams>) -> String {
         let p = params.0;
+        let p = self.apply_default_ref(p);
         let sections: Vec<(String, String)> =
             p.sections.into_iter().map(|s| (s.title, s.body)).collect();
 
@@ -1789,6 +1898,7 @@ impl CtxOneServer {
     )]
     async fn context(&self, params: Parameters<ContextParams>) -> String {
         let p = params.0;
+        let p = self.apply_default_ref(p);
         ensure_flat_size(&self.repo, &self.session, &p.ref_name);
         let flat_size = self.session.total_graph_size_chars.load(Ordering::Relaxed) as usize;
 
@@ -2301,6 +2411,7 @@ impl CtxOneServer {
     )]
     async fn forget(&self, params: Parameters<ForgetParams>) -> String {
         let p = params.0;
+        let p = self.apply_default_ref(p);
         let opts = CommitOptions::new(&self.agent_id, IntentCategory::Rollback, &p.reason);
         match self.repo.delete(&p.ref_name, &p.path, opts) {
             Ok(commit_id) => {
@@ -2344,6 +2455,7 @@ impl CtxOneServer {
     )]
     async fn branch(&self, params: Parameters<BranchCreateParams>) -> String {
         let p = params.0;
+        let p = self.apply_default_ref(p);
         match self.repo.branch(&p.name, &p.from) {
             Ok(id) => {
                 self.session.mark_dirty();
@@ -2366,6 +2478,7 @@ impl CtxOneServer {
     )]
     async fn merge(&self, params: Parameters<MergeParams>) -> String {
         let p = params.0;
+        let p = self.apply_default_ref(p);
         let mut opts = CommitOptions::new(&self.agent_id, IntentCategory::Merge, &p.description);
         if let Some(r) = p.reasoning {
             opts = opts.with_reasoning(r);
@@ -2480,6 +2593,7 @@ impl CtxOneServer {
     async fn taint_apply(&self, params: Parameters<TaintApplyParams>) -> String {
         use agentstategraph_taint::{QuarantineParams, TaintKind, TaintParams, WatchParams};
         let p = params.0;
+        let p = self.apply_default_ref(p);
         let kind = match parse_taint_kind(&p.kind) {
             Ok(k) => k,
             Err(msg) => return serde_json::json!({ "error": msg }).to_string(),
@@ -2571,6 +2685,7 @@ impl CtxOneServer {
     async fn taint_remove(&self, params: Parameters<TaintRemoveParams>) -> String {
         use agentstategraph_taint::{TaintKind, UntaintParams, UnwatchParams};
         let p = params.0;
+        let p = self.apply_default_ref(p);
         let taint = match self.repo.get_taint(&p.taint_id) {
             Ok(Some(t)) => t,
             Ok(None) => {
@@ -2633,6 +2748,7 @@ impl CtxOneServer {
     )]
     async fn get(&self, params: Parameters<GetStateParams>) -> String {
         let p = params.0;
+        let p = self.apply_default_ref(p);
         match self.repo.get_json(&p.ref_name, &p.path) {
             Ok(value) => serde_json::to_string(&value).unwrap_or_else(|_| "null".into()),
             Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
@@ -2646,6 +2762,7 @@ impl CtxOneServer {
     )]
     async fn ls(&self, params: Parameters<ListPathsParams>) -> String {
         let p = params.0;
+        let p = self.apply_default_ref(p);
         match self.repo.list_paths(&p.ref_name, &p.prefix, p.max_depth) {
             Ok(paths) => serde_json::to_string(&paths).unwrap_or_else(|_| "[]".into()),
             Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
@@ -2659,6 +2776,7 @@ impl CtxOneServer {
     )]
     async fn search(&self, params: Parameters<SearchValuesParams>) -> String {
         let p = params.0;
+        let p = self.apply_default_ref(p);
         match self
             .repo
             .search_values(&p.ref_name, &p.query, p.max_results)
@@ -2681,6 +2799,7 @@ impl CtxOneServer {
     )]
     async fn log(&self, params: Parameters<GetLogParams>) -> String {
         let p = params.0;
+        let p = self.apply_default_ref(p);
         match self.repo.log(&p.ref_name, p.limit) {
             Ok(commits) => {
                 let out: Vec<serde_json::Value> = commits
@@ -2713,6 +2832,7 @@ impl CtxOneServer {
     )]
     async fn blame(&self, params: Parameters<GetBlameParams>) -> String {
         let p = params.0;
+        let p = self.apply_default_ref(p);
         match self.repo.blame(&p.ref_name, &p.path) {
             Ok(blame) => serde_json::to_string(&blame).unwrap_or_else(|_| "null".into()),
             Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),

@@ -831,23 +831,52 @@ struct CreateBranchRequest {
     name: String,
     #[serde(default = "default_ref")]
     from: String,
+    /// Idempotent mode: an already-existing branch is success, not 500.
+    /// Branch mirroring re-ensures on every CLI invocation.
+    #[serde(default)]
+    if_missing: bool,
+    /// Raw git branch this ASG branch mirrors, recorded as metadata
+    /// (sanitization is lossy: `feature/x` → `feature-x`).
+    git_branch: Option<String>,
 }
 
 async fn create_branch(
     State(s): State<HubState>,
     ns: NamespaceId,
+    agent_id: AgentId,
     Json(req): Json<CreateBranchRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
-    let id = repo
-        .branch(&req.name, &req.from)
-        .map_err(internal_error)?;
-    Ok(Json(serde_json::json!({
+    let created = match repo.branch(&req.name, &req.from) {
+        Ok(id) => Some(id),
+        Err(agentstategraph::RepoError::BranchAlreadyExists(_)) if req.if_missing => None,
+        Err(e) => return Err(internal_error(e)),
+    };
+    // Record the mirrored git branch as namespace-global metadata on the
+    // `from` ref. Written once, on actual creation.
+    if let (Some(raw), Some(_)) = (&req.git_branch, &created) {
+        let opts = CommitOptions::new(
+            &agent_id.0,
+            IntentCategory::Custom("Observe".to_string()),
+            format!("branch {} mirrors git branch {}", req.name, raw),
+        );
+        let _ = repo.set_json(
+            &req.from,
+            &format!("/ctxone/branches/{}/git_branch", req.name),
+            &serde_json::json!(raw),
+            opts,
+        );
+    }
+    let mut out = serde_json::json!({
         "status": "ok",
         "name": req.name,
         "from": req.from,
-        "commit_id": format!("{}", id.short()),
-    })))
+        "existed": created.is_none(),
+    });
+    if let Some(id) = created {
+        out["commit_id"] = serde_json::json!(format!("{}", id.short()));
+    }
+    Ok(Json(out))
 }
 
 #[derive(Deserialize)]

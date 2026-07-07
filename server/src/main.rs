@@ -716,6 +716,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         info!(namespace = %namespace, "MCP session namespace");
 
+        // Branch mirroring: inside a project namespace, the session's
+        // default ref is the sanitized current git branch (auto-created
+        // from main, raw name recorded as metadata). Detached HEADs are
+        // skipped so mirroring never manufactures per-commit branches.
+        let mut default_ref = "main".to_string();
+        if namespace != agentstategraph_core::Namespace::DEFAULT
+            && let Ok(cwd) = std::env::current_dir()
+            && let Some(raw_branch) = ctxone_hub::project::read_git_branch(&cwd)
+            && !raw_branch.starts_with("detached-")
+        {
+            let mirrored = ctxone_hub::project::sanitize_branch_name(&raw_branch);
+            if mirrored != "main" {
+                match repo.branch(&mirrored, "main") {
+                    Ok(_) => {
+                        let opts = agentstategraph::CommitOptions::new(
+                            &agent_id,
+                            agentstategraph_core::IntentCategory::Custom("Observe".to_string()),
+                            format!("branch {} mirrors git branch {}", mirrored, raw_branch),
+                        );
+                        let _ = repo.set_json(
+                            "main",
+                            &format!("/ctxone/branches/{}/git_branch", mirrored),
+                            &serde_json::json!(raw_branch),
+                            opts,
+                        );
+                        info!(branch = %mirrored, git_branch = %raw_branch, "mirrored branch created");
+                    }
+                    Err(agentstategraph::RepoError::BranchAlreadyExists(_)) => {}
+                    Err(e) => {
+                        error!(error = %e, branch = %mirrored, "failed to ensure mirrored branch");
+                    }
+                }
+            }
+            default_ref = mirrored;
+            info!(default_ref = %default_ref, "session default ref (git mirror)");
+        }
+
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?
@@ -725,7 +762,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     agent_id.clone(),
                     asd_repos.clone(),
                 )
-                .with_namespace(namespace.clone());
+                .with_namespace(namespace.clone())
+                .with_default_ref(default_ref.clone());
                 // Attach pool if any --asd-repo flags were given
                 if !asd_pool_repos.is_empty() {
                     let pool = std::sync::Arc::new(ctxone_hub::asd_pool::AsdProcessPool::new(

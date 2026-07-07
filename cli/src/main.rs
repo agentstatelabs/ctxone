@@ -79,6 +79,9 @@ struct RawCli {
 struct Cli {
     server: String,
     branch: String,
+    /// True when the branch came from --branch / CTX_BRANCH (not the
+    /// config file). Explicit branches suppress git-branch mirroring.
+    branch_explicit: bool,
     format: OutputFormat,
     session: Option<String>,
     /// Explicit namespace from --namespace / CTX_NAMESPACE. `None` means
@@ -89,6 +92,7 @@ struct Cli {
 
 impl Cli {
     fn from_raw(raw: RawCli, config: &CtxConfig) -> Self {
+        let branch_explicit = raw.branch.is_some();
         Self {
             server: raw
                 .server
@@ -98,6 +102,7 @@ impl Cli {
                 .branch
                 .or_else(|| config.branch.clone())
                 .unwrap_or_else(|| "main".to_string()),
+            branch_explicit,
             format: raw.format.or(config.format).unwrap_or(OutputFormat::Text),
             session: raw.session,
             namespace: raw.namespace,
@@ -1094,6 +1099,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => cli.resolve_namespace().await,
     };
     let client = cli.http_client(namespace.as_deref());
+
+    // Branch mirroring: inside a project namespace, default the working
+    // branch to the sanitized current git branch. Explicit --branch /
+    // CTX_BRANCH wins; the config-file default applies outside projects.
+    // The ensure call is idempotent and fails silently — if the Hub is
+    // down, the actual command will report it properly.
+    let mut cli = cli;
+    if namespace.is_some()
+        && !cli.branch_explicit
+        && let Ok(cwd) = std::env::current_dir()
+        && let Some(raw_branch) = read_git_branch(&cwd)
+    {
+        let mirrored = sanitize_branch_name(&raw_branch);
+        cli.branch = mirrored.clone();
+        if mirrored != "main" {
+            let _ = client
+                .post(format!("{}/api/branches", cli.server))
+                .json(&serde_json::json!({
+                    "name": mirrored,
+                    "from": "main",
+                    "if_missing": true,
+                    "git_branch": raw_branch,
+                }))
+                .send()
+                .await;
+        }
+    }
+    let cli = cli;
 
     match cli.command {
         Commands::Skill {
@@ -2249,6 +2282,58 @@ fn find_git_root(start: &std::path::Path) -> Option<PathBuf> {
     let raw = String::from_utf8_lossy(&output.stdout);
     let path = raw.trim();
     (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
+/// Current git branch via `git symbolic-ref` — deliberately no detached-
+/// HEAD fallback, so mirroring never manufactures per-commit branches.
+fn read_git_branch(dir: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["symbolic-ref", "--short", "HEAD"])
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let branch = raw.trim().to_string();
+    (!branch.is_empty()).then_some(branch)
+}
+
+/// Sanitize a git branch name into an ASG branch name. Must stay in sync
+/// with `ctxone_hub::project::sanitize_branch_name` (the Hub records the
+/// raw name as metadata precisely because this mapping is lossy).
+fn sanitize_branch_name(raw: &str) -> String {
+    let stripped = raw.strip_prefix("refs/heads/").unwrap_or(raw);
+    let replaced: String = stripped
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let mut out = String::with_capacity(replaced.len());
+    let mut last_was_dash = false;
+    for c in replaced.chars() {
+        if c == '-' {
+            if !last_was_dash {
+                out.push(c);
+            }
+            last_was_dash = true;
+        } else {
+            out.push(c);
+            last_was_dash = false;
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() {
+        "work".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// Read `git remote get-url origin` for detection registration.
