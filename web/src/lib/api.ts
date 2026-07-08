@@ -164,10 +164,198 @@ export async function remember(req: RememberRequest): Promise<{ path: string; co
 	return resp.json();
 }
 
-export async function recall(topic: string, budget = 1500): Promise<unknown> {
+/**
+ * One entry in a recall response. Pinned entries carry `title`/`body`;
+ * topic matches carry `value`/`score`/`full_match`.
+ */
+export interface RecallEntry {
+	path: string;
+	pinned: boolean;
+	title?: string;
+	body?: string;
+	value?: string;
+	score?: number;
+	full_match?: boolean;
+}
+
+export interface RecallResponse {
+	topic: string;
+	ref: string;
+	results: RecallEntry[];
+	pinned_count: number;
+	topic_matches: number;
+	ctx_tokens_sent: number;
+	ctx_tokens_estimated_flat: number;
+	ctx_savings_ratio: number;
+}
+
+export async function recall(topic: string, budget = 1500, ref = 'main'): Promise<RecallResponse> {
 	return fetchJson(
-		`/api/memory/recall?topic=${encodeURIComponent(topic)}&budget=${budget}`
+		`/api/memory/recall?topic=${encodeURIComponent(topic)}&budget=${budget}&ref=${encodeURIComponent(ref)}`
 	);
+}
+
+/**
+ * Blame shape as the engine actually serializes it (agentstategraph-core
+ * `BlameEntry`). Note this differs from the older `BlameEntry` interface
+ * above: no `confidence`, plus `intent_category`/`reasoning`/`timestamp_anomaly`.
+ */
+export interface WhyBlame {
+	path: string;
+	commit_id: string;
+	agent_id: string;
+	intent_category: string;
+	intent_description: string;
+	reasoning: string | null;
+	timestamp: string;
+	timestamp_anomaly?: boolean;
+}
+
+export interface WhyTrace {
+	path: string;
+	/** The Hub serializes a SINGLE blame entry per trace (repo.blame returns
+	 * one entry), despite HTTP_API.md showing an array. Accept both. */
+	blame: WhyBlame | WhyBlame[] | null;
+}
+
+export interface WhyResponse {
+	decision: string;
+	traces: WhyTrace[];
+}
+
+/** GET /api/memory/why_did_we?decision=… — always searches/blames `main`. */
+export async function whyDidWe(decision: string): Promise<WhyResponse> {
+	return fetchJson(`/api/memory/why_did_we?decision=${encodeURIComponent(decision)}`);
+}
+
+// -- Reminders ------------------------------------------------------------
+
+export type ReminderStatus =
+	| 'pending'
+	| 'due'
+	| 'awaiting_permission'
+	| 'in_progress'
+	| 'completed'
+	| 'snoozed'
+	| 'cancelled';
+
+export type ReminderPriority = 'critical' | 'high' | 'medium' | 'low' | 'minimal';
+
+export interface ReminderRef {
+	kind: string;
+	id: string;
+	label: string | null;
+	stale: boolean;
+}
+
+export interface ReminderExecution {
+	started_at: string;
+	completed_at: string | null;
+	agent_id: string;
+	approved_by: string | null;
+	result: 'success' | 'failed' | 'deferred' | 'snoozed' | 'cancelled';
+	notes: string[];
+	task_id: string | null;
+}
+
+export interface ReminderSchedule {
+	kind: 'once' | 'interval' | 'daily' | 'weekly';
+	every_seconds?: number;
+	time?: string;
+	day?: string;
+}
+
+/** Wire shape from `server/src/reminder_tools.rs::reminder_to_json`. */
+export interface Reminder {
+	id: string;
+	title: string;
+	instructions: string;
+	commands: string[];
+	refs: ReminderRef[];
+	priority: ReminderPriority;
+	due_at: string;
+	schedule: ReminderSchedule | null;
+	autonomous: boolean;
+	created_by: string;
+	created_at: string;
+	status: ReminderStatus;
+	snoozed_until: string | null;
+	executions: ReminderExecution[];
+	tags: string[];
+}
+
+/** GET /api/reminders — optional status filter (pending|due|…). */
+export async function listReminders(status?: ReminderStatus): Promise<Reminder[]> {
+	const qs = status ? `?status=${encodeURIComponent(status)}` : '';
+	return fetchJson(`/api/reminders${qs}`);
+}
+
+/** GET /api/reminders/due — actionable (due / awaiting_permission), by priority. */
+export async function getDueReminders(): Promise<Reminder[]> {
+	return fetchJson('/api/reminders/due');
+}
+
+export interface CreateReminderRequest {
+	title: string;
+	instructions: string;
+	/** ISO 8601 / RFC 3339, e.g. 2026-05-10T09:00:00Z */
+	due_at: string;
+	priority?: ReminderPriority;
+	autonomous?: boolean;
+	tags?: string[];
+}
+
+export async function createReminder(req: CreateReminderRequest): Promise<Reminder> {
+	const resp = await hubFetch('/api/reminders', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(req)
+	});
+	if (!resp.ok) {
+		const msg = await resp.text();
+		throw new Error(`create reminder failed: ${resp.status} ${msg}`);
+	}
+	return resp.json();
+}
+
+async function reminderAction(id: string, action: string, body: object): Promise<Reminder> {
+	const resp = await hubFetch(`/api/reminders/${encodeURIComponent(id)}/${action}`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(body)
+	});
+	if (!resp.ok) {
+		const msg = await resp.text();
+		throw new Error(`${action} failed: ${resp.status} ${msg}`);
+	}
+	return resp.json();
+}
+
+export function snoozeReminder(id: string, until: string): Promise<Reminder> {
+	return reminderAction(id, 'snooze', { until });
+}
+
+export function approveReminder(id: string, approvedBy?: string): Promise<Reminder> {
+	return reminderAction(id, 'approve', approvedBy ? { approved_by: approvedBy } : {});
+}
+
+export function cancelReminder(id: string): Promise<Reminder> {
+	return reminderAction(id, 'cancel', {});
+}
+
+export function startReminder(id: string): Promise<Reminder> {
+	return reminderAction(id, 'start', {});
+}
+
+export function recordReminder(
+	id: string,
+	result: ReminderExecution['result'],
+	notes?: string[]
+): Promise<Reminder> {
+	// Quirk: the Hub's record handler deserializes ReminderRecordParams,
+	// whose `id` field is REQUIRED in the JSON body (it's then overridden
+	// by the path param). Omitting it 422s, so send it redundantly.
+	return reminderAction(id, 'record', { id, result, notes: notes ?? [] });
 }
 
 export interface ForgetRequest {

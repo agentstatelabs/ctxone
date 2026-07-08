@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { page } from '$app/stores';
 	import { getLog } from '$lib/api';
 	import type { CommitEntry } from '$lib/api';
 	import { branchStore } from '$lib/branchStore.svelte';
@@ -9,11 +10,40 @@
 	let selectedCommit: CommitEntry | null = $state(null);
 	let error: string | null = $state(null);
 
+	// Deep link (?commit=<id>) from /why et al: pre-select the commit on
+	// first load. Consumed once so later refreshes don't re-select.
+	let pendingCommit: string | null = $page.url.searchParams.get('commit');
+
 	async function loadLog() {
 		error = null;
 		selectedCommit = null;
 		try {
 			commits = await getLog(branchStore.current, 50);
+			if (pendingCommit) {
+				const want = pendingCommit;
+				const matches = (c: CommitEntry) => c.id.startsWith(want) || want.startsWith(c.id);
+				let hit = commits.find(matches) ?? null;
+				if (!hit) {
+					// Older than the default window — dig deeper once (the
+					// engine walks at most 1000 commits anyway).
+					const deeper = await getLog(branchStore.current, 1000);
+					const deepHit = deeper.find(matches);
+					if (deepHit) {
+						commits = deeper;
+						hit = deepHit;
+					}
+				}
+				selectedCommit = hit;
+				pendingCommit = null;
+				if (hit) {
+					// Bring the pre-selected commit into view once rendered.
+					setTimeout(() => {
+						document
+							.querySelector('.commit.selected')
+							?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+					}, 50);
+				}
+			}
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to load history';
 			commits = [];

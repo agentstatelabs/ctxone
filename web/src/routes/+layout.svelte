@@ -34,6 +34,7 @@
 					items: [
 						{ href: '/', label: 'Dashboard' },
 						{ href: '/plans', label: 'Plans' },
+						{ href: '/reminders', label: 'Reminders' },
 						{ href: '/sessions', label: 'Sessions' }
 					]
 				},
@@ -42,13 +43,16 @@
 					items: [
 						{ href: '/pinned', label: 'Pinned' },
 						{ href: '/browse', label: 'Browse' },
-						{ href: '/search', label: 'Search' }
+						{ href: '/search', label: 'Search' },
+						{ href: '/recall', label: 'Recall' },
+						{ href: '/why', label: 'Why…' }
 					]
 				},
 				{
 					label: 'Changes',
 					items: [
 						{ href: '/history', label: 'History' },
+						{ href: '/tail', label: 'Live Tail' },
 						{ href: '/diff', label: 'Diff' }
 					]
 				},

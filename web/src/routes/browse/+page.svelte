@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { page } from '$app/stores';
 	import { listPaths, getState, getBlame, forget } from '$lib/api';
 	import { branchStore } from '$lib/branchStore.svelte';
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
@@ -90,7 +91,30 @@
 		}
 	}
 
-	onMount(loadPaths);
+	// Initial load + deep link (?path=…) from /recall and /why: select the
+	// linked path and expand its ancestors so it's visible in tree view.
+	onMount(async () => {
+		await loadPaths();
+		const deepLink = $page.url.searchParams.get('path');
+		if (!deepLink) return;
+		// Recall/why hand out *section* paths for pinned memories, while
+		// the path list holds the stored leaves (…/body, …/title) — fall
+		// back to a child leaf when there's no exact match.
+		const target = paths.includes(deepLink)
+			? deepLink
+			: (paths.find((p) => p === `${deepLink}/body`) ??
+				paths.find((p) => p.startsWith(`${deepLink}/`)));
+		if (!target) return;
+		const next = new Set(expanded);
+		const segments = target.split('/').filter((s) => s.length > 0);
+		let acc = '';
+		for (const seg of segments.slice(0, -1)) {
+			acc = `${acc}/${seg}`;
+			next.add(acc);
+		}
+		expanded = next;
+		void selectPath(target);
+	});
 
 	const auto = useAutoRefresh(loadPaths);
 
