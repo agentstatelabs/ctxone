@@ -36,6 +36,8 @@ explains what `ctx init` actually writes and how to do it manually.
 
 ## What `ctx init` writes
 
+### stdio (default) — each tool spawns its own hub
+
 Each tool gets a JSON file with an `mcpServers.ctxone` entry:
 
 ```json
@@ -53,6 +55,23 @@ The `--path` flag is a canonical shared location so every AI tool talks to
 the **same memory graph**. Without it, each tool would spawn the Hub with a
 different default database depending on its working directory — the shared
 memory promise would break.
+
+### http — point tools at one shared daemon
+
+`ctx init --transport http` instead points each tool at a **single running hub**
+(`ctxone-hub --http --lens`) by URL, so nothing spawns its own child and one
+process serves MCP + REST + Lens. It picks the correct shape per tool:
+
+| Tool | What gets written |
+|------|-------------------|
+| Claude Code, Cursor, VS Code | native `{"type":"http","url":"http://localhost:3001/mcp?namespace=…"}` |
+| Codex | `[mcp_servers.ctxone]` with `url = "http://localhost:3001/mcp?namespace=…"` |
+| Claude Desktop | `mcp-remote` stdio bridge (`npx -y mcp-remote <url> --transport http-only`) — it has no native HTTP MCP |
+
+The project namespace (detected from the cwd) is baked into the URL so the daemon
+scopes writes the way a per-project stdio hub would. Override the endpoint with
+`--mcp-url`. See [DEPLOYMENT.md](DEPLOYMENT.md) for the daemon setup, `ctx service
+install`, and `--auth-token` when exposing the hub beyond localhost.
 
 ---
 
@@ -172,10 +191,19 @@ ctx init --tool codex
 
 ### What gets written
 
+Default (stdio):
+
 ```toml
 [mcp_servers.ctxone]
 command = "/Users/user/.local/bin/ctxone-hub"
 args = ["--path", "/Users/user/.ctxone/memory.db"]
+```
+
+With `--transport http` (Codex supports HTTP MCP natively via a `url` key):
+
+```toml
+[mcp_servers.ctxone]
+url = "http://localhost:3001/mcp?namespace=<detected>"
 ```
 
 Codex picks up the config on next launch.

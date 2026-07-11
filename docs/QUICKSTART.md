@@ -45,8 +45,13 @@ ctx --version
 In one terminal:
 
 ```bash
-ctx serve --http
+ctx serve --http           # REST API + MCP at /mcp
+ctx serve --http --lens    # …plus the Lens web UI at http://localhost:3001
 ```
+
+A single `--http` hub serves the REST API, the MCP tool surface (`/mcp`), and —
+with `--lens` — the web UI, all from one process. To run it at boot so it owns
+the db before any agent, see [`ctx service install`](DEPLOYMENT.md#running-as-a-service).
 
 You'll see:
 
@@ -144,6 +149,25 @@ After this, Claude Code / Cursor / etc. will call CTXone's MCP tools
 (`remember`, `recall`, `prime`, etc.) automatically. Every session starts
 with pinned context loaded and topic-relevant memories at hand — no more
 re-explaining your project.
+
+### stdio (default) vs. one shared daemon
+
+By default each tool spawns its **own** `ctxone-hub` over stdio. That's the
+simplest setup, but only one process can own the db at a time, so you can't also
+run a web UI on the same memory. To have **one** hub serve MCP + REST + Lens for
+every tool, run the daemon (`ctxone-hub --http --lens`, ideally via
+[`ctx service install`](DEPLOYMENT.md#running-as-a-service)) and point tools at it
+by URL:
+
+```bash
+ctx init --transport http          # write URL configs instead of stdio spawns
+```
+
+`ctx init` picks the right shape per tool automatically — native
+`{"type":"http","url":…}` for Claude Code / Cursor / VS Code, a `url` entry for
+Codex, and an `mcp-remote` bridge for Claude Desktop (which has no native HTTP
+MCP). See [DEPLOYMENT.md](DEPLOYMENT.md) for when to choose which, and for
+`--auth-token` if you expose the hub beyond localhost.
 
 ## 7. Prime your project's critical context
 
