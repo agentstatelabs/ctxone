@@ -1,6 +1,7 @@
 mod ingest;
 mod metrics;
 mod onboarding;
+mod service;
 
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
@@ -690,6 +691,47 @@ enum Commands {
         #[command(subcommand)]
         action: ProjectAction,
     },
+    /// Install the Hub as a login/boot service (launchd on macOS, systemd
+    /// user unit on Linux) so the unified daemon (MCP + REST + Lens) owns
+    /// the db before any agent starts — the fix for the reboot race.
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ServiceAction {
+    /// Write and register the service unit. Runs `ctxone-hub --http --lens`.
+    Install {
+        /// HTTP port for the daemon.
+        #[arg(long, default_value_t = 3001)]
+        port: u16,
+        /// SQLite db path the daemon owns. Defaults to the canonical path.
+        #[arg(long)]
+        path: Option<String>,
+        /// Do not serve the Lens web UI (REST + MCP only).
+        #[arg(long)]
+        no_lens: bool,
+        /// Embed a bearer token in the unit's environment (chmod 600). Prefer
+        /// setting CTXONE_AUTH_TOKEN in your own environment for secrets.
+        #[arg(long)]
+        auth_token: Option<String>,
+        /// Print the unit file and the commands without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Overwrite an existing unit file.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Stop and remove the service.
+    Uninstall {
+        /// Print the commands without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Show the service's registration status.
+    Status,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1130,6 +1172,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         | Commands::Init { .. }
         | Commands::Serve { .. }
         | Commands::Session { .. }
+        | Commands::Service { .. }
         | Commands::Db { .. } => None,
         _ => cli.resolve_namespace().await,
     };
@@ -2309,9 +2352,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let format = cli.format;
             handle_project(action, &server, format, client.clone()).await?;
         }
+        Commands::Service { action } => {
+            handle_service(action)?;
+        }
     }
 
     Ok(())
+}
+
+/// `ctx service` dispatch — installs/removes the Hub as a login/boot service.
+fn handle_service(action: ServiceAction) -> Result<(), Box<dyn std::error::Error>> {
+    match action {
+        ServiceAction::Install {
+            port,
+            path,
+            no_lens,
+            auth_token,
+            dry_run,
+            force,
+        } => {
+            let spec = service::ServiceSpec {
+                hub_bin: find_hub_binary(),
+                db_path: path.unwrap_or_else(canonical_db_path),
+                port,
+                lens: !no_lens,
+                auth_token,
+                log_path: service::default_log_path(),
+            };
+            service::install(&spec, dry_run, force)
+        }
+        ServiceAction::Uninstall { dry_run } => service::uninstall(dry_run),
+        ServiceAction::Status => service::status(),
+    }
 }
 
 // -- Project command implementation --

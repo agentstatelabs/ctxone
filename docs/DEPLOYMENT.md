@@ -215,8 +215,26 @@ Clients:
 ## Running as a service
 
 To make the HTTP/Lens hub survive reboots and start **before** any agent (so it,
-not an agent's stdio child, owns the db), run it under launchd. Example
-`~/Library/LaunchAgents/com.ctxone.hub.plist`:
+not an agent's stdio child, owns the db), run it as a login service. `ctx service`
+generates and registers the unit for you — launchd on macOS, a systemd **user**
+unit on Linux:
+
+```bash
+ctx service install                       # lens on, port 3001, canonical db
+ctx service install --port 3001 --path ~/.ctxone/memory.db
+ctx service install --auth-token "$(openssl rand -hex 32)"   # embeds token (chmod 600)
+ctx service install --dry-run             # print the unit + commands, write nothing
+ctx service status                        # is it registered/running?
+ctx service uninstall                     # stop + remove
+```
+
+The unit runs `ctxone-hub --http --lens --path <db> --port <port>` with
+`RunAtLoad`/`KeepAlive` (macOS) or `Restart=on-failure` (systemd), logging to
+`~/.ctxone/hub.log`. Preview it first with `--dry-run`. If another hub already
+holds the db (an agent's stdio hub, or a manual one), the service will fail on
+the lockfile — stop it first.
+
+<details><summary>Equivalent hand-written launchd plist</summary>
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -235,14 +253,15 @@ not an agent's stdio child, owns the db), run it under launchd. Example
   </array>
   <key>KeepAlive</key><true/>
   <key>RunAtLoad</key><true/>
-  <key>StandardErrorPath</key><string>/tmp/ctxone-hub.log</string>
+  <key>StandardErrorPath</key><string>/Users/user/.ctxone/hub.log</string>
 </dict>
 </plist>
 ```
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.ctxone.hub.plist
+launchctl load -w ~/Library/LaunchAgents/com.ctxone.hub.plist
 ```
+</details>
 
 > With the daemon running, point agents at it with `ctx init --transport http`
 > and they stop spawning their own hub — one process, one owner, no race. Agents
