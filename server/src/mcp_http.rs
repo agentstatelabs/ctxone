@@ -52,6 +52,10 @@ pub struct McpHttpState {
     asd_repos: Arc<Vec<(String, String)>>,
     /// Process pool for dynamically spawned `asd-serve` instances.
     asd_pool: Option<Arc<AsdProcessPool>>,
+    /// When true, disable rmcp's loopback-only Host allow-list so authenticated
+    /// remote clients can reach `/mcp`. Set when a bearer token guards the
+    /// surface (the auth middleware is then the real gate). See [`crate::http`].
+    allow_remote_hosts: bool,
     /// One MCP service per namespace, built on first use.
     services: Arc<RwLock<HashMap<String, Arc<McpService>>>>,
 }
@@ -62,12 +66,14 @@ impl McpHttpState {
         agent_id: String,
         asd_repos: Arc<Vec<(String, String)>>,
         asd_pool: Option<Arc<AsdProcessPool>>,
+        allow_remote_hosts: bool,
     ) -> Self {
         Self {
             repo,
             agent_id,
             asd_repos,
             asd_pool,
+            allow_remote_hosts,
             services: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -131,7 +137,13 @@ impl McpHttpState {
         // with SSE reconnection, as MCP clients expect) and a loopback Host
         // allow-list, matching a localhost daemon. The struct is
         // `#[non_exhaustive]`, so build from Default rather than a literal.
-        let config = StreamableHttpServerConfig::default();
+        let mut config = StreamableHttpServerConfig::default();
+        if self.allow_remote_hosts {
+            // Bearer auth gates access; let non-loopback Host headers through so
+            // authenticated remote clients aren't rejected by the DNS-rebinding
+            // guard before the auth layer even runs.
+            config = config.disable_allowed_hosts();
+        }
         StreamableHttpService::new(factory, Arc::new(LocalSessionManager::default()), config)
     }
 }

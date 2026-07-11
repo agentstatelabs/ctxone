@@ -8,10 +8,13 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use std::net::SocketAddr;
+
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::StatusCode,
+    middleware::Next,
     response::IntoResponse,
     routing::{get, post},
 };
@@ -63,6 +66,12 @@ pub struct HubConfig {
     /// Agent id stamped on commits made through the `/mcp` surface (parity with
     /// `ctxone-hub --agent-id`). Only read when `mcp_http` is true.
     pub agent_id: String,
+    /// Optional bearer token guarding the whole HTTP surface (REST + `/mcp`).
+    /// When `Some`, non-loopback requests must send `Authorization: Bearer
+    /// <token>`; loopback peers are always exempt. When `None`, no per-request
+    /// auth is enforced (the binary warns at startup if bound non-loopback).
+    /// See [`crate::mcp_http`] and the auth middleware in this module.
+    pub auth_token: Option<String>,
 }
 
 #[derive(Clone)]
@@ -249,6 +258,68 @@ pub fn router_with_config(
     router_with_config_inner(repo, sessions, config, None)
 }
 
+/// State for the bearer-auth middleware: the configured token (if any).
+#[derive(Clone)]
+struct AuthState {
+    token: Option<Arc<String>>,
+}
+
+/// Constant-time string comparison, so a wrong token can't be recovered by
+/// timing how far the comparison got. Length mismatch returns false but still
+/// scans the provided token to keep timing independent of the secret's length.
+fn constant_time_eq(provided: &str, expected: &str) -> bool {
+    let (a, b) = (provided.as_bytes(), expected.as_bytes());
+    let mut diff = (a.len() ^ b.len()) as u8;
+    for (i, &byte) in a.iter().enumerate() {
+        diff |= byte ^ b.get(i).copied().unwrap_or(0);
+    }
+    diff == 0
+}
+
+/// Whole-surface bearer auth. Loopback peers are always exempt (local CLI,
+/// Lens, and same-host agents keep working tokenless). When a token is
+/// configured, every non-loopback request must carry `Authorization: Bearer
+/// <token>`. When no token is configured, nothing is enforced here (the binary
+/// warns at startup if it bound to a non-loopback address). A request whose peer
+/// address is unknown (no `ConnectInfo`) is treated as untrusted — fail closed.
+async fn require_auth(
+    State(auth): State<AuthState>,
+    req: axum::extract::Request,
+    next: Next,
+) -> axum::response::Response {
+    let Some(token) = auth.token.as_deref() else {
+        // No token configured → no per-request enforcement.
+        return next.run(req).await;
+    };
+
+    // Peer address is attached by `into_make_service_with_connect_info`. Absent
+    // in unit tests (oneshot) and any misconfig → treat as non-loopback (fail
+    // closed). Tests inject `ConnectInfo` explicitly to exercise both paths.
+    let is_loopback = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0.ip().is_loopback())
+        .unwrap_or(false);
+    if is_loopback {
+        return next.run(req).await;
+    }
+
+    let presented = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "));
+
+    match presented {
+        Some(t) if constant_time_eq(t, token) => next.run(req).await,
+        _ => (
+            StatusCode::UNAUTHORIZED,
+            "missing or invalid bearer token (Authorization: Bearer <token>)",
+        )
+            .into_response(),
+    }
+}
+
 fn router_with_config_inner(
     repo: Arc<Repository>,
     sessions: Arc<SessionRegistry>,
@@ -292,6 +363,10 @@ fn router_with_config_inner(
             config.agent_id.clone(),
             asd_repos.clone(),
             asd_pool.clone(),
+            // When a bearer token guards the surface, the auth middleware is the
+            // real gate, so relax rmcp's loopback-only Host allow-list to let
+            // authenticated remote clients reach /mcp.
+            config.auth_token.is_some(),
         )
     });
 
@@ -429,6 +504,17 @@ fn router_with_config_inner(
     if let Some(layer) = governor {
         router = router.layer(layer);
     }
+
+    // Bearer auth outermost — runs first, before rate limiting and routing, so
+    // unauthenticated non-loopback traffic is rejected before doing any work.
+    // Added last = outermost layer. Guards REST + /mcp alike.
+    let auth_state = AuthState {
+        token: config.auth_token.clone().map(Arc::new),
+    };
+    router = router.layer(axum::middleware::from_fn_with_state(
+        auth_state,
+        require_auth,
+    ));
 
     router
 }

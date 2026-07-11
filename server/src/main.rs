@@ -93,6 +93,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // that tool in blame history. Defaults to "ctxone" when unset.
     let mut agent_id: String =
         std::env::var("CTX_AGENT_ID").unwrap_or_else(|_| "ctxone".to_string());
+    // Optional bearer token guarding the whole HTTP surface (REST + /mcp).
+    // When set, non-loopback requests must send `Authorization: Bearer <token>`;
+    // loopback peers stay exempt. From --auth-token or CTXONE_AUTH_TOKEN.
+    let mut auth_token: Option<String> = std::env::var("CTXONE_AUTH_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty());
     // MCP-mode namespace override. When unset, the project detection
     // chain runs from the process cwd at startup (the spawning tool
     // starts us in the project directory, so this Just Works once the
@@ -155,6 +161,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 i += 1;
                 if i < args.len() {
                     agent_id = args[i].clone();
+                }
+            }
+            "--auth-token" => {
+                i += 1;
+                if i < args.len() {
+                    auth_token = Some(args[i].clone()).filter(|s| !s.is_empty());
                 }
             }
             "--namespace" => {
@@ -257,6 +269,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 eprintln!(
                     "      --agent-id <NAME>    Agent ID recorded on commits (default: \"ctxone\")"
+                );
+                eprintln!(
+                    "      --auth-token <TOK>   Bearer token guarding REST + /mcp (env: CTXONE_AUTH_TOKEN)."
+                );
+                eprintln!(
+                    "                           Non-loopback requests must send Authorization: Bearer <TOK>;"
+                );
+                eprintln!(
+                    "                           loopback is exempt. Unset = no auth (warns if bound remotely)."
                 );
                 eprintln!(
                     "      --namespace <NS>     MCP mode: namespace to operate in (default: detect \
@@ -542,6 +563,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         info!("Try: curl http://localhost:{}/api/health", http_port);
 
+        // Auth posture. The socket binds 0.0.0.0 (all interfaces), so without a
+        // token the REST API + /mcp are reachable from the network unauthenticated.
+        // Loopback peers are always exempt; a token only gates non-loopback.
+        if auth_token.is_some() {
+            info!("Bearer auth enabled: non-loopback requests require Authorization: Bearer <token> (loopback exempt)");
+        } else {
+            warn!(
+                "No auth token set — REST API and /mcp are reachable on ALL interfaces \
+                 with no authentication. Set --auth-token / CTXONE_AUTH_TOKEN before \
+                 exposing this hub beyond localhost."
+            );
+        }
+
         // Session registry: load persisted stats from SQLite (if sqlite storage),
         // so token savings survive hub restarts. Falls back to empty on memory/pg.
         let sessions = Arc::new(if storage_type == "sqlite" {
@@ -560,6 +594,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Serve MCP at /mcp so this one daemon covers MCP + REST + Lens.
             mcp_http: true,
             agent_id: agent_id.clone(),
+            auth_token: auth_token.clone(),
         };
 
         // Capture db_path for background flush tasks.

@@ -70,6 +70,12 @@ struct RawCli {
     #[arg(long, env = "CTX_NAMESPACE", global = true)]
     namespace: Option<String>,
 
+    /// Bearer token for a hub that requires auth (env: CTX_TOKEN). Sent as
+    /// `Authorization: Bearer <token>`. Only needed for a non-loopback hub —
+    /// loopback requests are exempt.
+    #[arg(long, env = "CTX_TOKEN", global = true)]
+    token: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -87,6 +93,8 @@ struct Cli {
     /// Explicit namespace from --namespace / CTX_NAMESPACE. `None` means
     /// "detect from cwd" (see [`Cli::resolve_namespace`]).
     namespace: Option<String>,
+    /// Bearer token for an authenticated hub (--token / CTX_TOKEN).
+    token: Option<String>,
     command: Commands,
 }
 
@@ -106,6 +114,7 @@ impl Cli {
             format: raw.format.or(config.format).unwrap_or(OutputFormat::Text),
             session: raw.session,
             namespace: raw.namespace,
+            token: raw.token,
             command: raw.command,
         }
     }
@@ -139,8 +148,9 @@ impl Cli {
         }
     }
 
-    /// Build a reqwest client with X-CTXone-Session and (when resolved)
-    /// X-CTXone-Namespace baked in as default headers.
+    /// Build a reqwest client with X-CTXone-Session, X-CTXone-Namespace, and
+    /// (for an authenticated hub) `Authorization: Bearer <token>` baked in as
+    /// default headers.
     fn http_client(&self, namespace: Option<&str>) -> reqwest::Client {
         let mut headers = reqwest::header::HeaderMap::new();
         if let Some(ref sid) = self.session
@@ -152,6 +162,13 @@ impl Cli {
             && let Ok(val) = reqwest::header::HeaderValue::from_str(ns)
         {
             headers.insert("X-CTXone-Namespace", val);
+        }
+        if let Some(ref token) = self.token
+            && let Ok(mut val) =
+                reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+        {
+            val.set_sensitive(true);
+            headers.insert(reqwest::header::AUTHORIZATION, val);
         }
         let builder = reqwest::Client::builder().default_headers(headers);
         builder.build().unwrap_or_default()
@@ -5807,6 +5824,7 @@ mod tests {
             format: None,
             session: None,
             namespace: None,
+            token: None,
             command: Commands::Status,
         }
     }
