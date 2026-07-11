@@ -4371,6 +4371,7 @@ fn tool_slug(name: &str) -> String {
 
 fn mcp_server_entry(
     agent_id: &str,
+    client_name: &str,
     transport: McpTransport,
     mcp_url: &str,
     namespace: Option<&str>,
@@ -4378,11 +4379,23 @@ fn mcp_server_entry(
     match transport {
         McpTransport::Http => {
             // Point the tool at a shared daemon's Streamable-HTTP endpoint.
-            // `{"type":"http","url":…}` is the widely-supported MCP client
-            // shape (Claude Code, Cursor, VS Code). The daemon scopes writes
-            // by the `?namespace=` query, so bake in the detected namespace.
+            // The daemon scopes writes by the `?namespace=` query, so bake in
+            // the detected namespace.
             let url = mcp_http_url(mcp_url, namespace);
-            serde_json::json!({ "type": "http", "url": url })
+            if http_client_needs_bridge(client_name) {
+                // Stdio-only JSON clients (Claude Desktop) can't read
+                // `{"type":"http","url":…}`. Bridge to the HTTP hub with
+                // `mcp-remote`, a stdio proxy launched via npx. `-y` skips the
+                // install prompt; `--transport http-only` forces Streamable
+                // HTTP (no SSE fallback probe).
+                serde_json::json!({
+                    "command": "npx",
+                    "args": ["-y", "mcp-remote", url, "--transport", "http-only"]
+                })
+            } else {
+                // Native URL transport (Claude Code, Cursor, VS Code).
+                serde_json::json!({ "type": "http", "url": url })
+            }
         }
         McpTransport::Stdio => {
             let hub_bin = find_hub_binary();
@@ -4400,6 +4413,14 @@ fn mcp_server_entry(
             })
         }
     }
+}
+
+/// JSON MCP clients that only speak stdio and therefore need the `mcp-remote`
+/// bridge to reach an HTTP hub. Claude Desktop has no native `{type:http,url}`
+/// support (verified 2026-07, app v1.2x) — it ignores such entries — so under
+/// `--transport http` we write an `mcp-remote` stdio proxy for it instead.
+fn http_client_needs_bridge(client_name: &str) -> bool {
+    client_name == "Claude Desktop"
 }
 
 /// Compose the `/mcp` URL, appending `namespace=<ns>` to whatever query the
@@ -4612,7 +4633,17 @@ fn init_mcp(
         // (e.g. "Claude Code" → "claude-code"). This makes
         // `ctx blame` show the originating tool for every commit.
         let agent_id = tool_slug(t.name);
-        let entry = mcp_server_entry(&agent_id, transport, mcp_url, namespace.as_deref());
+        let entry = mcp_server_entry(&agent_id, t.name, transport, mcp_url, namespace.as_deref());
+
+        // Tell the user when http mode falls back to the mcp-remote bridge, so
+        // they know a Node/npx runtime is now a prerequisite for that client.
+        if transport == McpTransport::Http && http_client_needs_bridge(t.name) {
+            eprintln!(
+                "  \u{2139} {}: no native HTTP MCP support; using the `mcp-remote` \
+                 stdio bridge (requires Node/npx).",
+                t.name
+            );
+        }
 
         match t.config_type {
             ConfigType::McpJson => {
@@ -5957,7 +5988,13 @@ args = ["--path", "/old/db"]
 
     #[test]
     fn mcp_server_entry_includes_agent_id() {
-        let entry = mcp_server_entry("claude-code");
+        let entry = mcp_server_entry(
+            "claude-code",
+            "Claude Code",
+            McpTransport::Stdio,
+            "http://localhost:3001/mcp",
+            None,
+        );
         let args = entry
             .get("args")
             .and_then(|v| v.as_array())
@@ -5965,6 +6002,47 @@ args = ["--path", "/old/db"]
         let arg_strs: Vec<&str> = args.iter().filter_map(|v| v.as_str()).collect();
         assert!(arg_strs.contains(&"--agent-id"));
         assert!(arg_strs.contains(&"claude-code"));
+    }
+
+    #[test]
+    fn mcp_server_entry_http_native_for_claude_code() {
+        let entry = mcp_server_entry(
+            "claude-code",
+            "Claude Code",
+            McpTransport::Http,
+            "http://localhost:3001/mcp",
+            Some("proj-ns"),
+        );
+        assert_eq!(entry.get("type").and_then(|v| v.as_str()), Some("http"));
+        assert_eq!(
+            entry.get("url").and_then(|v| v.as_str()),
+            Some("http://localhost:3001/mcp?namespace=proj-ns")
+        );
+        assert!(entry.get("command").is_none(), "native http has no command");
+    }
+
+    #[test]
+    fn mcp_server_entry_http_bridges_claude_desktop() {
+        let entry = mcp_server_entry(
+            "claude-desktop",
+            "Claude Desktop",
+            McpTransport::Http,
+            "http://localhost:3001/mcp",
+            Some("proj-ns"),
+        );
+        // Claude Desktop can't read {type:http,url}; must get the mcp-remote bridge.
+        assert!(entry.get("type").is_none(), "bridge is a stdio command, not type:http");
+        assert_eq!(entry.get("command").and_then(|v| v.as_str()), Some("npx"));
+        let args: Vec<&str> = entry
+            .get("args")
+            .and_then(|v| v.as_array())
+            .expect("args array")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(args.contains(&"mcp-remote"));
+        assert!(args.contains(&"http://localhost:3001/mcp?namespace=proj-ns"));
+        assert!(args.contains(&"http-only"));
     }
 
     #[test]

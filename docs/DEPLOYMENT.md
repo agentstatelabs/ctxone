@@ -84,11 +84,15 @@ The `?namespace=` is filled in from the project detected in the current director
 
 - ✅ One process, one lock, **startup order irrelevant** — the reboot race is gone.
   Lens always up, independent of any agent; multiple agents share one graph.
-- ⚠️ Your MCP client must support **remote/URL MCP servers**. Claude Code, Cursor,
-  and VS Code accept `{"type":"http","url":…}`. Some desktop clients only speak
-  stdio (or need a bridge like `mcp-remote`) — for those, use stdio (topology A)
-  or a dedicated db (topology C). Codex is left on stdio by `ctx init` (a note is
-  printed) because its TOML has no verified URL form.
+- MCP clients reach the daemon two ways, and `ctx init --transport http` writes
+  the right one per client:
+  - **Native URL** — Claude Code, Cursor, VS Code get `{"type":"http","url":…}`.
+  - **`mcp-remote` bridge** — **Claude Desktop** has no native HTTP MCP support,
+    so `ctx init` writes an stdio bridge
+    (`npx -y mcp-remote <url> --transport http-only`) that proxies to the daemon.
+    Requires Node/npx on PATH; a note is printed when this is used.
+  - **stdio only** — Codex is left on stdio (a note is printed); its TOML has no
+    verified URL form.
 - ⚠️ A single daemon has no per-cwd project detection, so **one agent config maps
   to one namespace** (baked into the URL). An agent that roams many repos uses one
   fixed namespace or per-workspace configs. Need per-cwd auto-scoping? Use stdio
