@@ -4575,6 +4575,38 @@ fn merge_codex_ctxone_toml(
     toml::to_string_pretty(&doc).map_err(|e| format!("serialize failed: {}", e))
 }
 
+/// Merge a Streamable-HTTP `[mcp_servers.ctxone]` entry into a Codex TOML
+/// config. Codex supports HTTP MCP natively via a `url` key (verified against
+/// the official docs; no `experimental_use_rmcp_client` needed on current
+/// versions). Any stale stdio keys from a prior stdio install are removed so
+/// the entry doesn't carry both `command` and `url`.
+fn merge_codex_ctxone_toml_http(existing: &str, url: &str) -> Result<String, String> {
+    use toml::Value;
+
+    let mut doc: Value = if existing.trim().is_empty() {
+        Value::Table(toml::map::Map::new())
+    } else {
+        toml::from_str(existing).map_err(|e| format!("invalid existing TOML: {}", e))?
+    };
+
+    let root = doc
+        .as_table_mut()
+        .ok_or_else(|| "config root is not a table".to_string())?;
+
+    let servers = root
+        .entry("mcp_servers".to_string())
+        .or_insert_with(|| Value::Table(toml::map::Map::new()))
+        .as_table_mut()
+        .ok_or_else(|| "mcp_servers is not a table".to_string())?;
+
+    let mut ctxone = toml::map::Map::new();
+    ctxone.insert("url".to_string(), Value::String(url.to_string()));
+
+    servers.insert("ctxone".to_string(), Value::Table(ctxone));
+
+    toml::to_string_pretty(&doc).map_err(|e| format!("serialize failed: {}", e))
+}
+
 fn handle_config(
     action: ConfigAction,
     format: OutputFormat,
@@ -4774,19 +4806,6 @@ fn init_mcp(
                 }
             }
             ConfigType::Toml => {
-                // Codex's TOML `mcp_servers` schema is stdio-oriented (command
-                // + args). We don't have a verified URL form for it, so rather
-                // than write a config that might silently fail, keep Codex on
-                // stdio and say so when the user asked for http.
-                if transport == McpTransport::Http {
-                    eprintln!(
-                        "  \u{26A0} {}: http transport not auto-configured for this tool; \
-                         writing stdio config instead. Point it at the shared hub manually \
-                         if it supports remote MCP.",
-                        t.name
-                    );
-                }
-                let hub_bin = find_hub_binary();
                 let db_path = canonical_db_path();
                 if let Some(parent) = std::path::Path::new(&db_path).parent() {
                     let _ = std::fs::create_dir_all(parent);
@@ -4798,14 +4817,24 @@ fn init_mcp(
                     String::new()
                 };
 
-                let new_content =
-                    match merge_codex_ctxone_toml(&existing, &hub_bin, &db_path, &agent_id) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            eprintln!("  \u{2717} {}: could not merge TOML config: {}", t.name, e);
-                            continue;
-                        }
-                    };
+                // Codex supports both transports natively: stdio (command/args)
+                // and Streamable HTTP (a `url` key). Pick per --transport.
+                let merged = match transport {
+                    McpTransport::Http => {
+                        let url = mcp_http_url(mcp_url, namespace.as_deref());
+                        merge_codex_ctxone_toml_http(&existing, &url)
+                    }
+                    McpTransport::Stdio => {
+                        merge_codex_ctxone_toml(&existing, &find_hub_binary(), &db_path, &agent_id)
+                    }
+                };
+                let new_content = match merged {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("  \u{2717} {}: could not merge TOML config: {}", t.name, e);
+                        continue;
+                    }
+                };
 
                 if dry_run {
                     println!(
@@ -6047,6 +6076,30 @@ args = ["--path", "/old/db"]
     fn codex_merge_rejects_invalid_toml() {
         let broken = "this is { not valid toml }}";
         assert!(merge_codex_ctxone_toml(broken, "/bin/hub", "/db", "codex").is_err());
+    }
+
+    #[test]
+    fn codex_http_merge_writes_url_entry() {
+        let out = merge_codex_ctxone_toml_http("", "http://localhost:3001/mcp?namespace=p")
+            .expect("http merge");
+        assert!(out.contains("[mcp_servers.ctxone]"));
+        assert!(out.contains("url = \"http://localhost:3001/mcp?namespace=p\""));
+        assert!(!out.contains("command"));
+    }
+
+    #[test]
+    fn codex_http_merge_replaces_stale_stdio_entry() {
+        // Switching an existing stdio Codex entry to http must drop command/args.
+        let existing = r#"
+[mcp_servers.ctxone]
+command = "/old/ctxone-hub"
+args = ["--path", "/old/db"]
+"#;
+        let out = merge_codex_ctxone_toml_http(existing, "http://localhost:3001/mcp")
+            .expect("http merge");
+        assert!(out.contains("url = \"http://localhost:3001/mcp\""));
+        assert!(!out.contains("command"));
+        assert!(!out.contains("/old/db"));
     }
 
     // -------- tool_slug --------

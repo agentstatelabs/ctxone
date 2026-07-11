@@ -91,8 +91,8 @@ The `?namespace=` is filled in from the project detected in the current director
     so `ctx init` writes an stdio bridge
     (`npx -y mcp-remote <url> --transport http-only`) that proxies to the daemon.
     Requires Node/npx on PATH; a note is printed when this is used.
-  - **stdio only** — Codex is left on stdio (a note is printed); its TOML has no
-    verified URL form.
+  - **Codex** — native HTTP via a `url` key in `config.toml`
+    (`[mcp_servers.ctxone]\nurl = "…/mcp?namespace=…"`).
 - ⚠️ A single daemon has no per-cwd project detection, so **one agent config maps
   to one namespace** (baked into the URL). An agent that roams many repos uses one
   fixed namespace or per-workspace configs. Need per-cwd auto-scoping? Use stdio
