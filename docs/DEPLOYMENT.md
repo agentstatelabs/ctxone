@@ -248,7 +248,7 @@ browser UI needs the tunnel.)
 To make the HTTP/Lens hub survive reboots and start **before** any agent (so it,
 not an agent's stdio child, owns the db), run it as a login service. `ctx service`
 generates and registers the unit for you — launchd on macOS, a systemd **user**
-unit on Linux:
+unit on Linux, and a **Task Scheduler** logon task on Windows (via `schtasks`):
 
 ```bash
 ctx service install                       # lens on, port 3001, canonical db
@@ -260,10 +260,12 @@ ctx service uninstall                     # stop + remove
 ```
 
 The unit runs `ctxone-hub --http --lens --path <db> --port <port>` with
-`RunAtLoad`/`KeepAlive` (macOS) or `Restart=on-failure` (systemd), logging to
-`~/.ctxone/hub.log`. Preview it first with `--dry-run`. If another hub already
-holds the db (an agent's stdio hub, or a manual one), the service will fail on
-the lockfile — stop it first.
+`RunAtLoad`/`KeepAlive` (macOS), `Restart=on-failure` (systemd), or a
+`LogonTrigger` + `RestartOnFailure` (Windows), logging to `~/.ctxone/hub.log`.
+Preview it first with `--dry-run`. If another hub already holds the db (an
+agent's stdio hub, or a manual one), the service will fail on the lockfile —
+stop it first. On Windows the auth token can't be embedded in the task; set it
+with `setx CTXONE_AUTH_TOKEN <token>` instead.
 
 <details><summary>Equivalent hand-written launchd plist</summary>
 
