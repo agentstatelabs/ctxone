@@ -650,6 +650,19 @@ enum Commands {
         /// `?namespace=<ns>` when one is detected.
         #[arg(long, default_value = "http://localhost:3001/mcp")]
         mcp_url: String,
+        /// Literal bearer token to embed in generated http configs (for a
+        /// hub started with --auth-token). WARNING: written in plaintext into
+        /// the tool's config file. Used for native `headers` (Claude Code,
+        /// Cursor, VS Code) and the mcp-remote `--header` (Claude Desktop).
+        /// Codex needs an env-var name — see `--auth-token-env`.
+        #[arg(long)]
+        auth_token: Option<String>,
+        /// Name of an environment variable the tool reads the bearer token
+        /// from at runtime (keeps the secret out of the config file). This is
+        /// how Codex takes a token (`bearer_token_env_var`). Prefer this over
+        /// `--auth-token` where the client supports it.
+        #[arg(long)]
+        auth_token_env: Option<String>,
     },
     /// Manage the AGENTS.md guidance file — a short, pinned document
     /// that teaches AI tools how to use CTXone effectively. See
@@ -2291,6 +2304,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             no_agents,
             transport,
             mcp_url,
+            auth_token,
+            auth_token_env,
         } => {
             // Grab the fields agents_install_prompt needs BEFORE the
             // match consumes `cli.command` via destructuring. We only
@@ -2310,6 +2325,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 transport,
                 &mcp_url,
                 namespace.clone(),
+                auth_token.as_deref(),
+                auth_token_env.as_deref(),
             )?;
             // After MCP configs are written, optionally prime the
             // AGENTS.md guidance into the Hub. Skipped in --dry-run
@@ -4464,6 +4481,8 @@ fn mcp_server_entry(
     transport: McpTransport,
     mcp_url: &str,
     namespace: Option<&str>,
+    auth_token: Option<&str>,
+    auth_token_env: Option<&str>,
 ) -> Value {
     match transport {
         McpTransport::Http => {
@@ -4477,13 +4496,32 @@ fn mcp_server_entry(
                 // `mcp-remote`, a stdio proxy launched via npx. `-y` skips the
                 // install prompt; `--transport http-only` forces Streamable
                 // HTTP (no SSE fallback probe).
-                serde_json::json!({
-                    "command": "npx",
-                    "args": ["-y", "mcp-remote", url, "--transport", "http-only"]
-                })
+                let mut args = vec![
+                    "-y".to_string(),
+                    "mcp-remote".to_string(),
+                    url,
+                    "--transport".to_string(),
+                    "http-only".to_string(),
+                ];
+                // mcp-remote forwards a literal --header; it does not expand
+                // env vars, so only a literal token works for the bridge.
+                if let Some(tok) = auth_token {
+                    args.push("--header".to_string());
+                    args.push(format!("Authorization: Bearer {tok}"));
+                }
+                serde_json::json!({ "command": "npx", "args": args })
             } else {
                 // Native URL transport (Claude Code, Cursor, VS Code).
-                serde_json::json!({ "type": "http", "url": url })
+                let mut entry = serde_json::json!({ "type": "http", "url": url });
+                // Prefer a literal header; else reference an env var (clients
+                // that support `${VAR}` expansion in config values resolve it).
+                let auth_value = auth_token
+                    .map(|t| format!("Bearer {t}"))
+                    .or_else(|| auth_token_env.map(|v| format!("Bearer ${{{v}}}")));
+                if let Some(v) = auth_value {
+                    entry["headers"] = serde_json::json!({ "Authorization": v });
+                }
+                entry
             }
         }
         McpTransport::Stdio => {
@@ -4580,7 +4618,11 @@ fn merge_codex_ctxone_toml(
 /// the official docs; no `experimental_use_rmcp_client` needed on current
 /// versions). Any stale stdio keys from a prior stdio install are removed so
 /// the entry doesn't carry both `command` and `url`.
-fn merge_codex_ctxone_toml_http(existing: &str, url: &str) -> Result<String, String> {
+fn merge_codex_ctxone_toml_http(
+    existing: &str,
+    url: &str,
+    auth_token_env: Option<&str>,
+) -> Result<String, String> {
     use toml::Value;
 
     let mut doc: Value = if existing.trim().is_empty() {
@@ -4601,6 +4643,13 @@ fn merge_codex_ctxone_toml_http(existing: &str, url: &str) -> Result<String, Str
 
     let mut ctxone = toml::map::Map::new();
     ctxone.insert("url".to_string(), Value::String(url.to_string()));
+    // Codex sources the bearer from an env var at runtime (never a literal).
+    if let Some(var) = auth_token_env {
+        ctxone.insert(
+            "bearer_token_env_var".to_string(),
+            Value::String(var.to_string()),
+        );
+    }
 
     servers.insert("ctxone".to_string(), Value::Table(ctxone));
 
@@ -4691,6 +4740,7 @@ fn handle_config(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn init_mcp(
     global: bool,
     tool_filter: Option<String>,
@@ -4699,6 +4749,8 @@ fn init_mcp(
     transport: McpTransport,
     mcp_url: &str,
     namespace: Option<String>,
+    auth_token: Option<&str>,
+    auth_token_env: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut tools = detect_tools(global);
 
@@ -4754,7 +4806,15 @@ fn init_mcp(
         // (e.g. "Claude Code" → "claude-code"). This makes
         // `ctx blame` show the originating tool for every commit.
         let agent_id = tool_slug(t.name);
-        let entry = mcp_server_entry(&agent_id, t.name, transport, mcp_url, namespace.as_deref());
+        let entry = mcp_server_entry(
+            &agent_id,
+            t.name,
+            transport,
+            mcp_url,
+            namespace.as_deref(),
+            auth_token,
+            auth_token_env,
+        );
 
         // Tell the user when http mode falls back to the mcp-remote bridge, so
         // they know a Node/npx runtime is now a prerequisite for that client.
@@ -4764,6 +4824,36 @@ fn init_mcp(
                  stdio bridge (requires Node/npx).",
                 t.name
             );
+        }
+
+        // Per-client auth caveats under http. Codex needs an env-var name; the
+        // mcp-remote bridge needs a literal token (no env expansion); and a
+        // literal token is written into the config file in plaintext.
+        if transport == McpTransport::Http {
+            let is_codex = matches!(t.config_type, ConfigType::Toml);
+            if is_codex && auth_token_env.is_none() && auth_token.is_some() {
+                eprintln!(
+                    "  \u{26A0} {}: Codex reads the token from an env var — pass \
+                     --auth-token-env <VAR> (and export it); a literal --auth-token \
+                     can't be embedded, so no token was written.",
+                    t.name
+                );
+            } else if http_client_needs_bridge(t.name)
+                && auth_token.is_none()
+                && auth_token_env.is_some()
+            {
+                eprintln!(
+                    "  \u{26A0} {}: the mcp-remote bridge can't expand an env var — \
+                     pass a literal --auth-token <TOK> to authenticate; none was written.",
+                    t.name
+                );
+            } else if auth_token.is_some() && !is_codex {
+                eprintln!(
+                    "  \u{26A0} {}: bearer token written in plaintext into {}.",
+                    t.name,
+                    t.config_path.display()
+                );
+            }
         }
 
         match t.config_type {
@@ -4822,7 +4912,7 @@ fn init_mcp(
                 let merged = match transport {
                     McpTransport::Http => {
                         let url = mcp_http_url(mcp_url, namespace.as_deref());
-                        merge_codex_ctxone_toml_http(&existing, &url)
+                        merge_codex_ctxone_toml_http(&existing, &url, auth_token_env)
                     }
                     McpTransport::Stdio => {
                         merge_codex_ctxone_toml(&existing, &find_hub_binary(), &db_path, &agent_id)
@@ -6080,11 +6170,23 @@ args = ["--path", "/old/db"]
 
     #[test]
     fn codex_http_merge_writes_url_entry() {
-        let out = merge_codex_ctxone_toml_http("", "http://localhost:3001/mcp?namespace=p")
+        let out = merge_codex_ctxone_toml_http("", "http://localhost:3001/mcp?namespace=p", None)
             .expect("http merge");
         assert!(out.contains("[mcp_servers.ctxone]"));
         assert!(out.contains("url = \"http://localhost:3001/mcp?namespace=p\""));
         assert!(!out.contains("command"));
+        assert!(!out.contains("bearer_token_env_var"));
+    }
+
+    #[test]
+    fn codex_http_merge_writes_bearer_env_var() {
+        let out = merge_codex_ctxone_toml_http(
+            "",
+            "http://localhost:3001/mcp",
+            Some("CTXONE_AUTH_TOKEN"),
+        )
+        .expect("http merge");
+        assert!(out.contains("bearer_token_env_var = \"CTXONE_AUTH_TOKEN\""));
     }
 
     #[test]
@@ -6095,7 +6197,7 @@ args = ["--path", "/old/db"]
 command = "/old/ctxone-hub"
 args = ["--path", "/old/db"]
 "#;
-        let out = merge_codex_ctxone_toml_http(existing, "http://localhost:3001/mcp")
+        let out = merge_codex_ctxone_toml_http(existing, "http://localhost:3001/mcp", None)
             .expect("http merge");
         assert!(out.contains("url = \"http://localhost:3001/mcp\""));
         assert!(!out.contains("command"));
@@ -6137,6 +6239,8 @@ args = ["--path", "/old/db"]
             McpTransport::Stdio,
             "http://localhost:3001/mcp",
             None,
+            None,
+            None,
         );
         let args = entry
             .get("args")
@@ -6155,6 +6259,8 @@ args = ["--path", "/old/db"]
             McpTransport::Http,
             "http://localhost:3001/mcp",
             Some("proj-ns"),
+            None,
+            None,
         );
         assert_eq!(entry.get("type").and_then(|v| v.as_str()), Some("http"));
         assert_eq!(
@@ -6162,6 +6268,41 @@ args = ["--path", "/old/db"]
             Some("http://localhost:3001/mcp?namespace=proj-ns")
         );
         assert!(entry.get("command").is_none(), "native http has no command");
+        assert!(entry.get("headers").is_none(), "no token → no headers");
+    }
+
+    #[test]
+    fn mcp_server_entry_http_native_embeds_literal_token() {
+        let entry = mcp_server_entry(
+            "claude-code",
+            "Claude Code",
+            McpTransport::Http,
+            "http://localhost:3001/mcp",
+            None,
+            Some("s3cret"),
+            None,
+        );
+        assert_eq!(
+            entry["headers"]["Authorization"].as_str(),
+            Some("Bearer s3cret")
+        );
+    }
+
+    #[test]
+    fn mcp_server_entry_http_native_uses_env_ref_when_no_literal() {
+        let entry = mcp_server_entry(
+            "cursor",
+            "Cursor",
+            McpTransport::Http,
+            "http://localhost:3001/mcp",
+            None,
+            None,
+            Some("CTXONE_AUTH_TOKEN"),
+        );
+        assert_eq!(
+            entry["headers"]["Authorization"].as_str(),
+            Some("Bearer ${CTXONE_AUTH_TOKEN}")
+        );
     }
 
     #[test]
@@ -6172,6 +6313,8 @@ args = ["--path", "/old/db"]
             McpTransport::Http,
             "http://localhost:3001/mcp",
             Some("proj-ns"),
+            None,
+            None,
         );
         // Claude Desktop can't read {type:http,url}; must get the mcp-remote bridge.
         assert!(entry.get("type").is_none(), "bridge is a stdio command, not type:http");
@@ -6186,6 +6329,28 @@ args = ["--path", "/old/db"]
         assert!(args.contains(&"mcp-remote"));
         assert!(args.contains(&"http://localhost:3001/mcp?namespace=proj-ns"));
         assert!(args.contains(&"http-only"));
+        assert!(!args.contains(&"--header"), "no token → no --header");
+    }
+
+    #[test]
+    fn mcp_server_entry_bridge_adds_literal_header_token() {
+        let entry = mcp_server_entry(
+            "claude-desktop",
+            "Claude Desktop",
+            McpTransport::Http,
+            "http://localhost:3001/mcp",
+            None,
+            Some("s3cret"),
+            None,
+        );
+        let args: Vec<String> = entry["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        assert!(args.iter().any(|a| a == "--header"));
+        assert!(args.iter().any(|a| a == "Authorization: Bearer s3cret"));
     }
 
     #[test]

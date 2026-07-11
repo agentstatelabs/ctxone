@@ -200,17 +200,21 @@ Behaviour:
 - Setting a token also relaxes `/mcp`'s loopback-only Host check so authenticated
   remote clients can connect (the bearer becomes the gate).
 
-Clients:
+Clients — `ctx init --transport http` writes the token into each tool's config:
 - **`ctx` CLI** — `--token <TOK>` or `CTX_TOKEN` (only needed for a remote hub).
-- **Native http MCP** (Claude Code/Cursor/VS Code) — add an `Authorization`
-  header to the server entry.
-- **`mcp-remote`** (Claude Desktop) — add `--header "Authorization: Bearer <TOK>"`.
+- **`ctx init --transport http --auth-token <TOK>`** — embeds a literal bearer:
+  a `headers` entry for native http (Claude Code/Cursor/VS Code) and a
+  `--header` arg for the mcp-remote bridge (Claude Desktop). The token is written
+  in plaintext into those config files (a warning is printed).
+- **`ctx init --transport http --auth-token-env <VAR>`** — keeps the secret out
+  of config files: Codex gets `bearer_token_env_var = "<VAR>"`, and native http
+  entries reference `Bearer ${VAR}` (for clients that expand env vars). The
+  mcp-remote bridge can't expand env vars, so Claude Desktop needs the literal
+  `--auth-token` form.
 
-> Not yet automated: `ctx init --transport http` does not inject the token into
-> generated MCP configs — add it by hand for a remote authed hub (tracked as a
-> follow-up). Residual note: loopback browser requests remain exempt, so the
-> existing REST CORS posture (open) is unchanged — don't rely on the token for
-> same-host CSRF protection.
+> Residual note: loopback browser requests remain exempt and REST CORS is open
+> (`allow_origin(Any)`), so the token is not same-host CSRF protection — a local
+> web page can still reach the API. Tightening that is tracked separately.
 
 ## Running as a service
 
