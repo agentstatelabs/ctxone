@@ -2314,6 +2314,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let server = cli.server.clone();
             let branch = cli.branch.clone();
             let format = cli.format;
+            // Preflight: for http configs, check the daemon is actually up so we
+            // don't hand tools a URL config pointing at a hub that isn't running.
+            // Skipped in --dry-run (nothing is written anyway).
+            if transport == McpTransport::Http
+                && !dry_run
+                && let Some(health) = hub_health_url(&mcp_url)
+            {
+                let reachable = client
+                    .get(&health)
+                    .timeout(std::time::Duration::from_millis(1500))
+                    .send()
+                    .await
+                    .map(|r| r.status().is_success())
+                    .unwrap_or(false);
+                if !reachable {
+                    eprintln!(
+                        "  \u{26A0} hub not reachable at {health} — the configs below will \
+                         point at a hub that isn't running yet. Start it with \
+                         `ctxone-hub --http --lens` or `ctx service install`."
+                    );
+                }
+            }
             // `namespace` (resolved above for --transport http) is baked into
             // the `/mcp?namespace=<ns>` URL so the shared daemon scopes writes
             // the way a per-project stdio hub would.
@@ -4550,6 +4572,15 @@ fn http_client_needs_bridge(client_name: &str) -> bool {
     client_name == "Claude Desktop"
 }
 
+/// Derive the hub's health URL (`<scheme>://<authority>/api/health`) from an
+/// `/mcp` endpoint URL, so `ctx init --transport http` can preflight the daemon.
+/// Returns `None` if `base` has no scheme+authority.
+fn hub_health_url(base: &str) -> Option<String> {
+    let (scheme, rest) = base.split_once("://")?;
+    let authority = rest.split(['/', '?']).next().filter(|a| !a.is_empty())?;
+    Some(format!("{scheme}://{authority}/api/health"))
+}
+
 /// Compose the `/mcp` URL, appending `namespace=<ns>` to whatever query the
 /// base URL already carries (so an explicit `--mcp-url …?foo=bar` is preserved).
 fn mcp_http_url(base: &str, namespace: Option<&str>) -> String {
@@ -6166,6 +6197,19 @@ args = ["--path", "/old/db"]
     fn codex_merge_rejects_invalid_toml() {
         let broken = "this is { not valid toml }}";
         assert!(merge_codex_ctxone_toml(broken, "/bin/hub", "/db", "codex").is_err());
+    }
+
+    #[test]
+    fn hub_health_url_derives_from_mcp_url() {
+        assert_eq!(
+            hub_health_url("http://localhost:3001/mcp").as_deref(),
+            Some("http://localhost:3001/api/health")
+        );
+        assert_eq!(
+            hub_health_url("https://hub.example:8443/mcp?namespace=p").as_deref(),
+            Some("https://hub.example:8443/api/health")
+        );
+        assert_eq!(hub_health_url("not-a-url").as_deref(), None);
     }
 
     #[test]
