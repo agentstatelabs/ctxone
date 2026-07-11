@@ -1,9 +1,10 @@
 # Deployment & Configuration
 
-How to run the CTXone Hub, and the configuration choices that matter. If you just
-installed and everything works, you don't need this page — it's for when you want
-the **web UI**, want to run **multiple agents**, or want each agent to have its
-**own memory**.
+How to run the CTXone Hub, and the configuration choices that matter — the
+**shared daemon** (the standard setup), running it **as a service**, giving an
+agent its **own memory**, and **securing** the hub with a token when you expose
+it beyond localhost. If you followed the Quickstart and everything works, you
+already have the standard setup; this page is the reference for the rest.
 
 ## The one rule that governs every setup
 
@@ -29,46 +30,49 @@ really about *who* holds that single lock.
 | **MCP stdio** | `ctxone-hub --path DB` | MCP tools to the spawning agent | yes, while the agent runs |
 | **HTTP (+Lens)** | `ctxone-hub --http --lens --path DB` | REST API + web UI + **MCP at `/mcp`** | yes, while the daemon runs |
 
-By default `ctx init` configures agents to **spawn their own stdio hub**. That
-agent's hub holds the lock, so you cannot also run an HTTP/Lens hub on the *same*
-db at the same time.
-
-> **The unified daemon (recommended).** An `--http` hub now also serves MCP at
-> `/mcp` (Streamable HTTP), so one process covers MCP + REST + Lens and agents
-> connect by URL instead of spawning their own child — no lockfile race,
-> web UI always up, multiple agents share one graph. Configure it with
-> `ctx init --transport http` (see [Topology B](#b-shared-http-daemon-mcp--rest--lens-recommended)).
-> Design notes: [design/UNIFIED_HUB.md](design/UNIFIED_HUB.md).
+**The standard setup is one shared HTTP daemon.** An `--http` hub serves MCP (at
+`/mcp`, Streamable HTTP) + REST + the Lens web UI from one process, and
+`ctx init` (default `--transport http`) points every tool at it by URL — no
+lockfile race, web UI always up, all tools share one graph. `ctx init
+--transport stdio` is the escape hatch: each tool spawns its own hub that holds
+the lock, so you can't also run a web UI on that db. Design notes:
+[design/UNIFIED_HUB.md](design/UNIFIED_HUB.md).
 
 ## Choosing a topology
 
-### A. Agent-only, no web UI (default, simplest)
+Most setups want **Topology B (the shared daemon)** — it's what `ctx init` writes
+by default. Topology A is the no-daemon fallback; C and D cover isolation and
+one-off inspection.
 
-Let the agent spawn and own its stdio hub. Nothing else touches the db. This is
-what a fresh `ctx init` gives you.
+### A. Agent-only stdio (no daemon, fallback)
 
-- ✅ Zero extra processes, no port.
+`ctx init --transport stdio` — each tool spawns and owns its own stdio hub.
+Nothing else touches the db.
+
+- ✅ Zero extra processes, no port, no daemon to run.
 - ❌ No Lens; can't attach the CLI-over-HTTP to *this* db while the agent runs
-  (the CLI reads the same graph, but only through a running HTTP hub).
+  (the CLI reads the same graph, but only through a running HTTP hub). One tool
+  per db — a second tool needs its own db (topology C).
 
-### B. Shared HTTP daemon (MCP + REST + Lens) — recommended
+### B. Shared HTTP daemon — the default & standard
 
 Run **one** long-lived hub that serves everything, and point agents, the CLI, and
-Lens at it. Nothing spawns its own child; there is exactly one db owner.
+Lens at it. Nothing spawns its own child; there is exactly one db owner. This is
+what a plain `ctx init` configures.
 
 ```bash
-# 1. Run the one daemon (as a login service — see below — so it's up at boot).
+# 1. Run the one daemon (ideally as a login service — see below — so it's up at boot).
 ctxone-hub --http --lens --path ~/.ctxone/memory.db
 
-# 2. Point the CLI at it.
+# 2. Point the CLI at it (defaults to http://localhost:3001, so usually optional).
 export CTX_SERVER=http://localhost:3001
 
-# 3. Configure your agents to connect by URL instead of spawning a hub.
-ctx init --transport http                 # all detected tools
-ctx init --transport http --tool claude   # or one tool
+# 3. Configure your tools to connect by URL. http is the default, so plain:
+ctx init                       # all detected tools
+ctx init --tool claude         # or one tool
 ```
 
-`ctx init --transport http` writes an MCP entry like:
+`ctx init` (default `--transport http`) writes an MCP entry like:
 
 ```jsonc
 {
@@ -167,6 +171,7 @@ Override per agent with `--path` (topology C). A bare `ctxone-hub` with no
 | `--port <N>` | HTTP port (default 3001) — use distinct ports for parallel dbs |
 | `--agent-id <NAME>` | Attribution recorded on commits (`ctx blame`) |
 | `--auth-token <TOK>` | Bearer token guarding REST + `/mcp` (env `CTXONE_AUTH_TOKEN`); loopback exempt |
+| `--allowed-origin <ORIGIN>` | Extra browser origin allowed to call the API (repeatable; same-origin is always allowed) |
 | `--init` | Create the db file if missing (guards against path typos) |
 | `--storage memory` | Ephemeral, no file, no lock — good for tests/demos |
 | `--asd-path name=PATH` | Register an ASD code-graph repo for the process pool |
@@ -178,6 +183,9 @@ Override per agent with `--path` (topology C). A bare `ctxone-hub` with no
 | `CTX_SERVER` | Hub URL the `ctx` CLI targets (default `http://localhost:3001`) |
 | `CTX_NAMESPACE` | Project namespace for CLI/MCP scoping |
 | `CTX_BRANCH` | Default memory branch/ref |
+| `CTX_TOKEN` | Bearer token the `ctx` CLI sends (for a remote authed hub) |
+| `CTXONE_AUTH_TOKEN` | Same as `--auth-token` (bearer guarding REST + `/mcp`) |
+| `CTXONE_ALLOWED_ORIGINS` | Comma/space-separated extra allowed browser origins |
 | `CTXONE_BACKUP_KEEP` | Startup snapshots to retain (default 5) |
 | `CTXONE_BACKUP_INTERVAL_SECS` | Background VACUUM-INTO snapshot interval (default 1800; 0 disables) |
 | `RUST_LOG` | Log level (`info` default) |
@@ -200,8 +208,9 @@ Behaviour:
 - Setting a token also relaxes `/mcp`'s loopback-only Host check so authenticated
   remote clients can connect (the bearer becomes the gate).
 
-Clients — `ctx init --transport http` writes the token into each tool's config:
-- **`ctx` CLI** — `--token <TOK>` or `CTX_TOKEN` (only needed for a remote hub).
+How each client gets the token:
+- **`ctx` CLI** — pass `--token <TOK>` or set `CTX_TOKEN` (only for a remote hub).
+- **AI tools** — `ctx init --transport http` writes it into each tool's config:
 - **`ctx init --transport http --auth-token <TOK>`** — embeds a literal bearer:
   a `headers` entry for native http (Claude Code/Cursor/VS Code) and a
   `--header` arg for the mcp-remote bridge (Claude Desktop). The token is written
@@ -297,9 +306,12 @@ launchctl load -w ~/Library/LaunchAgents/com.ctxone.hub.plist
 </details>
 
 > With the daemon running, point agents at it with `ctx init --transport http`
-> and they stop spawning their own hub — one process, one owner, no race. Agents
-> that can't do remote MCP must instead use a **separate db** (topology C) to
-> avoid the lock collision. See [design/UNIFIED_HUB.md](design/UNIFIED_HUB.md).
+> and they stop spawning their own hub — one process, one owner, no race.
+> `ctx init` handles every detected client (native URL, Codex `url`, or the
+> mcp-remote bridge for Claude Desktop), so they all connect to the daemon. Use a
+> **separate db** (topology C) only for deliberate isolation, or for a client that
+> supports neither native http nor the mcp-remote bridge. See
+> [design/UNIFIED_HUB.md](design/UNIFIED_HUB.md).
 
 ## Troubleshooting
 

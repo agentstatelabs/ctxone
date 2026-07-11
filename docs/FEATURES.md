@@ -38,11 +38,12 @@ CTXone has four surfaces:
 
 | Command | What it does |
 |---|---|
-| `ctx init` | Auto-detect and configure your AI tools with the CTXone MCP server. `--tool claude/cursor/vscode/codex/gemini/grok`, `--global` vs `--project`, `--config-path` for unsupported clients, `--dry-run`. |
+| `ctx init` | Auto-detect and configure your AI tools with the CTXone MCP server. `--transport http` (default — point tools at a shared daemon by URL) or `--transport stdio` (each tool spawns its own hub); `--mcp-url`, `--auth-token`/`--auth-token-env` to embed a bearer; `--tool claude/cursor/vscode/codex/gemini/grok`, `--global` vs `--project`, `--config-path`, `--dry-run`. |
+| `ctx service install/uninstall/status` | Install the Hub as a login/boot service (launchd on macOS, systemd user unit on Linux, Task Scheduler on Windows) so the daemon owns the db before any tool starts. `--port`, `--path`, `--no-lens`, `--auth-token`, `--dry-run`. |
 | `ctx agents install/show` | Manage `AGENTS.md` — a short pinned document that teaches AI tools how to use CTXone. Prompts before writing unless `--yes`. |
 | `ctx skill` | Install CTXone's **Agent Skill** (`SKILL.md`) into each host's skills directory. Version-stamped. Installs the combined **CTXone + ASD** suite skill when the `asd` CLI is present. `--status` / `--dry-run` / `--project` / `--tool` / `--remove`. |
 | `ctx bootstrap` | Print a paste-into-your-agent block that installs + primes CTXone — and offers to set up AgentStateDeveloper too. |
-| `ctx serve` | Start the CTXone Hub. `--port`, `--storage sqlite/postgres/memory`, `--path <db>`, `--http` (REST API), `--lens` (web UI). |
+| `ctx serve` | Start the CTXone Hub. `--http` serves the REST API **and MCP at `/mcp`** (Streamable HTTP); `--lens` adds the web UI — one process for all three. `--port`, `--storage sqlite/postgres/memory`, `--path <db>`, `--auth-token` (bearer for non-loopback), `--allowed-origin` (extra browser origins). |
 | `ctx doctor` | End-to-end health checks with suggested fixes (inode drift, stray db files, missing recent backups). |
 | `ctx config` | Read/write persistent defaults in `~/.ctxone/config.toml`. |
 | `ctx completion <shell>` | Generate a shell completion script. |
@@ -110,6 +111,13 @@ The Hub exposes **52 MCP tools** to agents — memory (`remember`, `recall`,
 `summarize_session`), and token accounting (`record_llm_usage`). Full list:
 [MCP_TOOLS.md](MCP_TOOLS.md). The REST surface is in
 [HTTP_API.md](HTTP_API.md).
+
+Those MCP tools are served two ways: over **stdio** (a per-tool child), and —
+this is the standard setup — over **HTTP at `/mcp`** (Streamable HTTP) by an
+`--http` daemon, so one process serves MCP + REST + Lens and every tool connects
+by URL. Guard a network-exposed hub with a bearer token (`--auth-token`;
+loopback is exempt) and, if needed, browser origins (`--allowed-origin`). See
+[DEPLOYMENT.md](DEPLOYMENT.md).
 
 ---
 

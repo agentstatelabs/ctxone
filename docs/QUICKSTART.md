@@ -145,29 +145,26 @@ Install CTXone MCP server into these tools? [Y/n] y
 CTXone is ready. Try: "remember that we use BSL-1.1 licensing"
 ```
 
+`ctx init` points each tool at the **shared hub you started in step 2** by URL —
+that's the default (and standard) setup: one process serves MCP + REST + Lens,
+and every tool shares one memory graph. It picks the right config shape per tool
+automatically: native `{"type":"http","url":…}` for Claude Code / Cursor / VS
+Code, a `url` entry for Codex, and an `mcp-remote` bridge for Claude Desktop
+(which has no native HTTP MCP). If the hub isn't running, `ctx init` warns you.
+
 After this, Claude Code / Cursor / etc. will call CTXone's MCP tools
 (`remember`, `recall`, `prime`, etc.) automatically. Every session starts
 with pinned context loaded and topic-relevant memories at hand — no more
 re-explaining your project.
 
-### stdio (default) vs. one shared daemon
+To keep the hub running across reboots (so it's up before any tool), install it
+as a service — see [`ctx service install`](DEPLOYMENT.md#running-as-a-service).
 
-By default each tool spawns its **own** `ctxone-hub` over stdio. That's the
-simplest setup, but only one process can own the db at a time, so you can't also
-run a web UI on the same memory. To have **one** hub serve MCP + REST + Lens for
-every tool, run the daemon (`ctxone-hub --http --lens`, ideally via
-[`ctx service install`](DEPLOYMENT.md#running-as-a-service)) and point tools at it
-by URL:
-
-```bash
-ctx init --transport http          # write URL configs instead of stdio spawns
-```
-
-`ctx init` picks the right shape per tool automatically — native
-`{"type":"http","url":…}` for Claude Code / Cursor / VS Code, a `url` entry for
-Codex, and an `mcp-remote` bridge for Claude Desktop (which has no native HTTP
-MCP). See [DEPLOYMENT.md](DEPLOYMENT.md) for when to choose which, and for
-`--auth-token` if you expose the hub beyond localhost.
+> **Alternative: stdio, no daemon.** `ctx init --transport stdio` instead makes
+> each tool spawn its own `ctxone-hub` child — zero-setup (no hub to run), but
+> only one process can own the db at a time, so there's no shared web UI. Use it
+> for a quick single-tool setup; see [DEPLOYMENT.md](DEPLOYMENT.md) for the
+> trade-offs and for `--auth-token` when exposing the hub beyond localhost.
 
 ## 7. Prime your project's critical context
 

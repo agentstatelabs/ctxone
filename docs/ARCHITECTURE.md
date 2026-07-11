@@ -218,11 +218,11 @@ db yet), or give each agent its own db. See
 **[DEPLOYMENT.md](DEPLOYMENT.md)** for the full matrix and config examples.
 
 The unified daemon — **[design/UNIFIED_HUB.md](design/UNIFIED_HUB.md)** — makes
-the diagram literally true: `ctxone-hub --http` now also serves MCP at `/mcp`, so
-one process serves MCP + REST + Lens and agents connect by URL
-(`ctx init --transport http`) instead of spawning their own child. That removes
-the startup-order race. stdio remains the default and a supported fallback; see
-[DEPLOYMENT.md](DEPLOYMENT.md) to choose.
+the diagram literally true and is now the **standard** setup: `ctxone-hub --http`
+serves MCP at `/mcp` alongside REST + Lens, so one process covers all three and
+tools connect by URL. `ctx init` defaults to this (`--transport http`), removing
+the startup-order race. The per-client stdio path remains a supported fallback
+(`ctx init --transport stdio`); see [DEPLOYMENT.md](DEPLOYMENT.md) to choose.
 
 ## What the Hub is not
 
