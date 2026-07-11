@@ -638,12 +638,14 @@ enum Commands {
         /// Useful in scripts that want only the MCP config step.
         #[arg(long)]
         no_agents: bool,
-        /// MCP transport to configure. `stdio` (default) spawns a per-tool
-        /// `ctxone-hub` child that owns the db. `http` points the tool at a
-        /// shared daemon's `/mcp` URL instead — run one
-        /// `ctxone-hub --http --lens` (see docs/DEPLOYMENT.md) so a single
-        /// process serves MCP + REST + Lens with no lockfile races.
-        #[arg(long, value_enum, default_value_t = McpTransport::Stdio)]
+        /// MCP transport to configure. `http` (default, recommended) points
+        /// the tool at a shared daemon's `/mcp` URL — run one
+        /// `ctxone-hub --http --lens` (or `ctx service install`, see
+        /// docs/DEPLOYMENT.md) so a single process serves MCP + REST + Lens
+        /// with no lockfile races. `stdio` is the escape hatch: each tool
+        /// spawns its own `ctxone-hub` child that owns the db (zero-setup, but
+        /// only one owner per db and no shared web UI).
+        #[arg(long, value_enum, default_value_t = McpTransport::Http)]
         transport: McpTransport,
         /// Base URL of the shared hub's MCP endpoint (only used with
         /// `--transport http`). The project namespace is appended as
@@ -3039,10 +3041,10 @@ enum ConfigType {
 /// Which MCP transport `ctx init` writes into a tool's config.
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 enum McpTransport {
-    /// Spawn a per-tool `ctxone-hub` child over stdio (owns the db).
-    Stdio,
-    /// Connect to a shared daemon's `/mcp` URL (Streamable HTTP).
+    /// Connect to a shared daemon's `/mcp` URL (Streamable HTTP). Default.
     Http,
+    /// Spawn a per-tool `ctxone-hub` child over stdio (owns the db). Escape hatch.
+    Stdio,
 }
 
 /// Cross-platform "user data dir for app X".
