@@ -212,9 +212,20 @@ Clients — `ctx init --transport http` writes the token into each tool's config
   mcp-remote bridge can't expand env vars, so Claude Desktop needs the literal
   `--auth-token` form.
 
-> Residual note: loopback browser requests remain exempt and REST CORS is open
-> (`allow_origin(Any)`), so the token is not same-host CSRF protection — a local
-> web page can still reach the API. Tightening that is tracked separately.
+### Cross-origin (CSRF / DNS-rebinding)
+
+Independent of the token, the hub rejects **browser** requests whose `Origin`
+isn't same-origin or allow-listed — so a page you visit can't drive the loopback
+hub (loopback peers are auth-exempt, which is why this guard matters). CLI and
+native MCP clients send no `Origin` and are unaffected; Lens is same-origin and
+always allowed. CORS reflects only same-origin/allow-listed origins (never `*`).
+
+To let a real cross-origin browser app (e.g. Lens hosted elsewhere) use the API:
+
+```bash
+ctxone-hub --http --allowed-origin https://lens.example.com   # repeatable
+# or CTXONE_ALLOWED_ORIGINS="https://a.example, https://b.example"
+```
 
 ## Running as a service
 

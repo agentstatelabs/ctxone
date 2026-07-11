@@ -99,6 +99,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut auth_token: Option<String> = std::env::var("CTXONE_AUTH_TOKEN")
         .ok()
         .filter(|s| !s.is_empty());
+    // Extra browser origins allowed to call the API (repeatable
+    // --allowed-origin). Same-origin is always allowed; anything else carrying
+    // an Origin header is rejected. Seedable from CTXONE_ALLOWED_ORIGINS (comma-
+    // or space-separated) for service/env-based configs.
+    let mut allowed_origins: Vec<String> = std::env::var("CTXONE_ALLOWED_ORIGINS")
+        .ok()
+        .map(|s| {
+            s.split([',', ' '])
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
     // MCP-mode namespace override. When unset, the project detection
     // chain runs from the process cwd at startup (the spawning tool
     // starts us in the project directory, so this Just Works once the
@@ -167,6 +181,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 i += 1;
                 if i < args.len() {
                     auth_token = Some(args[i].clone()).filter(|s| !s.is_empty());
+                }
+            }
+            "--allowed-origin" => {
+                i += 1;
+                if i < args.len() && !args[i].is_empty() {
+                    allowed_origins.push(args[i].clone());
                 }
             }
             "--namespace" => {
@@ -595,6 +615,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             mcp_http: true,
             agent_id: agent_id.clone(),
             auth_token: auth_token.clone(),
+            allowed_origins: allowed_origins.clone(),
         };
 
         // Capture db_path for background flush tasks.

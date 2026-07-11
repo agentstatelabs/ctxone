@@ -72,6 +72,12 @@ pub struct HubConfig {
     /// auth is enforced (the binary warns at startup if bound non-loopback).
     /// See [`crate::mcp_http`] and the auth middleware in this module.
     pub auth_token: Option<String>,
+    /// Extra browser origins allowed to call the API (beyond same-origin, which
+    /// is always allowed). A request carrying an `Origin` header that is neither
+    /// same-origin nor in this list is rejected (CSRF/DNS-rebinding guard), and
+    /// only these origins get CORS response headers. Non-browser clients (CLI,
+    /// native MCP) send no `Origin` and are unaffected. From `--allowed-origin`.
+    pub allowed_origins: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -264,6 +270,76 @@ struct AuthState {
     token: Option<Arc<String>>,
 }
 
+/// The authority (`host[:port]`) of an `Origin` header value, lowercased and
+/// with the scheme stripped. `http://Localhost:3001` → `localhost:3001`.
+/// Returns `None` for opaque origins like `null`.
+fn origin_authority(origin: &str) -> Option<String> {
+    let rest = origin.split_once("://").map(|(_, a)| a).unwrap_or(origin);
+    let authority = rest.split('/').next().unwrap_or("");
+    if authority.is_empty() || authority.eq_ignore_ascii_case("null") {
+        None
+    } else {
+        Some(authority.to_ascii_lowercase())
+    }
+}
+
+/// Is this browser `Origin` allowed to call the hub? Same-origin (the Origin's
+/// authority equals the request `Host`) is always allowed; otherwise the origin
+/// must be in the configured allow-list. Non-browser clients send no `Origin`
+/// and never reach this check.
+fn origin_is_allowed(origin: &str, host: Option<&str>, allow: &[String]) -> bool {
+    match origin_authority(origin) {
+        None => false, // opaque/`null` origin — never same-origin, never listed
+        Some(auth) => {
+            if let Some(h) = host
+                && auth == h.to_ascii_lowercase()
+            {
+                return true; // same-origin
+            }
+            allow.iter().any(|a| {
+                a.eq_ignore_ascii_case(origin)
+                    || origin_authority(a).is_some_and(|aa| aa == auth)
+            })
+        }
+    }
+}
+
+/// State for the Origin-guard middleware: the extra allowed origins.
+#[derive(Clone)]
+struct OriginState {
+    allowed: Arc<Vec<String>>,
+}
+
+/// Reject requests carrying a disallowed `Origin` — the CSRF / DNS-rebinding
+/// guard. A page you visit in a browser can `fetch()` a loopback hub, and
+/// loopback peers are auth-exempt, so without this a malicious site could drive
+/// the API. Non-browser clients (CLI, native MCP) send no `Origin` and pass
+/// straight through; same-origin (Lens) is always allowed.
+async fn require_allowed_origin(
+    State(state): State<OriginState>,
+    req: axum::extract::Request,
+    next: Next,
+) -> axum::response::Response {
+    if let Some(origin) = req
+        .headers()
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+    {
+        let host = req
+            .headers()
+            .get(axum::http::header::HOST)
+            .and_then(|v| v.to_str().ok());
+        if !origin_is_allowed(origin, host, &state.allowed) {
+            return (
+                StatusCode::FORBIDDEN,
+                "cross-origin request rejected (add the origin with --allowed-origin)",
+            )
+                .into_response();
+        }
+    }
+    next.run(req).await
+}
+
 /// Constant-time string comparison, so a wrong token can't be recovered by
 /// timing how far the comparison got. Length mismatch returns false but still
 /// scans the provided token to keep timing independent of the secret's length.
@@ -326,8 +402,24 @@ fn router_with_config_inner(
     config: HubConfig,
     db_path: Option<String>,
 ) -> Router {
+    // CORS reflects an Origin only when it's same-origin or explicitly allowed
+    // (never `Any`), so cross-origin pages can't read API responses. The
+    // Origin-guard middleware below additionally blocks such requests from
+    // executing; this layer just supplies correct headers for allowed origins.
+    let cors_allow = Arc::new(config.allowed_origins.clone());
     let cors = CorsLayer::new()
-        .allow_origin(Any)
+        .allow_origin(tower_http::cors::AllowOrigin::predicate(
+            move |origin: &axum::http::HeaderValue, parts: &axum::http::request::Parts| {
+                let host = parts
+                    .headers
+                    .get(axum::http::header::HOST)
+                    .and_then(|v| v.to_str().ok());
+                origin
+                    .to_str()
+                    .map(|o| origin_is_allowed(o, host, &cors_allow))
+                    .unwrap_or(false)
+            },
+        ))
         .allow_methods(Any)
         .allow_headers(Any);
 
@@ -514,6 +606,16 @@ fn router_with_config_inner(
     router = router.layer(axum::middleware::from_fn_with_state(
         auth_state,
         require_auth,
+    ));
+
+    // Origin guard even further out — reject disallowed cross-origin browser
+    // requests before auth/rate-limit/routing. Whole-surface (REST + /mcp).
+    let origin_state = OriginState {
+        allowed: Arc::new(config.allowed_origins.clone()),
+    };
+    router = router.layer(axum::middleware::from_fn_with_state(
+        origin_state,
+        require_allowed_origin,
     ));
 
     router
