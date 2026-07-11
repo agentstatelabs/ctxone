@@ -166,6 +166,7 @@ Override per agent with `--path` (topology C). A bare `ctxone-hub` with no
 | `--lens` | Serve the web UI at `/` (requires `--http`) |
 | `--port <N>` | HTTP port (default 3001) — use distinct ports for parallel dbs |
 | `--agent-id <NAME>` | Attribution recorded on commits (`ctx blame`) |
+| `--auth-token <TOK>` | Bearer token guarding REST + `/mcp` (env `CTXONE_AUTH_TOKEN`); loopback exempt |
 | `--init` | Create the db file if missing (guards against path typos) |
 | `--storage memory` | Ephemeral, no file, no lock — good for tests/demos |
 | `--asd-path name=PATH` | Register an ASD code-graph repo for the process pool |
@@ -180,6 +181,36 @@ Override per agent with `--path` (topology C). A bare `ctxone-hub` with no
 | `CTXONE_BACKUP_KEEP` | Startup snapshots to retain (default 5) |
 | `CTXONE_BACKUP_INTERVAL_SECS` | Background VACUUM-INTO snapshot interval (default 1800; 0 disables) |
 | `RUST_LOG` | Log level (`info` default) |
+
+## Authentication
+
+The hub binds `0.0.0.0` (all interfaces). With no token set, REST and `/mcp` are
+reachable from the network **unauthenticated** — the hub logs a loud warning at
+startup. Before exposing it beyond localhost, set a bearer token:
+
+```bash
+ctxone-hub --http --lens --path ~/.ctxone/memory.db --auth-token "$(openssl rand -hex 32)"
+# or: CTXONE_AUTH_TOKEN=… ctxone-hub --http …
+```
+
+Behaviour:
+- **Loopback peers (127.0.0.1/::1) are always exempt** — local CLI, Lens, and
+  same-host agents keep working with no token.
+- **Non-loopback requests must send** `Authorization: Bearer <token>` (else 401).
+- Setting a token also relaxes `/mcp`'s loopback-only Host check so authenticated
+  remote clients can connect (the bearer becomes the gate).
+
+Clients:
+- **`ctx` CLI** — `--token <TOK>` or `CTX_TOKEN` (only needed for a remote hub).
+- **Native http MCP** (Claude Code/Cursor/VS Code) — add an `Authorization`
+  header to the server entry.
+- **`mcp-remote`** (Claude Desktop) — add `--header "Authorization: Bearer <TOK>"`.
+
+> Not yet automated: `ctx init --transport http` does not inject the token into
+> generated MCP configs — add it by hand for a remote authed hub (tracked as a
+> follow-up). Residual note: loopback browser requests remain exempt, so the
+> existing REST CORS posture (open) is unchanged — don't rely on the token for
+> same-host CSRF protection.
 
 ## Running as a service
 
