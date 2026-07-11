@@ -588,6 +588,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Loopback peers are always exempt; a token only gates non-loopback.
         if auth_token.is_some() {
             info!("Bearer auth enabled: non-loopback requests require Authorization: Bearer <token> (loopback exempt)");
+            if lens_mode {
+                info!(
+                    "Lens UI is served, but a remote browser can't send a bearer token — \
+                     for remote access tunnel it (ssh -L {port}:localhost:{port} <host>) so \
+                     the browser is loopback.",
+                    port = http_port
+                );
+            }
         } else {
             warn!(
                 "No auth token set — REST API and /mcp are reachable on ALL interfaces \

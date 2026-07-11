@@ -227,6 +227,22 @@ ctxone-hub --http --allowed-origin https://lens.example.com   # repeatable
 # or CTXONE_ALLOWED_ORIGINS="https://a.example, https://b.example"
 ```
 
+### Lens over an authenticated hub — use a tunnel
+
+Lens is a browser SPA; it can't attach an `Authorization: Bearer` header to its
+requests. So when a token is set, a **remote** browser hitting Lens directly is
+rejected by the auth layer (loopback is exempt, remote is not). Treat Lens as a
+**local admin UI** and reach it remotely over an SSH tunnel, which makes your
+browser a loopback client of the hub:
+
+```bash
+ssh -L 3001:localhost:3001 you@hub-host      # then open http://localhost:3001
+```
+
+The hub prints this reminder at startup when `--lens` and `--auth-token` are both
+set. (REST and `/mcp` remain directly reachable with the bearer token; only the
+browser UI needs the tunnel.)
+
 ## Running as a service
 
 To make the HTTP/Lens hub survive reboots and start **before** any agent (so it,
