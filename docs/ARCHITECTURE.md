@@ -201,7 +201,28 @@ Alongside the stdio MCP path, two other surfaces talk to the Hub over HTTP:
   `log`, `diff`, `tail`, ...)
 - **CTXone Lens** — SvelteKit web UI for browsing the graph visually
 
-All three surfaces hit the same Hub. There's no parallel memory.
+All three surfaces read and write the same graph — there's no parallel memory.
+
+### One important nuance: stdio spawns *per-client* hubs
+
+The diagram shows a single Hub, but today **MCP is served only over stdio**, so
+each agent (Claude Desktop, Cursor, …) *spawns its own* `ctxone-hub` child that
+opens the db directly. The HTTP surfaces (`ctx` CLI, Lens) are a *separate*
+process. Because a hub takes an exclusive lock on its db file (see
+[DATA_SAFETY.md](DATA_SAFETY.md)), an agent's stdio hub and a `--http --lens` hub
+**cannot both own the same db at once** — whoever starts first wins the lock.
+
+So "one Hub, three surfaces" is the intent, but in practice you pick a topology:
+let an agent own the db (no web UI), run a shared HTTP hub (no stdio agent on that
+db yet), or give each agent its own db. See
+**[DEPLOYMENT.md](DEPLOYMENT.md)** for the full matrix and config examples.
+
+The unified daemon — **[design/UNIFIED_HUB.md](design/UNIFIED_HUB.md)** — makes
+the diagram literally true: `ctxone-hub --http` now also serves MCP at `/mcp`, so
+one process serves MCP + REST + Lens and agents connect by URL
+(`ctx init --transport http`) instead of spawning their own child. That removes
+the startup-order race. stdio remains the default and a supported fallback; see
+[DEPLOYMENT.md](DEPLOYMENT.md) to choose.
 
 ## What the Hub is not
 

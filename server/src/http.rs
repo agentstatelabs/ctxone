@@ -56,6 +56,13 @@ pub struct HubConfig {
     /// Idle timeout (seconds) before the pool kills a spawned asd-serve child.
     /// `None` → AsdProcessPool default.
     pub asd_idle_timeout_secs: Option<u64>,
+    /// When true, mount the MCP tool surface at `/mcp` (Streamable HTTP) so a
+    /// single daemon serves MCP + REST + Lens. Off by default so unit tests
+    /// and library callers build a plain REST router. See [`crate::mcp_http`].
+    pub mcp_http: bool,
+    /// Agent id stamped on commits made through the `/mcp` surface (parity with
+    /// `ctxone-hub --agent-id`). Only read when `mcp_http` is true.
+    pub agent_id: String,
 }
 
 #[derive(Clone)]
@@ -276,6 +283,18 @@ fn router_with_config_inner(
         )))
     };
 
+    // Prepare the MCP-over-HTTP state before `repo`/`asd_*` move into HubState.
+    // Only built when enabled (the daemon path); library/test callers leave
+    // `mcp_http` false and get a plain REST router.
+    let mcp_state = config.mcp_http.then(|| {
+        crate::mcp_http::McpHttpState::new(
+            repo.clone(),
+            config.agent_id.clone(),
+            asd_repos.clone(),
+            asd_pool.clone(),
+        )
+    });
+
     let state = HubState {
         repo,
         sessions,
@@ -391,6 +410,14 @@ fn router_with_config_inner(
     }
 
     let mut router = router.layer(trace).layer(cors).with_state(state);
+
+    // Mount the MCP surface at `/mcp` when enabled. Merged after `with_state`
+    // (both are `Router<()>`) so it carries its own `McpHttpState` and sits
+    // outside the REST rate limiter — long-lived MCP sessions would otherwise
+    // trip the per-IP RPM cap.
+    if let Some(mcp_state) = mcp_state {
+        router = router.merge(crate::mcp_http::mcp_router(mcp_state));
+    }
 
     // Apply the rate limiter LAST so it runs FIRST in the request
     // lifecycle (tower layers execute in reverse insertion order).

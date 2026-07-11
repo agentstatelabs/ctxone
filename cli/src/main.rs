@@ -620,6 +620,18 @@ enum Commands {
         /// Useful in scripts that want only the MCP config step.
         #[arg(long)]
         no_agents: bool,
+        /// MCP transport to configure. `stdio` (default) spawns a per-tool
+        /// `ctxone-hub` child that owns the db. `http` points the tool at a
+        /// shared daemon's `/mcp` URL instead — run one
+        /// `ctxone-hub --http --lens` (see docs/DEPLOYMENT.md) so a single
+        /// process serves MCP + REST + Lens with no lockfile races.
+        #[arg(long, value_enum, default_value_t = McpTransport::Stdio)]
+        transport: McpTransport,
+        /// Base URL of the shared hub's MCP endpoint (only used with
+        /// `--transport http`). The project namespace is appended as
+        /// `?namespace=<ns>` when one is detected.
+        #[arg(long, default_value = "http://localhost:3001/mcp")]
+        mcp_url: String,
     },
     /// Manage the AGENTS.md guidance file — a short, pinned document
     /// that teaches AI tools how to use CTXone effectively. See
@@ -1088,6 +1100,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // that talk to the Hub — purely-local commands (and `serve`, where
     // the Hub is by definition not up yet) skip the detection round-trip.
     let namespace = match &cli.command {
+        // `init --transport http` needs the project namespace to bake into the
+        // `/mcp?namespace=<ns>` URL it writes, so detect it here (best-effort).
+        Commands::Init {
+            transport: McpTransport::Http,
+            ..
+        } => cli.resolve_namespace().await,
         Commands::Skill { .. }
         | Commands::Bootstrap
         | Commands::Completion { .. }
@@ -2211,6 +2229,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             config_path,
             dry_run,
             no_agents,
+            transport,
+            mcp_url,
         } => {
             // Grab the fields agents_install_prompt needs BEFORE the
             // match consumes `cli.command` via destructuring. We only
@@ -2219,7 +2239,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let server = cli.server.clone();
             let branch = cli.branch.clone();
             let format = cli.format;
-            init_mcp(global, tool, config_path, dry_run)?;
+            // `namespace` (resolved above for --transport http) is baked into
+            // the `/mcp?namespace=<ns>` URL so the shared daemon scopes writes
+            // the way a per-project stdio hub would.
+            init_mcp(
+                global,
+                tool,
+                config_path,
+                dry_run,
+                transport,
+                &mcp_url,
+                namespace.clone(),
+            )?;
             // After MCP configs are written, optionally prime the
             // AGENTS.md guidance into the Hub. Skipped in --dry-run
             // (we don't want a dry run to actually write to the
@@ -2875,6 +2906,15 @@ enum ConfigType {
     McpJson,
     /// TOML config
     Toml,
+}
+
+/// Which MCP transport `ctx init` writes into a tool's config.
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum McpTransport {
+    /// Spawn a per-tool `ctxone-hub` child over stdio (owns the db).
+    Stdio,
+    /// Connect to a shared daemon's `/mcp` URL (Streamable HTTP).
+    Http,
 }
 
 /// Cross-platform "user data dir for app X".
@@ -4329,19 +4369,49 @@ fn tool_slug(name: &str) -> String {
     out.trim_end_matches('-').to_string()
 }
 
-fn mcp_server_entry(agent_id: &str) -> Value {
-    let hub_bin = find_hub_binary();
-    let db_path = canonical_db_path();
+fn mcp_server_entry(
+    agent_id: &str,
+    transport: McpTransport,
+    mcp_url: &str,
+    namespace: Option<&str>,
+) -> Value {
+    match transport {
+        McpTransport::Http => {
+            // Point the tool at a shared daemon's Streamable-HTTP endpoint.
+            // `{"type":"http","url":…}` is the widely-supported MCP client
+            // shape (Claude Code, Cursor, VS Code). The daemon scopes writes
+            // by the `?namespace=` query, so bake in the detected namespace.
+            let url = mcp_http_url(mcp_url, namespace);
+            serde_json::json!({ "type": "http", "url": url })
+        }
+        McpTransport::Stdio => {
+            let hub_bin = find_hub_binary();
+            let db_path = canonical_db_path();
 
-    // Ensure the parent directory exists so the Hub can create the db on first run.
-    if let Some(parent) = std::path::Path::new(&db_path).parent() {
-        let _ = std::fs::create_dir_all(parent);
+            // Ensure the parent directory exists so the Hub can create the db
+            // on first run.
+            if let Some(parent) = std::path::Path::new(&db_path).parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+
+            serde_json::json!({
+                "command": hub_bin,
+                "args": ["--path", db_path, "--agent-id", agent_id]
+            })
+        }
     }
+}
 
-    serde_json::json!({
-        "command": hub_bin,
-        "args": ["--path", db_path, "--agent-id", agent_id]
-    })
+/// Compose the `/mcp` URL, appending `namespace=<ns>` to whatever query the
+/// base URL already carries (so an explicit `--mcp-url …?foo=bar` is preserved).
+fn mcp_http_url(base: &str, namespace: Option<&str>) -> String {
+    match namespace {
+        Some(ns) if !ns.is_empty() => {
+            let sep = if base.contains('?') { '&' } else { '?' };
+            format!("{base}{sep}namespace={ns}")
+        }
+        _ => base.to_string(),
+    }
 }
 
 /// Merge a `[mcp_servers.ctxone]` entry into an existing Codex TOML config.
@@ -4484,6 +4554,9 @@ fn init_mcp(
     tool_filter: Option<String>,
     generic_config_path: Option<String>,
     dry_run: bool,
+    transport: McpTransport,
+    mcp_url: &str,
+    namespace: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut tools = detect_tools(global);
 
@@ -4539,7 +4612,7 @@ fn init_mcp(
         // (e.g. "Claude Code" → "claude-code"). This makes
         // `ctx blame` show the originating tool for every commit.
         let agent_id = tool_slug(t.name);
-        let entry = mcp_server_entry(&agent_id);
+        let entry = mcp_server_entry(&agent_id, transport, mcp_url, namespace.as_deref());
 
         match t.config_type {
             ConfigType::McpJson => {
@@ -4581,6 +4654,18 @@ fn init_mcp(
                 }
             }
             ConfigType::Toml => {
+                // Codex's TOML `mcp_servers` schema is stdio-oriented (command
+                // + args). We don't have a verified URL form for it, so rather
+                // than write a config that might silently fail, keep Codex on
+                // stdio and say so when the user asked for http.
+                if transport == McpTransport::Http {
+                    eprintln!(
+                        "  \u{26A0} {}: http transport not auto-configured for this tool; \
+                         writing stdio config instead. Point it at the shared hub manually \
+                         if it supports remote MCP.",
+                        t.name
+                    );
+                }
                 let hub_bin = find_hub_binary();
                 let db_path = canonical_db_path();
                 if let Some(parent) = std::path::Path::new(&db_path).parent() {

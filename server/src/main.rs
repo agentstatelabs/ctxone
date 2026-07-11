@@ -224,8 +224,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!();
                 eprintln!("MODES:");
                 eprintln!("  (default)             MCP server over stdio (memory tools)");
-                eprintln!("  --http                HTTP REST API server");
+                eprintln!(
+                    "  --http                HTTP REST API + MCP over HTTP at /mcp (Streamable HTTP)"
+                );
                 eprintln!("  --lens                Serve Lens web UI at / (requires --http)");
+                eprintln!();
+                eprintln!(
+                    "  With --http, one process serves MCP + REST + Lens. Point agents at"
+                );
+                eprintln!(
+                    "  http://<host>:<port>/mcp?namespace=<ns> (see `ctx init --transport http`)."
+                );
                 eprintln!();
                 eprintln!("OPTIONS:");
                 eprintln!(
@@ -548,6 +557,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             asd_pool_repos: asd_pool_repos.clone(),
             asd_serve_binary: None, // use PATH
             asd_idle_timeout_secs,
+            // Serve MCP at /mcp so this one daemon covers MCP + REST + Lens.
+            mcp_http: true,
+            agent_id: agent_id.clone(),
         };
 
         // Capture db_path for background flush tasks.

@@ -11,6 +11,7 @@ pub mod code_tools;
 pub mod http;
 pub mod lens;
 pub mod lockfile;
+pub mod mcp_http;
 pub mod memory_tools;
 pub mod migrations;
 pub mod plan_tools;
