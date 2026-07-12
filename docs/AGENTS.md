@@ -246,6 +246,20 @@ in flight. If you're resuming a plan, call `plan_show` to see the full
 task tree, or `plan_next` to continue from the highest-priority
 pending task.
 
+### Task discipline — don't let plan state drift
+
+- **Close a task before opening another.** Before you `plan_start` a new
+  task, finish the current one (`plan_done`), abandon it
+  (`plan_abandon`), or explicitly say you're pausing it. `plan_start`
+  warns when another task in the plan is already `in_progress` — heed the
+  warning; don't accumulate silent in-progress tasks.
+- **Reconcile after each slice.** When you finish a child plan or a
+  substantial implementation slice, close/mark its tasks and record the
+  decisions *before* starting new work — never build on stale plan state.
+- **Sequential plans:** when a plan is meant to run in order, or the user
+  says "continue in order", use `plan_next --in-order` (first unstarted by
+  task order) instead of the default highest-priority pick.
+
 ### Multi-agent orchestration via `assigned_to`
 
 When a plan has tasks addressed to specific agents via `assigned_to`,
@@ -269,6 +283,23 @@ ticket tracker.
 Do NOT ask the user for permission to create plans. If the work is
 multi-step, plan it. The user will thank you for treating their time
 as worth structuring.
+
+## Docs — index, don't duplicate
+
+Repo `.md` files are **canonical**: they travel with the code and show up
+in reviews. CTXone holds the **rationale, summaries, and pointers** — not a
+second copy of the whole doc (a verbatim copy drifts the moment the file
+changes).
+
+- Before creating a new `.md`, check whether a canonical doc already covers
+  it (`ctx docs find <topic>`, or `recall`). If one exists, update it
+  instead of adding another file.
+- When you create or replace a doc, register it: `ctx docs add <path>
+  --scope … --answers …`. On supersession, archive/delete the old file and
+  record the supersession.
+- To make a doc's key sections recall-able without re-reading the file,
+  import it: `ctx import-doc <file>` (alias of `prime`; `--pin` for
+  always-included). Import the important sections, not a large doc verbatim.
 
 ## Session start checklist
 
