@@ -498,6 +498,8 @@ fn router_with_config_inner(
         .route("/api/memory/what_changed_since", get(what_changed_since))
         .route("/api/memory/why_did_we", get(why_did_we))
         // Plan endpoints
+        .route("/api/export", get(export_graph))
+        .route("/api/import", post(import_graph))
         .route("/api/plans", get(list_plans).post(create_plan))
         // Static path registered before `/api/plans/{name}` so it wins the match.
         .route("/api/plans/stale", get(stale_plan_tasks))
@@ -970,6 +972,79 @@ async fn list_paths(
         .list_paths(&ref_name, &prefix, q.max_depth)
         .map(Json)
         .map_err(internal_error)
+}
+
+#[derive(Deserialize)]
+struct ExportQuery {
+    #[serde(default = "default_ref", rename = "ref")]
+    ref_name: String,
+}
+
+/// `GET /api/export` — dump every leaf path+value on a ref into a JSON map. A
+/// portable, human-editable snapshot: prune it, then `import` into a fresh db to
+/// keep only what you want.
+async fn export_graph(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+    Query(q): Query<ExportQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
+    let paths = repo
+        .list_paths(&q.ref_name, "/", None)
+        .map_err(internal_error)?;
+    let mut map = serde_json::Map::new();
+    for p in paths {
+        // Skip DB-internal schema metadata — it's per-db and only writable by
+        // migration commits, so it can't (and shouldn't) be re-imported.
+        if p.starts_with("/_meta/") {
+            continue;
+        }
+        if let Ok(v) = repo.get_json(&q.ref_name, &p) {
+            map.insert(p, v);
+        }
+    }
+    Ok(Json(serde_json::json!({
+        "ref": q.ref_name,
+        "namespace": ns.0,
+        "count": map.len(),
+        "paths": serde_json::Value::Object(map),
+    })))
+}
+
+#[derive(Deserialize)]
+struct ImportRequest {
+    #[serde(default = "default_ref", rename = "ref")]
+    ref_name: String,
+    /// `{path: value}` map, as produced by `export` (its `paths` object).
+    paths: serde_json::Map<String, serde_json::Value>,
+}
+
+/// `POST /api/import` — write a `{path: value}` map onto a ref, to seed a fresh
+/// db from a (pruned) export snapshot.
+async fn import_graph(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+    agent_id: AgentId,
+    Json(req): Json<ImportRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
+    let mut imported = 0usize;
+    for (path, value) in &req.paths {
+        // Never write DB-internal schema metadata (reserved for migrations).
+        if path.starts_with("/_meta/") {
+            continue;
+        }
+        let opts = CommitOptions::new(
+            &agent_id.0,
+            IntentCategory::Custom("Import".to_string()),
+            format!("import {path}"),
+        );
+        repo.set_json(&req.ref_name, path, value, opts)
+            .map_err(internal_error)?;
+        imported += 1;
+    }
+    s.sessions.mark_all_dirty();
+    Ok(Json(serde_json::json!({ "ref": req.ref_name, "imported": imported })))
 }
 
 #[derive(Deserialize)]

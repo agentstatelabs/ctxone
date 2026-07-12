@@ -902,6 +902,19 @@ enum DbAction {
         #[arg(long)]
         yes: bool,
     },
+    /// Export the graph on the current branch to a JSON snapshot (stdout or
+    /// --out FILE). Prune it, then `db import` into a fresh db to keep only
+    /// what you want. Use `ctx --branch <b>` / `--namespace <n>` to pick scope.
+    Export {
+        /// Write to this file instead of stdout.
+        #[arg(long)]
+        out: Option<String>,
+    },
+    /// Import a JSON snapshot (from `db export`) onto the current branch.
+    Import {
+        /// Path to the snapshot JSON file.
+        file: String,
+    },
 }
 
 /// Per-kind proof examples, shown in error messages to speed recovery.
@@ -2419,8 +2432,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Db { action } => {
             let server = cli.server.clone();
+            let branch = cli.branch.clone();
             let format = cli.format;
-            handle_db(action, &server, format, client.clone()).await?;
+            handle_db(action, &server, &branch, format, client.clone()).await?;
         }
         Commands::Project { action } => {
             let server = cli.server.clone();
@@ -5893,10 +5907,56 @@ async fn handle_taint(
 async fn handle_db(
     action: DbAction,
     server: &str,
+    branch: &str,
     format: OutputFormat,
     client: reqwest::Client,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match action {
+        DbAction::Export { out } => {
+            let url = format!("{}/api/export?ref={}", server, urlencoding(branch));
+            let resp = match client.get(&url).send().await {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "db export failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            let pretty = serde_json::to_string_pretty(&parsed)?;
+            let count = parsed["count"].as_u64().unwrap_or(0);
+            match out {
+                Some(path) => {
+                    std::fs::write(&path, &pretty)?;
+                    eprintln!("Exported {count} paths (branch {branch}) → {path}");
+                }
+                None => println!("{pretty}"),
+            }
+        }
+        DbAction::Import { file } => {
+            let content = std::fs::read_to_string(&file)?;
+            let snapshot: Value = serde_json::from_str(&content)
+                .map_err(|e| format!("{file} is not valid JSON: {e}"))?;
+            // Accept either a full export ({paths:{…}}) or a bare {path:value} map.
+            let paths = snapshot
+                .get("paths")
+                .cloned()
+                .unwrap_or(snapshot);
+            let body = serde_json::json!({ "ref": branch, "paths": paths });
+            let resp = match client.post(format!("{server}/api/import")).json(&body).send().await {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "db import failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(format, &parsed, |v| {
+                println!(
+                    "Imported {} paths onto branch {branch}.",
+                    v["imported"].as_u64().unwrap_or(0)
+                );
+            });
+        }
         DbAction::Backup { suffix } => {
             let mut body = serde_json::Map::new();
             if let Some(s) = suffix {
