@@ -904,13 +904,16 @@ enum DbAction {
     },
 }
 
+/// Per-kind proof examples, shown in error messages to speed recovery.
+const PROOF_EXAMPLES: &str =
+    "commit:abc1234 | test:cargo test foo | file:src/lib.rs | text:manually verified in staging";
+
 /// Proof specifier — `kind:value[:note]`. Kind is one of commit|file|test|text.
 fn parse_proof_spec(raw: &str) -> Result<(String, String, Option<String>), String> {
     let parts: Vec<&str> = raw.splitn(3, ':').collect();
     if parts.len() < 2 {
         return Err(format!(
-            "expected <kind>:<value>[:<note>] (e.g. 'commit:abc123'), got '{}'",
-            raw
+            "invalid proof '{raw}': expected <kind>:<value>[:<note>]. Examples: {PROOF_EXAMPLES}"
         ));
     }
     let kind = parts[0].to_string();
@@ -919,8 +922,7 @@ fn parse_proof_spec(raw: &str) -> Result<(String, String, Option<String>), Strin
     match kind.as_str() {
         "commit" | "file" | "test" | "text" => Ok((kind, value, note)),
         _ => Err(format!(
-            "unknown proof kind '{}' (expected commit|file|test|text)",
-            kind
+            "unknown proof kind '{kind}' (expected commit|file|test|text). Examples: {PROOF_EXAMPLES}"
         )),
     }
 }

@@ -224,8 +224,9 @@ pub fn parse_proof(kind: &str, value: &str, note: Option<String>) -> Result<Proo
         "text" => Proof::text(value),
         other => {
             return Err(PlanToolError::InvalidProof(format!(
-                "unknown proof kind '{}' (expected commit|file|test|text)",
-                other
+                "unknown proof kind '{other}' (expected commit|file|test|text). \
+                 Examples: kind=commit value=abc1234 | kind=test value='cargo test foo' | \
+                 kind=file value=src/lib.rs | kind=text value='manually verified'"
             )));
         }
     };
