@@ -419,6 +419,51 @@ pub fn active_task_warning(
     ))
 }
 
+/// Like the substrate's `next_task_for`, but ordered by task id (creation
+/// order) rather than priority — for `plan next --in-order` / sequential plans.
+/// Same filters: `Pending`, all blockers `Done`, and the assignee rule.
+pub fn next_task_ordered(
+    store: &TaskStore,
+    ref_name: &str,
+    plan: &str,
+    assigned_to: Option<&str>,
+    include_unassigned: bool,
+) -> Result<Option<Task>, agentstategraph_tasks::TaskStoreError> {
+    let tasks = store.list_tasks(ref_name, plan)?;
+    let done: std::collections::HashSet<&str> = tasks
+        .iter()
+        .filter(|t| t.status == TaskStatus::Done)
+        .map(|t| t.id.as_str())
+        .collect();
+    let mut candidates: Vec<&Task> = tasks
+        .iter()
+        .filter(|t| t.status == TaskStatus::Pending)
+        // A blocker counts as satisfied only if it exists AND is Done.
+        .filter(|t| t.blocked_by.iter().all(|b| done.contains(b.as_str())))
+        .filter(|t| match assigned_to {
+            None => true,
+            Some(agent) => match &t.assigned_to {
+                Some(a) => a == agent,
+                None => include_unassigned,
+            },
+        })
+        .collect();
+    candidates.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(candidates.first().map(|t| (*t).clone()))
+}
+
+/// The `(id, title)` of every task currently `in_progress` in a plan — so
+/// `plan next` can show active work separately from the next unstarted task.
+pub fn in_progress_tasks(store: &TaskStore, ref_name: &str, plan: &str) -> Vec<serde_json::Value> {
+    store
+        .list_tasks(ref_name, plan)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|t| t.status == TaskStatus::InProgress)
+        .map(|t| serde_json::json!({ "id": t.id.as_str(), "title": t.title }))
+        .collect()
+}
+
 /// `task_to_json` plus an optional non-blocking `warning` field.
 pub fn task_to_json_with_warning(task: &Task, warning: Option<String>) -> serde_json::Value {
     let mut v = task_to_json(task);

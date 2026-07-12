@@ -1683,6 +1683,10 @@ struct NextTaskQuery {
     include_unassigned: bool,
     #[serde(default)]
     assigned_only: bool,
+    /// Pick order: `priority` (default — highest priority, id tiebreak) or
+    /// `order` (first unstarted by task id, for sequential plans).
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -1970,12 +1974,20 @@ async fn next_plan_task(
     // Preserve CTXone's historical semantics: assigned_only=true forces
     // unassigned tasks out regardless of include_unassigned.
     let include_unassigned = q.include_unassigned && !q.assigned_only;
-    let task = store
-        .next_task_for(&q.ref_name, &name, assignee.as_deref(), include_unassigned)
-        .map_err(substrate_error_to_response)?;
+    // `order` = first unstarted by id (sequential); default `priority`.
+    let task = if q.mode.as_deref() == Some("order") {
+        plan_tools::next_task_ordered(&store, &q.ref_name, &name, assignee.as_deref(), include_unassigned)
+            .map_err(substrate_error_to_response)?
+    } else {
+        store
+            .next_task_for(&q.ref_name, &name, assignee.as_deref(), include_unassigned)
+            .map_err(substrate_error_to_response)?
+    };
+    // Surface active work separately from the next unstarted task.
+    let in_progress = plan_tools::in_progress_tasks(&store, &q.ref_name, &name);
     let body = match task {
-        None => serde_json::json!({ "task": null }),
-        Some(t) => serde_json::json!({ "task": plan_tools::task_to_json(&t) }),
+        None => serde_json::json!({ "task": null, "in_progress": in_progress }),
+        Some(t) => serde_json::json!({ "task": plan_tools::task_to_json(&t), "in_progress": in_progress }),
     };
     Ok(Json(body))
 }

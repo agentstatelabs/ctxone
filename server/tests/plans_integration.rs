@@ -236,6 +236,42 @@ async fn add_task_with_priority_and_assigned_to() {
 }
 
 #[tokio::test]
+async fn next_task_priority_vs_in_order_and_in_progress() {
+    let router = test_router();
+    let _ = call_json(
+        router.clone(),
+        post_json_with_agent("/api/plans", "a", json!({"name": "p1"})),
+    )
+    .await;
+    // t-001 low, t-002 high (creation order != priority order).
+    for (title, pri) in [("low first", "low"), ("high second", "high")] {
+        let _ = call_json(
+            router.clone(),
+            post_json_with_agent("/api/plans/p1/tasks", "a", json!({"title": title, "priority": pri})),
+        )
+        .await;
+    }
+    // Default = priority → high task first.
+    let (_, byp) = call_json(router.clone(), get("/api/plans/p1/next")).await;
+    assert_eq!(byp["task"]["id"], "t-002");
+    // Order mode → first by id.
+    let (_, byo) = call_json(router.clone(), get("/api/plans/p1/next?mode=order")).await;
+    assert_eq!(byo["task"]["id"], "t-001");
+
+    // Start t-001; next still returns t-002 and lists t-001 as in_progress.
+    let _ = call_json(
+        router.clone(),
+        post_json_with_agent("/api/plans/p1/tasks/t-001/start", "a", json!({})),
+    )
+    .await;
+    let (_, after) = call_json(router, get("/api/plans/p1/next")).await;
+    assert_eq!(after["task"]["id"], "t-002");
+    let active = after["in_progress"].as_array().unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0]["id"], "t-001");
+}
+
+#[tokio::test]
 async fn start_task_warns_when_another_is_in_progress() {
     let router = test_router();
     let _ = call_json(

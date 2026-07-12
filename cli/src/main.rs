@@ -1000,6 +1000,10 @@ enum PlanAction {
         /// Restrict strictly to tasks explicitly assigned
         #[arg(long = "assigned-only")]
         assigned_only: bool,
+        /// Pick the first unstarted task by task order (sequential plans)
+        /// instead of the default highest-priority task.
+        #[arg(long = "in-order")]
+        in_order: bool,
     },
     /// List plans
     List {
@@ -5256,6 +5260,7 @@ async fn handle_plan(
             me,
             include_unassigned,
             assigned_only,
+            in_order,
         } => {
             let mut parts = vec![format!("ref={}", urlencoding(branch))];
             let assignee = if me {
@@ -5269,6 +5274,9 @@ async fn handle_plan(
             parts.push(format!("include_unassigned={}", include_unassigned));
             if assigned_only {
                 parts.push("assigned_only=true".to_string());
+            }
+            if in_order {
+                parts.push("mode=order".to_string());
             }
             let url = format!(
                 "{}/api/plans/{}/next?{}",
@@ -5289,21 +5297,36 @@ async fn handle_plan(
                 http_error_exit(resp, "plan next failed").await;
             }
             let parsed: Value = resp.json().await?;
-            emit(format, &parsed, |v| match v.get("task") {
-                Some(t) if !t.is_null() => {
-                    let pri = t["priority"].as_str().unwrap_or("");
-                    println!(
-                        "Next: {} {} {}",
-                        t["id"].as_str().unwrap_or(""),
-                        priority_tag(pri),
-                        t["title"].as_str().unwrap_or("")
-                    );
-                    if let Some(a) = t["assigned_to"].as_str() {
-                        println!("  assigned to: {}", a);
+            emit(format, &parsed, |v| {
+                match v.get("task") {
+                    Some(t) if !t.is_null() => {
+                        let pri = t["priority"].as_str().unwrap_or("");
+                        println!(
+                            "Next: {} {} {}",
+                            t["id"].as_str().unwrap_or(""),
+                            priority_tag(pri),
+                            t["title"].as_str().unwrap_or("")
+                        );
+                        if let Some(a) = t["assigned_to"].as_str() {
+                            println!("  assigned to: {}", a);
+                        }
+                    }
+                    _ => {
+                        println!("No pickable tasks.");
                     }
                 }
-                _ => {
-                    println!("No pickable tasks.");
+                // Show active work separately from the next unstarted task.
+                if let Some(active) = v["in_progress"].as_array()
+                    && !active.is_empty()
+                {
+                    println!("In progress:");
+                    for t in active {
+                        println!(
+                            "  {} {}",
+                            t["id"].as_str().unwrap_or(""),
+                            t["title"].as_str().unwrap_or("")
+                        );
+                    }
                 }
             });
         }
