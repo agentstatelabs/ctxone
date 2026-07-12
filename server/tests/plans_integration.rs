@@ -125,6 +125,29 @@ async fn list_plans_returns_empty_by_default() {
 }
 
 #[tokio::test]
+async fn list_plans_all_namespaces_tags_namespace() {
+    let router = test_router();
+    let _ = call_json(
+        router.clone(),
+        post_json_with_agent("/api/plans", "test", json!({"name": "p1"})),
+    )
+    .await;
+
+    // Scoped list: no namespace tag.
+    let (_, scoped) = call_json(router.clone(), get("/api/plans")).await;
+    assert_eq!(scoped.as_array().unwrap().len(), 1);
+    assert!(scoped[0].get("namespace").is_none());
+
+    // --all-namespaces: each plan is tagged with its namespace ("default" here).
+    let (status, all) = call_json(router, get("/api/plans?all_namespaces=true")).await;
+    assert_eq!(status, StatusCode::OK);
+    let arr = all.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["name"], "p1");
+    assert_eq!(arr[0]["namespace"], "default");
+}
+
+#[tokio::test]
 async fn list_plans_filter_by_status() {
     let router = test_router();
     let _ = call_json(

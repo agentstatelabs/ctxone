@@ -1612,6 +1612,10 @@ struct PlanListQuery {
     ref_name: String,
     #[serde(default)]
     status: Option<String>,
+    /// List plans across every namespace (each result tagged with its
+    /// `namespace`), instead of just the request's namespace.
+    #[serde(default)]
+    all_namespaces: bool,
 }
 
 #[derive(Deserialize)]
@@ -1721,21 +1725,53 @@ async fn list_plans(
     ns: NamespaceId,
     Query(q): Query<PlanListQuery>,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
-    let repo = s.repo_for(&ns)?;
-    let store = plan_tools::make_store(repo.clone(), DEFAULT_AGENT_ID);
     let filter = q
         .status
         .as_deref()
         .and_then(plan_tools::plan_status_from_str);
-    let plans = store
-        .list_plans_by_status(&q.ref_name, filter)
-        .map_err(substrate_error_to_response)?;
+
+    // Which namespaces to scan: just the request's namespace (default), or
+    // every namespace for a global inventory (--all-namespaces).
+    let namespaces: Vec<String> = if q.all_namespaces {
+        let mut names: Vec<String> = s
+            .repo
+            .list_namespaces()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .into_iter()
+            .map(|n| n.to_string())
+            .collect();
+        // Ensure the default namespace is always covered.
+        let default = Namespace::DEFAULT.to_string();
+        if !names.iter().any(|n| n == &default) {
+            names.push(default);
+        }
+        names.sort();
+        names.dedup();
+        names
+    } else {
+        vec![ns.0.clone()]
+    };
+
     let mut out = Vec::new();
-    for plan in plans {
-        let tasks = store
-            .list_tasks(&q.ref_name, &plan.name)
-            .unwrap_or_default();
-        out.push(plan_tools::plan_to_json(&plan, &tasks, false));
+    for ns_name in namespaces {
+        let repo = s.repo_for(&NamespaceId(ns_name.clone()))?;
+        let store = plan_tools::make_store(repo, DEFAULT_AGENT_ID);
+        let plans = match store.list_plans_by_status(&q.ref_name, filter) {
+            Ok(p) => p,
+            // A namespace with no ref/data yet shouldn't abort the whole listing.
+            Err(_) if q.all_namespaces => continue,
+            Err(e) => return Err(substrate_error_to_response(e)),
+        };
+        for plan in plans {
+            let tasks = store.list_tasks(&q.ref_name, &plan.name).unwrap_or_default();
+            let mut pj = plan_tools::plan_to_json(&plan, &tasks, false);
+            if q.all_namespaces
+                && let Some(obj) = pj.as_object_mut()
+            {
+                obj.insert("namespace".to_string(), serde_json::json!(ns_name));
+            }
+            out.push(pj);
+        }
     }
     Ok(Json(out))
 }

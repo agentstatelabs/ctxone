@@ -1006,6 +1006,10 @@ enum PlanAction {
         /// Filter by status: active|completed|archived
         #[arg(long)]
         status: Option<String>,
+        /// List plans across every namespace (each shown with its namespace),
+        /// instead of only the current one.
+        #[arg(long = "all-namespaces")]
+        all_namespaces: bool,
     },
     /// Show a plan with its tasks
     Show { plan_id: String },
@@ -5303,10 +5307,16 @@ async fn handle_plan(
                 }
             });
         }
-        PlanAction::List { status } => {
+        PlanAction::List {
+            status,
+            all_namespaces,
+        } => {
             let mut url = format!("{}/api/plans?ref={}", server, urlencoding(branch));
             if let Some(s) = status {
                 url.push_str(&format!("&status={}", urlencoding(&s)));
+            }
+            if all_namespaces {
+                url.push_str("&all_namespaces=true");
             }
             let resp = match client
                 .get(&url)
@@ -5336,9 +5346,15 @@ async fn handle_plan(
                     let in_progress = counts["in_progress"].as_u64().unwrap_or(0);
                     let pending = counts["pending"].as_u64().unwrap_or(0);
                     let total = counts["total"].as_u64().unwrap_or(0);
+                    // In --all-namespaces mode the server tags each plan with its
+                    // namespace; prefix it so the inventory is unambiguous.
+                    let ns_prefix = plan["namespace"]
+                        .as_str()
+                        .map(|n| format!("[{n}] "))
+                        .unwrap_or_default();
                     println!(
-                        "{:<24} {:<10} {} tasks [{}✓ {}→ {} ]",
-                        name, status, total, done, in_progress, pending
+                        "{}{:<24} {:<10} {} tasks [{}✓ {}→ {} ]",
+                        ns_prefix, name, status, total, done, in_progress, pending
                     );
                 }
             });
