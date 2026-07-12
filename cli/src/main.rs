@@ -5143,6 +5143,11 @@ async fn handle_plan(
                 http_error_exit(resp, "plan start failed").await;
             }
             let parsed: Value = resp.json().await?;
+            // Non-blocking warning when other tasks in the plan are already
+            // in progress (the server attaches it as a `warning` field).
+            if let Some(w) = parsed["warning"].as_str() {
+                eprintln!("  \u{26A0} {}", w);
+            }
             emit(format, &parsed, |v| {
                 println!(
                     "Started {}: {}",

@@ -213,6 +213,45 @@ async fn add_task_with_priority_and_assigned_to() {
 }
 
 #[tokio::test]
+async fn start_task_warns_when_another_is_in_progress() {
+    let router = test_router();
+    let _ = call_json(
+        router.clone(),
+        post_json_with_agent("/api/plans", "alice", json!({"name": "p1"})),
+    )
+    .await;
+    let mut ids = Vec::new();
+    for title in ["first", "second"] {
+        let (_, t) = call_json(
+            router.clone(),
+            post_json_with_agent("/api/plans/p1/tasks", "alice", json!({ "title": title })),
+        )
+        .await;
+        ids.push(t["id"].as_str().unwrap().to_string());
+    }
+
+    // First start: nothing else in progress → no warning.
+    let (status, body) = call_json(
+        router.clone(),
+        post_json_with_agent(&format!("/api/plans/p1/tasks/{}/start", ids[0]), "alice", json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.get("warning").is_none(), "no warning for the only active task");
+
+    // Second start: first is in progress → non-blocking warning naming it.
+    let (status, body) = call_json(
+        router,
+        post_json_with_agent(&format!("/api/plans/p1/tasks/{}/start", ids[1]), "alice", json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "start is non-blocking");
+    assert_eq!(body["status"], "in_progress");
+    let warning = body["warning"].as_str().expect("warning field present");
+    assert!(warning.contains(&ids[0]), "warning names the other in-progress task");
+}
+
+#[tokio::test]
 async fn start_task_then_complete_with_commit_proof() {
     let router = test_router();
     let _ = call_json(

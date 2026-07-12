@@ -1870,8 +1870,10 @@ async fn start_plan_task(
     let task = store
         .start_task(&req.ref_name, &name, &TaskId(task_id))
         .map_err(substrate_error_to_response)?;
+    // Non-blocking warning if other tasks in this plan are already in progress.
+    let warning = plan_tools::active_task_warning(&store, &req.ref_name, &name, &task.id);
     s.sessions.mark_all_dirty();
-    Ok(Json(plan_tools::task_to_json(&task)))
+    Ok(Json(plan_tools::task_to_json_with_warning(&task, warning)))
 }
 
 #[instrument(skip_all, fields(name = %name, task_id = %task_id, agent = %agent_id.0))]

@@ -2128,7 +2128,7 @@ impl CtxOneServer {
 
     #[tool(description = "Transition a task from `pending` to `in_progress`. \
         \
-        CALL THIS WHEN you begin working on a task. Refuses with an error listing the blockers if any entry in `blocked_by` is not yet `done`. The task's `started_at` and `started_by` are stamped automatically from the session's agent id.")]
+        CALL THIS WHEN you begin working on a task. Refuses with an error listing the blockers if any entry in `blocked_by` is not yet `done`. The task's `started_at` and `started_by` are stamped automatically from the session's agent id. Non-blocking: if OTHER tasks in the plan are already `in_progress`, the result includes a `warning` field naming them — parallel work is allowed, but finish or abandon stale tasks so plan state doesn't drift.")]
     async fn plan_start(&self, params: Parameters<crate::plan_tools::PlanStartParams>) -> String {
         use crate::plan_tools as pt;
         use agentstategraph_tasks::TaskId;
@@ -2138,7 +2138,11 @@ impl CtxOneServer {
         match store.start_task(&p.ref_name, &p.plan_id, &id) {
             Ok(task) => {
                 self.session.mark_dirty();
-                serde_json::to_string(&pt::task_to_json(&task)).unwrap_or_else(|_| "{}".into())
+                // Surface a non-blocking warning to the agent if other tasks in
+                // this plan are already in progress (stale-state drift guard).
+                let warning = pt::active_task_warning(&store, &p.ref_name, &p.plan_id, &task.id);
+                serde_json::to_string(&pt::task_to_json_with_warning(&task, warning))
+                    .unwrap_or_else(|_| "{}".into())
             }
             Err(e) => pt::err_json(e),
         }

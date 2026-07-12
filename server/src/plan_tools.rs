@@ -389,6 +389,47 @@ pub fn task_to_json(task: &Task) -> serde_json::Value {
     out
 }
 
+/// Build a non-blocking warning when starting a task while OTHER tasks in the
+/// same plan are already `in_progress`. Parallel work is allowed, but surfacing
+/// this helps agents notice accumulating stale in-progress state (the ExampleFlow
+/// feedback). Returns the message, or `None` when nothing else is active.
+pub fn active_task_warning(
+    store: &TaskStore,
+    ref_name: &str,
+    plan: &str,
+    just_started: &TaskId,
+) -> Option<String> {
+    let others: Vec<String> = store
+        .list_tasks(ref_name, plan)
+        .ok()?
+        .into_iter()
+        .filter(|t| t.status == TaskStatus::InProgress && &t.id != just_started)
+        .map(|t| t.id.as_str().to_string())
+        .collect();
+    if others.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{} already in progress in plan '{}': {} — parallel work is allowed, \
+         but close or finish {} if this wasn't intentional",
+        if others.len() == 1 { "another task is" } else { "other tasks are" },
+        plan,
+        others.join(", "),
+        if others.len() == 1 { "it" } else { "them" },
+    ))
+}
+
+/// `task_to_json` plus an optional non-blocking `warning` field.
+pub fn task_to_json_with_warning(task: &Task, warning: Option<String>) -> serde_json::Value {
+    let mut v = task_to_json(task);
+    if let Some(w) = warning
+        && let Some(obj) = v.as_object_mut()
+    {
+        obj.insert("warning".to_string(), serde_json::json!(w));
+    }
+    v
+}
+
 /// Render a plan as a JSON object, including task counts keyed by
 /// status. The `tasks` field is included only when `with_tasks` is
 /// true — the list endpoint keeps responses short, the detail endpoint
