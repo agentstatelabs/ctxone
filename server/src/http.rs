@@ -516,6 +516,10 @@ fn router_with_config_inner(
             post(complete_plan_task),
         )
         .route(
+            "/api/plans/{name}/tasks/{task_id}/link",
+            post(link_plan_task),
+        )
+        .route(
             "/api/plans/{name}/tasks/{task_id}/abandon",
             post(abandon_plan_task),
         )
@@ -1890,6 +1894,72 @@ async fn create_plan(
     Ok((StatusCode::CREATED, Json(body)))
 }
 
+/// Graph path holding a task's cross-plan "satisfies" links. Stored outside the
+/// substrate's task state machine (which only models within-plan `blocked_by`),
+/// so a task in one plan can point at a task in another.
+fn plan_link_path(plan: &str, task: &str) -> String {
+    format!("/plan_links/{plan}/{task}")
+}
+
+/// Read the `plan/task` targets a task satisfies (empty if none/unset).
+fn read_satisfies(repo: &Repository, ref_name: &str, plan: &str, task: &str) -> Vec<String> {
+    repo.get_json(ref_name, &plan_link_path(plan, task))
+        .ok()
+        .and_then(|v| {
+            v.get("satisfies").and_then(|s| s.as_array()).map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
+}
+
+#[derive(Deserialize)]
+struct LinkRequest {
+    #[serde(default = "default_ref", rename = "ref")]
+    ref_name: String,
+    /// Target this task satisfies, as `plan/task`.
+    target: String,
+}
+
+/// `POST /api/plans/{name}/tasks/{id}/link` — record that this task, when done,
+/// satisfies a task in another plan (a cross-plan dependency pointer).
+async fn link_plan_task(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+    agent_id: AgentId,
+    Path((name, task_id)): Path<(String, String)>,
+    Json(req): Json<LinkRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !req.target.contains('/') {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "target must be 'plan/task' (e.g. other-plan/t-002)".to_string(),
+        ));
+    }
+    let repo = s.repo_for(&ns)?;
+    let mut links = read_satisfies(&repo, &req.ref_name, &name, &task_id);
+    if !links.contains(&req.target) {
+        links.push(req.target.clone());
+    }
+    let opts = CommitOptions::new(
+        &agent_id.0,
+        IntentCategory::Custom("Link".to_string()),
+        format!("{name}/{task_id} satisfies {}", req.target),
+    );
+    repo.set_json(
+        &req.ref_name,
+        &plan_link_path(&name, &task_id),
+        &serde_json::json!({ "satisfies": links }),
+        opts,
+    )
+    .map_err(internal_error)?;
+    Ok(Json(
+        serde_json::json!({ "plan": name, "task": task_id, "satisfies": links }),
+    ))
+}
+
 #[instrument(skip_all, fields(name = %name, ref_name = %q.ref_name))]
 async fn get_plan(
     State(s): State<HubState>,
@@ -1903,7 +1973,21 @@ async fn get_plan(
         .get_plan(&q.ref_name, &name)
         .map_err(substrate_error_to_response)?;
     let tasks = store.list_tasks(&q.ref_name, &name).unwrap_or_default();
-    Ok(Json(plan_tools::plan_to_json(&plan, &tasks, true)))
+    let mut out = plan_tools::plan_to_json(&plan, &tasks, true);
+    // Attach cross-plan "satisfies" links to each task from the graph.
+    if let Some(arr) = out["tasks"].as_array_mut() {
+        for tj in arr.iter_mut() {
+            if let Some(id) = tj["id"].as_str() {
+                let links = read_satisfies(&repo, &q.ref_name, &name, id);
+                if !links.is_empty()
+                    && let Some(obj) = tj.as_object_mut()
+                {
+                    obj.insert("satisfies".to_string(), serde_json::json!(links));
+                }
+            }
+        }
+    }
+    Ok(Json(out))
 }
 
 #[instrument(skip_all, fields(name = %name, ref_name = %q.ref_name, agent = %agent_id.0))]
@@ -2025,10 +2109,18 @@ async fn complete_plan_task(
         .map_err(plan_error_to_response)?;
     let store = plan_tools::make_store(repo.clone(), &agent_id.0);
     let task = store
-        .complete_task(&req.ref_name, &name, &TaskId(task_id), proof)
+        .complete_task(&req.ref_name, &name, &TaskId(task_id.clone()), proof)
         .map_err(substrate_error_to_response)?;
     s.sessions.mark_all_dirty();
-    Ok(Json(plan_tools::task_to_json(&task)))
+    let mut out = plan_tools::task_to_json(&task);
+    // Remind the caller if finishing this task satisfies a task elsewhere.
+    let links = read_satisfies(&repo, &req.ref_name, &name, &task_id);
+    if !links.is_empty()
+        && let Some(obj) = out.as_object_mut()
+    {
+        obj.insert("satisfies".to_string(), serde_json::json!(links));
+    }
+    Ok(Json(out))
 }
 
 #[instrument(skip_all, fields(name = %name, task_id = %task_id, agent = %agent_id.0))]

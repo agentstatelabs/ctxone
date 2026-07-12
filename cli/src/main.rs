@@ -1023,6 +1023,15 @@ enum PlanAction {
         #[arg(long = "all-namespaces")]
         all_namespaces: bool,
     },
+    /// Record that a task, when done, satisfies a task in another plan
+    Link {
+        /// Plan holding the task that does the satisfying
+        plan_id: String,
+        /// Task id in that plan (e.g. t-003)
+        task_id: String,
+        /// Target it satisfies, as `plan/task` (e.g. other-plan/t-002)
+        target: String,
+    },
     /// List in-progress tasks that have gone stale (no progress in N days)
     Stale {
         /// Consider a task stale after this many days in progress
@@ -5234,6 +5243,16 @@ async fn handle_plan(
                     let val = p["value"].as_str().unwrap_or("");
                     println!("  proof: {} {}", kind, val);
                 }
+                // Nudge: this task satisfies task(s) in other plans.
+                if let Some(sat) = v["satisfies"].as_array()
+                    && !sat.is_empty()
+                {
+                    let targets: Vec<&str> = sat.iter().filter_map(|x| x.as_str()).collect();
+                    println!(
+                        "  \u{21B3} satisfies {} — mark it done too if complete",
+                        targets.join(", ")
+                    );
+                }
             });
         }
         PlanAction::Abandon {
@@ -5397,6 +5416,45 @@ async fn handle_plan(
                         ns_prefix, name, status, total, done, in_progress, pending
                     );
                 }
+            });
+        }
+        PlanAction::Link {
+            plan_id,
+            task_id,
+            target,
+        } => {
+            let url = format!(
+                "{}/api/plans/{}/tasks/{}/link",
+                server,
+                urlencoding(&plan_id),
+                urlencoding(&task_id),
+            );
+            let body = serde_json::json!({ "ref": branch, "target": target });
+            let resp = match client
+                .post(&url)
+                .header("X-CTXone-Agent", &agent_id)
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "plan link failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(format, &parsed, |v| {
+                let sat: Vec<&str> = v["satisfies"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+                    .unwrap_or_default();
+                println!(
+                    "{} {} now satisfies: {}",
+                    plan_id,
+                    task_id,
+                    sat.join(", ")
+                );
             });
         }
         PlanAction::Stale {
