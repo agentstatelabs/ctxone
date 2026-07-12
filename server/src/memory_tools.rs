@@ -1865,9 +1865,9 @@ impl CtxOneServer {
     }
 
     #[tool(
-        description = "Load pre-parsed markdown sections as pinned or primed memories. Pinned memories are always included in every `recall` response — use pinning for critical, always-relevant context like licensing rules, architectural decisions, or coding conventions. Primed (non-pinned) memories are searchable like normal facts. \
+        description = "Import a markdown doc into memory (aka `prime`; the `ctx import-doc` CLI alias). Registers a doc's sections as memories so you can `recall` it later WITHOUT re-reading the file. Pinned sections are always included in every `recall` response — use pinning for critical, always-relevant context like licensing rules, architectural decisions, or coding conventions. Primed (non-pinned) sections are searchable like normal facts. \
         \
-        CALL THIS WHEN the user points you at a README, an ARCHITECTURE doc, a style guide, or any substantial markdown file whose contents should influence every future decision. Sections should be pre-parsed — each entry has a title (the H1/H2 heading) and body (the content below it). Reuse the same `source` name when re-priming updated content; sections are keyed by source+slug so updates are idempotent."
+        CALL THIS WHEN the user points you at a README, an ARCHITECTURE doc, a style guide, or any substantial markdown file whose contents should influence future decisions — this is the intended 'register a doc as memory' flow, so you do NOT need to invent your own scheme for storing docs. Best practice: keep the file canonical in the repo and import its key sections/rationale here (don't paste an entire large doc verbatim if it changes often — it will drift). Sections are pre-parsed — each entry has a title (the H1/H2 heading) and body. Reuse the same `source` name when re-importing updated content; sections are keyed by source+slug so updates are idempotent."
     )]
     async fn prime(&self, params: Parameters<PrimeParams>) -> String {
         let p = params.0;

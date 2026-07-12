@@ -473,7 +473,13 @@ enum Commands {
     Demo,
     /// List pinned memories (always-included critical context)
     Pinned,
-    /// Load a markdown file as primed memory. Use --pin to make it always-included.
+    /// Import a markdown doc into memory (alias: `import-doc`). Parses the file
+    /// into sections stored as searchable memories so agents can `recall` it
+    /// without re-reading the file. `--pin` makes every section always-included
+    /// in recall (critical context). This is the intended "register a doc as
+    /// memory" flow — keep the file canonical in the repo and import its
+    /// rationale/summary here rather than pasting the whole doc into memory.
+    #[command(visible_alias = "import-doc")]
     Prime {
         /// Path to the markdown file
         file: String,
