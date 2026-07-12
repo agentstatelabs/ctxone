@@ -704,6 +704,13 @@ enum Commands {
         #[command(subcommand)]
         action: DbAction,
     },
+    /// Doc registry — index your canonical `.md` docs (path, status, scope,
+    /// what they answer) so agents can find the right doc without scanning the
+    /// repo. Keep the file canonical in the repo; this stores the pointer.
+    Docs {
+        #[command(subcommand)]
+        action: DocsAction,
+    },
     /// Manage projects — a project maps a code repo to its own namespace
     /// holding that repo's branches, plans, memory, and ASD data. Detection
     /// is automatic per-command (`.ctxproject` file, then git remote); use
@@ -915,6 +922,37 @@ enum DbAction {
         /// Path to the snapshot JSON file.
         file: String,
     },
+}
+
+#[derive(Subcommand)]
+enum DocsAction {
+    /// Register (or update) a canonical doc. Re-adding the same path updates it.
+    Add {
+        /// Repo path of the doc, e.g. /ARCHITECTURE.md
+        path: String,
+        /// canonical | draft | superseded (default: canonical)
+        #[arg(long)]
+        status: Option<String>,
+        /// Scope/owner area, e.g. "synth architecture"
+        #[arg(long)]
+        scope: Option<String>,
+        /// Owner (person/team)
+        #[arg(long)]
+        owner: Option<String>,
+        /// What questions this doc answers
+        #[arg(long)]
+        answers: Option<String>,
+        /// Path of a doc this supersedes
+        #[arg(long)]
+        supersedes: Option<String>,
+        /// Commit at which the doc was last verified current
+        #[arg(long = "verified-commit")]
+        verified_commit: Option<String>,
+    },
+    /// List all registered docs.
+    List,
+    /// Find registered docs whose path/scope/answers match a query.
+    Find { query: String },
 }
 
 /// Per-kind proof examples, shown in error messages to speed recovery.
@@ -2435,6 +2473,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let branch = cli.branch.clone();
             let format = cli.format;
             handle_db(action, &server, &branch, format, client.clone()).await?;
+        }
+        Commands::Docs { action } => {
+            let server = cli.server.clone();
+            let branch = cli.branch.clone();
+            let format = cli.format;
+            handle_docs(action, &server, &branch, format, client.clone()).await?;
         }
         Commands::Project { action } => {
             let server = cli.server.clone();
@@ -6062,6 +6106,117 @@ async fn handle_db(
                 println!("Restored {} from {}", to, snapshot);
                 println!("  previous db preserved at {}", preserved);
                 println!("  start the hub when ready");
+            });
+        }
+    }
+    Ok(())
+}
+
+/// `ctx docs` — the canonical-doc registry.
+async fn handle_docs(
+    action: DocsAction,
+    server: &str,
+    branch: &str,
+    format: OutputFormat,
+    client: reqwest::Client,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let print_entry = |d: &Value| {
+        let status = d["status"].as_str().unwrap_or("?");
+        let scope = d["scope"].as_str().map(|s| format!(" — {s}")).unwrap_or_default();
+        let answers = d["answers"]
+            .as_str()
+            .map(|s| format!("\n      answers: {s}"))
+            .unwrap_or_default();
+        println!("  {} [{}]{}{}", d["path"].as_str().unwrap_or(""), status, scope, answers);
+    };
+    match action {
+        DocsAction::Add {
+            path,
+            status,
+            scope,
+            owner,
+            answers,
+            supersedes,
+            verified_commit,
+        } => {
+            let body = serde_json::json!({
+                "ref": branch, "path": path, "status": status, "scope": scope,
+                "owner": owner, "answers": answers, "supersedes": supersedes,
+                "last_verified_commit": verified_commit,
+            });
+            let resp = match client.post(format!("{server}/api/docs")).json(&body).send().await {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "docs add failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(format, &parsed, |v| {
+                println!("Registered {} [{}]", v["path"].as_str().unwrap_or(""), v["status"].as_str().unwrap_or(""));
+            });
+        }
+        DocsAction::List => {
+            let resp = match client
+                .get(format!("{server}/api/docs?ref={}", urlencoding(branch)))
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "docs list failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(format, &parsed, |v| {
+                let empty = vec![];
+                let arr = v.as_array().unwrap_or(&empty);
+                if arr.is_empty() {
+                    println!("No registered docs.");
+                    return;
+                }
+                println!("Registered docs:");
+                for d in arr {
+                    print_entry(d);
+                }
+            });
+        }
+        DocsAction::Find { query } => {
+            let resp = match client
+                .get(format!("{server}/api/docs?ref={}", urlencoding(branch)))
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "docs find failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            let q = query.to_lowercase();
+            let matches: Vec<Value> = parsed
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter(|d| {
+                            ["path", "scope", "answers", "owner"].iter().any(|k| {
+                                d[*k].as_str().map(|s| s.to_lowercase().contains(&q)).unwrap_or(false)
+                            })
+                        })
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            emit(format, &Value::Array(matches.clone()), |_| {
+                if matches.is_empty() {
+                    println!("No docs match '{query}'.");
+                    return;
+                }
+                for d in &matches {
+                    print_entry(d);
+                }
             });
         }
     }

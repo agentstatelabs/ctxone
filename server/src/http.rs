@@ -500,6 +500,7 @@ fn router_with_config_inner(
         // Plan endpoints
         .route("/api/export", get(export_graph))
         .route("/api/import", post(import_graph))
+        .route("/api/docs", get(list_docs).post(register_doc))
         .route("/api/plans", get(list_plans).post(create_plan))
         // Static path registered before `/api/plans/{name}` so it wins the match.
         .route("/api/plans/stale", get(stale_plan_tasks))
@@ -1045,6 +1046,100 @@ async fn import_graph(
     }
     s.sessions.mark_all_dirty();
     Ok(Json(serde_json::json!({ "ref": req.ref_name, "imported": imported })))
+}
+
+/// Slug for a doc registry entry: the path lowercased with runs of non
+/// alnum collapsed to `-`. Keeps re-registering the same path idempotent.
+fn doc_slug(path: &str) -> String {
+    let mut s = String::new();
+    let mut dash = false;
+    for c in path.to_ascii_lowercase().chars() {
+        if c.is_ascii_alphanumeric() {
+            s.push(c);
+            dash = false;
+        } else if !dash && !s.is_empty() {
+            s.push('-');
+            dash = true;
+        }
+    }
+    s.trim_matches('-').to_string()
+}
+
+#[derive(Deserialize)]
+struct DocRegisterRequest {
+    #[serde(default = "default_ref", rename = "ref")]
+    ref_name: String,
+    path: String,
+    status: Option<String>,
+    scope: Option<String>,
+    owner: Option<String>,
+    answers: Option<String>,
+    supersedes: Option<String>,
+    last_verified_commit: Option<String>,
+}
+
+/// `POST /api/docs` — register (or update) a canonical-doc entry so agents can
+/// find docs without scanning the repo. Keeps the repo file canonical; this is
+/// just the index/pointer.
+async fn register_doc(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+    agent_id: AgentId,
+    Json(req): Json<DocRegisterRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
+    let slug = doc_slug(&req.path);
+    if slug.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "path is required".to_string()));
+    }
+    let entry = serde_json::json!({
+        "path": req.path,
+        "status": req.status.unwrap_or_else(|| "canonical".to_string()),
+        "scope": req.scope,
+        "owner": req.owner,
+        "answers": req.answers,
+        "supersedes": req.supersedes,
+        "last_verified_commit": req.last_verified_commit,
+    });
+    let opts = CommitOptions::new(
+        &agent_id.0,
+        IntentCategory::Custom("DocRegistry".to_string()),
+        format!("register doc {}", req.path),
+    );
+    repo.set_json(&req.ref_name, &format!("/docs/{slug}"), &entry, opts)
+        .map_err(internal_error)?;
+    Ok(Json(entry))
+}
+
+/// `GET /api/docs` — list all registered doc entries.
+async fn list_docs(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+    Query(q): Query<ExportQuery>,
+) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
+    // set_json stores each entry as a tree, so list_paths returns the leaf
+    // FIELDS (…/<slug>/status, …). Collect the distinct slugs, then get_json
+    // each `/docs/<slug>` to reassemble the whole object.
+    let leaves = repo
+        .list_paths(&q.ref_name, "/docs", None)
+        .unwrap_or_default();
+    let mut slugs = std::collections::BTreeSet::new();
+    for p in leaves {
+        if let Some(rest) = p.strip_prefix("/docs/")
+            && let Some(slug) = rest.split('/').next()
+            && !slug.is_empty()
+        {
+            slugs.insert(slug.to_string());
+        }
+    }
+    let mut out = Vec::new();
+    for slug in slugs {
+        if let Ok(v) = repo.get_json(&q.ref_name, &format!("/docs/{slug}")) {
+            out.push(v);
+        }
+    }
+    Ok(Json(out))
 }
 
 #[derive(Deserialize)]
