@@ -1023,6 +1023,15 @@ enum PlanAction {
         #[arg(long = "all-namespaces")]
         all_namespaces: bool,
     },
+    /// List in-progress tasks that have gone stale (no progress in N days)
+    Stale {
+        /// Consider a task stale after this many days in progress
+        #[arg(long, default_value_t = 7)]
+        days: i64,
+        /// Scan every namespace, not just the current one
+        #[arg(long = "all-namespaces")]
+        all_namespaces: bool,
+    },
     /// Show a plan with its tasks
     Show { plan_id: String },
     /// List the tasks of a plan (flat — no plan envelope). Use `show`
@@ -5386,6 +5395,51 @@ async fn handle_plan(
                     println!(
                         "{}{:<24} {:<10} {} tasks [{}✓ {}→ {} ]",
                         ns_prefix, name, status, total, done, in_progress, pending
+                    );
+                }
+            });
+        }
+        PlanAction::Stale {
+            days,
+            all_namespaces,
+        } => {
+            let mut url = format!(
+                "{}/api/plans/stale?ref={}&days={}",
+                server,
+                urlencoding(branch),
+                days
+            );
+            if all_namespaces {
+                url.push_str("&all_namespaces=true");
+            }
+            let resp = match client.get(&url).send().await {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "plan stale failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(format, &parsed, |v| {
+                let empty = vec![];
+                let arr = v.as_array().unwrap_or(&empty);
+                if arr.is_empty() {
+                    println!("No stale in-progress tasks (older than {days}d).");
+                    return;
+                }
+                println!("Stale in-progress tasks (>{days}d):");
+                for t in arr {
+                    let ns_prefix = t["namespace"]
+                        .as_str()
+                        .map(|n| format!("[{n}] "))
+                        .unwrap_or_default();
+                    println!(
+                        "  {}{} {} ({}d) — {}",
+                        ns_prefix,
+                        t["plan"].as_str().unwrap_or(""),
+                        t["id"].as_str().unwrap_or(""),
+                        t["age_days"].as_i64().unwrap_or(0),
+                        t["title"].as_str().unwrap_or("")
                     );
                 }
             });

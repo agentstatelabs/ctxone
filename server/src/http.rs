@@ -499,6 +499,8 @@ fn router_with_config_inner(
         .route("/api/memory/why_did_we", get(why_did_we))
         // Plan endpoints
         .route("/api/plans", get(list_plans).post(create_plan))
+        // Static path registered before `/api/plans/{name}` so it wins the match.
+        .route("/api/plans/stale", get(stale_plan_tasks))
         .route("/api/plans/{name}", get(get_plan).delete(delete_plan))
         .route(
             "/api/plans/{name}/tasks",
@@ -1721,6 +1723,98 @@ fn plan_error_to_response(err: plan_tools::PlanToolError) -> (StatusCode, String
 
 fn substrate_error_to_response(err: agentstategraph_tasks::TaskStoreError) -> (StatusCode, String) {
     plan_error_to_response(plan_tools::PlanToolError::Substrate(err))
+}
+
+#[derive(Deserialize)]
+struct StaleQuery {
+    #[serde(default = "default_ref", rename = "ref")]
+    ref_name: String,
+    #[serde(default = "default_stale_days")]
+    days: i64,
+    #[serde(default)]
+    all_namespaces: bool,
+}
+
+fn default_stale_days() -> i64 {
+    7
+}
+
+/// `GET /api/plans/stale?days=N` — in-progress tasks in active plans whose
+/// `started_at` (fallback `created_at`) is older than N days. Surfaces stale
+/// in-progress state so agents/humans notice work that stopped mid-flight.
+async fn stale_plan_tasks(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+    Query(q): Query<StaleQuery>,
+) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+    use agentstategraph_tasks::TaskStatus;
+    let now = chrono::Utc::now();
+    let cutoff = now - chrono::Duration::days(q.days.max(0));
+
+    let namespaces: Vec<String> = if q.all_namespaces {
+        let mut names: Vec<String> = s
+            .repo
+            .list_namespaces()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .into_iter()
+            .map(|n| n.to_string())
+            .collect();
+        let default = Namespace::DEFAULT.to_string();
+        if !names.iter().any(|n| n == &default) {
+            names.push(default);
+        }
+        names.sort();
+        names.dedup();
+        names
+    } else {
+        vec![ns.0.clone()]
+    };
+
+    let mut out = Vec::new();
+    for ns_name in namespaces {
+        let repo = s.repo_for(&NamespaceId(ns_name.clone()))?;
+        let store = plan_tools::make_store(repo, DEFAULT_AGENT_ID);
+        let plans = match store.list_plans_by_status(
+            &q.ref_name,
+            Some(agentstategraph_tasks::PlanStatus::Active),
+        ) {
+            Ok(p) => p,
+            Err(_) if q.all_namespaces => continue,
+            Err(e) => return Err(substrate_error_to_response(e)),
+        };
+        for plan in plans {
+            let tasks = store.list_tasks(&q.ref_name, &plan.name).unwrap_or_default();
+            for t in tasks {
+                if t.status != TaskStatus::InProgress {
+                    continue;
+                }
+                let since = t.started_at.unwrap_or(t.created_at);
+                if since < cutoff {
+                    let mut entry = serde_json::json!({
+                        "plan": plan.name,
+                        "id": t.id.as_str(),
+                        "title": t.title,
+                        "started_at": since.to_rfc3339(),
+                        "age_days": (now - since).num_days(),
+                    });
+                    if q.all_namespaces
+                        && let Some(obj) = entry.as_object_mut()
+                    {
+                        obj.insert("namespace".to_string(), serde_json::json!(ns_name));
+                    }
+                    out.push(entry);
+                }
+            }
+        }
+    }
+    // Most stale first.
+    out.sort_by(|a, b| {
+        b["age_days"]
+            .as_i64()
+            .unwrap_or(0)
+            .cmp(&a["age_days"].as_i64().unwrap_or(0))
+    });
+    Ok(Json(out))
 }
 
 #[instrument(skip_all, fields(ref_name = %q.ref_name, status = q.status.as_deref().unwrap_or("")))]
