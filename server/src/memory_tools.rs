@@ -1782,7 +1782,7 @@ impl CtxOneServer {
         \
         CALL THIS PROACTIVELY whenever the user tells you something worth keeping: an architectural decision (\"we use SQLite, not Postgres\"), a team convention (\"BSL-1.1 for new repos\"), a personal preference (\"tabs, not spaces\"), a constraint (\"migrations need backups\"), or a reason behind a choice (\"we picked X because Y\"). You do not need to ask permission — if the user said it, it's worth remembering. \
         \
-        Importance maps to confidence: 'high' (0.95) for explicit decisions and policies, 'medium' (0.7, default) for conventions and preferences, 'low' (0.4) for trivia and speculation. When unsure, save it. `remember` is cheap; forgetting something the user already told you is expensive."
+        Importance maps to confidence: 'high' (0.95) for explicit decisions and policies, 'medium' (0.7, default) for conventions and preferences, 'low' (0.4) for trivia and speculation. When unsure, save it. `remember` is cheap; forgetting something the user already told you is expensive. To import a whole markdown doc's sections at once, use `prime`, not repeated `remember` calls."
     )]
     async fn remember(&self, params: Parameters<RememberParams>) -> String {
         let p = params.0;
@@ -1848,7 +1848,7 @@ impl CtxOneServer {
         \
         CALL THIS AT THE START OF ANY SUBSTANTIAL TASK to load prior context the user already established: decisions, conventions, architectural choices, preferences, rules. Recall is budget-capped and near-free — it costs tokens in the low hundreds — so there is essentially zero downside to calling it before writing substantial code. \
         \
-        Pass a SPECIFIC topic, not 'context'. Good topics are domain words ('authentication', 'deployment', 'billing'), module names, or decision words from the user's prompt ('licensing', 'database schema'). Every response includes `ctx_savings_ratio`; if it's below 2× your topic was too broad — try a narrower one."
+        Pass a SPECIFIC topic, not 'context'. Good topics are domain words ('authentication', 'deployment', 'billing'), module names, or decision words from the user's prompt ('licensing', 'database schema'). Every response includes `ctx_savings_ratio`; if it's below 2× your topic was too broad — try a narrower one. To find a value whose path you don't know use `search` (any stored leaf) or `context` (a whole project subtree); to fetch a known path use `get`."
     )]
     async fn recall(&self, params: Parameters<RecallParams>) -> String {
         let p = params.0;
@@ -2258,7 +2258,7 @@ impl CtxOneServer {
     #[tool(
         description = "Fetch a single plan with full task list and per-task assignment data. \
         \
-        CALL THIS when you need the complete picture of a plan — its tasks, their statuses, their proofs, who's assigned to what. Cheaper than `list_plans` + N `plan_tasks` calls."
+        CALL THIS when you need the complete picture of a plan — its tasks, their statuses, their proofs, who's assigned to what. Cheaper than `plan_list` + N `plan_tasks` calls."
     )]
     async fn plan_show(&self, params: Parameters<crate::plan_tools::PlanGetParams>) -> String {
         use crate::plan_tools as pt;
@@ -2931,7 +2931,7 @@ impl CtxOneServer {
     }
 
     #[tool(
-        description = "Get a single reminder by id. Returns the full record including execution history."
+        description = "Fetch a single reminder by id, including its full execution history. CALL THIS WHEN you already have a reminder id (from `remind_me`, `reminder_list`, or `reminder_create`) and need its complete record — schedule, status, autonomy flag, and every past execution attempt. To discover which reminders are actionable use `remind_me`; to browse or filter by status/tag use `reminder_list`."
     )]
     async fn reminder_get(
         &self,
@@ -3058,18 +3058,22 @@ impl CtxOneServer {
 
     // ---- Code intelligence tools (proxy to ASD) ----
 
-    #[tool(description = "List all ASD code repos registered with this hub. \
-        Returns [{name, url}]. Pass the name as the `repo` param to other code tools. \
-        When only one repo is registered, all code tools default to it automatically.")]
+    #[tool(description = "List every ASD code repo registered with this hub, as [{name, url}]. \
+        CALL THIS FIRST when you're about to use any code-intelligence tool (code_search, \
+        code_read, callers_of, callees_of, code_impact) and don't yet know the repo names — \
+        the `name` here is exactly what you pass as their `repo` param. You can skip it when \
+        only one repo is registered: the code tools default to it automatically.")]
     async fn code_repos(&self, _params: Parameters<CodeReposParams>) -> String {
         crate::code_tools::list_repos_json(&self.asd_repos)
     }
 
     #[tool(
-        description = "Cross-repo service edges across all ASD-registered repos: a client \
-        call in one repo matched to a route served by another, joined on contract hash. \
-        Reads the shared ASD repo registry; index each repo first so its contracts are \
-        current. The federated (Team) view over the hub's registered repos."
+        description = "Map cross-repo service edges across every ASD-registered repo: a client \
+        call in one repo matched to the route that serves it in another. CALL THIS WHEN you need \
+        the federated (Team-wide) view of how the registered services actually call each other — \
+        before a cross-service change, or to surface hidden inter-repo dependencies. Index each \
+        repo first so its contracts are current. For the blast radius of ONE specific endpoint use \
+        code_impact instead; this tool returns ALL edges."
     )]
     async fn code_cross_repo_edges(&self, _params: Parameters<CrossRepoEdgesParams>) -> String {
         run_asd_json(vec!["repo".into(), "edges".into(), "--agent".into()]).await
@@ -3093,10 +3097,13 @@ impl CtxOneServer {
     }
 
     #[tool(
-        description = "Search code symbols by concept or keyword across name, signature, \
-        doc comment, file path, and ledger summaries. Returns ranked results. \
-        Use this for feature archaeology when you don't yet know exact symbol names. \
-        `repo` is optional when only one repo is registered."
+        description = "Search CODE symbols by concept or keyword — ranked across symbol name, \
+        signature, doc comment, file path, and ledger summaries — in an ASD-indexed repo. \
+        CALL THIS WHEN doing feature archaeology in source code and you don't yet know exact \
+        symbol names. NOTE: this searches SOURCE CODE, distinct from `search` (literal substring \
+        over stored MEMORY values) and `recall` (budgeted memory-fact retrieval) — use those for \
+        remembered facts/decisions, use `code_search` for the codebase itself. `repo` is optional \
+        when only one repo is registered; narrow with `kind`/`language`/`limit`."
     )]
     async fn code_search(&self, params: Parameters<CodeSearchParams>) -> String {
         let p = params.0;
@@ -3121,9 +3128,12 @@ impl CtxOneServer {
     }
 
     #[tool(
-        description = "Read a symbol by qualified name. Returns { symbol, effects, ledger } — \
-        the full context needed to reason about a code unit: its signature, doc, declared effects, \
-        and all ledger decisions. `repo` is optional when only one repo is registered."
+        description = "Read one CODE symbol by fully-qualified name (qname), returning \
+        { symbol, effects, ledger } — its signature, doc, declared effects, and every ledger \
+        decision about it. CALL THIS WHEN you've located a symbol (via code_search, callers_of, \
+        or callees_of) and need full context to reason about or safely change it. This reads \
+        SOURCE CODE, not memory — to fetch a value at a memory path use `get`. `repo` is optional \
+        when only one repo is registered."
     )]
     async fn code_read(&self, params: Parameters<CodeReadParams>) -> String {
         let p = params.0;
@@ -3139,8 +3149,11 @@ impl CtxOneServer {
     }
 
     #[tool(
-        description = "List symbols that call the given symbol (inbound call edges). \
-        `repo` is optional when only one repo is registered."
+        description = "List the symbols that call the given symbol (inbound call edges) in an \
+        ASD-indexed repo. CALL THIS WHEN you're about to change or remove a symbol and need to \
+        know who depends on it — the blast radius inside one repo. Pair with callees_of (what this \
+        symbol calls); for cross-repo consumers use code_impact. `repo` is optional when only one \
+        repo is registered."
     )]
     async fn callers_of(&self, params: Parameters<CallersOfParams>) -> String {
         let p = params.0;
@@ -3156,8 +3169,10 @@ impl CtxOneServer {
     }
 
     #[tool(
-        description = "List symbols called by the given symbol (outbound call edges). \
-        `repo` is optional when only one repo is registered."
+        description = "List the symbols the given symbol calls (outbound call edges) in an \
+        ASD-indexed repo. CALL THIS WHEN tracing how a function is implemented or what it depends \
+        on downstream. The inverse of callers_of. `repo` is optional when only one repo is \
+        registered."
     )]
     async fn callees_of(&self, params: Parameters<CalleesOfParams>) -> String {
         let p = params.0;
