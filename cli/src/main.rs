@@ -314,7 +314,11 @@ enum ConfigAction {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Install CTXone's agent Skill (SKILL.md) into detected agent skill dirs.
+    /// Install CTXone's agent Skill (SKILL.md) into every detected agent skill
+    /// dir so tools like Claude Code auto-load CTX usage guidance. Run once per
+    /// machine (or `--project` to scope to this repo). `--status` reports what's
+    /// installed, `--remove` uninstalls, `--dry-run` previews, `--emit-spec`
+    /// prints the SkillSpec JSON for the combined suite.
     Skill {
         /// Install project-scoped (into the repo) instead of user-wide.
         #[arg(long)]
@@ -341,9 +345,12 @@ enum Commands {
     },
     /// Print a paste-into-your-agent block that installs + primes CTX (+ ASD).
     Bootstrap,
-    /// Store a fact in agent memory
+    /// Store a durable fact in agent memory so it survives across sessions and
+    /// is retrievable via `recall`/`search`. Call this the moment you learn a
+    /// decision, convention, gotcha, or preference worth not re-deriving later.
     Remember {
-        /// The fact to remember
+        /// The fact to remember. Pass "-" (or pipe with no value) to read the
+        /// fact from stdin — handy for multi-line facts or `cmd | ctx remember -`.
         fact: String,
         /// Importance: high, medium, low
         #[arg(short, long, default_value = "medium")]
@@ -355,7 +362,10 @@ enum Commands {
         #[arg(short, long)]
         tags: Option<Vec<String>>,
     },
-    /// Retrieve relevant memories for a topic
+    /// Retrieve the most relevant memories for a topic within a token budget —
+    /// LLM-oriented (ranked + budgeted, pinned context always included). Call
+    /// this at the start of a task instead of re-reading docs/files. For an
+    /// exhaustive literal-substring scan with no budget, use `search` instead.
     Recall {
         /// Topic to recall
         topic: String,
@@ -375,16 +385,25 @@ enum Commands {
         #[arg(default_value = "-")]
         text: String,
     },
-    /// Load full context for a project
+    /// Load the full stored context for a named project (everything under that
+    /// project's context path), unranked and unbudgeted. Use when you want the
+    /// whole picture for a project rather than a topic-ranked slice — for a
+    /// budgeted, topic-scoped view use `recall`.
     Context {
-        /// Project name
+        /// Project context key (the tag facts were stored under, not the
+        /// namespace resolved by `ctx project`).
         project: String,
     },
     /// Show Hub status and connection info
     Status,
-    /// Show token savings statistics
+    /// Show cumulative token-savings statistics for this session (tokens used
+    /// vs. saved, ratio). For live per-session Claude Code transcript analysis
+    /// use `session metrics`; for hub/connection health use `status`.
     Stats,
-    /// Start the CtxOne Hub server
+    /// Start the CtxOne Hub server in the foreground. Good for dev/one-off runs;
+    /// for an always-on daemon that owns the db across reboots use
+    /// `ctx service install`. `--http` also serves the REST/MCP API; add
+    /// `--lens` for the web UI (requires --http).
     Serve {
         /// Port to listen on
         #[arg(short, long, default_value_t = 3001)]
@@ -695,11 +714,13 @@ enum Commands {
         #[command(subcommand)]
         action: TaintAction,
     },
-    /// Database admin: snapshot the live db (`backup`) or restore from
-    /// a snapshot (`restore`). Backups are written via SQLite VACUUM
-    /// INTO so they're consistent against a running hub. Restore
-    /// REQUIRES the hub to be stopped — it operates on the file
-    /// system directly.
+    /// Database admin. Two axes:
+    ///   • Whole-db files: `backup` (live VACUUM INTO snapshot, safe against a
+    ///     running hub) and `restore` (file-level swap; hub MUST be stopped).
+    ///   • Portable content: `export` a branch to JSON and `import` it back —
+    ///     to prune, share, or seed a fresh db (branch/namespace aware).
+    /// Use backup/restore for disaster recovery; export/import to move or trim
+    /// graph content.
     Db {
         #[command(subcommand)]
         action: DbAction,
@@ -842,6 +863,7 @@ enum TaintAction {
     /// Check whether a write would be allowed at a path for an agent
     /// at a given confidence. Read-only — does not modify state.
     Check {
+        /// Graph path to test a hypothetical write against.
         path: String,
         /// Agent attempting the write (defaults to session agent).
         #[arg(long = "as")]
@@ -852,6 +874,7 @@ enum TaintAction {
     },
     /// Apply a taint to a path.
     Apply {
+        /// Graph path to taint (prefix-matched by later write checks).
         path: String,
         /// Human-readable name for this taint.
         #[arg(long)]
@@ -876,6 +899,7 @@ enum TaintAction {
     },
     /// Remove (resolve) a taint by id. Use `ctx taint list` to find ids.
     Remove {
+        /// Taint id to resolve. Find it via `ctx taint list`.
         taint_id: String,
         /// Why the taint is being resolved (recorded for audit).
         #[arg(long, short)]
@@ -917,7 +941,12 @@ enum DbAction {
         #[arg(long)]
         out: Option<String>,
     },
-    /// Import a JSON snapshot (from `db export`) onto the current branch.
+    /// Import a JSON snapshot (from `db export`) onto the current branch,
+    /// writing each path into the graph. This MERGES (upserts): paths in the
+    /// snapshot overwrite, paths already present but not in the snapshot are
+    /// left untouched (internal `/_meta/*` is skipped). Target scope with
+    /// `ctx --branch <b>` / `--namespace <n>`. Pair with `db export` → prune
+    /// the JSON → import into a fresh db to keep only what you want.
     Import {
         /// Path to the snapshot JSON file.
         file: String,
@@ -1018,10 +1047,15 @@ enum PlanAction {
         #[arg(long)]
         force: bool,
     },
-    /// Mark a task in-progress
+    /// Mark a task in-progress before you begin work, so `plan next` skips it
+    /// and `plan stale` can track it. Warns (non-blocking) if another task in
+    /// the plan is already in-progress.
     Start {
+        /// Plan the task belongs to.
         plan_id: String,
+        /// Task id to start (e.g. t-003).
         task_id: String,
+        /// Optional note recorded in blame (e.g. why you picked this now).
         #[arg(long)]
         reason: Option<String>,
     },
