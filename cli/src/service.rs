@@ -373,6 +373,340 @@ fn set_owner_only(path: &std::path::Path) {
 #[cfg(not(unix))]
 fn set_owner_only(_path: &std::path::Path) {}
 
+// ---------------------------------------------------------------------------
+// Reminder-tick timer — a *periodic* companion to the hub daemon that runs
+// `ctx reminder tick` on an interval (execute due, approved, allowlisted
+// reminders). Unlike the hub service this is a repeating one-shot, not a
+// long-running daemon: launchd `StartInterval`, a systemd `.timer` + oneshot
+// `.service`, or a Task Scheduler repetition trigger.
+// ---------------------------------------------------------------------------
+
+/// launchd label / Windows task name stem for the tick timer.
+pub const TICK_LABEL: &str = "com.ctxone.reminder-tick";
+/// systemd oneshot service unit name.
+pub const TICK_SYSTEMD_SERVICE: &str = "ctxone-reminder-tick.service";
+/// systemd timer unit name.
+pub const TICK_SYSTEMD_TIMER: &str = "ctxone-reminder-tick.timer";
+/// Windows Task Scheduler task name.
+pub const TICK_WINDOWS_TASK: &str = "CtxOneReminderTick";
+
+/// Everything needed to render the tick timer unit(s).
+pub struct TickSpec {
+    pub ctx_bin: String,
+    pub interval_secs: u64,
+    pub allowlist: Option<String>,
+    pub skip: Vec<String>,
+    pub server: Option<String>,
+    pub log_path: String,
+}
+
+impl TickSpec {
+    /// The `ctx` argv the timer runs (without the binary itself).
+    pub fn program_args(&self) -> Vec<String> {
+        let mut a = Vec::new();
+        if let Some(s) = &self.server {
+            a.push("--server".to_string());
+            a.push(s.clone());
+        }
+        a.push("reminder".to_string());
+        a.push("tick".to_string());
+        if let Some(al) = &self.allowlist {
+            a.push("--allowlist".to_string());
+            a.push(al.clone());
+        }
+        for s in &self.skip {
+            a.push("--skip".to_string());
+            a.push(s.clone());
+        }
+        a
+    }
+
+    /// macOS launchd plist — periodic via `StartInterval`, no `KeepAlive`.
+    pub fn macos_plist(&self) -> String {
+        let mut prog = format!(
+            "    <key>ProgramArguments</key>\n    <array>\n      <string>{}</string>\n",
+            xml_escape(&self.ctx_bin)
+        );
+        for a in self.program_args() {
+            prog.push_str(&format!("      <string>{}</string>\n", xml_escape(&a)));
+        }
+        prog.push_str("    </array>\n");
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+             \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+             <plist version=\"1.0\">\n\
+             <dict>\n\
+             \x20   <key>Label</key>\n    <string>{label}</string>\n\
+             {prog}\
+             \x20   <key>StartInterval</key>\n    <integer>{interval}</integer>\n\
+             \x20   <key>RunAtLoad</key>\n    <true/>\n\
+             \x20   <key>StandardOutPath</key>\n    <string>{log}</string>\n\
+             \x20   <key>StandardErrorPath</key>\n    <string>{log}</string>\n\
+             </dict>\n\
+             </plist>\n",
+            label = xml_escape(TICK_LABEL),
+            prog = prog,
+            interval = self.interval_secs,
+            log = xml_escape(&self.log_path),
+        )
+    }
+
+    /// systemd oneshot service that runs one tick.
+    pub fn linux_service(&self) -> String {
+        let exec = std::iter::once(self.ctx_bin.clone())
+            .chain(self.program_args())
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!(
+            "[Unit]\n\
+             Description=CtxOne reminder tick (run due, approved, allowlisted reminders)\n\
+             \n\
+             [Service]\n\
+             Type=oneshot\n\
+             ExecStart={exec}\n",
+        )
+    }
+
+    /// systemd timer that fires the oneshot service on an interval.
+    pub fn linux_timer(&self) -> String {
+        format!(
+            "[Unit]\n\
+             Description=Schedule the CtxOne reminder tick\n\
+             \n\
+             [Timer]\n\
+             OnBootSec={interval}s\n\
+             OnUnitActiveSec={interval}s\n\
+             Unit={svc}\n\
+             \n\
+             [Install]\n\
+             WantedBy=timers.target\n",
+            interval = self.interval_secs,
+            svc = TICK_SYSTEMD_SERVICE,
+        )
+    }
+
+    /// Windows Task Scheduler XML — a time trigger repeating on an interval.
+    pub fn windows_task_xml(&self) -> String {
+        let args = self
+            .program_args()
+            .iter()
+            .map(|a| if a.contains(' ') { format!("\"{a}\"") } else { a.clone() })
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n\
+             <Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n\
+             \x20 <RegistrationInfo>\n    <Description>CtxOne reminder tick</Description>\n  </RegistrationInfo>\n\
+             \x20 <Triggers>\n    <TimeTrigger>\n      <StartBoundary>2020-01-01T00:00:00</StartBoundary>\n      <Enabled>true</Enabled>\n      <Repetition>\n        <Interval>{iso}</Interval>\n      </Repetition>\n    </TimeTrigger>\n  </Triggers>\n\
+             \x20 <Principals>\n    <Principal id=\"Author\">\n      <LogonType>InteractiveToken</LogonType>\n      <RunLevel>LeastPrivilege</RunLevel>\n    </Principal>\n  </Principals>\n\
+             \x20 <Settings>\n    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\n    <StartWhenAvailable>true</StartWhenAvailable>\n    <ExecutionTimeLimit>PT1H</ExecutionTimeLimit>\n  </Settings>\n\
+             \x20 <Actions Context=\"Author\">\n    <Exec>\n      <Command>{cmd}</Command>\n      <Arguments>{args}</Arguments>\n    </Exec>\n  </Actions>\n\
+             </Task>\n",
+            iso = iso8601_interval(self.interval_secs),
+            cmd = xml_escape(&self.ctx_bin),
+            args = xml_escape(&args),
+        )
+    }
+}
+
+/// ISO-8601 duration for a whole-unit interval (hours/minutes/seconds).
+fn iso8601_interval(secs: u64) -> String {
+    if secs != 0 && secs % 3600 == 0 {
+        format!("PT{}H", secs / 3600)
+    } else if secs != 0 && secs % 60 == 0 {
+        format!("PT{}M", secs / 60)
+    } else {
+        format!("PT{secs}S")
+    }
+}
+
+/// Default log path for the tick (`~/.ctxone/reminder-tick.log`).
+pub fn tick_log_path() -> String {
+    dirs::home_dir()
+        .map(|h| h.join(".ctxone/reminder-tick.log"))
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "/tmp/ctxone-reminder-tick.log".to_string())
+}
+
+/// Unit file(s) to write for the tick timer, `(path, content)`. Linux needs
+/// two (timer + oneshot service); the others need one.
+fn tick_files(spec: &TickSpec) -> Result<Vec<(PathBuf, String)>, Box<dyn std::error::Error>> {
+    if cfg!(target_os = "macos") {
+        let p = dirs::home_dir()
+            .ok_or("no home dir")?
+            .join("Library/LaunchAgents")
+            .join(format!("{TICK_LABEL}.plist"));
+        Ok(vec![(p, spec.macos_plist())])
+    } else if cfg!(target_os = "linux") {
+        let dir = dirs::config_dir().ok_or("no config dir")?.join("systemd/user");
+        Ok(vec![
+            (dir.join(TICK_SYSTEMD_SERVICE), spec.linux_service()),
+            (dir.join(TICK_SYSTEMD_TIMER), spec.linux_timer()),
+        ])
+    } else if cfg!(target_os = "windows") {
+        let p = dirs::data_dir()
+            .ok_or("no data dir")?
+            .join("ctxone")
+            .join("reminder-tick-task.xml");
+        Ok(vec![(p, spec.windows_task_xml())])
+    } else {
+        Err("`ctx service tick` supports macOS, Linux, and Windows.".into())
+    }
+}
+
+fn tick_register_commands(files: &[(PathBuf, String)]) -> Vec<(String, Vec<String>)> {
+    if cfg!(target_os = "macos") {
+        let p = files[0].0.to_string_lossy().into_owned();
+        vec![
+            ("launchctl".into(), vec!["unload".into(), p.clone()]),
+            ("launchctl".into(), vec!["load".into(), "-w".into(), p]),
+        ]
+    } else if cfg!(target_os = "windows") {
+        let p = files[0].0.to_string_lossy().into_owned();
+        vec![(
+            "schtasks".into(),
+            vec!["/create".into(), "/tn".into(), TICK_WINDOWS_TASK.into(), "/xml".into(), p, "/f".into()],
+        )]
+    } else {
+        vec![
+            ("systemctl".into(), vec!["--user".into(), "daemon-reload".into()]),
+            (
+                "systemctl".into(),
+                vec!["--user".into(), "enable".into(), "--now".into(), TICK_SYSTEMD_TIMER.into()],
+            ),
+        ]
+    }
+}
+
+fn tick_deregister_commands() -> Vec<(String, Vec<String>)> {
+    if cfg!(target_os = "macos") {
+        let p = dirs::home_dir()
+            .map(|h| h.join("Library/LaunchAgents").join(format!("{TICK_LABEL}.plist")))
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        vec![("launchctl".into(), vec!["unload".into(), p])]
+    } else if cfg!(target_os = "windows") {
+        vec![(
+            "schtasks".into(),
+            vec!["/delete".into(), "/tn".into(), TICK_WINDOWS_TASK.into(), "/f".into()],
+        )]
+    } else {
+        vec![(
+            "systemctl".into(),
+            vec!["--user".into(), "disable".into(), "--now".into(), TICK_SYSTEMD_TIMER.into()],
+        )]
+    }
+}
+
+/// Install the tick timer. With `dry_run`, print unit(s) + commands only.
+pub fn tick_install(spec: &TickSpec, dry_run: bool, force: bool) -> CmdResult {
+    let files = tick_files(spec)?;
+    let cmds = tick_register_commands(&files);
+
+    if dry_run {
+        for (p, c) in &files {
+            println!("[dry-run] would write {}\n\n{c}", p.display());
+        }
+        println!("[dry-run] would then run:");
+        for (bin, args) in &cmds {
+            println!("    {bin} {}", args.join(" "));
+        }
+        return Ok(());
+    }
+
+    for (p, _) in &files {
+        if p.exists() && !force {
+            return Err(format!(
+                "{} already exists — pass --force (or `ctx service tick uninstall` first)",
+                p.display()
+            )
+            .into());
+        }
+    }
+    if let Some(log_parent) = std::path::Path::new(&spec.log_path).parent() {
+        let _ = std::fs::create_dir_all(log_parent);
+    }
+    for (p, c) in &files {
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(p, c)?;
+        println!("\u{2192} wrote {}", p.display());
+    }
+    for (bin, args) in &cmds {
+        run(bin, args)?;
+    }
+    println!("\u{2713} reminder-tick timer installed ({TICK_LABEL}).");
+    println!(
+        "  runs `ctx reminder tick` every {}s; logs: {}",
+        spec.interval_secs, spec.log_path
+    );
+    println!("  approve commands in the allowlist before anything runs (fail-closed).");
+    Ok(())
+}
+
+/// Deregister and remove the tick timer unit(s).
+pub fn tick_uninstall(dry_run: bool) -> CmdResult {
+    // Reconstruct the file list from paths (content irrelevant for removal).
+    let dummy = TickSpec {
+        ctx_bin: String::new(),
+        interval_secs: 0,
+        allowlist: None,
+        skip: vec![],
+        server: None,
+        log_path: String::new(),
+    };
+    let files = tick_files(&dummy)?;
+    let cmds = tick_deregister_commands();
+    if dry_run {
+        println!("[dry-run] would run:");
+        for (bin, args) in &cmds {
+            println!("    {bin} {}", args.join(" "));
+        }
+        for (p, _) in &files {
+            println!("[dry-run] would remove {}", p.display());
+        }
+        return Ok(());
+    }
+    for (bin, args) in &cmds {
+        let _ = run(bin, args); // best-effort
+    }
+    for (p, _) in &files {
+        if p.exists() {
+            std::fs::remove_file(&p)?;
+            println!("\u{2713} removed {}", p.display());
+        }
+    }
+    Ok(())
+}
+
+/// Show tick-timer registration status.
+pub fn tick_status() -> CmdResult {
+    let (bin, args) = if cfg!(target_os = "macos") {
+        ("launchctl".to_string(), vec!["list".to_string(), TICK_LABEL.to_string()])
+    } else if cfg!(target_os = "windows") {
+        ("schtasks".to_string(), vec!["/query".into(), "/tn".into(), TICK_WINDOWS_TASK.into()])
+    } else {
+        ("systemctl".to_string(), vec!["--user".into(), "status".into(), TICK_SYSTEMD_TIMER.into()])
+    };
+    println!("$ {bin} {}", args.join(" "));
+    let _ = std::process::Command::new(&bin).args(&args).status();
+    if let Ok(files) = tick_files(&TickSpec {
+        ctx_bin: String::new(),
+        interval_secs: 0,
+        allowlist: None,
+        skip: vec![],
+        server: None,
+        log_path: String::new(),
+    }) {
+        for (p, _) in &files {
+            println!("unit file: {} ({})", p.display(), if p.exists() { "present" } else { "absent" });
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,5 +801,69 @@ mod tests {
         // Env vars aren't expressible in this schema; the token must not leak in.
         let x = spec(Some("s3cret"), true).windows_task_xml();
         assert!(!x.contains("s3cret"));
+    }
+
+    fn tick_spec() -> TickSpec {
+        TickSpec {
+            ctx_bin: "/usr/local/bin/ctx".into(),
+            interval_secs: 3600,
+            allowlist: Some("/home/user/.ctxone/reminder-tick.allow".into()),
+            skip: vec!["abc".into()],
+            server: None,
+            log_path: "/home/user/.ctxone/reminder-tick.log".into(),
+        }
+    }
+
+    #[test]
+    fn tick_program_args_shape() {
+        assert_eq!(
+            tick_spec().program_args(),
+            vec![
+                "reminder",
+                "tick",
+                "--allowlist",
+                "/home/user/.ctxone/reminder-tick.allow",
+                "--skip",
+                "abc"
+            ]
+        );
+    }
+
+    #[test]
+    fn tick_macos_plist_is_periodic_not_kept_alive() {
+        let p = tick_spec().macos_plist();
+        assert!(p.contains("<string>com.ctxone.reminder-tick</string>"));
+        assert!(p.contains("<key>StartInterval</key>"));
+        assert!(p.contains("<integer>3600</integer>"));
+        assert!(p.contains("<string>reminder</string>"));
+        assert!(p.contains("<string>tick</string>"));
+        assert!(!p.contains("KeepAlive")); // periodic one-shot, not a daemon
+    }
+
+    #[test]
+    fn tick_linux_timer_and_oneshot_service() {
+        let s = tick_spec();
+        let svc = s.linux_service();
+        assert!(svc.contains("Type=oneshot"));
+        assert!(svc.contains("ExecStart=/usr/local/bin/ctx reminder tick"));
+        let timer = s.linux_timer();
+        assert!(timer.contains("OnUnitActiveSec=3600s"));
+        assert!(timer.contains("Unit=ctxone-reminder-tick.service"));
+        assert!(timer.contains("WantedBy=timers.target"));
+    }
+
+    #[test]
+    fn tick_windows_has_repetition_interval() {
+        let x = tick_spec().windows_task_xml();
+        assert!(x.contains("<Interval>PT1H</Interval>"));
+        assert!(x.contains("<Command>/usr/local/bin/ctx</Command>"));
+        assert!(x.contains("reminder tick"));
+    }
+
+    #[test]
+    fn iso8601_interval_units() {
+        assert_eq!(iso8601_interval(3600), "PT1H");
+        assert_eq!(iso8601_interval(900), "PT15M");
+        assert_eq!(iso8601_interval(90), "PT90S");
     }
 }

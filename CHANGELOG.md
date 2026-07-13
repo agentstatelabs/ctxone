@@ -53,7 +53,10 @@ Lens web UI.
 - `ctx reminder tick` — executor for due reminders: runs a reminder only if it
   is approved (status `due`, not `awaiting_permission`) **and** every one of its
   commands is on an exact-match allowlist (`~/.ctxone/reminder-tick.allow`),
-  records the outcome, and snoozes anything unapproved. Meant to run on a timer.
+  records the outcome, and snoozes anything unapproved.
+- `ctx service tick install/uninstall/status` — install the tick on a periodic
+  timer (launchd `StartInterval`, a systemd `.timer` + oneshot `.service`, or a
+  Task Scheduler repetition trigger). `--interval`, `--allowlist`, `--skip`.
 - New MCP tools `plan_link`, `plan_stale`, `docs_find`.
 
 ### Added — Lens

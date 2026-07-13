@@ -786,6 +786,41 @@ enum ServiceAction {
     },
     /// Show the service's registration status.
     Status,
+    /// Manage the periodic reminder-tick timer (runs `ctx reminder tick`).
+    Tick {
+        #[command(subcommand)]
+        action: TickAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TickAction {
+    /// Install the periodic timer that runs `ctx reminder tick`.
+    Install {
+        /// Seconds between ticks (default hourly).
+        #[arg(long, default_value_t = 3600)]
+        interval: u64,
+        /// Allowlist path passed through to `ctx reminder tick`.
+        #[arg(long, default_value = "~/.ctxone/reminder-tick.allow")]
+        allowlist: String,
+        /// Reminder id to skip (repeatable) — e.g. one with a dedicated runner.
+        #[arg(long = "skip")]
+        skip: Vec<String>,
+        /// Print the unit(s) + commands without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Overwrite existing unit file(s).
+        #[arg(long)]
+        force: bool,
+    },
+    /// Stop and remove the tick timer.
+    Uninstall {
+        /// Print the commands without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Show tick-timer registration status.
+    Status,
 }
 
 #[derive(Subcommand, Debug)]
@@ -2792,7 +2827,37 @@ fn handle_service(action: ServiceAction) -> Result<(), Box<dyn std::error::Error
         }
         ServiceAction::Uninstall { dry_run } => service::uninstall(dry_run),
         ServiceAction::Status => service::status(),
+        ServiceAction::Tick { action } => match action {
+            TickAction::Install {
+                interval,
+                allowlist,
+                skip,
+                dry_run,
+                force,
+            } => {
+                let spec = service::TickSpec {
+                    ctx_bin: current_ctx_bin(),
+                    interval_secs: interval,
+                    allowlist: Some(allowlist),
+                    skip,
+                    server: None,
+                    log_path: service::tick_log_path(),
+                };
+                service::tick_install(&spec, dry_run, force)
+            }
+            TickAction::Uninstall { dry_run } => service::tick_uninstall(dry_run),
+            TickAction::Status => service::tick_status(),
+        },
     }
+}
+
+/// Absolute path to the currently-running `ctx` binary, for baking into a
+/// service unit. Falls back to the bare name if it can't be resolved.
+fn current_ctx_bin() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.to_str().map(str::to_string))
+        .unwrap_or_else(|| "ctx".to_string())
 }
 
 // -- Project command implementation --
