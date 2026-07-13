@@ -465,6 +465,118 @@ pub fn in_progress_tasks(store: &TaskStore, ref_name: &str, plan: &str) -> Vec<s
         .collect()
 }
 
+// -- Cross-plan links (shared by the HTTP `/link` route and the MCP tool) --
+
+/// Graph path holding a task's cross-plan "satisfies" links.
+pub fn plan_link_path(plan: &str, task: &str) -> String {
+    format!("/plan_links/{plan}/{task}")
+}
+
+/// Read the `plan/task` targets a task satisfies (empty if none/unset).
+pub fn read_satisfies(repo: &Repository, ref_name: &str, plan: &str, task: &str) -> Vec<String> {
+    repo.get_json(ref_name, &plan_link_path(plan, task))
+        .ok()
+        .and_then(|v| {
+            v.get("satisfies").and_then(|s| s.as_array()).map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// Record that `plan/task`, when done, satisfies `target` (a `plan/task` in
+/// another plan). Idempotent; returns the full satisfies list.
+pub fn add_satisfies(
+    repo: &Repository,
+    ref_name: &str,
+    agent_id: &str,
+    plan: &str,
+    task: &str,
+    target: &str,
+) -> Result<Vec<String>, String> {
+    let mut links = read_satisfies(repo, ref_name, plan, task);
+    if !links.iter().any(|l| l == target) {
+        links.push(target.to_string());
+    }
+    let opts = CommitOptions::new(
+        agent_id,
+        IntentCategory::Custom("Link".to_string()),
+        format!("{plan}/{task} satisfies {target}"),
+    );
+    repo.set_json(
+        ref_name,
+        &plan_link_path(plan, task),
+        &serde_json::json!({ "satisfies": links }),
+        opts,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(links)
+}
+
+/// In-progress tasks in active plans whose `started_at` (fallback `created_at`)
+/// is older than `days` — the stale-drift surface, most-stale first. Shared by
+/// the HTTP `/plans/stale` route and the MCP tool.
+pub fn stale_in_progress(
+    store: &TaskStore,
+    ref_name: &str,
+    days: i64,
+) -> Vec<serde_json::Value> {
+    let now = chrono::Utc::now();
+    let cutoff = now - chrono::Duration::days(days.max(0));
+    let mut out = Vec::new();
+    let plans = store
+        .list_plans_by_status(ref_name, Some(PlanStatus::Active))
+        .unwrap_or_default();
+    for plan in plans {
+        for t in store.list_tasks(ref_name, &plan.name).unwrap_or_default() {
+            if t.status != TaskStatus::InProgress {
+                continue;
+            }
+            let since = t.started_at.unwrap_or(t.created_at);
+            if since < cutoff {
+                out.push(serde_json::json!({
+                    "plan": plan.name,
+                    "id": t.id.as_str(),
+                    "title": t.title,
+                    "started_at": since.to_rfc3339(),
+                    "age_days": (now - since).num_days(),
+                }));
+            }
+        }
+    }
+    out.sort_by(|a, b| {
+        b["age_days"]
+            .as_i64()
+            .unwrap_or(0)
+            .cmp(&a["age_days"].as_i64().unwrap_or(0))
+    });
+    out
+}
+
+/// Read every registered doc entry (reassembled from its tree leaves under
+/// `/docs/<slug>`). Shared by the HTTP `/docs` route and the MCP tool.
+pub fn list_registered_docs(repo: &Repository, ref_name: &str) -> Vec<serde_json::Value> {
+    let leaves = repo.list_paths(ref_name, "/docs", None).unwrap_or_default();
+    let mut slugs = std::collections::BTreeSet::new();
+    for p in leaves {
+        if let Some(rest) = p.strip_prefix("/docs/")
+            && let Some(slug) = rest.split('/').next()
+            && !slug.is_empty()
+        {
+            slugs.insert(slug.to_string());
+        }
+    }
+    let mut out = Vec::new();
+    for slug in slugs {
+        if let Ok(v) = repo.get_json(ref_name, &format!("/docs/{slug}")) {
+            out.push(v);
+        }
+    }
+    out
+}
+
 /// `task_to_json` plus an optional non-blocking `warning` field.
 pub fn task_to_json_with_warning(task: &Task, warning: Option<String>) -> serde_json::Value {
     let mut v = task_to_json(task);
@@ -528,6 +640,41 @@ pub struct PlanNewParams {
     /// Optional one or two sentence description.
     pub description: Option<String>,
     /// Branch to write to (default: "main").
+    #[serde(default = "default_ref", rename = "ref")]
+    pub ref_name: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct PlanLinkParams {
+    /// Plan holding the task that does the satisfying.
+    pub plan_id: String,
+    /// Task id in that plan (e.g. "t-003").
+    pub task_id: String,
+    /// Target this task satisfies, as "plan/task" (e.g. "other-plan/t-002").
+    pub target: String,
+    #[serde(default = "default_ref", rename = "ref")]
+    pub ref_name: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct PlanStaleParams {
+    /// Consider an in-progress task stale after this many days. Default: 7.
+    #[serde(default = "default_stale_days")]
+    pub days: i64,
+    #[serde(default = "default_ref", rename = "ref")]
+    pub ref_name: String,
+}
+
+fn default_stale_days() -> i64 {
+    7
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct DocsFindParams {
+    /// Substring to match against a registered doc's path/scope/answers/owner.
+    /// Omit or pass "" to list all registered docs.
+    #[serde(default)]
+    pub query: String,
     #[serde(default = "default_ref", rename = "ref")]
     pub ref_name: String,
 }

@@ -1867,7 +1867,7 @@ impl CtxOneServer {
     #[tool(
         description = "Import a markdown doc into memory (aka `prime`; the `ctx import-doc` CLI alias). Registers a doc's sections as memories so you can `recall` it later WITHOUT re-reading the file. Pinned sections are always included in every `recall` response — use pinning for critical, always-relevant context like licensing rules, architectural decisions, or coding conventions. Primed (non-pinned) sections are searchable like normal facts. \
         \
-        CALL THIS WHEN the user points you at a README, an ARCHITECTURE doc, a style guide, or any substantial markdown file whose contents should influence future decisions — this is the intended 'register a doc as memory' flow, so you do NOT need to invent your own scheme for storing docs. Best practice: keep the file canonical in the repo and import its key sections/rationale here (don't paste an entire large doc verbatim if it changes often — it will drift). Sections are pre-parsed — each entry has a title (the H1/H2 heading) and body. Reuse the same `source` name when re-importing updated content; sections are keyed by source+slug so updates are idempotent."
+        CALL THIS WHEN the user points you at a README, an ARCHITECTURE doc, a style guide, or any substantial markdown file whose contents should influence future decisions — this is the intended 'register a doc as memory' flow, so you do NOT need to invent your own scheme for storing docs. Best practice: keep the file canonical in the repo and import its key sections/rationale here (don't paste an entire large doc verbatim if it changes often — it will drift). Sections are pre-parsed — each entry has a title (the H1/H2 heading) and body. Reuse the same `source` name when re-importing updated content; sections are keyed by source+slug so updates are idempotent. NOTE: `prime` imports a doc's CONTENT into recall; to register a POINTER to a canonical doc (path/status/scope) or find where a topic is documented, use `docs_find` instead."
     )]
     async fn prime(&self, params: Parameters<PrimeParams>) -> String {
         let p = params.0;
@@ -2273,6 +2273,75 @@ impl CtxOneServer {
             .unwrap_or_default();
         serde_json::to_string(&pt::plan_to_json(&plan, &tasks, true))
             .unwrap_or_else(|_| "{}".into())
+    }
+
+    #[tool(
+        description = "Record that a task, when done, satisfies a task in ANOTHER plan — a \
+        cross-plan dependency pointer (the substrate's `blocked_by` is within-plan only). \
+        \
+        CALL THIS WHEN work in one plan closes out a task tracked in another (e.g. a routing plan's \
+        task satisfies a foundation plan's t-002). Advisory: it does not auto-close the target; \
+        completing this task surfaces a reminder to close it too. `target` is \"plan/task\"."
+    )]
+    async fn plan_link(&self, params: Parameters<crate::plan_tools::PlanLinkParams>) -> String {
+        use crate::plan_tools as pt;
+        let p = params.0;
+        if !p.target.contains('/') {
+            return serde_json::json!({ "error": "target must be 'plan/task' (e.g. other-plan/t-002)" }).to_string();
+        }
+        match pt::add_satisfies(&self.repo, &p.ref_name, &self.agent_id, &p.plan_id, &p.task_id, &p.target) {
+            Ok(links) => {
+                self.session.mark_dirty();
+                serde_json::json!({ "plan": p.plan_id, "task": p.task_id, "satisfies": links }).to_string()
+            }
+            Err(e) => serde_json::json!({ "error": e }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "List in-progress tasks that have gone stale — no progress in N days (default 7) — \
+        across active plans, most-stale first. \
+        \
+        CALL THIS WHEN resuming work or auditing state to catch tasks left silently in-progress (the \
+        drift `plan_start`'s warning guards against). Complements `plan_next` (which only returns the \
+        next PENDING task and never shows what's in progress)."
+    )]
+    async fn plan_stale(&self, params: Parameters<crate::plan_tools::PlanStaleParams>) -> String {
+        use crate::plan_tools as pt;
+        let p = params.0;
+        let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        serde_json::to_string(&pt::stale_in_progress(&store, &p.ref_name, p.days))
+            .unwrap_or_else(|_| "[]".into())
+    }
+
+    #[tool(
+        description = "Find registered canonical docs whose path/scope/answers/owner match a query \
+        (omit `query` to list all). Returns each doc's path, status, scope, and what it answers. \
+        \
+        CALL THIS WHEN you need to know where a topic is documented BEFORE reading files or writing a \
+        new doc — the doc registry is the index of canonical `.md` docs. Distinct from `prime`, which \
+        imports a doc's CONTENT into recall; this returns a POINTER to the canonical file."
+    )]
+    async fn docs_find(&self, params: Parameters<crate::plan_tools::DocsFindParams>) -> String {
+        use crate::plan_tools as pt;
+        let p = params.0;
+        let all = pt::list_registered_docs(&self.repo, &p.ref_name);
+        let q = p.query.to_lowercase();
+        let matched: Vec<_> = if q.is_empty() {
+            all
+        } else {
+            all.into_iter()
+                .filter(|d| {
+                    ["path", "scope", "answers", "owner"].iter().any(|k| {
+                        d[*k]
+                            .as_str()
+                            .map(|s| s.to_lowercase().contains(&q))
+                            .unwrap_or(false)
+                    })
+                })
+                .collect()
+        };
+        serde_json::to_string(&matched).unwrap_or_else(|_| "[]".into())
     }
 
     #[tool(
