@@ -1,14 +1,16 @@
 # MCP Tools Reference
 
-The CTXone Hub exposes **53 MCP tools** over the stdio transport, in
-seven groups:
+The CTXone Hub exposes **56 MCP tools** over the stdio transport, in
+eight groups:
 
 - **Memory** (8): `remember`, `recall`, `prime`, `context`,
   `summarize_session`, `what_changed_since`, `why_did_we`,
   `project_status`
-- **Plans** (12): `plan_new`, `plan_add`, `plan_start`,
+- **Plans** (14): `plan_new`, `plan_add`, `plan_start`,
   `plan_done`, `plan_abandon`, `plan_next`, `plan_list`,
-  `plan_show`, `plan_tasks`, `plan_move`, `plan_complete`, `plan_archive`
+  `plan_show`, `plan_tasks`, `plan_link`, `plan_stale`, `plan_move`,
+  `plan_complete`, `plan_archive`
+- **Docs** (1): `docs_find`
 - **Reminders** (9): `reminder_create`, `remind_me`, `reminder_list`,
   `reminder_get`, `reminder_snooze`, `reminder_approve`, `reminder_cancel`,
   `reminder_start`, `reminder_record`
@@ -540,6 +542,48 @@ superseded). For incremental progress, prefer `plan_done` per task.
 Set plan status to `archived`. Soft — task data is preserved.
 
 **Parameters:** `plan_id`, `ref?`.
+
+---
+
+### `plan_link`
+
+Record that a task, when done, **satisfies a task in another plan** — a
+cross-plan dependency pointer (the substrate's `blocked_by` is within-plan
+only). Advisory: it does not auto-close the target; completing the linked task
+surfaces a reminder to close the other one.
+
+**When to call:** work in one plan closes out a task tracked in another.
+
+**Parameters:** `plan_id`, `task_id`, `target` (as `"plan/task"`), `ref?`.
+
+---
+
+### `plan_stale`
+
+List **in-progress tasks idle for N days** (default 7) across active plans,
+most-stale first. The drift guard `plan_start`'s warning defends against.
+
+**When to call:** resuming work or auditing state to catch tasks left silently
+in-progress. Complements `plan_next`, which only returns the next *pending*
+task and never shows what's in progress.
+
+**Parameters:** `days?` (default 7), `ref?`.
+
+---
+
+## Docs
+
+### `docs_find`
+
+Find registered canonical docs whose path/scope/answers/owner match a query
+(omit `query` to list all). Returns each doc's path, status, scope, and what it
+answers — a **pointer** to the canonical `.md` file, not its content.
+
+**When to call:** before reading files or writing a new doc, to find where a
+topic is already documented. Distinct from `prime`, which imports doc *content*
+into `recall`.
+
+**Parameters:** `query?`, `ref?`.
 
 ---
 

@@ -801,6 +801,41 @@ incremental progress, prefer `ctx plan done` per task.
 
 Soft-archive. Task data preserved.
 
+### `ctx plan link <plan> <task-id> <plan/task>`
+
+Record that this task, when done, **satisfies a task in another plan** (a
+cross-plan pointer). Advisory: `plan done` on the linked task then reminds you
+to close the target. Also on `plan next --in-order` (pick the first unstarted
+task by order instead of highest priority).
+
+### `ctx plan stale [--days N]`
+
+List **in-progress tasks idle for N days** (default 7), most-stale first — the
+drift `plan start`'s warning guards against. Add `--all-namespaces` for a global
+view.
+
+---
+
+## `ctx docs` — canonical-doc registry
+
+Index your canonical `.md` docs so agents find the right one without scanning
+the repo (the repo file stays canonical; this stores the pointer).
+
+- `ctx docs add <path> [--status --scope --owner --answers --supersedes]` —
+  register/update a doc (idempotent per path).
+- `ctx docs list` — list registered docs.
+- `ctx docs find <query>` — find docs by path/scope/answers/owner.
+
+To import a doc's *content* into recall instead, use `ctx import-doc <file>`
+(alias of `ctx prime`; `--pin` to always-include).
+
+## `ctx db export` / `ctx db import`
+
+Portable JSON snapshots (vs the binary `db backup`). `ctx db export [--out FILE]`
+dumps the current branch's graph; `ctx db import FILE` merges it back (upsert).
+Prune the JSON between the two to seed a fresh db with only what you want.
+Branch/namespace scoped via the usual flags.
+
 ---
 
 ## See also
