@@ -314,8 +314,11 @@ pub struct ReminderCreateParams {
     pub due_at: String,
     /// Priority: critical | high | medium (default) | low | minimal.
     pub priority: Option<String>,
-    /// `true` (default): agent may execute without user approval.
-    /// `false`: surfaces as `awaiting_permission` until `reminder_approve` is called.
+    /// `false` (default): surfaces as `awaiting_permission` until
+    /// `reminder_approve` is called — fail-closed, since a reminder can carry
+    /// commands an executor will run.
+    /// `true`: pre-approved to execute without user approval — set this
+    /// explicitly only for reminders you intend to run unattended.
     pub autonomous: Option<bool>,
     /// Recurrence schedule. Omit for a one-shot reminder.
     pub schedule: Option<ScheduleParam>,
@@ -475,7 +478,7 @@ pub fn create_reminder(
         default_agent.to_string(),
     )
     .with_priority(priority)
-    .with_autonomous(params.autonomous.unwrap_or(true))
+    .with_autonomous(params.autonomous.unwrap_or(false))
     .with_commands(params.commands)
     .with_refs(refs)
     .with_tags(params.tags);

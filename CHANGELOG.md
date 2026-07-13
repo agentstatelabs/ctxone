@@ -62,6 +62,11 @@ Lens web UI.
 
 - Agent-discoverability polish across the CLI help, MCP tool descriptions, and
   the reference docs (`AGENTS.md` task-discipline + docs-model rules).
+- **Reminders now fail closed**: the `autonomous` flag defaults to `false`
+  (was `true`). A reminder created without an explicit `autonomous: true`
+  surfaces as `awaiting_permission` and must be `reminder_approve`d before any
+  executor acts on it — safer now that reminders can carry commands an executor
+  will run. Set `autonomous: true` explicitly for unattended reminders.
 
 ## v0.9.13 — 2026-06-08
 

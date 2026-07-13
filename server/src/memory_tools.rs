@@ -2938,7 +2938,7 @@ impl CtxOneServer {
         \
         CALL THIS WHEN the user asks you to follow up on something later, when you identify a recurring operational task (weekly review, metric check, etc.), when you want to revisit a decision after a soak period, or whenever 'I should check this again' would be useful. \
         \
-        `autonomous: true` (default) means you may act without asking. `autonomous: false` surfaces as `awaiting_permission` — use for actions the user should approve. \
+        `autonomous: false` (default) surfaces as `awaiting_permission` — the reminder needs `reminder_approve` before anything acts on it (fail-closed). Set `autonomous: true` explicitly only for reminders you intend to run unattended without further approval. \
         Recurrence: set a `schedule` with `kind: interval|daily|weekly` to re-fire after each execution. Omit for a one-shot."
     )]
     async fn reminder_create(
