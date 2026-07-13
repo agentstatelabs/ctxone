@@ -314,6 +314,30 @@ At the start of any significant work session, in order:
 4. If the work is significant: `ctx branch <type>/<name> --from main`
 5. Set `CTX_SESSION=<descriptive-name>` so the session is visible
    in Lens.
+6. `remind_me()` — surface anything due (see below).
+
+## Reminders — poll at least hourly
+
+Reminders are **pull-based**: they sit in the queue until an agent asks for
+them. So ask, regularly.
+
+- Call `remind_me()` at **session start** and at least **once per hour** of
+  active work. It returns what's currently due.
+- For a due reminder marked `autonomous`, run its `commands`, then close the
+  loop with `reminder_record(result=…, notes=[…])`. For a non-autonomous one,
+  do the work (or `reminder_snooze` with a reason) — don't silently ignore it.
+- Recording every run is the point: it's the transparency trail (visible in
+  Lens) that shows a recurring chore actually happened. Never skip the record.
+
+### Repo & registry hygiene
+
+The shared ASD repo registry (`~/.config/asd/repos.toml`) accumulates temp
+test dbs that tests never deregister. **After running the asd test suite**, or
+whenever you see stale `-tmp*` / hash-suffixed entries in `asd repo list`,
+prune the dead ones (`~/.local/bin/asd-repo-prune`, or `asd repo rm <name>`
+for each entry whose `.asd-state.db` is gone). A weekly launchd job does this
+autonomously and records against the "Prune dead asd repo registrations"
+reminder; doing it inline just keeps things tidy between runs.
 
 ## Report LLM usage back to CTXone
 
