@@ -50,6 +50,10 @@ Lens web UI.
   richer proof-parse errors with per-kind examples.
 - `ctx db export` / `ctx db import` — portable JSON branch-graph snapshots.
 - `ctx docs` registry — index canonical docs; `import-doc` alias for `prime`.
+- `ctx reminder tick` — executor for due reminders: runs a reminder only if it
+  is approved (status `due`, not `awaiting_permission`) **and** every one of its
+  commands is on an exact-match allowlist (`~/.ctxone/reminder-tick.allow`),
+  records the outcome, and snoozes anything unapproved. Meant to run on a timer.
 - New MCP tools `plan_link`, `plan_stale`, `docs_find`.
 
 ### Added — Lens

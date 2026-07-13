@@ -747,6 +747,11 @@ enum Commands {
         #[command(subcommand)]
         action: ServiceAction,
     },
+    /// Work with reminders — durable, scheduled follow-ups stored in the Hub.
+    Reminder {
+        #[command(subcommand)]
+        action: ReminderAction,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -982,6 +987,32 @@ enum DocsAction {
     List,
     /// Find registered docs whose path/scope/answers match a query.
     Find { query: String },
+}
+
+#[derive(Subcommand)]
+enum ReminderAction {
+    /// Run due, approved reminders whose commands are all allowlisted, then
+    /// record the outcome. Meant to run on a timer (see `ctx service`).
+    ///
+    /// A reminder runs only if BOTH gates pass: (1) it is approved — status
+    /// `due`, not `awaiting_permission` (approve with `reminder_approve`); and
+    /// (2) every one of its `commands` is on the allowlist (one exact command
+    /// per line, '#' comments). Otherwise nothing from it runs and it is
+    /// recorded `deferred` and snoozed. A missing allowlist means nothing runs.
+    Tick {
+        /// Allowlist file of approved commands (exact match, one per line).
+        #[arg(long, default_value = "~/.ctxone/reminder-tick.allow")]
+        allowlist: String,
+        /// Reminder id to skip (repeatable) — e.g. one with a dedicated runner.
+        #[arg(long = "skip")]
+        skip: Vec<String>,
+        /// Hours to snooze a reminder whose commands aren't allowlisted.
+        #[arg(long, default_value_t = 12)]
+        defer_hours: i64,
+        /// Show what would run/defer without executing or recording.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 /// Per-kind proof examples, shown in error messages to speed recovery.
@@ -2522,9 +2553,220 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Service { action } => {
             handle_service(action)?;
         }
+        Commands::Reminder { action } => {
+            let server = cli.server.clone();
+            let format = cli.format;
+            handle_reminder(action, &server, format, client.clone()).await?;
+        }
     }
 
     Ok(())
+}
+
+/// `ctx reminder` dispatch — the tick executes due, approved, allowlisted
+/// reminders and records the outcome.
+async fn handle_reminder(
+    action: ReminderAction,
+    server: &str,
+    format: OutputFormat,
+    client: reqwest::Client,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use serde_json::json;
+    match action {
+        ReminderAction::Tick {
+            allowlist,
+            skip,
+            defer_hours,
+            dry_run,
+        } => {
+            let allow = load_tick_allowlist(&allowlist);
+            let skip: std::collections::HashSet<String> = skip.into_iter().collect();
+
+            let resp = match client
+                .get(format!("{server}/api/reminders/due"))
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "reminder tick: fetch due failed").await;
+            }
+            let due: Value = resp.json().await?;
+            let due = due.as_array().cloned().unwrap_or_default();
+
+            let (mut acted, mut deferred, mut skipped, mut needs_approval, mut no_cmds) =
+                (0u32, 0u32, 0u32, 0u32, 0u32);
+            let mut results: Vec<Value> = Vec::new();
+
+            for r in &due {
+                let id = r["id"].as_str().unwrap_or("").to_string();
+                let title = r["title"].as_str().unwrap_or("?").to_string();
+                let status = r["status"].as_str().unwrap_or("");
+
+                // Gate 1: approval. Unapproved reminders wait for `reminder_approve`.
+                if status == "awaiting_permission" {
+                    needs_approval += 1;
+                    continue;
+                }
+                if id.is_empty() || skip.contains(&id) {
+                    skipped += 1;
+                    continue;
+                }
+
+                let cmds: Vec<String> = r["commands"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|c| c.as_str())
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty() && !s.starts_with('#'))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if cmds.is_empty() {
+                    no_cmds += 1;
+                    continue;
+                }
+
+                // Gate 2: allowlist. Every command must be pre-approved.
+                let disallowed: Vec<String> =
+                    cmds.iter().filter(|c| !allow.contains(*c)).cloned().collect();
+                if !disallowed.is_empty() {
+                    deferred += 1;
+                    let note = format!(
+                        "not in allowlist — needs approval: {}",
+                        disallowed.join(" ; ")
+                    );
+                    results.push(json!({"reminder": title, "action": "deferred", "detail": note}));
+                    if !dry_run {
+                        let _ =
+                            reminder_record(&client, server, &id, "deferred", vec![note]).await;
+                        let until = (chrono::Utc::now()
+                            + chrono::Duration::hours(defer_hours))
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                        let _ = client
+                            .post(format!("{server}/api/reminders/{id}/snooze"))
+                            .json(&json!({"id": id, "until": until}))
+                            .send()
+                            .await;
+                    }
+                    continue;
+                }
+
+                if dry_run {
+                    acted += 1;
+                    results.push(json!({"reminder": title, "action": "would-run", "commands": cmds}));
+                    continue;
+                }
+
+                // Both gates passed — run the commands.
+                let _ = client
+                    .post(format!("{server}/api/reminders/{id}/start"))
+                    .json(&json!({}))
+                    .send()
+                    .await;
+                let mut ok = true;
+                let mut outs: Vec<String> = Vec::new();
+                for c in &cmds {
+                    match std::process::Command::new("bash").arg("-lc").arg(c).output() {
+                        Ok(out) => {
+                            let code = out.status.code().unwrap_or(-1);
+                            let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
+                            combined.push_str(&String::from_utf8_lossy(&out.stderr));
+                            let last: String = combined
+                                .lines()
+                                .last()
+                                .unwrap_or("")
+                                .chars()
+                                .take(120)
+                                .collect();
+                            outs.push(format!("$ {c} -> exit {code}: {last}"));
+                            if !out.status.success() {
+                                ok = false;
+                            }
+                        }
+                        Err(e) => {
+                            outs.push(format!("$ {c} -> spawn error: {e}"));
+                            ok = false;
+                        }
+                    }
+                }
+                let result = if ok { "success" } else { "failed" };
+                let _ = reminder_record(&client, server, &id, result, outs.clone()).await;
+                acted += 1;
+                results.push(json!({"reminder": title, "action": result, "output": outs}));
+            }
+
+            let summary = json!({
+                "due": due.len(),
+                "acted": acted,
+                "deferred": deferred,
+                "skipped": skipped,
+                "needs_approval": needs_approval,
+                "no_commands": no_cmds,
+                "dry_run": dry_run,
+                "results": results,
+            });
+            emit(format, &summary, |_| {
+                println!(
+                    "reminder tick: due={} acted={} deferred={} skipped={} awaiting_approval={} no_commands={}{}",
+                    due.len(),
+                    acted,
+                    deferred,
+                    skipped,
+                    needs_approval,
+                    no_cmds,
+                    if dry_run { " (dry-run)" } else { "" }
+                );
+                for r in &results {
+                    println!(
+                        "  {} — {}",
+                        r["reminder"].as_str().unwrap_or("?"),
+                        r["action"].as_str().unwrap_or("?")
+                    );
+                }
+            });
+        }
+    }
+    Ok(())
+}
+
+/// POST a reminder execution record (best-effort helper for the tick).
+async fn reminder_record(
+    client: &reqwest::Client,
+    server: &str,
+    id: &str,
+    result: &str,
+    notes: Vec<String>,
+) -> Result<(), reqwest::Error> {
+    client
+        .post(format!("{server}/api/reminders/{id}/record"))
+        .json(&serde_json::json!({"id": id, "result": result, "notes": notes}))
+        .send()
+        .await
+        .map(|_| ())
+}
+
+/// Load the tick allowlist: one exact command per line, '#' comments and blank
+/// lines ignored. Missing file -> empty set (fail closed). Expands a leading `~/`.
+fn load_tick_allowlist(path: &str) -> std::collections::HashSet<String> {
+    let expanded = match path.strip_prefix("~/") {
+        Some(rest) => std::env::var_os("HOME")
+            .map(|h| std::path::PathBuf::from(h).join(rest))
+            .unwrap_or_else(|| std::path::PathBuf::from(path)),
+        None => std::path::PathBuf::from(path),
+    };
+    std::fs::read_to_string(&expanded)
+        .map(|s| {
+            s.lines()
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .map(|l| l.to_string())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// `ctx service` dispatch — installs/removes the Hub as a login/boot service.
