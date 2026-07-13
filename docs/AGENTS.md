@@ -152,7 +152,7 @@ Use descriptive kebab-case prefixed by type:
 ```
 ctx branch feature/<name> --from main     # create at task start
 # all ctx operations use --branch feature/<name>
-ctx summarize_session --branch feature/<name>   # before merging
+ctx summarize-session --branch feature/<name>   # before merging
 ctx merge feature/<name>                  # merge when user accepts work
 ```
 

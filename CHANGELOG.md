@@ -4,6 +4,81 @@ All notable changes to CTXone are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 the project's `0.9.x` series (incremented by 0.0.01 per release).
 
+## [Unreleased]
+
+The headline work since v0.9.13: project **namespaces** and the **unified
+MCP-over-HTTP daemon** that makes one process serve MCP, the REST API, and the
+Lens web UI.
+
+### Added — namespaces & projects
+
+- Project **namespaces** isolate everything ref-scoped (branches, plans, memory,
+  taints, reminders, history); one namespace typically maps to one code repo.
+- `ctx project add/list/use/detect` plus a `POST /api/projects` registry;
+  namespace threaded through every ref-touching endpoint (query param,
+  `X-CTXone-Namespace` header, else `default`).
+- Per-session namespace resolution in MCP + a `project_status` tool.
+- Git-branch mirroring **within** a project namespace.
+- `ctx plan list --all-namespaces` for a global plan inventory.
+
+### Added — unified MCP-over-HTTP daemon (now the standard setup)
+
+- **MCP over HTTP** (Streamable HTTP) at `POST /mcp?namespace=<ns>`: one
+  `ctxone-hub --http` process serves MCP + REST + Lens. Removes the
+  stdio startup-order / db-lock race.
+- `ctx init` now defaults to `--transport http`, writing URL-based configs
+  (native `http` for Claude Code/Cursor/VS Code/Codex; an `mcp-remote` stdio
+  bridge for Claude Desktop). Preflights the daemon; stdio remains a fallback.
+- `ctx service install/uninstall/status` — run the daemon as an always-on
+  login/boot service (launchd, systemd, or Windows Task Scheduler).
+
+### Added — security posture
+
+- Optional **bearer-token auth** over REST + `/mcp` (`--auth-token` /
+  `CTXONE_AUTH_TOKEN`): non-loopback requests need `Authorization: Bearer`;
+  loopback is exempt. Tokens are injected into `ctx init --transport http` configs.
+- **Origin guard + tightened CORS** (CSRF / DNS-rebinding): same-origin always
+  passes; foreign origins rejected unless allow-listed (`--allowed-origin` /
+  `CTXONE_ALLOWED_ORIGINS`). Lens is local/tunnel-only over an authed hub.
+
+### Added — plans, data & docs
+
+- `ctx plan link` — a task can satisfy a task in another plan (cross-plan);
+  `ctx plan stale` — surface in-progress tasks idle for N days;
+  `ctx plan next --in-order` + in-progress tasks shown separately;
+  non-blocking warning when starting a task while another is in progress;
+  richer proof-parse errors with per-kind examples.
+- `ctx db export` / `ctx db import` — portable JSON branch-graph snapshots.
+- `ctx docs` registry — index canonical docs; `import-doc` alias for `prime`.
+- New MCP tools `plan_link`, `plan_stale`, `docs_find`.
+
+### Added — Lens
+
+- Namespace switcher + `/projects` page; reminders, recall, why-did-we, and
+  live-tail pages; `/code/*` renders from `@agentstate/lens-core`; streaming
+  (SSE) passthrough for the ASD proxy.
+
+### Changed
+
+- Agent-discoverability polish across the CLI help, MCP tool descriptions, and
+  the reference docs (`AGENTS.md` task-discipline + docs-model rules).
+
+## v0.9.13 — 2026-06-08
+
+### Fixed
+
+- `release.yml` builds the SvelteKit frontend before `cargo` so Lens assets
+  ship in the release binary.
+
+## v0.9.12 — 2026-06-08
+
+### Added
+
+- GitHub Actions release pipeline (first automated release) + Windows
+  distribution; `scripts/release.sh` + `RELEASE.md`.
+- Lens surfaces Plan G/K thinking from `asd-serve`; sidebar split into CtxOne
+  and ASD sections.
+
 ## v0.9.11 — 2026-06-03
 
 ### Added — asd-multi-repo integration

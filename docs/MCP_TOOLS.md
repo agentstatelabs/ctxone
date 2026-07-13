@@ -1,7 +1,7 @@
 # MCP Tools Reference
 
-The CTXone Hub exposes **56 MCP tools** over the stdio transport, in
-eight groups:
+The CTXone Hub exposes **56 MCP tools**, served over HTTP at `/mcp` (the
+standard setup) and over stdio, in eight groups:
 
 - **Memory** (8): `remember`, `recall`, `prime`, `context`,
   `summarize_session`, `what_changed_since`, `why_did_we`,
@@ -34,24 +34,29 @@ For the underlying concepts, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Connecting
 
-In your AI tool's MCP config:
+**Standard (HTTP daemon).** Point your tool at a running `ctxone-hub --http`
+by URL — one daemon serves MCP + REST + Lens (see [ARCHITECTURE.md](ARCHITECTURE.md)):
 
 ```json
-{
-  "mcpServers": {
-    "ctxone": {
-      "command": "/path/to/ctxone-hub",
-      "args": ["--path", "/Users/user/.ctxone/memory.db"]
-    }
-  }
-}
+{ "mcpServers": { "ctxone": {
+  "type": "http",
+  "url": "http://localhost:3001/mcp?namespace=<detected>"
+} } }
 ```
 
-`ctx init` writes this config for you automatically in every detected
-tool.
+**Fallback (stdio).** The Hub also speaks MCP over stdio when spawned per-client
+without `--http` — it stays alive for the agent session and handles one client
+at a time:
 
-The Hub runs in stdio mode when invoked without `--http`. It stays alive
-for the duration of the agent session and handles one client at a time.
+```json
+{ "mcpServers": { "ctxone": {
+  "command": "/path/to/ctxone-hub",
+  "args": ["--path", "/Users/user/.ctxone/memory.db"]
+} } }
+```
+
+`ctx init` writes the right shape for you automatically in every detected tool
+(defaulting to the http daemon; `--transport stdio` for the fallback).
 
 ## Namespace & branch mirroring
 
@@ -364,7 +369,7 @@ unambiguous.
 
 ## Plan tools
 
-Twelve MCP tools wrap the plan primitives from the
+Fourteen MCP tools wrap the plan primitives from the
 `agentstategraph-tasks` crate and surface them with proactive
 "CALL THIS WHEN" descriptions. Plans persist under `/plans/<name>/`
 and survive session boundaries — the same plan can be picked up by

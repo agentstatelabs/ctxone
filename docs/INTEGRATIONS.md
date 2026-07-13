@@ -103,7 +103,8 @@ Restart Claude Code, then ask it:
 > What MCP tools do you have available?
 
 It should list `remember`, `recall`, `prime`, `context`,
-`summarize_session`, `what_changed_since`, and `why_did_we`.
+`summarize_session`, `what_changed_since`, `why_did_we`, and the plan/docs
+tools `plan_link`, `plan_stale`, and `docs_find`.
 
 ### Typical session
 
@@ -198,19 +199,20 @@ ctx init --tool codex
 
 ### What gets written
 
-Default (stdio):
+Default (`--transport http`) — Codex supports HTTP MCP natively via a `url` key,
+so it connects to your running daemon:
+
+```toml
+[mcp_servers.ctxone]
+url = "http://localhost:3001/mcp?namespace=<detected>"
+```
+
+With `--transport stdio`, Codex spawns its own hub child instead:
 
 ```toml
 [mcp_servers.ctxone]
 command = "/Users/user/.local/bin/ctxone-hub"
 args = ["--path", "/Users/user/.ctxone/memory.db"]
-```
-
-With `--transport http` (Codex supports HTTP MCP natively via a `url` key):
-
-```toml
-[mcp_servers.ctxone]
-url = "http://localhost:3001/mcp?namespace=<detected>"
 ```
 
 Codex picks up the config on next launch.
@@ -243,8 +245,9 @@ and any other settings plus any pre-existing `mcpServers` entries.
 ### Verifying
 
 Start a Gemini session and check the MCP server list from the CLI's
-built-in diagnostics. The ctxone entry should appear with `command`
-pointing at your `ctxone-hub` binary.
+built-in diagnostics. The ctxone entry should appear — a `url` pointing at
+your running hub under the default http transport, or a `command` spawning
+`ctxone-hub` under `--transport stdio`.
 
 ---
 
@@ -266,8 +269,9 @@ ctx init --global --tool grok
 ### Verifying
 
 Inside the Grok TUI, type `/mcps` to list configured MCP servers. The
-`ctxone` entry should appear, and Grok will spawn the Hub on session
-start.
+`ctxone` entry should appear — connecting to your running hub by URL under
+the default http transport, or spawning the Hub on session start under
+`--transport stdio`.
 
 ---
 
@@ -349,11 +353,14 @@ Notes:
   production to avoid surprises.
 - **`args`** — always include `--path` pointing at a shared location. This
   is what makes memory shared across tools.
-- **Stdio transport** — CTXone Hub speaks stdio MCP by default. Don't pass
-  `--http`; that's for the REST API.
-- **Single-session** — the Hub handles one stdio client at a time. When
-  the AI tool exits, the Hub exits with it. Each tool session gets a fresh
-  Hub process.
+- **Transport** — if your client speaks HTTP MCP, prefer the daemon: point
+  it at `http://localhost:3001/mcp?namespace=<ns>` (run `ctxone-hub --http`).
+  The stdio shape above is the per-client fallback — the Hub speaks stdio MCP
+  when spawned this way (no `--http`), and `--http` serves MCP at `/mcp`
+  alongside the REST API, not instead of it.
+- **Single-session (stdio only)** — a stdio Hub handles one client at a time
+  and exits when the tool exits, so each session gets a fresh Hub process. The
+  `--http` daemon has no such limit — every tool shares the one process.
 
 ---
 

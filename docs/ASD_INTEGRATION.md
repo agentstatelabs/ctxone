@@ -181,6 +181,27 @@ up within 5 seconds.
 
 ### ctxone-hub (memory + code intelligence together)
 
+**Standard — the http daemon.** Run one hub with the ASD repos attached, then
+point tools at it by URL (this is what `ctx init --transport http` writes):
+
+```bash
+ctxone-hub --http --lens \
+  --asd-path myproject=/home/user/myproject/.asd-state.db \
+  --asd-path otherlib=/home/user/otherlib/.asd-state.db
+# (with no --asd-path flags the hub auto-discovers repos from
+#  ~/.config/asd/repos.toml — usually all you need)
+```
+
+```json
+{ "mcpServers": { "ctxone": {
+  "type": "http",
+  "url": "http://localhost:3001/mcp?namespace=<detected>"
+} } }
+```
+
+**Fallback — stdio spawn.** Each tool spawns its own hub child (`--asd-repo`
+still works as a legacy alias for `--asd-path`):
+
 ```json
 {
   "mcpServers": {
@@ -188,8 +209,8 @@ up within 5 seconds.
       "command": "/path/to/ctxone-hub",
       "args": [
         "--path", "/home/user/.ctxone/memory.db",
-        "--asd-repo", "myproject=/home/user/myproject/.asd-state.db",
-        "--asd-repo", "otherlib=/home/user/otherlib/.asd-state.db"
+        "--asd-path", "myproject=/home/user/myproject/.asd-state.db",
+        "--asd-path", "otherlib=/home/user/otherlib/.asd-state.db"
       ]
     }
   }
@@ -199,7 +220,8 @@ up within 5 seconds.
 ### Both simultaneously
 
 Use both MCP servers at once — `asd` for code-specific tools, `ctxone` for
-memory and planning:
+memory and planning (shown with the stdio shape; use the http `url` form above
+for `ctxone` if you're running the daemon):
 
 ```json
 {

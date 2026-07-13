@@ -190,8 +190,9 @@ ctx ls /memory/openwebui/
 ctx --branch <your-branch> recall "<topic>"
 ```
 
-Or browse through CTXone Lens at `http://localhost:5173/browse` — the
-blame panel shows which user wrote each fact via Open WebUI and when.
+Or browse through CTXone Lens at `http://localhost:3001/browse` — served by
+the hub itself (run with `--lens`). The blame panel shows which user wrote
+each fact via Open WebUI and when.
 
 ## Related docs
 

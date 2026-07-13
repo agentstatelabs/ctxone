@@ -453,28 +453,66 @@ For the Postgres backend, the connection string is read from the
 `DATABASE_URL` environment variable, not a flag:
 `export DATABASE_URL=postgres://… && ctx serve --http --storage postgres`.
 
-**ASD code intelligence.** The ASD code-pool flags `--asd-repo` and
+**ASD code intelligence.** The ASD code-pool flags `--asd-path` and
 `--asd-url` are **not** on `ctx serve` — they're passthrough flags on the
-`ctxone-hub` binary directly:
+`ctxone-hub` binary directly. (In practice you rarely need them: with no ASD
+flags the hub auto-discovers repos from `~/.config/asd/repos.toml`.)
 
 ```bash
 # Hub manages asd-serve processes — recommended for most setups
 ctxone-hub --http \
-  --asd-repo myproject=/home/user/myproject/.asd-state.db \
-  --asd-repo otherlib=/home/user/otherlib/.asd-state.db
+  --asd-path myproject=/home/user/myproject/.asd-state.db \
+  --asd-path otherlib=/home/user/otherlib/.asd-state.db
 
 # Pre-running asd-serve (useful when you want full control over the process)
 asd-serve --db /home/user/myproject/.asd-state.db &
 ctxone-hub --http --asd-url myproject=http://127.0.0.1:4120
 ```
 
-- `--asd-repo <NAME=PATH>` — register an ASD repo for the code-intelligence
+- `--asd-path <NAME=PATH>` — register an ASD repo db for the code-intelligence
   process pool (repeatable). The hub spawns `asd-serve` on demand and kills
-  it after 5 min idle.
+  it after 5 min idle. (`--asd-repo` is accepted as a legacy alias.)
 - `--asd-url <NAME=URL>` — register a pre-running `asd-serve` endpoint
   (repeatable). Proxies `/api/code/<name>/*` to `<URL>/api/v1/*`.
 
 See [ASD_INTEGRATION.md](ASD_INTEGRATION.md) for the full setup guide.
+
+**Auth & origin (network-exposed hubs).** `ctxone-hub` accepts a bearer token
+and an origin allow-list, guarding both REST and `/mcp`; loopback is exempt:
+
+```bash
+ctxone-hub --http --auth-token "$CTXONE_AUTH_TOKEN" \
+  --allowed-origin https://lens.example.com
+```
+
+`--auth-token` (env `CTXONE_AUTH_TOKEN`) requires `Authorization: Bearer <tok>`
+on non-loopback requests; `--allowed-origin` (env `CTXONE_ALLOWED_ORIGINS`,
+comma-separated) allow-lists cross-origin browsers. See
+[DEPLOYMENT.md](DEPLOYMENT.md) and [HTTP_API.md](HTTP_API.md#authentication).
+
+### `ctx service [install | uninstall | status]`
+
+Install the unified daemon (`ctxone-hub --http --lens`) as an **always-on
+login/boot service** so the hub is up before any agent starts — the recommended
+production setup. Uses the platform's native service manager: **launchd**
+(macOS), **systemd** (Linux), or **Task Scheduler** (Windows).
+
+```
+USAGE: ctx service <install | uninstall | status> [OPTIONS]
+
+  install     Register + start the daemon at login/boot
+  uninstall   Stop + remove the service
+  status      Show whether the service is installed and running
+
+OPTIONS (install):
+      --path <PATH>          Database path  [default: ~/.ctxone/memory.db]
+  -p, --port <PORT>          Port  [default: 3001]
+      --auth-token <TOK>     Bearer token baked into the service (env: CTXONE_AUTH_TOKEN)
+      --no-lens              Don't serve the Lens web UI
+```
+
+After `ctx service install`, run `ctx init` to point your AI tools at the
+running daemon by URL. See [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ### `ctx init [options]`
 
@@ -484,6 +522,9 @@ Auto-detect installed AI tools and write CTXone into their MCP configs.
 USAGE: ctx init [OPTIONS]
 
 OPTIONS:
+      --transport <MODE>     http | stdio  [default: http] — http points tools
+                             at a running daemon by URL (one shared process);
+                             stdio makes each tool spawn its own hub child
       --global               User-level config instead of project-only
       --project              Project-only (default)
       --tool <NAME>          Target a specific tool: claude, cursor, vscode,
@@ -492,6 +533,10 @@ OPTIONS:
                              clients ctx init doesn't know about yet
       --dry-run              Show what would be written without writing
 ```
+
+With `--transport http` (the default), `ctx init` writes URL configs and, when
+a `--auth-token` is set on the hub, injects the bearer token into each config.
+`--transport stdio` writes the per-client spawn shape instead.
 
 **Supported tools** (auto-detection + auto-configuration):
 Claude Code, Claude Desktop, Cursor, VS Code (Copilot MCP), Codex,
@@ -768,6 +813,8 @@ Options:
 - `--include-unassigned` — include unowned tasks alongside assigned
   ones (default on)
 - `--assigned-only` — restrict strictly to explicitly assigned tasks
+- `--in-order` — for sequential plans, pick the first unstarted task in
+  order rather than any pickable one
 
 With `--me`, two agents sharing one plan each pick up their own tasks
 without stepping on each other. This is **state-driven orchestration**

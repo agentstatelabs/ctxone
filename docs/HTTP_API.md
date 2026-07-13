@@ -5,7 +5,13 @@ doc lists every endpoint, its request format, response format, and any
 query parameters.
 
 All endpoints live under `http://<host>:<port>/api/`. Default host and port:
-`0.0.0.0:3001`. CORS is enabled with `Allow-Origin: *`.
+`0.0.0.0:3001`. The same daemon also serves **MCP over HTTP at `/mcp`** and,
+with `--lens`, the web UI — one process, all three surfaces (see
+[MCP over HTTP](#mcp-over-http) and [Authentication](#authentication) below).
+
+Cross-origin requests are guarded, not wide open: same-origin is always
+allowed, and any request carrying a foreign `Origin` header is rejected unless
+that origin is allow-listed (`--allowed-origin` / `CTXONE_ALLOWED_ORIGINS`).
 
 ## Conventions
 
@@ -910,15 +916,45 @@ Record execution outcome. Body: `{ "result": "success|failed|deferred|snoozed|ca
 
 ---
 
+## MCP over HTTP
+
+The same daemon that serves this REST API also serves MCP over HTTP
+(Streamable HTTP) at:
+
+```
+POST /mcp?namespace=<ns>
+```
+
+This is what `ctx init --transport http` points AI tools at, and it's the
+standard setup (one process covers MCP + REST + Lens; see
+[ARCHITECTURE.md](ARCHITECTURE.md)). The `namespace` query parameter selects
+the project namespace exactly like the REST endpoints. The list of tools
+served here is documented in [MCP_TOOLS.md](MCP_TOOLS.md). The bearer token and
+Origin guard below apply to `/mcp` just as they do to `/api/*`.
+
+---
+
 ## Authentication
 
-The HTTP API currently has **no authentication**. Run the Hub on a
-trusted network (loopback, VPN, or private subnet) or put a reverse
-proxy in front with whatever auth layer you already use.
+The HTTP surface (REST **and** `/mcp`) is guarded by an **optional bearer
+token**:
 
-Multi-tenant auth is tracked as future work — see the engine's
-`agentstategraph-mcp` binary, which supports `--auth` and `--keys-file`
-for tenant isolation. CTXone Hub doesn't currently expose these.
+- Set it with `--auth-token <TOK>` or `CTXONE_AUTH_TOKEN=<TOK>`.
+- When set, **non-loopback** requests must send `Authorization: Bearer <TOK>`;
+  requests are rejected with **401** otherwise. **Loopback peers are always
+  exempt**, so a hub bound to `127.0.0.1` needs no token and local tools keep
+  working.
+- When unset, there is no authentication. If the hub is bound to a non-loopback
+  interface, it logs a warning that REST and `/mcp` are reachable unauthenticated
+  — set a token before exposing it beyond loopback.
+
+Cross-origin requests are additionally guarded (see the [intro](#http-api-reference)):
+same-origin always passes; a foreign `Origin` is rejected unless allow-listed
+via `--allowed-origin` / `CTXONE_ALLOWED_ORIGINS` (comma-separated).
+
+For multi-tenant / keyed isolation beyond a single shared token, the engine's
+`agentstategraph-mcp` binary supports `--auth` and `--keys-file`; CTXone Hub's
+bearer token is a single-secret gate over the whole surface.
 
 ---
 

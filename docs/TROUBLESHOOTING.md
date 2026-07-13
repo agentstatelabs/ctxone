@@ -14,9 +14,16 @@ bound to a different interface.
 **Fix:**
 
 ```bash
-ctx serve --http           # start it
-# ... or in another terminal / systemd service / docker
+ctx serve --http --lens    # start it in this terminal (add --lens for the web UI)
 ctx status                 # verify
+```
+
+For an **always-on** hub that comes up before any agent (recommended), install
+it as a login/boot service instead of starting it by hand:
+
+```bash
+ctx service install        # launchd / systemd / Task Scheduler
+ctx service status         # verify it's registered and running
 ```
 
 If you have the Hub running on a different port or host:
@@ -27,6 +34,13 @@ ctx status
 ```
 
 Or pass `--server` explicitly.
+
+**401 Unauthorized (network-exposed hub).** If the hub was started with a
+bearer token (`--auth-token` / `CTXONE_AUTH_TOKEN`), non-loopback clients must
+send it. Loopback (`127.0.0.1`) is exempt, so local `ctx` works without one; a
+remote client needs `CTXONE_AUTH_TOKEN` set in its own environment. A browser
+hitting Lens cross-origin also needs its origin allow-listed on the hub
+(`--allowed-origin` / `CTXONE_ALLOWED_ORIGINS`).
 
 ## 2. `ctx: command not found`
 
@@ -115,11 +129,18 @@ default (`.mcp.json` in cwd). If you want global, add `--global`.
 ctx init --dry-run
 ```
 
-Copy the path. Open it in an editor. Verify the `mcpServers.ctxone` entry
-points at your actual `ctxone-hub` binary.
+Copy the path. Open it in an editor. Verify the `mcpServers.ctxone` entry.
+Under the default `--transport http` it should be a `url` pointing at your
+running daemon (`http://localhost:3001/mcp?namespace=…`) — so confirm the hub
+is actually up (`ctx status`). Under `--transport stdio` it should be a
+`command` pointing at your actual `ctxone-hub` binary.
 
-**Cause D — the Hub binary moved.** If you reinstalled, the old `.mcp.json`
-may point at a stale path. Re-run `ctx init` to refresh.
+**Cause D — the Hub binary moved.** If you reinstalled, an old stdio `.mcp.json`
+may point at a stale binary path. Re-run `ctx init` to refresh.
+
+**Cause E — http config but no daemon.** With `--transport http`, nothing
+spawns a hub for you — the tool connects to a hub you must already be running.
+Start one (`ctx serve --http` or `ctx service install`) before launching the tool.
 
 ## 5. Ratio stuck near 1.0x — no savings
 

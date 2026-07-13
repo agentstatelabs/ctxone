@@ -197,8 +197,8 @@ ctx diff main experiment
 # Try recalling on the experiment branch
 ctx --branch experiment recall "naming"
 
-# If you like it: merge (there's no merge command yet — use Repository::merge
-# via the engine directly, or just keep writing to the experiment branch)
+# If you like it: merge the experiment branch back into main
+ctx merge experiment --into main
 
 # If you don't: switch back
 export CTX_BRANCH=main

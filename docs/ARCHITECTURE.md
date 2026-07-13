@@ -168,16 +168,16 @@ improvement.
 │  │ Claude Code  │  │  Cursor  │  │ VSCode │  │ Codex │  │
 │  └──────┬───────┘  └────┬─────┘  └────┬───┘  └───┬───┘  │
 │         │               │              │          │      │
-│         │           MCP stdio          │          │      │
-│         │               │              │          │      │
-└─────────┼───────────────┼──────────────┼──────────┼──────┘
-          │               │              │          │
-          ▼               ▼              ▼          ▼
+│         └────── MCP over HTTP (POST /mcp) ───────────┘      │
+│                         │                                  │
+└─────────────────────────┼──────────────────────────────────┘
+                          │
+                          ▼
     ┌───────────────────────────────────────────────────┐
-    │            CTXone Hub (ctxone-hub)                │
-    │   MCP tools: remember / recall / prime / ...      │
+    │      CTXone Hub — one process (ctxone-hub)        │
+    │   MCP at /mcp: remember / recall / prime / ...    │
     │   HTTP API: /api/memory/*, /api/state/*           │
-    │   Token tracker: session savings                  │
+    │   Lens web UI (--lens) · token tracker            │
     └──────────────────────┬────────────────────────────┘
                            │
                            ▼
@@ -195,34 +195,32 @@ improvement.
                   └─────────────────┘
 ```
 
-Alongside the stdio MCP path, two other surfaces talk to the Hub over HTTP:
+The same process also serves two other surfaces over the same HTTP listener:
 
 - **`ctx` CLI** — scripting and inspection (`remember`, `recall`, `search`,
   `log`, `diff`, `tail`, ...)
-- **CTXone Lens** — SvelteKit web UI for browsing the graph visually
+- **CTXone Lens** — SvelteKit web UI for browsing the graph visually (`--lens`)
 
-All three surfaces read and write the same graph — there's no parallel memory.
+All surfaces read and write the same graph — there's no parallel memory.
 
-### One important nuance: stdio spawns *per-client* hubs
+### The unified daemon is the standard setup
 
-The diagram shows a single Hub, but today **MCP is served only over stdio**, so
-each agent (Claude Desktop, Cursor, …) *spawns its own* `ctxone-hub` child that
-opens the db directly. The HTTP surfaces (`ctx` CLI, Lens) are a *separate*
-process. Because a hub takes an exclusive lock on its db file (see
-[DATA_SAFETY.md](DATA_SAFETY.md)), an agent's stdio hub and a `--http --lens` hub
-**cannot both own the same db at once** — whoever starts first wins the lock.
+`ctxone-hub --http` — the **[unified daemon](design/UNIFIED_HUB.md)** — serves
+MCP at `POST /mcp` alongside the REST API and (with `--lens`) the web UI, all
+from **one process** that owns the db. Agents connect by URL, so the diagram
+above is literally true: one Hub, every surface. `ctx init` defaults to this
+(`--transport http`), and `ctx service install` runs it as an always-on
+login/boot daemon. This is the recommended setup for everyone — see
+**[DEPLOYMENT.md](DEPLOYMENT.md)**.
 
-So "one Hub, three surfaces" is the intent, but in practice you pick a topology:
-let an agent own the db (no web UI), run a shared HTTP hub (no stdio agent on that
-db yet), or give each agent its own db. See
-**[DEPLOYMENT.md](DEPLOYMENT.md)** for the full matrix and config examples.
-
-The unified daemon — **[design/UNIFIED_HUB.md](design/UNIFIED_HUB.md)** — makes
-the diagram literally true and is now the **standard** setup: `ctxone-hub --http`
-serves MCP at `/mcp` alongside REST + Lens, so one process covers all three and
-tools connect by URL. `ctx init` defaults to this (`--transport http`), removing
-the startup-order race. The per-client stdio path remains a supported fallback
-(`ctx init --transport stdio`); see [DEPLOYMENT.md](DEPLOYMENT.md) to choose.
+**The stdio fallback.** MCP can also be served per-client over stdio
+(`ctx init --transport stdio`): each agent *spawns its own* `ctxone-hub` child
+that opens the db directly. Because a hub takes an exclusive lock on its db file
+(see [DATA_SAFETY.md](DATA_SAFETY.md)), an agent's stdio hub and a `--http --lens`
+hub **cannot both own the same db at once** — whoever starts first wins the lock,
+which is exactly the startup-order race the daemon removes. Use stdio only when a
+client can't speak HTTP MCP or you deliberately want each agent on its own db;
+see [DEPLOYMENT.md](DEPLOYMENT.md) for the topology matrix.
 
 ## What the Hub is not
 

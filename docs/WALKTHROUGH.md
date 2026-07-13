@@ -99,7 +99,7 @@ Three layers, same shape as its sibling:
 
 1. **MCP tools** (`ctx init`). The agent can call `remember`, `recall`,
    plans, taint, `why_did_we`, etc. as structured tools — the capability
-   layer. 42 tools in total.
+   layer. 56 tools in total.
 2. **Always-on guidance** (`ctx agents install`). Writes `AGENTS.md` and
    primes it as pinned memory so the agent knows the tools exist and the
    house rules for using them.

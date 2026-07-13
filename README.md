@@ -11,7 +11,7 @@ Persistent, searchable, accountable memory for AI agents. Eliminate context anxi
 
 | Component | Directory | Description |
 |-----------|-----------|-------------|
-| **CTXone Hub** | `server/` | MCP server (52 tools) + HTTP API — the memory interface for AI tools |
+| **CTXone Hub** | `server/` | MCP server (56 tools) + HTTP API + Lens web UI — one daemon, the memory interface for AI tools |
 | **CTXone Engine** | `engine/` | Core memory + graph layer (AgentStateGraph) |
 | **CTXone Lens** | `web/` | Web UI: dashboard, plans, sessions, browse, history, branches, taint, diff. ⌘K palette, 15s auto-refresh, multi-theme |
 | **ctx** | `cli/` | CLI for memory, plans, branches, taint, and team operations |
@@ -116,7 +116,8 @@ primes CTXone — and offers to set up **AgentStateDeveloper** (code context) to
 
 | Command | Sets up |
 |---|---|
-| `ctx init` | Auto-detect and configure your AI tools (MCP). Target one with `ctx init --tool claude` / `--tool cursor`. |
+| `ctx service install` | Run the unified hub (`ctxone-hub --http --lens`) as an always-on login/boot daemon (launchd / systemd / Task Scheduler) — the recommended production path. |
+| `ctx init` | Auto-detect and configure your AI tools (MCP). Defaults to `--transport http` (point tools at the running daemon by URL); target one with `ctx init --tool claude` / `--tool cursor`. |
 | `ctx agents install` | Write the shared `AGENTS.md` and prime it as pinned memory in the Hub. |
 | `ctx skill` | Install CTXone's **Agent Skill** (`SKILL.md`) into each host's skills directory — teaches the agent to record decisions, plans, and memory. Version-stamped. When the `asd` CLI is present, it also installs the combined **CTXone + ASD** suite skill. |
 
@@ -142,6 +143,14 @@ ctx plan new my-feature
 ctx plan add my-feature "Wire up new endpoint"
 ctx plan next my-feature        # what should I do next?
 ctx plan done my-feature t-001 --proof commit:abc1234
+
+# Link a task to one it satisfies in another plan; find stalled in-progress work
+ctx plan link my-feature t-001 other-plan/t-004
+ctx plan stale --days 3
+
+# Index canonical docs so agents can discover them by topic
+ctx docs add ./docs/ARCHITECTURE.md
+ctx docs find "how does recall rank"
 
 # Give each repo its own namespace — branches, plans, and memory isolated per repo
 ctx project add myrepo          # commit the .ctxproject marker it writes
@@ -179,6 +188,9 @@ the hub treats it as the crown jewel. All defenses are on by default:
 - **Recovery** — `ctx db backup` triggers a snapshot on demand;
   `ctx db restore <snapshot>` swaps one back in (current db is
   preserved at `<db>.pre-restore-<ts>` first).
+- **Portable snapshots** — `ctx db export` writes the branch graph to a
+  portable JSON file; `ctx db import` merges one back — for migration,
+  review, or seeding another db.
 - **`ctx doctor`** flags inode drift, stray db files, and missing
   recent backups, with one-line fixes.
 

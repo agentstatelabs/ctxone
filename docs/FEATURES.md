@@ -55,7 +55,7 @@ CTXone has four surfaces:
 | `ctx remember <fact>` | Store a fact. `--importance high/medium/low`, `--context <category>`, `--tags`. |
 | `ctx recall <topic>` | Retrieve the most relevant memories for a topic within a `--budget` (tokens). `--exact` re-tokenizes with tiktoken for precise counts. |
 | `ctx context <project>` | Load full context for a project. |
-| `ctx prime <file>` | Load a markdown file as primed memory; `--pin` makes it always-included. |
+| `ctx prime <file>` (alias `ctx import-doc`) | Load a markdown file as primed memory; `--pin` makes it always-included. |
 | `ctx pinned` | List pinned (always-included) memories. |
 | `ctx forget <path>` | Delete a memory at a path; `--reason` shows up in blame. |
 | `ctx search <query>` | Literal substring search over the graph — full matching paths and values, no budget (unlike recall). |
@@ -66,7 +66,16 @@ CTXone has four surfaces:
 
 | Command | What it does |
 |---|---|
-| `ctx plan new/add/next/done/…` | Manage plans: create a plan, add tasks, ask "what's next?", and mark tasks done with proof (`--proof commit:abc1234`). Plans persist across sessions and stay anchored to reality. |
+| `ctx plan new/add/start/next/done` | Core loop: create a plan, add tasks, `start` a task, ask "what's next?" (`--in-order` for sequential plans), and mark tasks `done` with proof (`--proof commit:abc1234`, or `file:`/`test:`/`text:`). Plans persist across sessions and stay anchored to reality. |
+| `ctx plan link <plan> <task> <plan/task>` | Cross-plan link: mark that a task, when done, satisfies a task in another plan (target given as `plan/task`, e.g. `other-plan/t-002`). |
+| `ctx plan stale [--days N]` | Surface in-progress tasks idle for N days (stalled work). |
+| `ctx plan list --all-namespaces` | Global plan inventory across every namespace. |
+
+### Docs registry
+
+| Command | What it does |
+|---|---|
+| `ctx docs add/list/find` | Index canonical docs (READMEs, guides) so agents can discover and `find` them by topic instead of re-reading the tree. Exposed to agents as the `docs_find` MCP tool. |
 
 ### Branches & history
 
@@ -101,13 +110,15 @@ CTXone has four surfaces:
 | Command | What it does |
 |---|---|
 | `ctx db backup/restore` | Snapshot the live db (SQLite `VACUUM INTO`, consistent against a running hub) or restore from a snapshot (hub must be stopped). |
+| `ctx db export/import` | Export the branch graph to a portable JSON snapshot / import (merge) one back — for migration, review, or seeding another db. |
 
 ---
 
 ## MCP tools & HTTP API
 
-The Hub exposes **52 MCP tools** to agents — memory (`remember`, `recall`,
-`context`), plans, branches, taint (`taint_*`), provenance (`why_did_we`,
+The Hub exposes **56 MCP tools** to agents — memory (`remember`, `recall`,
+`context`), plans (incl. `plan_link`, `plan_stale`), the docs registry
+(`docs_find`), branches, taint (`taint_*`), provenance (`why_did_we`,
 `summarize_session`), and token accounting (`record_llm_usage`). Full list:
 [MCP_TOOLS.md](MCP_TOOLS.md). The REST surface is in
 [HTTP_API.md](HTTP_API.md).
