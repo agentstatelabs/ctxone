@@ -51,9 +51,11 @@ Lens web UI.
 - `ctx db export` / `ctx db import` — portable JSON branch-graph snapshots.
 - `ctx docs` registry — index canonical docs; `import-doc` alias for `prime`.
 - `ctx reminder tick` — executor for due reminders: runs a reminder only if it
-  is approved (status `due`, not `awaiting_permission`) **and** every one of its
-  commands is on an exact-match allowlist (`~/.ctxone/reminder-tick.allow`),
-  records the outcome, and snoozes anything unapproved.
+  is explicitly **`autonomous: true`** **and** every one of its commands is on an
+  exact-match allowlist (`~/.ctxone/reminder-tick.allow`); records the outcome
+  and snoozes anything unapproved. (Gating on the `autonomous` flag directly,
+  not just status, is fail-closed and sidesteps an `agentstategraph-reminders`
+  bug where `remind_me` can promote a non-autonomous reminder straight to `due`.)
 - `ctx service tick install/uninstall/status` — install the tick on a periodic
   timer (launchd `StartInterval`, a systemd `.timer` + oneshot `.service`, or a
   Task Scheduler repetition trigger). `--interval`, `--allowlist`, `--skip`.

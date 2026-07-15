@@ -1029,11 +1029,12 @@ enum ReminderAction {
     /// Run due, approved reminders whose commands are all allowlisted, then
     /// record the outcome. Meant to run on a timer (see `ctx service`).
     ///
-    /// A reminder runs only if BOTH gates pass: (1) it is approved — status
-    /// `due`, not `awaiting_permission` (approve with `reminder_approve`); and
-    /// (2) every one of its `commands` is on the allowlist (one exact command
-    /// per line, '#' comments). Otherwise nothing from it runs and it is
-    /// recorded `deferred` and snoozed. A missing allowlist means nothing runs.
+    /// A reminder runs only if BOTH gates pass: (1) it is explicitly
+    /// `autonomous: true` (anything else — including `awaiting_permission` —
+    /// needs a human); and (2) every one of its `commands` is on the allowlist
+    /// (one exact command per line, '#' comments). Otherwise nothing from it
+    /// runs and it is recorded `deferred` and snoozed. Missing allowlist =
+    /// nothing runs.
     Tick {
         /// Allowlist file of approved commands (exact match, one per line).
         #[arg(long, default_value = "~/.ctxone/reminder-tick.allow")]
@@ -2639,9 +2640,15 @@ async fn handle_reminder(
                 let id = r["id"].as_str().unwrap_or("").to_string();
                 let title = r["title"].as_str().unwrap_or("?").to_string();
                 let status = r["status"].as_str().unwrap_or("");
+                let autonomous = r["autonomous"].as_bool().unwrap_or(false);
 
-                // Gate 1: approval. Unapproved reminders wait for `reminder_approve`.
-                if status == "awaiting_permission" {
+                // Gate 1: approval — fail closed. Only run reminders explicitly
+                // marked `autonomous: true`; everything else (including
+                // `awaiting_permission`) needs a human. Gating on the flag
+                // directly, not just status, sidesteps an upstream bug where the
+                // hub can promote a non-autonomous reminder straight to `due`
+                // without routing it through `awaiting_permission`.
+                if !autonomous || status == "awaiting_permission" {
                     needs_approval += 1;
                     continue;
                 }
