@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { hubFetch } from '$lib/api';
+	import { formatCompact } from '@agentstate/lens-core';
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
 	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 
@@ -88,8 +89,13 @@
 		return 'var(--text-2)';
 	}
 
+	// Compact display (12.4K / 17.5M / 1.2B) — exact value goes in the
+	// title attribute so precision is a hover away.
 	function fmt(n: number): string {
-		return n.toLocaleString();
+		return formatCompact(n ?? 0);
+	}
+	function exact(n: number): string {
+		return (n ?? 0).toLocaleString();
 	}
 </script>
 
@@ -134,15 +140,15 @@
 
 					<div class="stat-grid">
 						<div class="stat">
-							<div class="stat-value">{fmt(selected.session_tokens_used)}</div>
+							<div class="stat-value" title={exact(selected.session_tokens_used)}>{fmt(selected.session_tokens_used)}</div>
 							<div class="stat-label">Tokens used</div>
 						</div>
 						<div class="stat">
-							<div class="stat-value" style="color: var(--success)">{fmt(selected.session_tokens_saved)}</div>
+							<div class="stat-value" style="color: var(--success)" title={exact(selected.session_tokens_saved)}>{fmt(selected.session_tokens_saved)}</div>
 							<div class="stat-label">Tokens saved</div>
 						</div>
 						<div class="stat">
-							<div class="stat-value">{fmt(selected.total_graph_size_tokens)}</div>
+							<div class="stat-value" title={exact(selected.total_graph_size_tokens)}>{fmt(selected.total_graph_size_tokens)}</div>
 							<div class="stat-label">Graph size (tokens)</div>
 						</div>
 						<div class="stat">
@@ -153,23 +159,33 @@
 						</div>
 					</div>
 
+					{#if selected.session_tokens_used === 0 && selected.llm_call_count > 0}
+						<p class="zero-hint">
+							This session reported LLM usage but no memory operations carry its
+							session id — its recalls likely ran under the
+							<code>default</code> session (the agent isn't sending
+							<code>X-CTXone-Session</code> on memory calls). Used/saved
+							accrue there instead.
+						</p>
+					{/if}
+
 					{#if selected.llm_call_count > 0}
 						<h3>LLM Consumption</h3>
 						<div class="stat-grid">
 							<div class="stat">
-								<div class="stat-value">{fmt(selected.llm_call_count)}</div>
+								<div class="stat-value" title={exact(selected.llm_call_count)}>{fmt(selected.llm_call_count)}</div>
 								<div class="stat-label">API calls</div>
 							</div>
 							<div class="stat">
-								<div class="stat-value">{fmt(selected.llm_input_tokens)}</div>
+								<div class="stat-value" title={exact(selected.llm_input_tokens)}>{fmt(selected.llm_input_tokens)}</div>
 								<div class="stat-label">Input tokens</div>
 							</div>
 							<div class="stat">
-								<div class="stat-value">{fmt(selected.llm_output_tokens)}</div>
+								<div class="stat-value" title={exact(selected.llm_output_tokens)}>{fmt(selected.llm_output_tokens)}</div>
 								<div class="stat-label">Output tokens</div>
 							</div>
 							<div class="stat">
-								<div class="stat-value">{fmt(selected.llm_cache_read_tokens)}</div>
+								<div class="stat-value" title={exact(selected.llm_cache_read_tokens)}>{fmt(selected.llm_cache_read_tokens)}</div>
 								<div class="stat-label">Cache read tokens</div>
 							</div>
 						</div>
@@ -425,5 +441,19 @@
 		padding: 0.1em 0.35em;
 		border-radius: 3px;
 		font-size: 0.85em;
+	}
+
+	.zero-hint {
+		margin: 0.6rem 0 0;
+		padding: 0.5rem 0.7rem;
+		font-size: var(--lens-font-size-xs);
+		color: var(--lens-muted);
+		background: color-mix(in srgb, var(--lens-info, #67c7e6) 8%, var(--lens-surface));
+		border: 1px solid color-mix(in srgb, var(--lens-info, #67c7e6) 25%, var(--lens-border));
+		border-radius: var(--lens-radius-sm);
+	}
+	.zero-hint code {
+		font-family: var(--lens-font-mono);
+		color: var(--lens-text);
 	}
 </style>
