@@ -29,6 +29,8 @@ export interface TaskCounts {
 export interface Task {
 	id: string;
 	title: string;
+	/** Optional long-form body — present when the task was created with one. */
+	description?: string | null;
 	status: TaskStatus;
 	priority: Priority;
 	parent_id: string | null;
