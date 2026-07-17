@@ -1,6 +1,6 @@
 <script lang="ts">
 	import type { Task } from '$lib/plansApi';
-	import { STATUS_META, layerTasks } from './model';
+	import { PRIORITY_META, STATUS_META, layerTasks } from './model';
 
 	let {
 		tasks,
@@ -68,6 +68,34 @@
 	let hoveredEdge: string | null = $state(null);
 	let hoveredNode: string | null = $state(null);
 
+	// -- Hover tooltip (dependencies + priority) -----------------------------
+	// One HTML tooltip trailing the pointer inside the scroll container —
+	// richer than the old SVG <title> (which we drop): status, priority,
+	// assignee, and dependencies in both directions with open/done state.
+	let tip = $state({ x: 0, y: 0 });
+	let scrollEl: HTMLDivElement | undefined = $state();
+
+	function trackTip(ev: MouseEvent) {
+		if (!scrollEl) return;
+		const r = scrollEl.getBoundingClientRect();
+		tip = { x: ev.clientX - r.left + scrollEl.scrollLeft, y: ev.clientY - r.top + scrollEl.scrollTop };
+	}
+
+	const byId = $derived(new Map(tasks.map((t) => [t.id, t])));
+	const tipTask = $derived(hoveredNode ? (byId.get(hoveredNode) ?? null) : null);
+	/** Tasks this one blocks (reverse edges of blocked_by). */
+	const tipBlocks = $derived(
+		tipTask ? tasks.filter((t) => t.blocked_by.includes(tipTask.id)) : []
+	);
+	const tipBlockedBy = $derived(
+		tipTask ? tipTask.blocked_by.map((id) => byId.get(id)).filter((t): t is Task => !!t) : []
+	);
+	const tipEdge = $derived(hoveredEdge ? (edges.find((e) => e.id === hoveredEdge) ?? null) : null);
+
+	const done = (t: Task) => t.status === 'done' || t.status === 'abandoned';
+	// Flip the tooltip left of the cursor when it would clip the right edge.
+	const tipFlip = $derived(scrollEl ? tip.x > scrollEl.scrollWidth - 260 : false);
+
 	function edgeHighlighted(e: Edge): boolean {
 		if (hoveredEdge === e.id) return true;
 		if (hoveredNode && (e.from.task.id === hoveredNode || e.to.task.id === hoveredNode))
@@ -94,7 +122,8 @@
 		<p class="empty">No tasks match.</p>
 	{:else}
 		{#if dag.layers.length > 0}
-			<div class="scroll">
+			<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<div class="scroll" bind:this={scrollEl} onmousemove={trackTip}>
 				<svg
 					{width}
 					{height}
@@ -141,7 +170,6 @@
 							tabindex="0"
 							aria-label="{pos.task.id} {pos.task.title} — {meta.label}"
 						>
-							<title>{pos.task.id} · {pos.task.title} · {meta.label}</title>
 							<rect
 								width={NW}
 								height={NH}
@@ -155,6 +183,62 @@
 						</g>
 					{/each}
 				</svg>
+
+				{#if tipTask}
+					{@const pm = PRIORITY_META[tipTask.priority]}
+					<div
+						class="tl-tip"
+						class:flip={tipFlip}
+						style:left="{tip.x}px"
+						style:top="{tip.y}px"
+					>
+						<div class="tip-head">
+							<span class="tip-dot" style:background={STATUS_META[tipTask.status].color}
+							></span>
+							<span class="tip-title">{tipTask.title}</span>
+						</div>
+						<div class="tip-meta">
+							<span class="tip-chip" style:color={pm.color} style:border-color={pm.border}
+								>{pm.label}</span
+							>
+							<span class="tip-id">{tipTask.id}</span>
+							{#if tipTask.assigned_to}
+								<span class="tip-assignee">@{tipTask.assigned_to}</span>
+							{/if}
+						</div>
+						{#if tipBlockedBy.length > 0}
+							<div class="tip-deps">
+								<span class="tip-label">blocked by</span>
+								{#each tipBlockedBy as d (d.id)}
+									<span class="tip-dep" class:resolved={done(d)}
+										>{d.id} {done(d) ? '✓' : '·'} {truncate(d.title, 26)}</span
+									>
+								{/each}
+							</div>
+						{/if}
+						{#if tipBlocks.length > 0}
+							<div class="tip-deps">
+								<span class="tip-label">blocks</span>
+								{#each tipBlocks as d (d.id)}
+									<span class="tip-dep" class:resolved={done(d)}
+										>{d.id} {done(d) ? '✓' : '·'} {truncate(d.title, 26)}</span
+									>
+								{/each}
+							</div>
+						{/if}
+						{#if tipBlockedBy.length === 0 && tipBlocks.length === 0}
+							<div class="tip-deps"><span class="tip-label">no dependencies</span></div>
+						{/if}
+					</div>
+				{:else if tipEdge}
+					<div class="tl-tip" class:flip={tipFlip} style:left="{tip.x}px" style:top="{tip.y}px">
+						<div class="tip-deps">
+							<span class="tip-dep">{tipEdge.from.task.id} {truncate(tipEdge.from.task.title, 20)}</span>
+							<span class="tip-label">blocks</span>
+							<span class="tip-dep">{tipEdge.to.task.id} {truncate(tipEdge.to.task.title, 20)}</span>
+						</div>
+					</div>
+				{/if}
 			</div>
 		{/if}
 
@@ -199,6 +283,7 @@
 		gap: var(--lens-space-3);
 	}
 	.scroll {
+		position: relative; /* anchors .tl-tip */
 		overflow: auto;
 		border: 1px solid var(--lens-border);
 		border-radius: var(--lens-radius-md);
@@ -320,5 +405,78 @@
 		text-align: center;
 		padding: var(--lens-space-6);
 		margin: 0;
+	}
+
+	.tl-tip {
+		position: absolute;
+		transform: translate(14px, 10px);
+		max-width: 250px;
+		background: var(--lens-overlay, var(--lens-surface-raised));
+		border: 1px solid var(--lens-border-strong);
+		border-radius: var(--lens-radius-sm);
+		box-shadow: var(--lens-shadow-2, 0 4px 16px rgb(0 0 0 / 0.4));
+		padding: 0.45rem 0.55rem;
+		pointer-events: none;
+		z-index: 5;
+		display: flex;
+		flex-direction: column;
+		gap: 0.3rem;
+		font-size: var(--lens-font-size-xs);
+	}
+	.tl-tip.flip {
+		transform: translate(calc(-100% - 14px), 10px);
+	}
+	.tip-head {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+	}
+	.tip-dot {
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		flex: none;
+	}
+	.tip-title {
+		font-weight: 600;
+		color: var(--lens-text);
+	}
+	.tip-meta {
+		display: flex;
+		align-items: center;
+		gap: 0.45rem;
+		font-family: var(--lens-font-mono);
+		font-size: var(--lens-font-size-2xs);
+	}
+	.tip-chip {
+		border: 1px solid;
+		border-radius: var(--lens-radius-full, 999px);
+		padding: 0 0.4rem;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+	}
+	.tip-id,
+	.tip-assignee {
+		color: var(--lens-muted);
+	}
+	.tip-deps {
+		display: flex;
+		flex-direction: column;
+		gap: 0.15rem;
+	}
+	.tip-label {
+		font-size: var(--lens-font-size-2xs);
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: var(--lens-tracking-caps);
+		color: var(--lens-muted);
+	}
+	.tip-dep {
+		font-family: var(--lens-font-mono);
+		font-size: var(--lens-font-size-2xs);
+		color: var(--lens-text-secondary, var(--lens-text));
+	}
+	.tip-dep.resolved {
+		color: var(--lens-ok);
 	}
 </style>
