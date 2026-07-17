@@ -760,6 +760,23 @@
 		letter-spacing: var(--lens-tracking-caps);
 		color: var(--lens-muted);
 	}
+	/* Per-group hue tints (source order: Home, Work, Memory, Activity,
+	   Code, Settings) — a little wayfinding color against the dark chrome. */
+	.nav-group:nth-of-type(1) .nav-group-label {
+		color: color-mix(in srgb, var(--lens-accent) 75%, var(--lens-muted));
+	}
+	.nav-group:nth-of-type(2) .nav-group-label {
+		color: color-mix(in srgb, var(--lens-ok) 70%, var(--lens-muted));
+	}
+	.nav-group:nth-of-type(3) .nav-group-label {
+		color: color-mix(in srgb, var(--lens-info) 70%, var(--lens-muted));
+	}
+	.nav-group:nth-of-type(4) .nav-group-label {
+		color: color-mix(in srgb, var(--lens-warn) 65%, var(--lens-muted));
+	}
+	.nav-group:nth-of-type(5) .nav-group-label {
+		color: color-mix(in srgb, var(--lens-danger) 55%, var(--lens-muted));
+	}
 
 	.repo-picker {
 		display: flex;

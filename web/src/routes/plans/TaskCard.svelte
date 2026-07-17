@@ -115,8 +115,15 @@
 
 <style>
 	.card {
-		background: var(--lens-surface);
-		border: 1px solid var(--lens-border);
+		/* Status-tinted gradient: the card's accent (status color) washes in
+		   from the top-left and settles onto the surface — enough color to
+		   read the column at a glance, calm enough to stack twenty deep. */
+		background: linear-gradient(
+			135deg,
+			color-mix(in srgb, var(--card-accent) 16%, var(--lens-surface)),
+			var(--lens-surface) 70%
+		);
+		border: 1px solid color-mix(in srgb, var(--card-accent) 25%, var(--lens-border));
 		border-left: 2px solid var(--card-accent);
 		border-radius: var(--lens-radius-sm);
 		padding: 0.5rem 0.6rem;
@@ -129,9 +136,13 @@
 		user-select: none;
 	}
 	.card:hover {
-		border-color: var(--lens-border-strong);
+		border-color: color-mix(in srgb, var(--card-accent) 45%, var(--lens-border-strong));
 		border-left-color: var(--card-accent);
-		background: var(--lens-surface-raised);
+		background: linear-gradient(
+			135deg,
+			color-mix(in srgb, var(--card-accent) 24%, var(--lens-surface-raised)),
+			var(--lens-surface-raised) 75%
+		);
 	}
 	.card.done {
 		opacity: 0.8;

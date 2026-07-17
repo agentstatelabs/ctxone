@@ -26,16 +26,19 @@
 
 :root,
 :root[data-theme='tw-dark'] {
-	--bg-0: #0a0a0a;
-	--bg-1: #111;
-	--bg-2: #161616;
-	--bg-hover: #1a1a1a;
-	--bg-active: #0f1f3d;
+	/* Brightened blue-black ramp (was neutral #0a0a0a grays — read flat
+	   and gloomy). A step lighter than lens-core's own ramp, with visible
+	   blue chroma so surfaces have color rather than absence of it. */
+	--bg-0: #0e1320;
+	--bg-1: #161d2e;
+	--bg-2: #1c2437;
+	--bg-hover: #232d44;
+	--bg-active: #1a2c52;
 	--text-0: #ffffff;
-	--text-1: #e0e0e0;
-	--text-2: #888;
-	--text-3: #555;
-	--border: #222;
+	--text-1: #e4e9f4;
+	--text-2: #96a2bd;
+	--text-3: #667089;
+	--border: #273350;
 	--border-hi: #3b82f6;
 	--accent: #93c5fd;
 	--accent-bg: #1e3a5f;
