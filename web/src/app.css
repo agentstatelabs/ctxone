@@ -291,32 +291,83 @@
 	--info: #0000ee;
 }
 
+/* Light themes flip color-scheme so native form controls (selects,
+ * scrollbars, checkboxes) match — tokens.css sets `color-scheme: dark`
+ * on :root as the dark-first default, so only the light themes override. */
+:root[data-theme='tw-light'],
+:root[data-theme='solarized-light'],
+:root[data-theme='gruvbox-light'],
+:root[data-theme='paper'],
+:root[data-theme='high-contrast-light'] {
+	color-scheme: light;
+}
+
 body {
 	margin: 0;
-	font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-	background: var(--bg-0);
-	color: var(--text-1);
+	font-family: var(--lens-font-sans);
+	background: var(--lens-bg);
+	color: var(--lens-text);
 }
 
 /* ---------------------------------------------------------------------------
- * @agentstate/lens-core bridge — map the app theme onto the --lens-* tokens
- * the shared code-intelligence components consume. Declared on body (not
- * :root) so it wins over tokens.css defaults regardless of import order,
- * and re-resolves per theme via the [data-theme] variables above.
+ * @agentstate/lens-core bridge — the whole app is on the --lens-* system.
+ *
+ * The legacy CTXone theme system (12 themes + the theme-select above) stays
+ * the source of truth for *which* palette is active; this block maps each
+ * theme's output onto the lens tokens so the shell chrome, the shared
+ * code-intelligence components, and any page still on legacy vars all render
+ * from one vocabulary. Declared on body (not :root) so it wins over
+ * tokens.css defaults regardless of import order, and re-resolves per theme
+ * via the [data-theme] variables above.
+ *
+ * Non-color tokens (spacing, radii, typography, motion, elevation) are NOT
+ * bridged — they come straight from the lens-core identity on :root, so the
+ * shell inherits the real 0.5.0 design system for those regardless of theme.
  * ------------------------------------------------------------------------- */
 body {
 	--lens-bg: var(--bg-0);
 	--lens-surface: var(--bg-1);
 	--lens-surface-raised: var(--bg-hover);
+	--lens-overlay: var(--bg-2);
+	--lens-border-subtle: var(--border);
 	--lens-border: var(--border);
+	--lens-border-strong: var(--border-hi);
 	--lens-text-strong: var(--text-0);
 	--lens-text: var(--text-1);
 	--lens-text-secondary: var(--text-2);
 	--lens-muted: var(--text-3);
+	--lens-text-faint: var(--text-3);
 	--lens-accent: var(--accent);
+	--lens-accent-hover: var(--accent);
 	--lens-accent-surface: var(--accent-bg);
 	--lens-accent-surface-hi: var(--accent-bg-hi);
 	--lens-danger: var(--danger);
 	--lens-ok: var(--success);
 	--lens-warn: var(--warning);
+	--lens-info: var(--info);
+}
+
+/* ---------------------------------------------------------------------------
+ * Shared page-shell affordances. Pages render loading / empty / error states
+ * ad hoc today; these classes give them one restrained, on-system vocabulary
+ * to converge on. Purely additive — adopting them is up to each page.
+ * ------------------------------------------------------------------------- */
+.lens-state {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: var(--lens-space-2);
+	padding: var(--lens-space-12) var(--lens-space-6);
+	text-align: center;
+	color: var(--lens-muted);
+	font-size: var(--lens-font-size-sm);
+}
+.lens-state--error {
+	color: var(--lens-danger);
+}
+.lens-state__title {
+	color: var(--lens-text-secondary);
+	font-size: var(--lens-font-size-md);
+	font-weight: 600;
 }

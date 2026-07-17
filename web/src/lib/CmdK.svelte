@@ -41,21 +41,35 @@
 	let branches: string[] = $state([]);
 	let indexedFor: string | null = $state(null); // last branch we indexed for
 
-	// Static routes — keep in sync with the sidebar in +layout.svelte.
+	// Static routes — keep in sync with the sidebar nav in +layout.svelte
+	// (workspace → branch spine + flat groups: Home / Work / Memory /
+	// Activity / Code / Settings).
 	const ROUTES: { href: string; label: string }[] = [
+		// Home
 		{ href: '/', label: 'Dashboard' },
+		// Work
 		{ href: '/plans', label: 'Plans' },
 		{ href: '/reminders', label: 'Reminders' },
 		{ href: '/sessions', label: 'Sessions' },
-		{ href: '/pinned', label: 'Pinned' },
+		// Memory
 		{ href: '/browse', label: 'Browse' },
+		{ href: '/pinned', label: 'Pinned' },
 		{ href: '/search', label: 'Search' },
 		{ href: '/recall', label: 'Recall' },
-		{ href: '/why', label: 'Why did we…' },
+		{ href: '/why', label: 'Why' },
+		// Activity
 		{ href: '/history', label: 'History' },
 		{ href: '/tail', label: 'Live Tail' },
 		{ href: '/diff', label: 'Diff' },
-		{ href: '/projects', label: 'Projects' },
+		// Code
+		{ href: '/code', label: 'Code Overview' },
+		{ href: '/code/search', label: 'Code Search' },
+		{ href: '/code/symbols', label: 'Symbols' },
+		{ href: '/code/graph', label: 'Graph' },
+		{ href: '/code/files', label: 'Files' },
+		{ href: '/code/thinking', label: 'Thinking' },
+		// Settings
+		{ href: '/projects', label: 'Workspaces' },
 		{ href: '/branches', label: 'Branches' },
 		{ href: '/taint', label: 'Taint' }
 	];
