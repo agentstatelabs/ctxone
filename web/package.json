@@ -14,7 +14,10 @@
 		"test:unit:watch": "vitest"
 	},
 	"dependencies": {
-		"@agentstate/lens-core": "file:../../lens-core"
+		"@agentstate/lens-core": "file:../../lens-core",
+		"@types/dompurify": "^3.0.5",
+		"dompurify": "^3.4.12",
+		"marked": "^18.0.6"
 	},
 	"devDependencies": {
 		"@sveltejs/adapter-auto": "^7.0.1",
