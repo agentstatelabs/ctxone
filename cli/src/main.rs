@@ -430,6 +430,12 @@ enum Commands {
         #[arg(long)]
         file: Option<String>,
 
+        /// Scan EVERY project under ~/.claude/projects (not just this one).
+        /// Forces full-turn + token capture; extraction still requires an API
+        /// key. Prints per-project counts and a final JSON summary line.
+        #[arg(long)]
+        all: bool,
+
         /// Only import sessions modified after this date (YYYY-MM-DD)
         #[arg(long)]
         since: Option<String>,
@@ -446,8 +452,13 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
 
-        /// Skip persisting the full turn JSON (only extracted memories + tokens)
+        /// Force persisting the full turn JSON (default anyway; explicit for
+        /// callers that want the guarantee, e.g. the hub's session-sync).
         #[arg(long)]
+        full_turn: bool,
+
+        /// Skip persisting the full turn JSON (only extracted memories + tokens)
+        #[arg(long, conflicts_with = "full_turn")]
         no_full_turn: bool,
     },
 
@@ -1800,22 +1811,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         Commands::IngestSession {
             file,
+            all,
             since,
             last,
             tokens_only,
             dry_run,
+            full_turn,
             no_full_turn,
         } => {
+            // `--full-turn` forces on; `--no-full-turn` forces off; default is on.
+            let full_turn_effective = full_turn || !no_full_turn;
             run_ingest_session(
                 &cli.server,
                 &cli.branch,
                 cli.session.as_deref(),
                 file,
+                all,
                 since,
                 last,
                 tokens_only,
                 dry_run,
-                !no_full_turn,
+                full_turn_effective,
                 client.clone(),
             )
             .await?;
@@ -4067,16 +4083,18 @@ fn session_id_for_file(path: &std::path::Path) -> String {
         .unwrap_or_else(|| "default".to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_ingest_session(
     server: &str,
     branch: &str,
     session: Option<&str>,
     file: Option<String>,
+    all: bool,
     since: Option<String>,
     last: Option<usize>,
     tokens_only: bool,
     dry_run: bool,
-    full_turn: bool,
+    mut full_turn: bool,
     client: reqwest::Client,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
@@ -4086,178 +4104,239 @@ async fn run_ingest_session(
         );
     }
 
-    let files: Vec<std::path::PathBuf> = if let Some(f) = file {
-        vec![std::path::PathBuf::from(f)]
+    // `--all` forces full-turn + token capture so a whole-machine sync always
+    // rebuilds the Sessions view's turn/token data even with no API key.
+    if all {
+        full_turn = true;
+    }
+
+    // Build the (project-label, files) groups to ingest. A single explicit
+    // --file or the cwd project are one-group cases; --all fans out across
+    // every project under ~/.claude/projects so per-project counts print.
+    let groups: Vec<(String, Vec<std::path::PathBuf>)> = if let Some(f) = file {
+        vec![(String::new(), vec![std::path::PathBuf::from(f)])]
+    } else if all {
+        crate::ingest::find_all_session_files()
     } else {
         let cwd = std::env::current_dir()?;
-        crate::ingest::find_session_files(&cwd)
+        let label = cwd
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        vec![(label, crate::ingest::find_session_files(&cwd))]
     };
 
-    if files.is_empty() {
-        println!("No session files found for this project.");
-        println!("Pass --file <path> to specify a .jsonl file directly.");
+    if groups.iter().all(|(_, f)| f.is_empty()) {
+        if all {
+            println!("No Claude Code session files found in ~/.claude/projects/");
+            // Still emit the machine-readable summary so the hub's session-sync
+            // parser always finds a final JSON line (zeros = clean no-op).
+            println!("{}", serde_json::json!({ "sessions": 0, "turns": 0, "tokens": 0 }));
+        } else {
+            println!("No session files found for this project.");
+            println!("Pass --file <path> to specify a .jsonl file directly.");
+        }
         return Ok(());
     }
 
     // Parse since date filter.
     let since_ts = since.as_deref().unwrap_or("");
 
-    let mut total_turns = 0usize;
+    let mut total_sessions = 0usize;
+    let mut total_turns_seen = 0usize;
     let mut total_memories = 0usize;
     let mut total_full_turns = 0usize;
     let mut total_tokens = crate::ingest::TurnTokens::default();
 
-    for path in &files {
-        let fname = path.file_name().unwrap_or_default().to_string_lossy();
-        // If the caller didn't pin an explicit --session, give each file
-        // its own session id derived from the filename so the Sessions
-        // page shows one row per ingested transcript instead of
-        // collapsing everything into "default".
-        let derived_sid;
-        let effective_session: Option<&str> = match session {
-            Some(s) => Some(s),
-            None => {
-                derived_sid = session_id_for_file(path);
-                Some(derived_sid.as_str())
-            }
-        };
-        println!(
-            "→ {}  (session: {})",
-            fname,
-            effective_session.unwrap_or("default")
-        );
+    for (label, files) in &groups {
+        if files.is_empty() {
+            continue;
+        }
+        if all && !label.is_empty() {
+            println!("\n=== project: {} ({} files) ===", label, files.len());
+        }
+        let mut proj_sessions = 0usize;
+        let mut proj_turns = 0usize;
+        let mut proj_tokens = crate::ingest::TurnTokens::default();
 
-        let mut turns = crate::ingest::parse_turns(path);
-
-        // Session title (t-016): derive from the FULL session (before the
-        // --since/--last filters below) so it reflects where the session
-        // started, then persist a title node at /sessions/{id}/title.
-        // Fallback: "<project-dir-name> · <date>".
-        let title = crate::ingest::derive_session_title(&turns).unwrap_or_else(|| {
-            let proj = std::env::current_dir()
-                .ok()
-                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-                .unwrap_or_else(|| "session".to_string());
-            let date = turns
-                .first()
-                .map(|t| t.timestamp.clone())
-                .filter(|ts| ts.len() >= 10)
-                .map(|ts| ts[..10].to_string())
-                .unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%d").to_string());
-            crate::ingest::truncate_title(&format!("{} · {}", proj, date))
-        });
-        if dry_run {
+        for path in files {
+            let fname = path.file_name().unwrap_or_default().to_string_lossy();
+            // If the caller didn't pin an explicit --session, give each file
+            // its own session id derived from the filename so the Sessions
+            // page shows one row per ingested transcript instead of
+            // collapsing everything into "default".
+            let derived_sid;
+            let effective_session: Option<&str> = match session {
+                Some(s) => Some(s),
+                None => {
+                    derived_sid = session_id_for_file(path);
+                    Some(derived_sid.as_str())
+                }
+            };
             println!(
-                "  [dry] title: /sessions/{}/title = {:?}",
-                effective_session.unwrap_or("default"),
-                title
+                "→ {}  (session: {})",
+                fname,
+                effective_session.unwrap_or("default")
             );
-        } else {
-            crate::ingest::store_session_title(
-                &title,
-                server,
-                branch,
-                effective_session,
-                &client,
-            )
-            .await;
-        }
 
-        // Apply --since filter on timestamp.
-        if !since_ts.is_empty() {
-            turns.retain(|t| t.timestamp.as_str() >= since_ts);
-        }
-
-        // Apply --last filter.
-        if let Some(n) = last {
-            let skip = turns.len().saturating_sub(n);
-            turns = turns.into_iter().skip(skip).collect();
-        }
-
-        let source_file = path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-        for (idx, turn) in turns.iter().enumerate() {
-            total_tokens.add(&turn.tokens);
-
-            if !turn.tokens.is_empty() {
-                if dry_run {
-                    println!(
-                        "  [dry] token record: in={} out={} cache_read={} cache_create={} model={}",
-                        turn.tokens.input,
-                        turn.tokens.output,
-                        turn.tokens.cache_read,
-                        turn.tokens.cache_creation,
-                        turn.model,
-                    );
-                } else {
-                    crate::ingest::record_turn_tokens(
-                        &turn.tokens,
-                        &turn.model,
-                        server,
-                        effective_session,
-                        &client,
-                    )
-                    .await;
-                }
+            let mut turns = crate::ingest::parse_turns(path);
+            if !turns.is_empty() {
+                proj_sessions += 1;
             }
 
-            if full_turn {
-                if dry_run {
-                    println!(
-                        "  [dry] full turn: /sessions/{}/turns/{:04} ({} bytes assistant, {} tools)",
-                        effective_session.unwrap_or("default"),
-                        idx,
-                        turn.assistant_text.len(),
-                        turn.tool_calls_raw.len(),
-                    );
+            // Session title (t-016): derive from the FULL session (before the
+            // --since/--last filters below) so it reflects where the session
+            // started, then persist a title node at /sessions/{id}/title.
+            // Fallback: "<project-label> · <date>".
+            let title = crate::ingest::derive_session_title(&turns).unwrap_or_else(|| {
+                let proj = if !label.is_empty() {
+                    label.clone()
                 } else {
-                    crate::ingest::store_full_turn(
-                        turn,
-                        idx,
-                        &source_file,
-                        server,
-                        branch,
-                        effective_session,
-                        &client,
-                    )
-                    .await;
-                    total_full_turns += 1;
-                }
+                    std::env::current_dir()
+                        .ok()
+                        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                        .unwrap_or_else(|| "session".to_string())
+                };
+                let date = turns
+                    .first()
+                    .map(|t| t.timestamp.clone())
+                    .filter(|ts| ts.len() >= 10)
+                    .map(|ts| ts[..10].to_string())
+                    .unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%d").to_string());
+                crate::ingest::truncate_title(&format!("{} · {}", proj, date))
+            });
+            if dry_run {
+                println!(
+                    "  [dry] title: /sessions/{}/title = {:?}",
+                    effective_session.unwrap_or("default"),
+                    title
+                );
+            } else {
+                crate::ingest::store_session_title(
+                    &title,
+                    server,
+                    branch,
+                    effective_session,
+                    &client,
+                )
+                .await;
             }
 
-            if tokens_only || api_key.is_empty() || !turn.is_substantial() {
-                continue;
+            // Apply --since filter on timestamp.
+            if !since_ts.is_empty() {
+                turns.retain(|t| t.timestamp.as_str() >= since_ts);
             }
 
-            let memories = crate::ingest::extract_memories(turn, &api_key, &client).await;
-            for mem in &memories {
-                if dry_run {
-                    println!(
-                        "  [dry] memory: {} ({}) — {}",
-                        mem.path, mem.importance, mem.title
-                    );
-                } else {
-                    crate::ingest::store_memory(mem, server, branch, effective_session, &client)
+            // Apply --last filter.
+            if let Some(n) = last {
+                let skip = turns.len().saturating_sub(n);
+                turns = turns.into_iter().skip(skip).collect();
+            }
+
+            let source_file = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            for (idx, turn) in turns.iter().enumerate() {
+                proj_turns += 1;
+                proj_tokens.add(&turn.tokens);
+
+                if !turn.tokens.is_empty() {
+                    if dry_run {
+                        println!(
+                            "  [dry] token record: in={} out={} cache_read={} cache_create={} model={}",
+                            turn.tokens.input,
+                            turn.tokens.output,
+                            turn.tokens.cache_read,
+                            turn.tokens.cache_creation,
+                            turn.model,
+                        );
+                    } else {
+                        crate::ingest::record_turn_tokens(
+                            &turn.tokens,
+                            &turn.model,
+                            server,
+                            effective_session,
+                            &client,
+                        )
                         .await;
-                    print!(".");
-                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                    }
                 }
+
+                if full_turn {
+                    if dry_run {
+                        println!(
+                            "  [dry] full turn: /sessions/{}/turns/{:04} ({} bytes assistant, {} tools)",
+                            effective_session.unwrap_or("default"),
+                            idx,
+                            turn.assistant_text.len(),
+                            turn.tool_calls_raw.len(),
+                        );
+                    } else {
+                        crate::ingest::store_full_turn(
+                            turn,
+                            idx,
+                            &source_file,
+                            server,
+                            branch,
+                            effective_session,
+                            &client,
+                        )
+                        .await;
+                        total_full_turns += 1;
+                    }
+                }
+
+                if tokens_only || api_key.is_empty() || !turn.is_substantial() {
+                    continue;
+                }
+
+                let memories = crate::ingest::extract_memories(turn, &api_key, &client).await;
+                for mem in &memories {
+                    if dry_run {
+                        println!(
+                            "  [dry] memory: {} ({}) — {}",
+                            mem.path, mem.importance, mem.title
+                        );
+                    } else {
+                        crate::ingest::store_memory(mem, server, branch, effective_session, &client)
+                            .await;
+                        print!(".");
+                        let _ = std::io::Write::flush(&mut std::io::stdout());
+                    }
+                }
+                if !memories.is_empty() && !dry_run {
+                    println!(" {} memories", memories.len());
+                }
+                total_memories += memories.len();
             }
-            if !memories.is_empty() && !dry_run {
-                println!(" {} memories", memories.len());
-            }
-            total_memories += memories.len();
-            total_turns += 1;
         }
+
+        if all && !label.is_empty() {
+            println!(
+                "  project {}: {} sessions, {} turns, {} tokens",
+                label,
+                proj_sessions,
+                proj_turns,
+                proj_tokens.input
+                    + proj_tokens.output
+                    + proj_tokens.cache_read
+                    + proj_tokens.cache_creation,
+            );
+        }
+        total_sessions += proj_sessions;
+        total_turns_seen += proj_turns;
+        total_tokens.add(&proj_tokens);
     }
+
+    let grand_tokens =
+        total_tokens.input + total_tokens.output + total_tokens.cache_read + total_tokens.cache_creation;
 
     println!();
     println!(
-        "Done. {} turns processed, {} memories stored, {} full turns persisted.",
-        total_turns, total_memories, total_full_turns
+        "Done. {} sessions, {} turns processed, {} memories stored, {} full turns persisted.",
+        total_sessions, total_turns_seen, total_memories, total_full_turns
     );
     println!(
         "Tokens — input: {}  output: {}  cache_read: {}  cache_create: {}",
@@ -4266,6 +4345,20 @@ async fn run_ingest_session(
         total_tokens.cache_read,
         total_tokens.cache_creation,
     );
+
+    // Machine-readable final line so a caller (the hub's session-sync
+    // endpoint) can parse the outcome without scraping prose. Always the LAST
+    // stdout line under --all.
+    if all {
+        println!(
+            "{}",
+            serde_json::json!({
+                "sessions": total_sessions,
+                "turns": total_turns_seen,
+                "tokens": grand_tokens,
+            })
+        );
+    }
     Ok(())
 }
 
