@@ -4,7 +4,7 @@ All notable changes to CTXone are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 the project's `0.9.x` series (incremented by 0.0.01 per release).
 
-## [Unreleased]
+## [v0.9.14] — 2026-07-18
 
 The headline work since v0.9.13: project **namespaces** and the **unified
 MCP-over-HTTP daemon** that makes one process serve MCP, the REST API, and the
