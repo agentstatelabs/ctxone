@@ -117,10 +117,16 @@ pub fn parse_turns(path: &Path) -> Vec<Turn> {
         let typ = entry.get("type").and_then(|v| v.as_str()).unwrap_or("");
         match typ {
             "user" => {
-                // Start a new turn.
-                let text = extract_text_content(entry.get("message"));
-                if !text.trim().is_empty() {
-                    current_user = Some(text);
+                // Start a new turn. Strip harness-injected system content
+                // (task notifications / reminders / local-command output) so
+                // it isn't attributed to the user. A message that had text but
+                // was fully synthetic still opens a turn (with empty user
+                // text) — the agent's reply then renders as agent-only.
+                // A message with NO text at all (a bare tool_result) is part
+                // of the current turn, so we leave `current_user` untouched.
+                let raw = extract_text_content(entry.get("message"));
+                if !raw.trim().is_empty() {
+                    current_user = Some(strip_synthetic_blocks(&raw));
                     current_ts = entry
                         .get("timestamp")
                         .and_then(|v| v.as_str())
@@ -177,6 +183,55 @@ pub fn parse_turns(path: &Path) -> Vec<Turn> {
     }
 
     turns
+}
+
+/// Harness-injected tags that arrive inside a "user" turn but are NOT
+/// human input: background-task notifications, system reminders, and the
+/// output of local slash-commands. Left in place they mis-attribute
+/// system/agent content to the USER in the transcript.
+const SYNTHETIC_TAGS: &[&str] = &[
+    "system-reminder",
+    "task-notification",
+    "local-command-caveat",
+    "local-command-stdout",
+    "local-command-message",
+    "local-command-name",
+    "local-command-args",
+];
+
+/// Remove synthetic `<tag>…</tag>` blocks from a user message, returning
+/// the genuine human remainder. A fully-synthetic message reduces to an
+/// empty string — the caller still opens a turn for it, so the agent's
+/// reply renders as agent-only (no false USER bubble).
+fn strip_synthetic_blocks(text: &str) -> String {
+    let mut s = text.to_string();
+    for tag in SYNTHETIC_TAGS {
+        let open = format!("<{tag}>");
+        let close = format!("</{tag}>");
+        loop {
+            let Some(start) = s.find(&open) else { break };
+            match s[start + open.len()..].find(&close) {
+                Some(rel) => {
+                    let end = start + open.len() + rel + close.len();
+                    s.replace_range(start..end, "");
+                }
+                // Unclosed tag — drop from the marker to the end, defensively.
+                None => {
+                    s.truncate(start);
+                    break;
+                }
+            }
+        }
+    }
+    // Some notifications carry a bare "[SYSTEM NOTIFICATION - NOT USER
+    // INPUT]" preamble ahead of the tag; strip a leading one if it's left.
+    let trimmed = s.trim_start();
+    if trimmed.starts_with("[SYSTEM NOTIFICATION") {
+        if let Some(nl) = trimmed.find("\n\n") {
+            return trimmed[nl..].trim().to_string();
+        }
+    }
+    s.trim().to_string()
 }
 
 fn extract_text_content(msg: Option<&Value>) -> String {
@@ -769,6 +824,30 @@ pub fn last_turns(path: &Path, n: usize) -> Vec<Turn> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strip_synthetic_removes_task_notification() {
+        let raw = "<task-notification>\n<task-id>abc</task-id>\n<summary>Agent finished</summary>\n</task-notification>";
+        assert_eq!(strip_synthetic_blocks(raw), "");
+    }
+
+    #[test]
+    fn strip_synthetic_keeps_genuine_and_drops_reminder() {
+        let raw = "Do the thing.\n<system-reminder>internal context</system-reminder>";
+        assert_eq!(strip_synthetic_blocks(raw), "Do the thing.");
+    }
+
+    #[test]
+    fn strip_synthetic_removes_local_command_blocks() {
+        let raw = "<local-command-caveat>Caveat: …</local-command-caveat>\n<local-command-stdout>Set model to x</local-command-stdout>";
+        assert_eq!(strip_synthetic_blocks(raw), "");
+    }
+
+    #[test]
+    fn strip_synthetic_leaves_plain_user_text_untouched() {
+        let raw = "Just a normal message with < and > but no synthetic tags.";
+        assert_eq!(strip_synthetic_blocks(raw), raw);
+    }
 
     #[test]
     fn truncate_shorter_than_limit_is_unchanged() {
