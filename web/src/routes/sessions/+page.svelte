@@ -104,6 +104,11 @@
 		}
 	}
 
+	// Client-derived list titles: for GUID sessions the server hasn't named
+	// yet, fetch just the first turn's user_text (one small leaf, cached).
+	// Superseded by the server `name` field once session-metrics lands.
+	let derivedNames: Record<string, string> = $state({});
+
 	async function load() {
 		loading = true;
 		error = null;
@@ -112,10 +117,37 @@
 			if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
 			sessions = await r.json();
 			sessions.sort((a, b) => b.session_tokens_used - a.session_tokens_used);
+			void deriveListNames();
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
 			loading = false;
+		}
+	}
+
+	async function deriveListNames() {
+		// Only GUID-looking sessions with no server name and no cache hit.
+		const todo = sessions.filter(
+			(s) => !s.name?.trim() && UUID_RE.test(s.session_id) && !(s.session_id in derivedNames)
+		);
+		const CONCURRENCY = 8;
+		for (let i = 0; i < todo.length; i += CONCURRENCY) {
+			await Promise.all(
+				todo.slice(i, i + CONCURRENCY).map(async (s) => {
+					try {
+						const r = await hubFetch(
+							`/api/state/main?path=/sessions/${encodeURIComponent(s.session_id)}/turns/t0000/user_text`
+						);
+						if (!r.ok) return;
+						const txt = await r.json();
+						if (typeof txt === 'string' && txt.trim()) {
+							derivedNames[s.session_id] = truncate(txt.trim(), 64);
+						}
+					} catch {
+						/* leave as id */
+					}
+				})
+			);
 		}
 	}
 
@@ -147,13 +179,17 @@
 		return (n ?? 0).toLocaleString();
 	}
 
-	// A session that carries a name (or, in the detail, whose first turn
-	// we've loaded) gets a human title; otherwise the id stands in.
+	// A session that carries a name (server, or a client-derived first-turn
+	// title) gets a human label; otherwise the id stands in.
+	const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 	function truncate(s: string, n: number): string {
 		return s.length > n ? s.slice(0, n - 1) + '…' : s;
 	}
-	function listName(s: Session): string {
-		return s.name?.trim() || s.session_id;
+	function listLabel(s: Session): string {
+		return s.name?.trim() || derivedNames[s.session_id] || s.session_id;
+	}
+	function hasDistinctName(s: Session): boolean {
+		return !!(s.name?.trim() || derivedNames[s.session_id]);
 	}
 	// Detail title: server name > first user message (turns already loaded) > id.
 	const detailTitle: string = $derived.by(() => {
@@ -190,8 +226,8 @@
 						class:active={selected?.session_id === s.session_id}
 						onclick={() => selected = s}
 					>
-						<div class="session-name">{listName(s)}</div>
-						{#if s.name?.trim()}
+						<div class="session-name">{listLabel(s)}</div>
+						{#if hasDistinctName(s)}
 							<div class="session-id" title={s.session_id}>{s.session_id}</div>
 						{/if}
 						<div class="session-meta">
@@ -443,10 +479,12 @@
 	.session-row.active { border-color: var(--border-hi); background: var(--accent-bg); }
 
 	.session-name {
-		font-family: monospace;
+		font-family: var(--lens-font, inherit);
 		font-size: 0.9rem;
-		margin-bottom: 0.35rem;
-		word-break: break-all;
+		font-weight: 600;
+		line-height: 1.35;
+		margin-bottom: 0.2rem;
+		overflow-wrap: anywhere;
 	}
 
 	.session-meta {
