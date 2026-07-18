@@ -3,6 +3,7 @@
 	import { formatCompact } from '@agentstate/lens-core';
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
 	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
+	import { renderMarkdown } from '$lib/markdown';
 
 	interface Session {
 		session_id: string;
@@ -529,6 +530,22 @@
 		}
 		return out;
 	}
+
+	// Markdown-rendered turn bodies, memoized per session. Keyed by turn key →
+	// {user, assistant} sanitized HTML. `turns` only changes on session load,
+	// so this recomputes once per session (not on every keystroke). When a
+	// transcript search is active we fall back to the plain-text + <mark>
+	// highlighter below, so the map is only consumed when `turnSearch` is empty.
+	const renderedTurns = $derived.by(() => {
+		const map = new Map<string, { user: string; assistant: string }>();
+		for (const t of turns) {
+			map.set(t.key, {
+				user: renderMarkdown(t.user_text),
+				assistant: renderMarkdown(t.assistant_text)
+			});
+		}
+		return map;
+	});
 </script>
 
 <div class="page">
@@ -781,13 +798,23 @@
 									{#if t.user_text?.trim()}
 										<div class="msg user">
 											<span class="msg-role">User</span>
-											<div class="msg-body">{#each segments(t.user_text ?? '', q) as seg}{#if seg.hit}<mark>{seg.text}</mark>{:else}{seg.text}{/if}{/each}</div>
+											{#if q}
+												<div class="msg-body">{#each segments(t.user_text ?? '', q) as seg}{#if seg.hit}<mark>{seg.text}</mark>{:else}{seg.text}{/if}{/each}</div>
+											{:else}
+												<!-- eslint-disable-next-line svelte/no-at-html-tags — sanitized by renderMarkdown (DOMPurify) -->
+												<div class="msg-body markdown">{@html renderedTurns.get(t.key)?.user ?? ''}</div>
+											{/if}
 										</div>
 									{/if}
 									{#if t.assistant_text?.trim()}
 										<div class="msg assistant">
-											<span class="msg-role">Assistant</span>
-											<div class="msg-body">{#each segments(t.assistant_text ?? '', q) as seg}{#if seg.hit}<mark>{seg.text}</mark>{:else}{seg.text}{/if}{/each}</div>
+											<span class="msg-role">Agent</span>
+											{#if q}
+												<div class="msg-body">{#each segments(t.assistant_text ?? '', q) as seg}{#if seg.hit}<mark>{seg.text}</mark>{:else}{seg.text}{/if}{/each}</div>
+											{:else}
+												<!-- eslint-disable-next-line svelte/no-at-html-tags — sanitized by renderMarkdown (DOMPurify) -->
+												<div class="msg-body markdown">{@html renderedTurns.get(t.key)?.assistant ?? ''}</div>
+											{/if}
 										</div>
 									{/if}
 									{#if t.tool_calls?.length}
@@ -1293,6 +1320,164 @@
 		white-space: pre-wrap;
 		word-break: break-word;
 		min-width: 0;
+	}
+
+	/* ── Rendered markdown (turn bodies) ─────────────────────────────────────
+	   Injected via {@html} after DOMPurify. Everything below targets that
+	   sanitized subtree, so the selectors must be :global — Svelte's scope hash
+	   never lands on injected nodes. Scoped under `.markdown` so nothing here
+	   leaks to the rest of the panel. */
+	.msg-body.markdown {
+		white-space: normal;
+	}
+	.markdown :global(> *:first-child) {
+		margin-top: 0;
+	}
+	.markdown :global(> *:last-child) {
+		margin-bottom: 0;
+	}
+	.markdown :global(p) {
+		margin: 0 0 0.55em;
+	}
+	.markdown :global(h1),
+	.markdown :global(h2),
+	.markdown :global(h3),
+	.markdown :global(h4),
+	.markdown :global(h5),
+	.markdown :global(h6) {
+		margin: 0.9em 0 0.4em;
+		line-height: 1.3;
+		font-weight: 700;
+		color: var(--lens-text-strong, var(--lens-text));
+		text-transform: none;
+		letter-spacing: 0;
+	}
+	/* Headings live inside a panel — scale them down so they don't dominate. */
+	.markdown :global(h1) { font-size: 1.15em; }
+	.markdown :global(h2) { font-size: 1.08em; }
+	.markdown :global(h3) { font-size: 1em; }
+	.markdown :global(h4),
+	.markdown :global(h5),
+	.markdown :global(h6) { font-size: 0.95em; }
+
+	.markdown :global(ul),
+	.markdown :global(ol) {
+		margin: 0 0 0.55em;
+		padding-left: 1.4em;
+	}
+	.markdown :global(li) {
+		margin: 0.15em 0;
+	}
+	.markdown :global(li > ul),
+	.markdown :global(li > ol) {
+		margin: 0.15em 0;
+	}
+	.markdown :global(li input[type='checkbox']) {
+		margin-right: 0.4em;
+	}
+	.markdown :global(a) {
+		color: var(--lens-accent, #6ea8ff);
+		text-decoration: none;
+	}
+	.markdown :global(a:hover) {
+		text-decoration: underline;
+	}
+	.markdown :global(strong) { font-weight: 700; color: var(--lens-text-strong, var(--lens-text)); }
+	.markdown :global(hr) {
+		border: none;
+		border-top: 1px solid var(--lens-border);
+		margin: 0.8em 0;
+	}
+	.markdown :global(blockquote) {
+		margin: 0 0 0.55em;
+		padding: 0.1em 0.8em;
+		border-left: 3px solid var(--lens-accent-border, var(--lens-border-strong, var(--lens-border)));
+		color: var(--lens-text-secondary, var(--lens-muted));
+	}
+
+	/* Inline code — a small mono chip. `:not(pre code)` keeps this off fenced
+	   blocks, which are styled separately below. */
+	.markdown :global(code) {
+		font-family: var(--lens-font-mono, monospace);
+		font-size: 0.9em;
+	}
+	.markdown :global(:not(pre) > code) {
+		background: color-mix(in srgb, var(--lens-accent, #6ea8ff) 10%, var(--lens-surface-raised));
+		border: 1px solid var(--lens-border);
+		border-radius: var(--lens-radius-sm, 4px);
+		padding: 0.05em 0.35em;
+		white-space: normal;
+		word-break: break-word;
+	}
+
+	/* Fenced code blocks — mono, subtle surface, optional language label,
+	   horizontal scroll (JSON/XML/wide code read cleanly instead of wrapping). */
+	.markdown :global(.md-code) {
+		margin: 0 0 0.6em;
+		border: 1px solid var(--lens-border);
+		border-radius: var(--lens-radius-sm, 4px);
+		background: var(--lens-surface-raised, var(--lens-surface));
+		overflow: hidden;
+	}
+	.markdown :global(.md-code-lang) {
+		font-family: var(--lens-font-mono, monospace);
+		font-size: var(--lens-font-size-2xs, 0.68rem);
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: var(--lens-muted);
+		padding: 0.25em 0.6em;
+		border-bottom: 1px solid var(--lens-border);
+		background: color-mix(in srgb, var(--lens-accent, #6ea8ff) 6%, transparent);
+	}
+	.markdown :global(.md-code pre) {
+		margin: 0;
+		padding: 0.55em 0.65em;
+		overflow-x: auto;
+	}
+	.markdown :global(.md-code pre code) {
+		font-family: var(--lens-font-mono, monospace);
+		font-size: var(--lens-font-size-2xs, 0.72rem);
+		line-height: 1.5;
+		color: var(--lens-text);
+		white-space: pre;
+		background: none;
+		border: none;
+		padding: 0;
+	}
+
+	/* Tables — bordered, shaded header, wrapped in a scroll surface so wide
+	   tables never break the panel layout. */
+	.markdown :global(.md-table-wrap) {
+		overflow-x: auto;
+		margin: 0 0 0.6em;
+		border: 1px solid var(--lens-border);
+		border-radius: var(--lens-radius-sm, 4px);
+	}
+	.markdown :global(table) {
+		border-collapse: collapse;
+		width: max-content;
+		min-width: 100%;
+		font-size: var(--lens-font-size-2xs, 0.72rem);
+	}
+	.markdown :global(th),
+	.markdown :global(td) {
+		border: 1px solid var(--lens-border);
+		padding: 0.3em 0.6em;
+		text-align: left;
+		vertical-align: top;
+	}
+	.markdown :global(th) {
+		background: color-mix(in srgb, var(--lens-accent, #6ea8ff) 8%, var(--lens-surface-raised));
+		color: var(--lens-text-strong, var(--lens-text));
+		font-weight: 700;
+		white-space: nowrap;
+	}
+	.markdown :global(tbody tr:nth-child(even) td) {
+		background: color-mix(in srgb, var(--lens-text, #fff) 3%, transparent);
+	}
+	.markdown :global(img) {
+		max-width: 100%;
+		height: auto;
 	}
 	.tool-toggle {
 		background: none;
