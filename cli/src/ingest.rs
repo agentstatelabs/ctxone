@@ -5,6 +5,23 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
+/// Truncate `s` to at most `max_bytes` bytes on a UTF-8 char boundary.
+///
+/// A naive `&s[..max_bytes]` panics when `max_bytes` lands inside a
+/// multibyte char (e.g. an em-dash spanning bytes 118..121 when the cut is
+/// at 120). We back the cut up to the nearest boundary instead. Returns the
+/// original string when it already fits.
+fn truncate_on_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 // ── JSONL structures ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Default, Serialize)]
@@ -56,7 +73,10 @@ impl Turn {
         out.push_str("\n\nASSISTANT:\n");
         // Truncate very long assistant text to keep Haiku call cheap.
         let text = if self.assistant_text.len() > 8000 {
-            format!("{}…[truncated]", &self.assistant_text[..8000])
+            format!(
+                "{}…[truncated]",
+                truncate_on_char_boundary(&self.assistant_text, 8000)
+            )
         } else {
             self.assistant_text.clone()
         };
@@ -97,10 +117,16 @@ pub fn parse_turns(path: &Path) -> Vec<Turn> {
         let typ = entry.get("type").and_then(|v| v.as_str()).unwrap_or("");
         match typ {
             "user" => {
-                // Start a new turn.
-                let text = extract_text_content(entry.get("message"));
-                if !text.trim().is_empty() {
-                    current_user = Some(text);
+                // Start a new turn. Strip harness-injected system content
+                // (task notifications / reminders / local-command output) so
+                // it isn't attributed to the user. A message that had text but
+                // was fully synthetic still opens a turn (with empty user
+                // text) — the agent's reply then renders as agent-only.
+                // A message with NO text at all (a bare tool_result) is part
+                // of the current turn, so we leave `current_user` untouched.
+                let raw = extract_text_content(entry.get("message"));
+                if !raw.trim().is_empty() {
+                    current_user = Some(strip_synthetic_blocks(&raw));
                     current_ts = entry
                         .get("timestamp")
                         .and_then(|v| v.as_str())
@@ -159,6 +185,55 @@ pub fn parse_turns(path: &Path) -> Vec<Turn> {
     turns
 }
 
+/// Harness-injected tags that arrive inside a "user" turn but are NOT
+/// human input: background-task notifications, system reminders, and the
+/// output of local slash-commands. Left in place they mis-attribute
+/// system/agent content to the USER in the transcript.
+const SYNTHETIC_TAGS: &[&str] = &[
+    "system-reminder",
+    "task-notification",
+    "local-command-caveat",
+    "local-command-stdout",
+    "local-command-message",
+    "local-command-name",
+    "local-command-args",
+];
+
+/// Remove synthetic `<tag>…</tag>` blocks from a user message, returning
+/// the genuine human remainder. A fully-synthetic message reduces to an
+/// empty string — the caller still opens a turn for it, so the agent's
+/// reply renders as agent-only (no false USER bubble).
+fn strip_synthetic_blocks(text: &str) -> String {
+    let mut s = text.to_string();
+    for tag in SYNTHETIC_TAGS {
+        let open = format!("<{tag}>");
+        let close = format!("</{tag}>");
+        loop {
+            let Some(start) = s.find(&open) else { break };
+            match s[start + open.len()..].find(&close) {
+                Some(rel) => {
+                    let end = start + open.len() + rel + close.len();
+                    s.replace_range(start..end, "");
+                }
+                // Unclosed tag — drop from the marker to the end, defensively.
+                None => {
+                    s.truncate(start);
+                    break;
+                }
+            }
+        }
+    }
+    // Some notifications carry a bare "[SYSTEM NOTIFICATION - NOT USER
+    // INPUT]" preamble ahead of the tag; strip a leading one if it's left.
+    let trimmed = s.trim_start();
+    if trimmed.starts_with("[SYSTEM NOTIFICATION") {
+        if let Some(nl) = trimmed.find("\n\n") {
+            return trimmed[nl..].trim().to_string();
+        }
+    }
+    s.trim().to_string()
+}
+
 fn extract_text_content(msg: Option<&Value>) -> String {
     let msg = match msg {
         Some(m) => m,
@@ -213,7 +288,7 @@ fn extract_tool_calls(msg: &Value) -> Vec<String> {
                 .map(|c| {
                     let c = c.trim();
                     if c.len() > 120 {
-                        format!("{}…", &c[..120])
+                        format!("{}…", truncate_on_char_boundary(c, 120))
                     } else {
                         c.to_string()
                     }
@@ -390,7 +465,7 @@ pub async fn extract_memories(
         eprintln!(
             "  warn: Haiku returned {}: {}",
             status,
-            &body[..body.len().min(200)]
+            truncate_on_char_boundary(&body, 200)
         );
         return vec![];
     }
@@ -423,7 +498,7 @@ pub async fn extract_memories(
         Ok(memories) => memories,
         Err(e) => {
             eprintln!("  warn: could not parse extracted memories: {}", e);
-            eprintln!("  raw: {}", &json_str[..json_str.len().min(300)]);
+            eprintln!("  raw: {}", truncate_on_char_boundary(json_str, 300));
             vec![]
         }
     }
@@ -501,6 +576,131 @@ pub async fn store_full_turn(
     let _ = req.send().await;
 }
 
+/// Max length of a derived session title (chars), before an ellipsis.
+const TITLE_MAX_CHARS: usize = 70;
+
+/// True when a user message is substantive enough to title a session by.
+///
+/// Skips the noise Claude Code injects as `user`-role entries: slash commands
+/// (`/clear`, `/init`), XML-ish meta wrappers (`<command-name>`,
+/// `<local-command-stdout>`, `<system-reminder>`), and the caveat preamble.
+/// Tool-result echoes are already dropped upstream — `parse_turns` only keeps
+/// user text extracted from `text` blocks, so a tool_result turn arrives here
+/// as empty and is filtered by the `is_empty` guard.
+fn is_substantive_user_text(text: &str) -> bool {
+    let t = text.trim();
+    if t.is_empty() {
+        return false;
+    }
+    // Slash-command invocations (the whole message is the command).
+    if t.starts_with('/') {
+        return false;
+    }
+    // Meta/wrapper blocks Claude Code emits as user turns.
+    if t.starts_with('<') {
+        return false;
+    }
+    if t.starts_with("Caveat:") {
+        return false;
+    }
+    // Require at least one alphanumeric char so pure punctuation is skipped.
+    t.chars().any(|c| c.is_alphanumeric())
+}
+
+/// Derive a session title from parsed turns: the first substantive user
+/// message, truncated to [`TITLE_MAX_CHARS`]. Returns `None` when no turn
+/// qualifies (caller supplies the `<project> · <date>` fallback).
+pub fn derive_session_title(turns: &[Turn]) -> Option<String> {
+    let raw = turns
+        .iter()
+        .map(|t| t.user_text.as_str())
+        .find(|txt| is_substantive_user_text(txt))?;
+    // Collapse internal whitespace/newlines into single spaces for a clean
+    // one-line title.
+    let collapsed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    Some(truncate_title(&collapsed))
+}
+
+/// Truncate to [`TITLE_MAX_CHARS`] on a char boundary, appending an ellipsis
+/// when the text was cut.
+pub fn truncate_title(s: &str) -> String {
+    if s.chars().count() <= TITLE_MAX_CHARS {
+        return s.to_string();
+    }
+    let truncated: String = s.chars().take(TITLE_MAX_CHARS).collect();
+    format!("{}…", truncated.trim_end())
+}
+
+/// Persist a session's human-readable title at `/sessions/{session}/title`
+/// via the Hub. Idempotent — re-ingesting overwrites. No-op on empty title.
+pub async fn store_session_title(
+    title: &str,
+    hub: &str,
+    branch: &str,
+    session: Option<&str>,
+    client: &reqwest::Client,
+) {
+    if title.trim().is_empty() {
+        return;
+    }
+    let sid = session.unwrap_or("default");
+    let url = format!(
+        "{}/api/sessions/{}/title?ref={}",
+        hub,
+        crate::urlencoding(sid),
+        crate::urlencoding(branch),
+    );
+    let mut req = client.put(url).json(&serde_json::json!(title));
+    if let Some(s) = session {
+        req = req.header("X-CTXone-Session", s);
+    }
+    let _ = req.send().await;
+}
+
+/// Persist a session's meta object `{source, started_at, updated_at}` at
+/// `/sessions/{session}/meta` via the Hub. Idempotent; drives the Lens
+/// agent-type filter and date sort. No-op when all fields are empty.
+pub async fn store_session_meta(
+    source: &str,
+    started_at: &str,
+    updated_at: &str,
+    models_used: &[String],
+    hub: &str,
+    branch: &str,
+    session: Option<&str>,
+    client: &reqwest::Client,
+) {
+    if source.is_empty() && started_at.is_empty() && updated_at.is_empty() && models_used.is_empty()
+    {
+        return;
+    }
+    let sid = session.unwrap_or("default");
+    let url = format!(
+        "{}/api/sessions/{}/meta?ref={}",
+        hub,
+        crate::urlencoding(sid),
+        crate::urlencoding(branch),
+    );
+    let mut meta = serde_json::Map::new();
+    if !source.is_empty() {
+        meta.insert("source".into(), serde_json::json!(source));
+    }
+    if !started_at.is_empty() {
+        meta.insert("started_at".into(), serde_json::json!(started_at));
+    }
+    if !updated_at.is_empty() {
+        meta.insert("updated_at".into(), serde_json::json!(updated_at));
+    }
+    if !models_used.is_empty() {
+        meta.insert("models_used".into(), serde_json::json!(models_used));
+    }
+    let mut req = client.put(url).json(&serde_json::Value::Object(meta));
+    if let Some(s) = session {
+        req = req.header("X-CTXone-Session", s);
+    }
+    let _ = req.send().await;
+}
+
 pub async fn store_memory(
     mem: &ExtractedMemory,
     hub: &str,
@@ -557,9 +757,134 @@ pub fn latest_session_file(project_dir: &Path) -> Option<PathBuf> {
     find_session_files(project_dir).into_iter().last()
 }
 
+/// Scan EVERY project under `~/.claude/projects/*` for Claude Code session
+/// JSONL files and return them grouped by project as `(label, files)` pairs.
+///
+/// Each subdirectory of `~/.claude/projects/` is a hashed project path
+/// (Claude Code replaces `/` with `-`). We derive a short human-readable
+/// `label` from the last two path components of the recovered path so
+/// `ctx ingest-session --all` can report per-project counts. Files within
+/// each project are sorted oldest-first (by mtime); projects are sorted by
+/// label for stable output. Projects with no `.jsonl` files are omitted.
+///
+/// This is the `--all` counterpart to [`find_session_files`], which scans
+/// only the single project matching a given directory.
+pub fn find_all_session_files() -> Vec<(String, Vec<PathBuf>)> {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
+    let projects_dir = home.join(".claude").join("projects");
+
+    let mut result: Vec<(String, Vec<PathBuf>)> = vec![];
+    let Ok(entries) = std::fs::read_dir(&projects_dir) else {
+        return result;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let hash = path.file_name().unwrap_or_default().to_string_lossy();
+        // Recover a readable label. The hash is `project_path.replace('/', "-")`,
+        // so an absolute path leads with '-'. Take the last two components.
+        let label = if let Some(stripped) = hash.strip_prefix('-') {
+            let parts: Vec<&str> = stripped.split('-').collect();
+            if parts.len() >= 2 {
+                format!("{}/{}", parts[parts.len() - 2], parts[parts.len() - 1])
+            } else {
+                hash.to_string()
+            }
+        } else {
+            hash.to_string()
+        };
+
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&path)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().map(|e| e == "jsonl").unwrap_or(false))
+            .collect();
+        files.sort_by_key(|p| p.metadata().and_then(|m| m.modified()).ok());
+
+        if !files.is_empty() {
+            result.push((label, files));
+        }
+    }
+    result.sort_by(|a, b| a.0.cmp(&b.0));
+    result
+}
+
 /// Return the last N turns from a session file (for per-turn hook capture).
 pub fn last_turns(path: &Path, n: usize) -> Vec<Turn> {
     let all = parse_turns(path);
     let skip = all.len().saturating_sub(n);
     all.into_iter().skip(skip).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_synthetic_removes_task_notification() {
+        let raw = "<task-notification>\n<task-id>abc</task-id>\n<summary>Agent finished</summary>\n</task-notification>";
+        assert_eq!(strip_synthetic_blocks(raw), "");
+    }
+
+    #[test]
+    fn strip_synthetic_keeps_genuine_and_drops_reminder() {
+        let raw = "Do the thing.\n<system-reminder>internal context</system-reminder>";
+        assert_eq!(strip_synthetic_blocks(raw), "Do the thing.");
+    }
+
+    #[test]
+    fn strip_synthetic_removes_local_command_blocks() {
+        let raw = "<local-command-caveat>Caveat: …</local-command-caveat>\n<local-command-stdout>Set model to x</local-command-stdout>";
+        assert_eq!(strip_synthetic_blocks(raw), "");
+    }
+
+    #[test]
+    fn strip_synthetic_leaves_plain_user_text_untouched() {
+        let raw = "Just a normal message with < and > but no synthetic tags.";
+        assert_eq!(strip_synthetic_blocks(raw), raw);
+    }
+
+    #[test]
+    fn truncate_shorter_than_limit_is_unchanged() {
+        assert_eq!(truncate_on_char_boundary("hello", 120), "hello");
+    }
+
+    #[test]
+    fn truncate_backs_up_off_a_multibyte_boundary() {
+        // Em-dash '—' is 3 bytes. Build a string whose byte 120 lands INSIDE
+        // it — the exact case that panicked `&c[..120]` on real transcripts.
+        let s = format!("{}—tail", "x".repeat(118)); // '—' occupies bytes 118..121
+        assert!(!s.is_char_boundary(120));
+        let out = truncate_on_char_boundary(&s, 120);
+        // Cut backed up to byte 118 (start of the em-dash), never panicking.
+        assert_eq!(out.len(), 118);
+        assert_eq!(out, "x".repeat(118));
+    }
+
+    #[test]
+    fn truncate_on_exact_boundary_keeps_full_bytes() {
+        let s = "abcdef";
+        assert_eq!(truncate_on_char_boundary(s, 6), "abcdef");
+        assert_eq!(truncate_on_char_boundary(s, 3), "abc");
+    }
+
+    #[test]
+    fn extract_tool_calls_survives_long_unicode_bash_command() {
+        // Regression: a Bash command with a multibyte char straddling byte 120
+        // must summarize without panicking.
+        let cmd = format!("echo {}—done", "a".repeat(130));
+        let msg = serde_json::json!({
+            "content": [
+                { "type": "tool_use", "name": "Bash", "input": { "command": cmd } }
+            ]
+        });
+        let calls = extract_tool_calls(&msg);
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].starts_with("Bash: echo "));
+    }
 }

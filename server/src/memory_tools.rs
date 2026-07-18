@@ -353,6 +353,31 @@ pub struct SessionSnapshot {
     pub last_model: Option<String>,
     #[serde(default)]
     pub last_provider: Option<String>,
+
+    /// Human-readable session title (t-016). Populated best-effort by the
+    /// HTTP layer from the `/sessions/{id}/title` graph node; `None` when no
+    /// title was ingested. `session_id` stays the GUID — this is display-only.
+    #[serde(default)]
+    pub name: Option<String>,
+
+    /// Originating tool/agent for this session (e.g. "Claude Code"), read
+    /// from the `/sessions/{id}/meta` node at ingest (t-021). `None` for
+    /// sessions with no ingested meta (e.g. live `default`). Lets the Lens
+    /// filter by agent type; ready for Cursor/Copilot ingesters.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// First-turn timestamp (RFC-3339), for date sort. Best-effort.
+    #[serde(default)]
+    pub started_at: Option<String>,
+    /// Last-turn timestamp (RFC-3339). Best-effort.
+    #[serde(default)]
+    pub updated_at: Option<String>,
+    /// Every distinct model used across the session's turns (t-022), so a
+    /// session that switched models mid-way (e.g. Fable → Opus) stays
+    /// findable by any of them — `last_model` only remembers the final one.
+    /// Empty until the session is (re-)ingested with this field.
+    #[serde(default)]
+    pub models_used: Vec<String>,
 }
 
 impl SessionSnapshot {
@@ -380,6 +405,12 @@ impl SessionSnapshot {
             llm_call_count: stats.llm_call_count.load(Ordering::Relaxed),
             last_model: stats.last_model(),
             last_provider: stats.last_provider(),
+            // Filled in best-effort by the HTTP layer (reads the title/meta nodes).
+            name: None,
+            source: None,
+            started_at: None,
+            updated_at: None,
+            models_used: Vec::new(),
         }
     }
 }
@@ -557,6 +588,12 @@ impl SessionRegistry {
             // metadata — it's a roll-up, not a single session's view.
             last_model: None,
             last_provider: None,
+            // The aggregate is a roll-up, not a single named session.
+            name: None,
+            source: None,
+            started_at: None,
+            updated_at: None,
+            models_used: Vec::new(),
         }
     }
 
@@ -1730,6 +1767,18 @@ impl CtxOneServer {
     /// when `--asd-repo` flags were supplied.
     pub fn with_pool(mut self, pool: Arc<AsdProcessPool>) -> Self {
         self.asd_pool = Some(pool);
+        self
+    }
+
+    /// Replace the server's session-stats accumulator with a shared
+    /// `Arc<SessionStats>` (session-metrics t-014). The stdio MCP binary uses
+    /// this to hand the server a session that a `SessionRegistry` also holds,
+    /// so token savings written here are visible to `flush_to_db` and survive
+    /// process exit — instead of evaporating in a private, never-flushed
+    /// `SessionStats::new()`. The Arc is shared, not copied: writes through
+    /// `self.session` land in the same counters the registry flushes.
+    pub fn with_session(mut self, session: Arc<SessionStats>) -> Self {
+        self.session = session;
         self
     }
 

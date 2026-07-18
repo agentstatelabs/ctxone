@@ -32,22 +32,80 @@
 //! for rate limiting to actually see real peer IPs. The Hub's
 //! `main.rs` already does this.
 
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use ::governor::middleware::NoOpMiddleware;
+use axum::extract::ConnectInfo;
+use axum::http::Request;
 use tower_governor::GovernorLayer;
+use tower_governor::errors::GovernorError;
 use tower_governor::governor::{GovernorConfig, GovernorConfigBuilder};
-use tower_governor::key_extractor::PeerIpKeyExtractor;
+use tower_governor::key_extractor::KeyExtractor;
 use tracing::{info, warn};
 
-/// Compiled config type for the peer-IP keyed rate limiter.
+/// Rate-limit key extractor that **exempts loopback traffic**.
 ///
-/// `GovernorConfig<K, M>` has two generic parameters; we pin them
-/// to the default extractor (peer IP) and the no-op middleware so
-/// the layer type is nameable elsewhere in the crate.
-pub type PeerIpGovernorConfig = GovernorConfig<PeerIpKeyExtractor, NoOpMiddleware>;
+/// The limiter exists to protect the Hub from *remote* abuse. Requests
+/// originating on the same machine — local agents, the `ctx` CLI, the
+/// Lens dev proxy, and `/api/sessions/sync` (which fires thousands of
+/// loopback POSTs via the spawned CLI) — are trusted and must not be
+/// throttled: a rate-limited sync silently drops writes.
+///
+/// Remote peers are keyed by IP (one shared token bucket per IP, exactly
+/// as `PeerIpKeyExtractor` did). Loopback peers get a **unique key per
+/// request** (a monotonic counter), so each lands in its own bucket and
+/// is never limited. governor's background GC reclaims those buckets.
+#[derive(Clone)]
+pub struct LoopbackExemptKeyExtractor {
+    counter: Arc<AtomicU64>,
+}
+
+impl LoopbackExemptKeyExtractor {
+    fn new() -> Self {
+        Self {
+            counter: Arc::new(AtomicU64::new(0)),
+        }
+    }
+}
+
+impl KeyExtractor for LoopbackExemptKeyExtractor {
+    type Key = String;
+
+    #[cfg(feature = "tracing")]
+    fn name(&self) -> &'static str {
+        "loopback-exempt peer IP"
+    }
+
+    fn extract<T>(&self, req: &Request<T>) -> Result<Self::Key, GovernorError> {
+        let addr = req
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ci| ci.0)
+            .ok_or(GovernorError::UnableToExtractKey)?;
+        if addr.ip().is_loopback() {
+            // Unique bucket per request → effectively unlimited for local.
+            let n = self.counter.fetch_add(1, Ordering::Relaxed);
+            Ok(format!("lo:{n}"))
+        } else {
+            Ok(addr.ip().to_string())
+        }
+    }
+
+    #[cfg(feature = "tracing")]
+    fn key_name(&self, key: &Self::Key) -> Option<String> {
+        Some(key.clone())
+    }
+}
+
+/// Compiled config type for the loopback-exempt rate limiter.
+pub type PeerIpGovernorConfig = GovernorConfig<LoopbackExemptKeyExtractor, NoOpMiddleware>;
 
 /// Fully-pinned `GovernorLayer` type so callers can store it in a
 /// `Router::layer(...)` chain without wrestling with generics.
-pub type PeerIpGovernorLayer = GovernorLayer<PeerIpKeyExtractor, NoOpMiddleware, axum::body::Body>;
+pub type PeerIpGovernorLayer =
+    GovernorLayer<LoopbackExemptKeyExtractor, NoOpMiddleware, axum::body::Body>;
 
 /// Build a rate limiter layer that enforces `rpm` requests per minute
 /// per peer IP, or `None` when rate limiting is disabled (rpm = 0).
@@ -83,6 +141,7 @@ pub fn build_config(rpm: u32) -> Option<PeerIpGovernorConfig> {
     let config = GovernorConfigBuilder::default()
         .period(std::time::Duration::from_millis(period_ms))
         .burst_size(burst)
+        .key_extractor(LoopbackExemptKeyExtractor::new())
         .finish();
 
     match config {
@@ -143,5 +202,33 @@ mod tests {
     #[test]
     fn build_layer_non_zero_is_some() {
         assert!(build_layer(300).is_some());
+    }
+
+    fn req_from(addr: &str) -> Request<()> {
+        let mut r = Request::new(());
+        r.extensions_mut()
+            .insert(ConnectInfo(addr.parse::<SocketAddr>().unwrap()));
+        r
+    }
+
+    #[test]
+    fn loopback_gets_unique_keys_remote_is_stable() {
+        let ex = LoopbackExemptKeyExtractor::new();
+        // Two loopback requests → distinct keys (each its own bucket).
+        let a = ex.extract(&req_from("127.0.0.1:5001")).unwrap();
+        let b = ex.extract(&req_from("127.0.0.1:5002")).unwrap();
+        assert_ne!(a, b, "loopback requests must not share a bucket");
+        assert!(a.starts_with("lo:") && b.starts_with("lo:"));
+        // A remote peer → stable key across requests (shared bucket, limited).
+        let r1 = ex.extract(&req_from("203.0.113.7:40000")).unwrap();
+        let r2 = ex.extract(&req_from("203.0.113.7:40001")).unwrap();
+        assert_eq!(r1, "203.0.113.7");
+        assert_eq!(r1, r2, "same remote IP must share one bucket");
+    }
+
+    #[test]
+    fn missing_connect_info_errors() {
+        let ex = LoopbackExemptKeyExtractor::new();
+        assert!(ex.extract(&Request::new(())).is_err());
     }
 }
