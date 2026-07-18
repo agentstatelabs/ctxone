@@ -109,6 +109,41 @@
 	// Superseded by the server `name` field once session-metrics lands.
 	let derivedNames: Record<string, string> = $state({});
 
+	// Sync = re-scan this machine's Claude Code transcripts into the hub
+	// (turns, titles, token metrics). Runs the local CLI via a hub endpoint;
+	// only works when the hub is co-located with ~/.claude/projects.
+	let syncing = $state(false);
+	let syncMsg: string | null = $state(null);
+	let syncErr = $state(false);
+
+	async function syncSessions() {
+		syncing = true;
+		syncMsg = null;
+		syncErr = false;
+		try {
+			const r = await hubFetch('/api/sessions/sync', { method: 'POST' });
+			if (r.status === 404) {
+				syncErr = true;
+				syncMsg = 'Sync not available on this Hub version.';
+				return;
+			}
+			if (!r.ok) {
+				syncErr = true;
+				syncMsg = `Sync failed: ${(await r.text()) || r.statusText}`;
+				return;
+			}
+			const res = await r.json();
+			syncMsg = `Synced ${res.sessions ?? '?'} sessions · ${fmt(res.tokens ?? 0)} tokens`;
+			derivedNames = {}; // titles may now come from the server
+			await load();
+		} catch (e) {
+			syncErr = true;
+			syncMsg = `Sync failed: ${e instanceof Error ? e.message : String(e)}`;
+		} finally {
+			syncing = false;
+		}
+	}
+
 	async function load() {
 		loading = true;
 		error = null;
@@ -208,6 +243,17 @@
 		<button class="refresh-btn" onclick={load} disabled={loading}>
 			{loading ? 'Loading…' : 'Refresh'}
 		</button>
+		<button
+			class="sync-btn"
+			onclick={syncSessions}
+			disabled={syncing}
+			title="Re-scan Claude Code transcripts on this machine and pull them into the hub (local hub only)"
+		>
+			{syncing ? 'Syncing…' : '⟳ Sync transcripts'}
+		</button>
+		{#if syncMsg}
+			<span class="sync-msg" class:err={syncErr}>{syncMsg}</span>
+		{/if}
 		<span class="ago">refreshed {formatAgo(auto.lastRefreshed)}</span>
 	</div>
 
@@ -740,4 +786,23 @@
 		color: var(--lens-muted);
 		margin: -0.2rem 0 0.6rem;
 	}
+
+	.sync-btn {
+		background: color-mix(in srgb, var(--lens-accent, #6ea8ff) 14%, var(--bg-hover));
+		border: 1px solid color-mix(in srgb, var(--lens-accent, #6ea8ff) 40%, var(--border));
+		color: var(--lens-accent, #93c5fd);
+		padding: 0.35rem 0.75rem;
+		border-radius: 6px;
+		cursor: pointer;
+		font-size: 0.85rem;
+	}
+	.sync-btn:hover:not(:disabled) {
+		background: color-mix(in srgb, var(--lens-accent, #6ea8ff) 22%, var(--bg-hover));
+	}
+	.sync-btn:disabled { opacity: 0.6; cursor: default; }
+	.sync-msg {
+		font-size: 0.8rem;
+		color: var(--lens-ok, #4ade80);
+	}
+	.sync-msg.err { color: var(--lens-danger, #ff6b6b); }
 </style>
