@@ -69,7 +69,20 @@
 		}
 	}
 
-	onMount(loadPlans);
+	onMount(async () => {
+		await loadPlans();
+		// Deep-link: /plans?plan=<name>&task=<t-id> opens that plan (and task).
+		// Used by the session Commits section to jump from a commit to its task.
+		if (typeof window !== 'undefined') {
+			const p = new URLSearchParams(window.location.search);
+			const plan = p.get('plan');
+			const task = p.get('task');
+			if (plan && plans.some((x) => x.name === plan)) {
+				await selectPlan(plan);
+				if (task) panelTaskId = task;
+			}
+		}
+	});
 
 	// Refresh both the list and the open plan on each tick — agents
 	// looking at a plan want task-status changes to surface promptly.
