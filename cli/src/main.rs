@@ -1360,17 +1360,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // that talk to the Hub — purely-local commands (and `serve`, where
     // the Hub is by definition not up yet) skip the detection round-trip.
     let namespace = match &cli.command {
-        // `init --transport http` needs the project namespace to bake into the
-        // `/mcp?namespace=<ns>` URL it writes, so detect it here (best-effort).
-        Commands::Init {
-            transport: McpTransport::Http,
-            ..
-        } => cli.resolve_namespace().await,
+        // `init` needs the project namespace: `--transport http` bakes it into
+        // the `/mcp?namespace=<ns>` URL, and both transports use it as the
+        // stable CTX_SESSION id injected into the stdio server's env (t-015).
+        // Best-effort — a down hub just yields None and we fall back below.
+        Commands::Init { .. } => cli.resolve_namespace().await,
         Commands::Skill { .. }
         | Commands::Bootstrap
         | Commands::Completion { .. }
         | Commands::Config { .. }
-        | Commands::Init { .. }
         | Commands::Serve { .. }
         | Commands::Session { .. }
         | Commands::Service { .. }
@@ -4131,6 +4129,40 @@ async fn run_ingest_session(
 
         let mut turns = crate::ingest::parse_turns(path);
 
+        // Session title (t-016): derive from the FULL session (before the
+        // --since/--last filters below) so it reflects where the session
+        // started, then persist a title node at /sessions/{id}/title.
+        // Fallback: "<project-dir-name> · <date>".
+        let title = crate::ingest::derive_session_title(&turns).unwrap_or_else(|| {
+            let proj = std::env::current_dir()
+                .ok()
+                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                .unwrap_or_else(|| "session".to_string());
+            let date = turns
+                .first()
+                .map(|t| t.timestamp.clone())
+                .filter(|ts| ts.len() >= 10)
+                .map(|ts| ts[..10].to_string())
+                .unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%d").to_string());
+            crate::ingest::truncate_title(&format!("{} · {}", proj, date))
+        });
+        if dry_run {
+            println!(
+                "  [dry] title: /sessions/{}/title = {:?}",
+                effective_session.unwrap_or("default"),
+                title
+            );
+        } else {
+            crate::ingest::store_session_title(
+                &title,
+                server,
+                branch,
+                effective_session,
+                &client,
+            )
+            .await;
+        }
+
         // Apply --since filter on timestamp.
         if !since_ts.is_empty() {
             turns.retain(|t| t.timestamp.as_str() >= since_ts);
@@ -4939,6 +4971,44 @@ fn tool_slug(name: &str) -> String {
     out.trim_end_matches('-').to_string()
 }
 
+/// Resolve the stable `CTX_SESSION` id baked into the stdio MCP server's env
+/// (t-015). This unifies a project's MCP-side memory savings into ONE session
+/// row in the Hub's `ctxone_sessions` table, and is stable across re-inits.
+///
+/// Preference order:
+///   1. the registered project namespace (when `detect_project` matched) — so
+///      every tool configured for this repo converges on the same id, and it
+///      lines up with where the stdio server scopes its writes; else
+///   2. a deterministic hash of the canonical project directory. `DefaultHasher`
+///      uses fixed keys, so the same path always yields the same id across
+///      processes and re-inits, with no file to persist and no divergence
+///      between per-tool config files.
+///
+/// LIMITATION (documented on purpose): this keys savings per PROJECT, not per
+/// Claude Code CONVERSATION. Claude Code's own session ids are per-conversation
+/// UUIDs (the `<uuid>.jsonl` stem that `ctx ingest-session` uses); aligning MCP
+/// savings with those would require a per-turn hook injecting the live
+/// conversation id into CTX_SESSION, which is out of scope here. So `ctx
+/// ingest-session` rows (per conversation) and live MCP rows (per project) live
+/// side by side rather than merging.
+fn init_session_id(namespace: Option<&str>) -> String {
+    if let Some(ns) = namespace {
+        let ns = ns.trim();
+        if !ns.is_empty() && ns != "default" {
+            return ns.to_string();
+        }
+    }
+    use std::hash::{Hash, Hasher};
+    let cwd = std::env::current_dir()
+        .ok()
+        .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    cwd.hash(&mut h);
+    format!("proj-{:016x}", h.finish())
+}
+
 fn mcp_server_entry(
     agent_id: &str,
     client_name: &str,
@@ -5047,6 +5117,7 @@ fn merge_codex_ctxone_toml(
     hub_bin: &str,
     db_path: &str,
     agent_id: &str,
+    session_id: &str,
 ) -> Result<String, String> {
     use toml::Value;
 
@@ -5080,6 +5151,14 @@ fn merge_codex_ctxone_toml(
             Value::String(agent_id.to_string()),
         ]),
     );
+    // CTX_SESSION env (t-015): stable per-project id so the stdio hub persists
+    // its recall/remember savings under one session row.
+    let mut env = toml::map::Map::new();
+    env.insert(
+        "CTX_SESSION".to_string(),
+        Value::String(session_id.to_string()),
+    );
+    ctxone.insert("env".to_string(), Value::Table(env));
 
     servers.insert("ctxone".to_string(), Value::Table(ctxone));
 
@@ -5227,6 +5306,13 @@ fn init_mcp(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut tools = detect_tools(global);
 
+    // Stable per-project CTX_SESSION id for the stdio MCP server (t-015).
+    // Injected as `env.CTX_SESSION` below so the spawned hub attributes and
+    // PERSISTS its recall/remember savings under one id instead of losing them
+    // to a never-flushed default session. See `init_session_id` for the
+    // per-project (not per-conversation) limitation.
+    let session_id = init_session_id(namespace.as_deref());
+
     // Generic fallback: if the user passed --config-path, add a synthetic
     // tool entry pointing at that path. Treated as McpJson (the de-facto
     // standard for MCP client config files).
@@ -5279,7 +5365,7 @@ fn init_mcp(
         // (e.g. "Claude Code" → "claude-code"). This makes
         // `ctx blame` show the originating tool for every commit.
         let agent_id = tool_slug(t.name);
-        let entry = mcp_server_entry(
+        let mut entry = mcp_server_entry(
             &agent_id,
             t.name,
             transport,
@@ -5288,6 +5374,19 @@ fn init_mcp(
             auth_token,
             auth_token_env,
         );
+
+        // Inject CTX_SESSION into the stdio server's env (t-015) so its
+        // recall/remember savings persist under a stable id. Only the stdio
+        // transport spawns a per-tool hub process; the HTTP transport scopes
+        // by the `?namespace=` URL and the X-CTXone-Session header instead.
+        if transport == McpTransport::Stdio
+            && let Some(obj) = entry.as_object_mut()
+        {
+            obj.insert(
+                "env".to_string(),
+                serde_json::json!({ "CTX_SESSION": session_id }),
+            );
+        }
 
         // Tell the user when http mode falls back to the mcp-remote bridge, so
         // they know a Node/npx runtime is now a prerequisite for that client.
@@ -5387,9 +5486,13 @@ fn init_mcp(
                         let url = mcp_http_url(mcp_url, namespace.as_deref());
                         merge_codex_ctxone_toml_http(&existing, &url, auth_token_env)
                     }
-                    McpTransport::Stdio => {
-                        merge_codex_ctxone_toml(&existing, &find_hub_binary(), &db_path, &agent_id)
-                    }
+                    McpTransport::Stdio => merge_codex_ctxone_toml(
+                        &existing,
+                        &find_hub_binary(),
+                        &db_path,
+                        &agent_id,
+                        &session_id,
+                    ),
                 };
                 let new_content = match merged {
                     Ok(s) => s,
@@ -6853,6 +6956,7 @@ mod tests {
             "/usr/local/bin/ctxone-hub",
             "/home/user/.ctxone/memory.db",
             "codex",
+            "proj-abc123",
         )
         .expect("merge should succeed on empty input");
         assert!(out.contains("[mcp_servers.ctxone]"));
@@ -6862,6 +6966,9 @@ mod tests {
         // New: agent-id flag should be passed through
         assert!(out.contains("--agent-id"));
         assert!(out.contains("\"codex\""));
+        // t-015: CTX_SESSION env baked in for savings persistence.
+        assert!(out.contains("CTX_SESSION"));
+        assert!(out.contains("proj-abc123"));
     }
 
     #[test]
@@ -6871,7 +6978,7 @@ mod tests {
 command = "wsl"
 args = ["npx", "-y", "mcp-remote", "https://mcp.linear.app/sse"]
 "#;
-        let out = merge_codex_ctxone_toml(existing, "/bin/ctxone-hub", "/db", "codex")
+        let out = merge_codex_ctxone_toml(existing, "/bin/ctxone-hub", "/db", "codex", "proj-x")
             .expect("merge should succeed");
         assert!(out.contains("[mcp_servers.linear]"));
         assert!(out.contains("[mcp_servers.ctxone]"));
@@ -6888,7 +6995,7 @@ some_other_setting = 42
 [mcp_servers.figma]
 command = "figma-mcp"
 "#;
-        let out = merge_codex_ctxone_toml(existing, "/bin/ctxone-hub", "/db", "codex")
+        let out = merge_codex_ctxone_toml(existing, "/bin/ctxone-hub", "/db", "codex", "proj-x")
             .expect("merge should succeed");
         assert!(out.contains("project_trust_level = \"workspace-trusted\""));
         assert!(out.contains("some_other_setting = 42"));
@@ -6899,10 +7006,10 @@ command = "figma-mcp"
     #[test]
     fn codex_merge_is_idempotent() {
         // First merge
-        let first =
-            merge_codex_ctxone_toml("", "/bin/hub", "/db/main.db", "codex").expect("first merge");
+        let first = merge_codex_ctxone_toml("", "/bin/hub", "/db/main.db", "codex", "proj-x")
+            .expect("first merge");
         // Second merge on the output of the first
-        let second = merge_codex_ctxone_toml(&first, "/bin/hub", "/db/main.db", "codex")
+        let second = merge_codex_ctxone_toml(&first, "/bin/hub", "/db/main.db", "codex", "proj-x")
             .expect("second merge");
         assert_eq!(first, second);
     }
@@ -6914,8 +7021,9 @@ command = "figma-mcp"
 command = "/old/path/ctxone-hub"
 args = ["--path", "/old/db"]
 "#;
-        let out = merge_codex_ctxone_toml(existing, "/new/path/ctxone-hub", "/new/db", "codex")
-            .expect("merge should succeed");
+        let out =
+            merge_codex_ctxone_toml(existing, "/new/path/ctxone-hub", "/new/db", "codex", "proj-x")
+                .expect("merge should succeed");
         assert!(out.contains("/new/path/ctxone-hub"));
         assert!(out.contains("/new/db"));
         assert!(!out.contains("/old/path/ctxone-hub"));
@@ -6925,7 +7033,7 @@ args = ["--path", "/old/db"]
     #[test]
     fn codex_merge_rejects_invalid_toml() {
         let broken = "this is { not valid toml }}";
-        assert!(merge_codex_ctxone_toml(broken, "/bin/hub", "/db", "codex").is_err());
+        assert!(merge_codex_ctxone_toml(broken, "/bin/hub", "/db", "codex", "proj-x").is_err());
     }
 
     #[test]
