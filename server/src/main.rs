@@ -118,6 +118,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // starts us in the project directory, so this Just Works once the
     // repo is registered via `ctx project add`).
     let mut namespace_flag: Option<String> = std::env::var("CTX_NAMESPACE").ok();
+    // Path to the `ctx` CLI binary used by POST /api/sessions/sync to
+    // re-ingest local Claude Code transcripts. None → resolve "ctx" on PATH.
+    // From --ctx-binary or CTXONE_CTX_BINARY.
+    let mut ctx_binary: Option<String> = std::env::var("CTXONE_CTX_BINARY")
+        .ok()
+        .filter(|s| !s.is_empty());
 
     let mut i = 1;
     while i < args.len() {
@@ -193,6 +199,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 i += 1;
                 if i < args.len() {
                     namespace_flag = Some(args[i].clone());
+                }
+            }
+            "--ctx-binary" => {
+                i += 1;
+                if i < args.len() {
+                    ctx_binary = Some(args[i].clone()).filter(|s| !s.is_empty());
                 }
             }
             "--asd-url" => {
@@ -328,6 +340,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "      --asd-idle-timeout <SECS>  Pool idle timeout before killing an asd-serve"
                 );
                 eprintln!("                            child (default 600).");
+                eprintln!(
+                    "      --ctx-binary <PATH>  Path to the `ctx` CLI for POST /api/sessions/sync"
+                );
+                eprintln!(
+                    "                            (re-ingests local transcripts; default: `ctx` on PATH)."
+                );
                 eprintln!("  -h, --help            Print help");
                 eprintln!("  -V, --version         Print version and exit");
                 eprintln!();
@@ -613,6 +631,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             memory_tools::SessionRegistry::new()
         });
 
+        // Loopback base URL the hub hands to `ctx ingest-session --all` for
+        // session-sync. The socket binds 0.0.0.0, which is not a valid connect
+        // target, so we always dial back over 127.0.0.1 on the same port.
+        let self_base_url = format!("http://127.0.0.1:{}", http_port);
+
         let hub_config = http::HubConfig {
             rate_limit_rpm,
             asd_repos: asd_repos.clone(),
@@ -624,6 +647,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             agent_id: agent_id.clone(),
             auth_token: auth_token.clone(),
             allowed_origins: allowed_origins.clone(),
+            ctx_binary: ctx_binary.clone(),
+            self_base_url: Some(self_base_url),
         };
 
         // Capture db_path for background flush tasks.

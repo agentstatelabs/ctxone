@@ -78,6 +78,15 @@ pub struct HubConfig {
     /// only these origins get CORS response headers. Non-browser clients (CLI,
     /// native MCP) send no `Origin` and are unaffected. From `--allowed-origin`.
     pub allowed_origins: Vec<String>,
+    /// Override path to the `ctx` CLI binary used by `POST /api/sessions/sync`
+    /// to re-ingest local Claude Code transcripts. `None` → resolve `"ctx"` on
+    /// PATH. From `--ctx-binary`.
+    pub ctx_binary: Option<String>,
+    /// The hub's own loopback base URL (e.g. `http://127.0.0.1:3001`), passed to
+    /// the spawned `ctx ingest-session --all` as `--server` so it ingests back
+    /// into this hub. `None` on library/test callers (session-sync then targets
+    /// the default port). Built from the bind addr by the binary.
+    pub self_base_url: Option<String>,
 }
 
 #[derive(Clone)]
@@ -90,6 +99,10 @@ pub struct HubState {
     pub asd_repos: Arc<Vec<(String, String)>>,
     /// Process pool for dynamically spawned `asd-serve` instances.
     pub asd_pool: Option<Arc<AsdProcessPool>>,
+    /// Path to the `ctx` CLI binary for `POST /api/sessions/sync`. `None` → PATH.
+    pub ctx_binary: Option<String>,
+    /// The hub's own loopback base URL, passed to `ctx ingest-session --all`.
+    pub self_base_url: Option<String>,
 }
 
 impl HubState {
@@ -468,6 +481,8 @@ fn router_with_config_inner(
         db_path,
         asd_repos,
         asd_pool,
+        ctx_binary: config.ctx_binary.clone(),
+        self_base_url: config.self_base_url.clone(),
     };
 
     let mut router = Router::new()
@@ -559,6 +574,9 @@ fn router_with_config_inner(
             "/api/sessions/{sid}/title",
             axum::routing::put(put_session_title).get(get_session_title),
         )
+        // Session sync (t-019): re-ingest local Claude Code transcripts by
+        // spawning the co-located `ctx ingest-session --all` CLI.
+        .route("/api/sessions/sync", post(sync_sessions))
         // Taint / quarantine / watch
         .route(
             "/api/taint",
@@ -893,7 +911,11 @@ struct LlmUsageRequest {
     output_tokens: u64,
     #[serde(default)]
     cache_read_tokens: u64,
-    #[serde(default)]
+    // Accept both spellings: the `ctx` CLI's ingest path posts
+    // `cache_creation_tokens` (matching the provider's raw usage field name),
+    // while native callers use `cache_create_tokens`. Without the alias the
+    // CLI's cache-creation tokens were silently dropped to 0.
+    #[serde(default, alias = "cache_creation_tokens")]
     cache_create_tokens: u64,
     #[serde(default)]
     model: Option<String>,
@@ -2949,6 +2971,160 @@ async fn get_session_title(
         .map_err(internal_error)
 }
 
+// -- Session sync (t-019) ----------------------------------------------
+
+/// Wall-clock cap on a full `ctx ingest-session --all` run before the
+/// endpoint gives up and returns 504. A whole-machine sync of many large
+/// transcripts is I/O bound but should never run for minutes.
+const SESSION_SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// `POST /api/sessions/sync` — re-pull ALL local Claude Code transcripts into
+/// this hub so the Sessions view reflects the latest turns, titles, and token
+/// metrics.
+///
+/// **Local-only.** This spawns the co-located `ctx` CLI
+/// (`ctx ingest-session --all --full-turn --server <self> --namespace <ns>`),
+/// which reads `~/.claude/projects/*` on the *hub's* machine and POSTs the
+/// parsed turns back into this hub. It is only meaningful when the transcripts
+/// live on the same box as the hub; there is no remote-transcript path. When
+/// `~/.claude/projects` is empty the CLI no-ops cleanly and this returns zeros.
+///
+/// The CLI's final stdout line is a JSON object
+/// `{"sessions":N,"turns":M,"tokens":T}` which we parse and echo back along
+/// with `elapsed_ms`. Timeout → 504; missing `ctx` binary → 400 (set
+/// `--ctx-binary`); non-zero CLI exit → 500 with the stderr tail.
+async fn sync_sessions(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let ctx_bin = s
+        .ctx_binary
+        .clone()
+        .unwrap_or_else(|| "ctx".to_string());
+    // Fall back to the conventional default port if the binary wasn't built
+    // with a self URL (library/test callers). The Hub binary always sets this.
+    let base_url = s
+        .self_base_url
+        .clone()
+        .unwrap_or_else(|| "http://127.0.0.1:3001".to_string());
+
+    let start = std::time::Instant::now();
+
+    let mut cmd = tokio::process::Command::new(&ctx_bin);
+    cmd.arg("ingest-session")
+        .arg("--all")
+        .arg("--full-turn")
+        .arg("--server")
+        .arg(&base_url)
+        // Target this request's namespace so sync lands where session reads do.
+        // Passing it explicitly also stops the CLI from re-detecting a project
+        // from the hub's cwd (deterministic: sync writes exactly one namespace).
+        .arg("--namespace")
+        .arg(&ns.0)
+        // Pin the ref to `main`. Session titles/turns are read from `main`
+        // (see `read_session_title` / `default_ref`), and an EXPLICIT --branch
+        // also suppresses the CLI's git-branch mirroring — which would
+        // otherwise divert these writes onto the hub's current git branch when
+        // a namespace is set, leaving the Sessions view with null names.
+        .arg("--branch")
+        .arg("main")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "ctx binary not found ('{ctx_bin}'); set --ctx-binary. Session sync runs \
+                     the local CLI and requires a co-located hub."
+                ),
+            ));
+        }
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to spawn ctx: {e}"),
+            ));
+        }
+    };
+
+    let output = match tokio::time::timeout(SESSION_SYNC_TIMEOUT, child.wait_with_output()).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("ctx ingest-session failed: {e}"),
+            ));
+        }
+        Err(_) => {
+            return Err((
+                StatusCode::GATEWAY_TIMEOUT,
+                format!(
+                    "session sync timed out after {}s (ctx ingest-session --all still running)",
+                    SESSION_SYNC_TIMEOUT.as_secs()
+                ),
+            ));
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let tail: String = stderr.lines().rev().take(5).collect::<Vec<_>>().join(" | ");
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "ctx ingest-session exited {}: {}",
+                output
+                    .status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "signal".to_string()),
+                tail
+            ),
+        ));
+    }
+
+    // The CLI prints a machine-readable JSON object as its final stdout line
+    // under --all. Scan from the bottom for the first line that parses as an
+    // object carrying `sessions` (prose lines above won't match).
+    let summary = stdout.lines().rev().find_map(|line| {
+        serde_json::from_str::<serde_json::Value>(line.trim())
+            .ok()
+            .filter(|v| v.get("sessions").is_some())
+    });
+
+    let (sessions, turns, tokens) = match summary {
+        Some(v) => (
+            v.get("sessions").and_then(|x| x.as_u64()).unwrap_or(0),
+            v.get("turns").and_then(|x| x.as_u64()).unwrap_or(0),
+            v.get("tokens").and_then(|x| x.as_u64()).unwrap_or(0),
+        ),
+        None => (0, 0, 0),
+    };
+
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+    info!(
+        sessions,
+        turns,
+        tokens,
+        elapsed_ms,
+        namespace = %ns.0,
+        "session sync complete"
+    );
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "sessions": sessions,
+        "turns": turns,
+        "tokens": tokens,
+        "elapsed_ms": elapsed_ms,
+    })))
+}
+
 // -- Reminder endpoints -------------------------------------------------
 
 fn reminder_error_to_response(e: reminder_tools::ReminderToolError) -> (StatusCode, String) {
@@ -3352,6 +3528,28 @@ async fn detect_project_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn llm_usage_accepts_cache_creation_alias() {
+        // The `ctx` CLI ingest path posts `cache_creation_tokens`; the serde
+        // alias must map it onto `cache_create_tokens` so session-sync doesn't
+        // silently drop cache-creation tokens.
+        let req: LlmUsageRequest = serde_json::from_str(
+            r#"{"input_tokens":1,"output_tokens":2,"cache_read_tokens":3,"cache_creation_tokens":42}"#,
+        )
+        .expect("deserialize with cache_creation_tokens alias");
+        assert_eq!(req.cache_create_tokens, 42);
+        assert_eq!(req.cache_read_tokens, 3);
+    }
+
+    #[test]
+    fn llm_usage_accepts_native_cache_create_name() {
+        let req: LlmUsageRequest = serde_json::from_str(
+            r#"{"input_tokens":1,"output_tokens":2,"cache_create_tokens":7}"#,
+        )
+        .expect("deserialize with cache_create_tokens");
+        assert_eq!(req.cache_create_tokens, 7);
+    }
 
     #[test]
     fn importance_high_maps_to_high_confidence() {
