@@ -829,6 +829,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             info!(default_ref = %default_ref, "session default ref (git mirror)");
         }
 
+        // Session-stats persistence for the stdio MCP server (session-metrics
+        // t-014). Historically the stdio server wrote `recall`/`remember`
+        // savings into a private `SessionStats::new()` that lived in no
+        // registry and was never flushed — so every byte of MCP-side savings
+        // evaporated on process exit. Here we:
+        //   1. resolve a stable session id (CTX_SESSION > project namespace >
+        //      agent id > "default"),
+        //   2. LOAD any persisted row for that id so we accumulate rather than
+        //      clobber (the flush upsert OVERWRITES tokens_saved, so a fresh
+        //      zeroed session would otherwise reset a prior total), and
+        //   3. share that one `Arc<SessionStats>` between a `SessionRegistry`
+        //      and the `CtxOneServer`, then flush it periodically and on exit
+        //      using the same machinery the HTTP hub uses.
+        // Skipped entirely for memory/postgres — no db_path to persist to.
+        let mcp_session_id: String = std::env::var("CTX_SESSION")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                if namespace != agentstategraph_core::Namespace::DEFAULT {
+                    namespace.clone()
+                } else if !agent_id.is_empty() {
+                    agent_id.clone()
+                } else {
+                    "default".to_string()
+                }
+            });
+        info!(session = %mcp_session_id, "MCP session-stats id (savings accounting)");
+
+        // (registry, shared session Arc, db_path). None on memory/postgres.
+        let session_persistence: Option<(
+            Arc<memory_tools::SessionRegistry>,
+            Arc<memory_tools::SessionStats>,
+            String,
+        )> = if storage_type == "sqlite" {
+            info!("Loading persisted session stats from db (stdio)");
+            let registry = Arc::new(memory_tools::SessionRegistry::load_from_db(&db_path));
+            // get_or_create returns the loaded Arc when the row existed (seeded
+            // with prior totals), else a fresh zeroed one — either way the
+            // server and registry now share this exact Arc.
+            let session = registry.get_or_create(&mcp_session_id);
+            Some((registry, session, db_path.clone()))
+        } else {
+            None
+        };
+
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?
@@ -840,6 +886,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .with_namespace(namespace.clone())
                 .with_default_ref(default_ref.clone());
+                // Share the persisted session Arc so MCP savings land in the
+                // same counters the registry flushes.
+                if let Some((_, ref session, _)) = session_persistence {
+                    ctx_server = ctx_server.with_session(session.clone());
+                }
                 // Attach pool if any --asd-repo flags were given
                 if !asd_pool_repos.is_empty() {
                     let pool = std::sync::Arc::new(ctxone_hub::asd_pool::AsdProcessPool::new(
@@ -849,6 +900,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ));
                     ctx_server = ctx_server.with_pool(pool);
                 }
+
+                // Periodic flush: mirror the HTTP hub's 30s background task so
+                // long-lived stdio sessions persist savings even before exit.
+                if let Some((ref registry, _, ref path)) = session_persistence {
+                    let registry_bg = registry.clone();
+                    let path_bg = path.clone();
+                    tokio::spawn(async move {
+                        let mut interval =
+                            tokio::time::interval(std::time::Duration::from_secs(30));
+                        interval.tick().await; // skip the immediate first tick
+                        loop {
+                            interval.tick().await;
+                            registry_bg.flush_to_db(&path_bg);
+                        }
+                    });
+                }
+
                 let service = ctx_server
                     .serve(rmcp::transport::stdio())
                     .await
@@ -859,6 +927,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if let Err(e) = service.waiting().await {
                     warn!(error = %e, "MCP server exited with error");
+                }
+
+                // Graceful shutdown flush: persist final savings before exit.
+                if let Some((ref registry, _, ref path)) = session_persistence {
+                    info!("Flushing session stats to db on stdio shutdown");
+                    registry.flush_to_db(path);
                 }
                 Ok::<(), Box<dyn std::error::Error>>(())
             })?;

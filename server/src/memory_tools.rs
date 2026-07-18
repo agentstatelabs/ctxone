@@ -353,6 +353,12 @@ pub struct SessionSnapshot {
     pub last_model: Option<String>,
     #[serde(default)]
     pub last_provider: Option<String>,
+
+    /// Human-readable session title (t-016). Populated best-effort by the
+    /// HTTP layer from the `/sessions/{id}/title` graph node; `None` when no
+    /// title was ingested. `session_id` stays the GUID — this is display-only.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 impl SessionSnapshot {
@@ -380,6 +386,8 @@ impl SessionSnapshot {
             llm_call_count: stats.llm_call_count.load(Ordering::Relaxed),
             last_model: stats.last_model(),
             last_provider: stats.last_provider(),
+            // Filled in best-effort by the HTTP layer (reads the title node).
+            name: None,
         }
     }
 }
@@ -557,6 +565,8 @@ impl SessionRegistry {
             // metadata — it's a roll-up, not a single session's view.
             last_model: None,
             last_provider: None,
+            // The aggregate is a roll-up, not a single named session.
+            name: None,
         }
     }
 
@@ -1730,6 +1740,18 @@ impl CtxOneServer {
     /// when `--asd-repo` flags were supplied.
     pub fn with_pool(mut self, pool: Arc<AsdProcessPool>) -> Self {
         self.asd_pool = Some(pool);
+        self
+    }
+
+    /// Replace the server's session-stats accumulator with a shared
+    /// `Arc<SessionStats>` (session-metrics t-014). The stdio MCP binary uses
+    /// this to hand the server a session that a `SessionRegistry` also holds,
+    /// so token savings written here are visible to `flush_to_db` and survive
+    /// process exit — instead of evaporating in a private, never-flushed
+    /// `SessionStats::new()`. The Arc is shared, not copied: writes through
+    /// `self.session` land in the same counters the registry flushes.
+    pub fn with_session(mut self, session: Arc<SessionStats>) -> Self {
+        self.session = session;
         self
     }
 
