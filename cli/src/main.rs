@@ -4229,18 +4229,32 @@ async fn run_ingest_session(
             // own. Timestamps come from the full (pre-filter) turn list.
             let started_at = turns.first().map(|t| t.timestamp.clone()).unwrap_or_default();
             let updated_at = turns.last().map(|t| t.timestamp.clone()).unwrap_or_default();
+            // Distinct real models across all turns, first-seen order — so a
+            // session that switched models mid-way stays findable by any.
+            // Skip synthetic/placeholder markers (e.g. "<synthetic>" on
+            // system/tool-result turns) and empties.
+            let mut models_used: Vec<String> = Vec::new();
+            for t in &turns {
+                let m = t.model.trim();
+                let real = !m.is_empty() && !m.starts_with('<');
+                if real && !models_used.iter().any(|x| x == m) {
+                    models_used.push(m.to_string());
+                }
+            }
             if dry_run {
                 println!(
-                    "  [dry] meta: /sessions/{}/meta = {{source: \"Claude Code\", started_at: {:?}, updated_at: {:?}}}",
+                    "  [dry] meta: /sessions/{}/meta = {{source: \"Claude Code\", started_at: {:?}, updated_at: {:?}, models_used: {:?}}}",
                     effective_session.unwrap_or("default"),
                     started_at,
-                    updated_at
+                    updated_at,
+                    models_used
                 );
             } else {
                 crate::ingest::store_session_meta(
                     "Claude Code",
                     &started_at,
                     &updated_at,
+                    &models_used,
                     server,
                     branch,
                     effective_session,

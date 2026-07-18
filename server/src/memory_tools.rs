@@ -372,6 +372,12 @@ pub struct SessionSnapshot {
     /// Last-turn timestamp (RFC-3339). Best-effort.
     #[serde(default)]
     pub updated_at: Option<String>,
+    /// Every distinct model used across the session's turns (t-022), so a
+    /// session that switched models mid-way (e.g. Fable → Opus) stays
+    /// findable by any of them — `last_model` only remembers the final one.
+    /// Empty until the session is (re-)ingested with this field.
+    #[serde(default)]
+    pub models_used: Vec<String>,
 }
 
 impl SessionSnapshot {
@@ -404,6 +410,7 @@ impl SessionSnapshot {
             source: None,
             started_at: None,
             updated_at: None,
+            models_used: Vec::new(),
         }
     }
 }
@@ -586,6 +593,7 @@ impl SessionRegistry {
             source: None,
             started_at: None,
             updated_at: None,
+            models_used: Vec::new(),
         }
     }
 

@@ -609,12 +609,14 @@ pub async fn store_session_meta(
     source: &str,
     started_at: &str,
     updated_at: &str,
+    models_used: &[String],
     hub: &str,
     branch: &str,
     session: Option<&str>,
     client: &reqwest::Client,
 ) {
-    if source.is_empty() && started_at.is_empty() && updated_at.is_empty() {
+    if source.is_empty() && started_at.is_empty() && updated_at.is_empty() && models_used.is_empty()
+    {
         return;
     }
     let sid = session.unwrap_or("default");
@@ -633,6 +635,9 @@ pub async fn store_session_meta(
     }
     if !updated_at.is_empty() {
         meta.insert("updated_at".into(), serde_json::json!(updated_at));
+    }
+    if !models_used.is_empty() {
+        meta.insert("models_used".into(), serde_json::json!(models_used));
     }
     let mut req = client.put(url).json(&serde_json::Value::Object(meta));
     if let Some(s) = session {

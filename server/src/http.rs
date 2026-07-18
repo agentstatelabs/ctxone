@@ -882,10 +882,11 @@ async fn session_token_stats(
             // the request's namespace; None when absent.
             if let Ok(repo) = s.repo_for(&ns) {
                 snap.name = read_session_title(&repo, "main", &session_id);
-                let (source, started, updated) = read_session_meta(&repo, "main", &session_id);
-                snap.source = source;
-                snap.started_at = started;
-                snap.updated_at = updated;
+                let meta = read_session_meta(&repo, "main", &session_id);
+                snap.source = meta.source;
+                snap.started_at = meta.started_at;
+                snap.updated_at = meta.updated_at;
+                snap.models_used = meta.models_used;
             }
             Ok(Json(snap))
         }
@@ -908,10 +909,11 @@ async fn list_sessions(State(s): State<HubState>, ns: NamespaceId) -> impl IntoR
     if let Ok(repo) = s.repo_for(&ns) {
         for snap in &mut snaps {
             snap.name = read_session_title(&repo, "main", &snap.session_id);
-            let (source, started, updated) = read_session_meta(&repo, "main", &snap.session_id);
-            snap.source = source;
-            snap.started_at = started;
-            snap.updated_at = updated;
+            let meta = read_session_meta(&repo, "main", &snap.session_id);
+            snap.source = meta.source;
+            snap.started_at = meta.started_at;
+            snap.updated_at = meta.updated_at;
+            snap.models_used = meta.models_used;
         }
     }
     Json(snaps)
@@ -2993,13 +2995,21 @@ fn session_meta_path(sid: &str) -> String {
 /// Read a session's meta (source / started_at / updated_at) from the graph,
 /// best-effort. Any missing piece is `None`. Populates the matching
 /// `SessionSnapshot` fields so the Lens can filter by agent and sort by date.
-fn read_session_meta(
-    repo: &Repository,
-    ref_name: &str,
-    sid: &str,
-) -> (Option<String>, Option<String>, Option<String>) {
+struct SessionMeta {
+    source: Option<String>,
+    started_at: Option<String>,
+    updated_at: Option<String>,
+    models_used: Vec<String>,
+}
+
+fn read_session_meta(repo: &Repository, ref_name: &str, sid: &str) -> SessionMeta {
     let Ok(v) = repo.get_json(ref_name, &session_meta_path(sid)) else {
-        return (None, None, None);
+        return SessionMeta {
+            source: None,
+            started_at: None,
+            updated_at: None,
+            models_used: Vec::new(),
+        };
     };
     let str_field = |k: &str| {
         v.get(k)
@@ -3007,7 +3017,21 @@ fn read_session_meta(
             .map(str::to_string)
             .filter(|s| !s.is_empty())
     };
-    (str_field("source"), str_field("started_at"), str_field("updated_at"))
+    let models_used = v
+        .get("models_used")
+        .and_then(|x| x.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|m| m.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    SessionMeta {
+        source: str_field("source"),
+        started_at: str_field("started_at"),
+        updated_at: str_field("updated_at"),
+        models_used,
+    }
 }
 
 /// `PUT /api/sessions/{sid}/meta` — set a session's meta object. Body is
