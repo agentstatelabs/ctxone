@@ -32,13 +32,59 @@
 	let memories: MemoryCommit[] = $state([]);
 	let memoriesLoading = $state(false);
 
+	interface Turn {
+		key: string;
+		turn_index?: number;
+		timestamp?: string;
+		model?: string;
+		user_text?: string;
+		assistant_text?: string;
+		tool_calls?: string[];
+		tool_calls_raw?: unknown[];
+		tokens?: { input?: number; output?: number; cache_read?: number; cache_creation?: number };
+	}
+	let turns: Turn[] = $state([]);
+	let turnsLoading = $state(false);
+	let turnsError: string | null = $state(null);
+	let expandedTools: Record<string, boolean> = $state({});
+
 	$effect(() => {
 		if (selected) {
 			loadMemories(selected.session_id);
+			loadTurns(selected.session_id);
 		} else {
 			memories = [];
+			turns = [];
 		}
 	});
+
+	async function loadTurns(sessionId: string) {
+		turnsLoading = true;
+		turnsError = null;
+		turns = [];
+		expandedTools = {};
+		try {
+			// One subtree fetch returns every turn for the session.
+			const r = await hubFetch(
+				`/api/state/main?path=/sessions/${encodeURIComponent(sessionId)}/turns`
+			);
+			if (r.status === 404) {
+				turns = []; // session predates turn capture
+				return;
+			}
+			if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+			const tree = await r.json();
+			if (tree && typeof tree === 'object') {
+				turns = Object.entries(tree as Record<string, Turn>)
+					.map(([key, v]) => ({ ...v, key }))
+					.sort((a, b) => (a.turn_index ?? 0) - (b.turn_index ?? 0));
+			}
+		} catch (e) {
+			turnsError = e instanceof Error ? e.message : String(e);
+		} finally {
+			turnsLoading = false;
+		}
+	}
 
 	async function loadMemories(sessionId: string) {
 		memoriesLoading = true;
@@ -200,6 +246,71 @@
 							No LLM usage reported. Agents can call <code>record_llm_usage</code> (MCP)
 							or <code>POST /api/stats/llm_usage</code> to surface real token counts.
 						</p>
+					{/if}
+
+					<h3>Conversation {#if turns.length}<span class="count">{turns.length} turns</span>{/if}</h3>
+					{#if turnsLoading}
+						<p class="muted">Loading transcript…</p>
+					{:else if turnsError}
+						<p class="muted hint">Transcript unavailable: {turnsError}</p>
+					{:else if turns.length === 0}
+						<p class="muted hint">
+							No captured turns for this session. Turn content is recorded when an
+							agent posts to <code>/api/sessions/{'{sid}'}/turns</code> (e.g. via the
+							session-ingest tooling).
+						</p>
+					{:else}
+						<ol class="turns">
+							{#each turns as t (t.key)}
+								<li class="turn">
+									<div class="turn-head">
+										<span class="turn-idx">#{(t.turn_index ?? 0) + 1}</span>
+										{#if t.model}<span class="turn-model">{t.model}</span>{/if}
+										{#if t.timestamp}<span class="turn-time"
+												>{new Date(t.timestamp).toLocaleString()}</span
+											>{/if}
+										{#if t.tokens}
+											<span class="turn-tok" title="input / output tokens"
+												>{fmt(t.tokens.input ?? 0)}↑ {fmt(t.tokens.output ?? 0)}↓</span
+											>
+										{/if}
+									</div>
+									{#if t.user_text?.trim()}
+										<div class="msg user">
+											<span class="msg-role">User</span>
+											<div class="msg-body">{t.user_text}</div>
+										</div>
+									{/if}
+									{#if t.assistant_text?.trim()}
+										<div class="msg assistant">
+											<span class="msg-role">Assistant</span>
+											<div class="msg-body">{t.assistant_text}</div>
+										</div>
+									{/if}
+									{#if t.tool_calls?.length}
+										<div class="msg tool">
+											<button
+												class="msg-role tool-toggle"
+												onclick={() => (expandedTools[t.key] = !expandedTools[t.key])}
+											>
+												{expandedTools[t.key] ? '▾' : '▸'} {t.tool_calls.length} tool call{t
+													.tool_calls.length > 1
+													? 's'
+													: ''}
+											</button>
+											<div class="msg-body">
+												{#each t.tool_calls as tc}
+													<div class="tool-summary">{tc}</div>
+												{/each}
+												{#if expandedTools[t.key] && t.tool_calls_raw?.length}
+													<pre class="tool-raw">{JSON.stringify(t.tool_calls_raw, null, 2)}</pre>
+												{/if}
+											</div>
+										</div>
+									{/if}
+								</li>
+							{/each}
+						</ol>
 					{/if}
 
 					<h3>Memories</h3>
@@ -455,5 +566,97 @@
 	.zero-hint code {
 		font-family: var(--lens-font-mono);
 		color: var(--lens-text);
+	}
+
+	h3 .count {
+		font-size: var(--lens-font-size-xs);
+		font-weight: 400;
+		color: var(--lens-muted);
+		margin-left: 0.4rem;
+	}
+	.turns {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.6rem;
+		max-height: 460px;
+		overflow-y: auto;
+	}
+	.turn {
+		border: 1px solid var(--lens-border);
+		border-radius: var(--lens-radius-sm);
+		background: var(--lens-surface);
+		padding: 0.5rem 0.6rem;
+	}
+	.turn-head {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		font-family: var(--lens-font-mono);
+		font-size: var(--lens-font-size-2xs);
+		color: var(--lens-muted);
+		margin-bottom: 0.4rem;
+	}
+	.turn-idx {
+		font-weight: 700;
+		color: var(--lens-text);
+	}
+	.turn-tok {
+		margin-left: auto;
+	}
+	.msg {
+		display: grid;
+		grid-template-columns: 68px 1fr;
+		gap: 0.5rem;
+		padding: 0.25rem 0;
+	}
+	.msg-role {
+		font-size: var(--lens-font-size-2xs);
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		padding-top: 0.15rem;
+	}
+	.msg.user .msg-role {
+		color: var(--lens-accent);
+	}
+	.msg.assistant .msg-role {
+		color: var(--lens-ok);
+	}
+	.msg.tool .msg-role {
+		color: var(--lens-info, #67c7e6);
+	}
+	.msg-body {
+		font-size: var(--lens-font-size-xs);
+		line-height: 1.5;
+		color: var(--lens-text);
+		white-space: pre-wrap;
+		word-break: break-word;
+		min-width: 0;
+	}
+	.tool-toggle {
+		background: none;
+		border: none;
+		cursor: pointer;
+		text-align: left;
+		padding: 0.15rem 0;
+		font-family: inherit;
+	}
+	.tool-summary {
+		font-family: var(--lens-font-mono);
+		font-size: var(--lens-font-size-2xs);
+		color: var(--lens-muted);
+	}
+	.tool-raw {
+		margin: 0.35rem 0 0;
+		padding: 0.4rem 0.5rem;
+		background: color-mix(in srgb, var(--lens-info, #67c7e6) 6%, var(--lens-surface-raised));
+		border: 1px solid var(--lens-border);
+		border-radius: var(--lens-radius-sm);
+		font-size: var(--lens-font-size-2xs);
+		overflow-x: auto;
+		max-height: 260px;
 	}
 </style>
