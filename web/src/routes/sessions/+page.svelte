@@ -6,6 +6,9 @@
 
 	interface Session {
 		session_id: string;
+		/** Human-readable title (server-derived from the first user turn).
+		 * Optional — absent on older Hubs; we fall back to the id. */
+		name?: string | null;
 		session_tokens_used: number;
 		session_tokens_saved: number;
 		total_graph_size_tokens: number;
@@ -143,6 +146,24 @@
 	function exact(n: number): string {
 		return (n ?? 0).toLocaleString();
 	}
+
+	// A session that carries a name (or, in the detail, whose first turn
+	// we've loaded) gets a human title; otherwise the id stands in.
+	function truncate(s: string, n: number): string {
+		return s.length > n ? s.slice(0, n - 1) + '…' : s;
+	}
+	function listName(s: Session): string {
+		return s.name?.trim() || s.session_id;
+	}
+	// Detail title: server name > first user message (turns already loaded) > id.
+	const detailTitle: string = $derived.by(() => {
+		const sel = selected;
+		if (!sel) return '';
+		if (sel.name?.trim()) return sel.name.trim();
+		const firstUser = turns.find((t) => t.user_text?.trim())?.user_text?.trim();
+		if (firstUser) return truncate(firstUser, 80);
+		return sel.session_id;
+	});
 </script>
 
 <div class="page">
@@ -169,7 +190,10 @@
 						class:active={selected?.session_id === s.session_id}
 						onclick={() => selected = s}
 					>
-						<div class="session-name">{s.session_id}</div>
+						<div class="session-name">{listName(s)}</div>
+						{#if s.name?.trim()}
+							<div class="session-id" title={s.session_id}>{s.session_id}</div>
+						{/if}
 						<div class="session-meta">
 							<span>{fmt(s.session_tokens_used)} tokens used</span>
 							<span class="ratio" style="color: {ratioColor(s.cumulative_ratio)}">
@@ -182,7 +206,10 @@
 
 			{#if selected}
 				<div class="detail">
-					<h2>{selected.session_id}</h2>
+					<h2>{detailTitle}</h2>
+					{#if detailTitle !== selected.session_id}
+						<div class="detail-id" title="session id">{selected.session_id}</div>
+					{/if}
 
 					<div class="stat-grid">
 						<div class="stat">
@@ -658,5 +685,21 @@
 		font-size: var(--lens-font-size-2xs);
 		overflow-x: auto;
 		max-height: 260px;
+	}
+
+	.session-id {
+		font-family: var(--lens-font-mono);
+		font-size: var(--lens-font-size-2xs);
+		color: var(--lens-muted);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		margin-top: 0.1rem;
+	}
+	.detail-id {
+		font-family: var(--lens-font-mono);
+		font-size: var(--lens-font-size-2xs);
+		color: var(--lens-muted);
+		margin: -0.2rem 0 0.6rem;
 	}
 </style>
