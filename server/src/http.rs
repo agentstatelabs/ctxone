@@ -574,6 +574,10 @@ fn router_with_config_inner(
             "/api/sessions/{sid}/title",
             axum::routing::put(put_session_title).get(get_session_title),
         )
+        .route(
+            "/api/sessions/{sid}/meta",
+            axum::routing::put(put_session_meta),
+        )
         // Session sync (t-019): re-ingest local Claude Code transcripts by
         // spawning the co-located `ctx ingest-session --all` CLI.
         .route("/api/sessions/sync", post(sync_sessions))
@@ -874,10 +878,14 @@ async fn session_token_stats(
 
     match s.sessions.snapshot(&session_id) {
         Some(mut snap) => {
-            // Best-effort session title (t-016). Reads /sessions/{id}/title
-            // from the request's namespace; None when absent.
+            // Best-effort session title (t-016) + meta (t-021). Read from
+            // the request's namespace; None when absent.
             if let Ok(repo) = s.repo_for(&ns) {
                 snap.name = read_session_title(&repo, "main", &session_id);
+                let (source, started, updated) = read_session_meta(&repo, "main", &session_id);
+                snap.source = source;
+                snap.started_at = started;
+                snap.updated_at = updated;
             }
             Ok(Json(snap))
         }
@@ -900,6 +908,10 @@ async fn list_sessions(State(s): State<HubState>, ns: NamespaceId) -> impl IntoR
     if let Ok(repo) = s.repo_for(&ns) {
         for snap in &mut snaps {
             snap.name = read_session_title(&repo, "main", &snap.session_id);
+            let (source, started, updated) = read_session_meta(&repo, "main", &snap.session_id);
+            snap.source = source;
+            snap.started_at = started;
+            snap.updated_at = updated;
         }
     }
     Json(snaps)
@@ -2969,6 +2981,70 @@ async fn get_session_title(
     repo.get_json(&q.ref_name, &path)
         .map(Json)
         .map_err(internal_error)
+}
+
+// -- Session meta: source + timestamps (t-021) --------------------------
+
+/// Graph path holding a session's meta object `{source, started_at, updated_at}`.
+fn session_meta_path(sid: &str) -> String {
+    format!("/sessions/{}/meta", sid)
+}
+
+/// Read a session's meta (source / started_at / updated_at) from the graph,
+/// best-effort. Any missing piece is `None`. Populates the matching
+/// `SessionSnapshot` fields so the Lens can filter by agent and sort by date.
+fn read_session_meta(
+    repo: &Repository,
+    ref_name: &str,
+    sid: &str,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let Ok(v) = repo.get_json(ref_name, &session_meta_path(sid)) else {
+        return (None, None, None);
+    };
+    let str_field = |k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .map(str::to_string)
+            .filter(|s| !s.is_empty())
+    };
+    (str_field("source"), str_field("started_at"), str_field("updated_at"))
+}
+
+/// `PUT /api/sessions/{sid}/meta` — set a session's meta object. Body is
+/// `{source?, started_at?, updated_at?}`. Idempotent; written into the
+/// request namespace at `/sessions/{sid}/meta`. Written by `ctx
+/// ingest-session` alongside the title.
+async fn put_session_meta(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+    Path(sid): Path<String>,
+    agent_id: AgentId,
+    Query(q): Query<SessionTurnQuery>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !body.is_object() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "meta body must be a JSON object {source?, started_at?, updated_at?}".to_string(),
+        ));
+    }
+    let repo = s.repo_for(&ns)?;
+    let path = session_meta_path(&sid);
+    let opts = CommitOptions::new(
+        &agent_id.0,
+        IntentCategory::Custom("Observe".to_string()),
+        format!("session meta {}", sid),
+    )
+    .with_tags(vec![format!("session:{}", sid), "kind:session-meta".to_string()]);
+    let commit_id = repo
+        .set_json(&q.ref_name, &path, &body, opts)
+        .map_err(internal_error)?;
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "ref": q.ref_name,
+        "path": path,
+        "commit_id": format!("{}", commit_id.short()),
+    })))
 }
 
 // -- Session sync (t-019) ----------------------------------------------

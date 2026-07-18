@@ -359,6 +359,19 @@ pub struct SessionSnapshot {
     /// title was ingested. `session_id` stays the GUID — this is display-only.
     #[serde(default)]
     pub name: Option<String>,
+
+    /// Originating tool/agent for this session (e.g. "Claude Code"), read
+    /// from the `/sessions/{id}/meta` node at ingest (t-021). `None` for
+    /// sessions with no ingested meta (e.g. live `default`). Lets the Lens
+    /// filter by agent type; ready for Cursor/Copilot ingesters.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// First-turn timestamp (RFC-3339), for date sort. Best-effort.
+    #[serde(default)]
+    pub started_at: Option<String>,
+    /// Last-turn timestamp (RFC-3339). Best-effort.
+    #[serde(default)]
+    pub updated_at: Option<String>,
 }
 
 impl SessionSnapshot {
@@ -386,8 +399,11 @@ impl SessionSnapshot {
             llm_call_count: stats.llm_call_count.load(Ordering::Relaxed),
             last_model: stats.last_model(),
             last_provider: stats.last_provider(),
-            // Filled in best-effort by the HTTP layer (reads the title node).
+            // Filled in best-effort by the HTTP layer (reads the title/meta nodes).
             name: None,
+            source: None,
+            started_at: None,
+            updated_at: None,
         }
     }
 }
@@ -567,6 +583,9 @@ impl SessionRegistry {
             last_provider: None,
             // The aggregate is a roll-up, not a single named session.
             name: None,
+            source: None,
+            started_at: None,
+            updated_at: None,
         }
     }
 

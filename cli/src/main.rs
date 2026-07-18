@@ -4222,6 +4222,33 @@ async fn run_ingest_session(
                 .await;
             }
 
+            // Session meta (t-021): source + first/last turn timestamps, so the
+            // Lens can filter by agent type and sort by date. `ctx
+            // ingest-session` only parses Claude Code transcripts today, so the
+            // source is "Claude Code"; Cursor/Copilot ingesters would set their
+            // own. Timestamps come from the full (pre-filter) turn list.
+            let started_at = turns.first().map(|t| t.timestamp.clone()).unwrap_or_default();
+            let updated_at = turns.last().map(|t| t.timestamp.clone()).unwrap_or_default();
+            if dry_run {
+                println!(
+                    "  [dry] meta: /sessions/{}/meta = {{source: \"Claude Code\", started_at: {:?}, updated_at: {:?}}}",
+                    effective_session.unwrap_or("default"),
+                    started_at,
+                    updated_at
+                );
+            } else {
+                crate::ingest::store_session_meta(
+                    "Claude Code",
+                    &started_at,
+                    &updated_at,
+                    server,
+                    branch,
+                    effective_session,
+                    &client,
+                )
+                .await;
+            }
+
             // Apply --since filter on timestamp.
             if !since_ts.is_empty() {
                 turns.retain(|t| t.timestamp.as_str() >= since_ts);

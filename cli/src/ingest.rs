@@ -602,6 +602,45 @@ pub async fn store_session_title(
     let _ = req.send().await;
 }
 
+/// Persist a session's meta object `{source, started_at, updated_at}` at
+/// `/sessions/{session}/meta` via the Hub. Idempotent; drives the Lens
+/// agent-type filter and date sort. No-op when all fields are empty.
+pub async fn store_session_meta(
+    source: &str,
+    started_at: &str,
+    updated_at: &str,
+    hub: &str,
+    branch: &str,
+    session: Option<&str>,
+    client: &reqwest::Client,
+) {
+    if source.is_empty() && started_at.is_empty() && updated_at.is_empty() {
+        return;
+    }
+    let sid = session.unwrap_or("default");
+    let url = format!(
+        "{}/api/sessions/{}/meta?ref={}",
+        hub,
+        crate::urlencoding(sid),
+        crate::urlencoding(branch),
+    );
+    let mut meta = serde_json::Map::new();
+    if !source.is_empty() {
+        meta.insert("source".into(), serde_json::json!(source));
+    }
+    if !started_at.is_empty() {
+        meta.insert("started_at".into(), serde_json::json!(started_at));
+    }
+    if !updated_at.is_empty() {
+        meta.insert("updated_at".into(), serde_json::json!(updated_at));
+    }
+    let mut req = client.put(url).json(&serde_json::Value::Object(meta));
+    if let Some(s) = session {
+        req = req.header("X-CTXone-Session", s);
+    }
+    let _ = req.send().await;
+}
+
 pub async fn store_memory(
     mem: &ExtractedMemory,
     hub: &str,
