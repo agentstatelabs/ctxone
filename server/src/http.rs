@@ -554,6 +554,11 @@ fn router_with_config_inner(
             "/api/sessions/{sid}/turns/{idx}",
             post(put_session_turn).get(get_session_turn),
         )
+        // Session title (t-016): human-readable name for a session id.
+        .route(
+            "/api/sessions/{sid}/title",
+            axum::routing::put(put_session_title).get(get_session_title),
+        )
         // Taint / quarantine / watch
         .route(
             "/api/taint",
@@ -840,6 +845,7 @@ async fn token_stats(State(s): State<HubState>) -> impl IntoResponse {
 /// has touched the Hub once, its ID is valid here.)
 async fn session_token_stats(
     State(s): State<HubState>,
+    ns: NamespaceId,
     Path(session_id): Path<String>,
 ) -> Result<Json<SessionSnapshot>, (StatusCode, String)> {
     // Refresh flat-size against the default session so the cache
@@ -849,7 +855,14 @@ async fn session_token_stats(
     ensure_flat_size(&s.repo, &default_session, "main");
 
     match s.sessions.snapshot(&session_id) {
-        Some(snap) => Ok(Json(snap)),
+        Some(mut snap) => {
+            // Best-effort session title (t-016). Reads /sessions/{id}/title
+            // from the request's namespace; None when absent.
+            if let Ok(repo) = s.repo_for(&ns) {
+                snap.name = read_session_title(&repo, "main", &session_id);
+            }
+            Ok(Json(snap))
+        }
         None => Err((
             StatusCode::NOT_FOUND,
             format!("session not found: {}", session_id),
@@ -858,10 +871,20 @@ async fn session_token_stats(
 }
 
 /// `GET /api/stats/sessions` — per-session breakdown.
-async fn list_sessions(State(s): State<HubState>) -> impl IntoResponse {
+///
+/// Each snapshot's `name` is populated best-effort from the
+/// `/sessions/{id}/title` graph node in the request's namespace (t-016);
+/// sessions with no ingested title report `name: null`.
+async fn list_sessions(State(s): State<HubState>, ns: NamespaceId) -> impl IntoResponse {
     let default_session = s.sessions.get_or_create(DEFAULT_SESSION_ID);
     ensure_flat_size(&s.repo, &default_session, "main");
-    Json(s.sessions.snapshot_all())
+    let mut snaps = s.sessions.snapshot_all();
+    if let Ok(repo) = s.repo_for(&ns) {
+        for snap in &mut snaps {
+            snap.name = read_session_title(&repo, "main", &snap.session_id);
+        }
+    }
+    Json(snaps)
 }
 
 #[derive(Deserialize)]
@@ -2839,6 +2862,91 @@ async fn list_session_turns(
         }
     }
     Ok(Json(roots.into_iter().collect()))
+}
+
+// -- Session title (t-016) ----------------------------------------------
+
+/// Graph path holding a session's human-readable title.
+fn session_title_path(sid: &str) -> String {
+    format!("/sessions/{}/title", sid)
+}
+
+/// Read a session's title from the graph, best-effort. Returns `None` when
+/// the node is absent, unreadable, or not a string. Used to populate
+/// `SessionSnapshot::name` on the stats endpoints.
+fn read_session_title(repo: &Repository, ref_name: &str, sid: &str) -> Option<String> {
+    repo.get_json(ref_name, &session_title_path(sid))
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .filter(|s| !s.is_empty())
+}
+
+/// `PUT /api/sessions/{sid}/title` — set (or overwrite) a session's title.
+///
+/// Body is a bare JSON string, e.g. `"Fix the flush-on-exit bug"`. Idempotent:
+/// re-ingesting a transcript overwrites the prior title. Written into the
+/// request's namespace at `/sessions/{sid}/title`.
+async fn put_session_title(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+    Path(sid): Path<String>,
+    agent_id: AgentId,
+    Query(q): Query<SessionTurnQuery>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // Accept a bare string, or an object with a `title` field, so callers can
+    // POST either shape. Anything else is a 400.
+    let title = match &body {
+        serde_json::Value::String(sv) => sv.clone(),
+        serde_json::Value::Object(m) => m
+            .get("title")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "title object must carry a string `title` field".to_string(),
+                )
+            })?,
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "title body must be a JSON string or {\"title\": \"…\"}".to_string(),
+            ));
+        }
+    };
+    let repo = s.repo_for(&ns)?;
+    let path = session_title_path(&sid);
+    let intent = format!("name session {}", sid);
+    let opts = CommitOptions::new(
+        &agent_id.0,
+        IntentCategory::Custom("Observe".to_string()),
+        &intent,
+    )
+    .with_tags(vec![format!("session:{}", sid), "kind:session-title".to_string()]);
+    let commit_id = repo
+        .set_json(&q.ref_name, &path, &serde_json::json!(title), opts)
+        .map_err(internal_error)?;
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "ref": q.ref_name,
+        "path": path,
+        "title": title,
+        "commit_id": format!("{}", commit_id.short()),
+    })))
+}
+
+async fn get_session_title(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+    Path(sid): Path<String>,
+    Query(q): Query<SessionTurnQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
+    let path = session_title_path(&sid);
+    repo.get_json(&q.ref_name, &path)
+        .map(Json)
+        .map_err(internal_error)
 }
 
 // -- Reminder endpoints -------------------------------------------------

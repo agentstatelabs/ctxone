@@ -501,6 +501,87 @@ pub async fn store_full_turn(
     let _ = req.send().await;
 }
 
+/// Max length of a derived session title (chars), before an ellipsis.
+const TITLE_MAX_CHARS: usize = 70;
+
+/// True when a user message is substantive enough to title a session by.
+///
+/// Skips the noise Claude Code injects as `user`-role entries: slash commands
+/// (`/clear`, `/init`), XML-ish meta wrappers (`<command-name>`,
+/// `<local-command-stdout>`, `<system-reminder>`), and the caveat preamble.
+/// Tool-result echoes are already dropped upstream — `parse_turns` only keeps
+/// user text extracted from `text` blocks, so a tool_result turn arrives here
+/// as empty and is filtered by the `is_empty` guard.
+fn is_substantive_user_text(text: &str) -> bool {
+    let t = text.trim();
+    if t.is_empty() {
+        return false;
+    }
+    // Slash-command invocations (the whole message is the command).
+    if t.starts_with('/') {
+        return false;
+    }
+    // Meta/wrapper blocks Claude Code emits as user turns.
+    if t.starts_with('<') {
+        return false;
+    }
+    if t.starts_with("Caveat:") {
+        return false;
+    }
+    // Require at least one alphanumeric char so pure punctuation is skipped.
+    t.chars().any(|c| c.is_alphanumeric())
+}
+
+/// Derive a session title from parsed turns: the first substantive user
+/// message, truncated to [`TITLE_MAX_CHARS`]. Returns `None` when no turn
+/// qualifies (caller supplies the `<project> · <date>` fallback).
+pub fn derive_session_title(turns: &[Turn]) -> Option<String> {
+    let raw = turns
+        .iter()
+        .map(|t| t.user_text.as_str())
+        .find(|txt| is_substantive_user_text(txt))?;
+    // Collapse internal whitespace/newlines into single spaces for a clean
+    // one-line title.
+    let collapsed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    Some(truncate_title(&collapsed))
+}
+
+/// Truncate to [`TITLE_MAX_CHARS`] on a char boundary, appending an ellipsis
+/// when the text was cut.
+pub fn truncate_title(s: &str) -> String {
+    if s.chars().count() <= TITLE_MAX_CHARS {
+        return s.to_string();
+    }
+    let truncated: String = s.chars().take(TITLE_MAX_CHARS).collect();
+    format!("{}…", truncated.trim_end())
+}
+
+/// Persist a session's human-readable title at `/sessions/{session}/title`
+/// via the Hub. Idempotent — re-ingesting overwrites. No-op on empty title.
+pub async fn store_session_title(
+    title: &str,
+    hub: &str,
+    branch: &str,
+    session: Option<&str>,
+    client: &reqwest::Client,
+) {
+    if title.trim().is_empty() {
+        return;
+    }
+    let sid = session.unwrap_or("default");
+    let url = format!(
+        "{}/api/sessions/{}/title?ref={}",
+        hub,
+        crate::urlencoding(sid),
+        crate::urlencoding(branch),
+    );
+    let mut req = client.put(url).json(&serde_json::json!(title));
+    if let Some(s) = session {
+        req = req.header("X-CTXone-Session", s);
+    }
+    let _ = req.send().await;
+}
+
 pub async fn store_memory(
     mem: &ExtractedMemory,
     hub: &str,
