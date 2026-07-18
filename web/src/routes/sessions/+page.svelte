@@ -36,6 +36,22 @@
 		intent: { description: string; tags: string[] };
 	}
 
+	// Commits tagged with the session but that are plumbing, not memories:
+	// transcript turn captures + the session title/meta nodes. These would
+	// otherwise flood the Memories list (they ARE the transcript, shown in
+	// the Conversation panel).
+	const CAPTURE_KINDS = new Set(['full-turn', 'session-title', 'session-meta']);
+	function isCapture(c: MemoryCommit): boolean {
+		return (c.intent.tags ?? []).some(
+			(t) => t.startsWith('kind:') && CAPTURE_KINDS.has(t.slice(5))
+		);
+	}
+	function memPath(c: MemoryCommit): string | null {
+		// If the memory tags carry its path, we can deep-link into Browse.
+		return (c.intent.tags ?? []).find((t) => t.startsWith('/'))?.trim() ?? null;
+	}
+	let openMemory: MemoryCommit | null = $state(null);
+
 	let sessions: Session[] = $state([]);
 	let loading = $state(true);
 	let error: string | null = $state(null);
@@ -105,7 +121,8 @@
 			if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
 			const all: MemoryCommit[] = await r.json();
 			const tag = `session:${sessionId}`;
-			memories = all.filter((c) => c.intent.tags?.includes(tag));
+			// Real memories only — drop transcript-capture / title / meta commits.
+			memories = all.filter((c) => c.intent.tags?.includes(tag) && !isCapture(c));
 		} catch {
 			memories = [];
 		} finally {
@@ -191,24 +208,37 @@
 					// "seen" and we never refetch it on every tick.
 					const meta: DerivedMeta = {};
 					try {
-						// One node fetch carries user_text (→ title), timestamp (→ date)
-						// and model. Older hubs return just the leaf if the node 404s.
-						const r = await hubFetch(
-							`/api/state/main?path=/sessions/${encodeURIComponent(s.session_id)}/turns/t0000`
-						);
-						if (r.ok) {
-							const node = await r.json();
-							if (node && typeof node === 'object') {
-								const ut = (node as Turn).user_text;
-								if (typeof ut === 'string' && ut.trim()) meta.title = truncate(ut.trim(), 64);
-								const ts = (node as Turn).timestamp;
-								if (typeof ts === 'string' && ts.trim()) {
-									const ms = Date.parse(ts);
-									if (!Number.isNaN(ms)) meta.date = ms;
+						// Fast path: the first turn is usually t0000. If it isn't
+						// (partial snapshots can start mid-session, e.g. t0043),
+						// fall back to the turns subtree and take the real first
+						// key — so title/date/model are never silently missing.
+						const base = `/api/state/main?path=/sessions/${encodeURIComponent(s.session_id)}/turns`;
+						let node: Turn | null = null;
+						const r0 = await hubFetch(`${base}/t0000`);
+						if (r0.ok) {
+							const j = await r0.json();
+							if (j && typeof j === 'object') node = j as Turn;
+						}
+						if (!node) {
+							const rAll = await hubFetch(base);
+							if (rAll.ok) {
+								const tree = await rAll.json();
+								if (tree && typeof tree === 'object') {
+									const keys = Object.keys(tree).sort();
+									if (keys.length) node = tree[keys[0]] as Turn;
 								}
-								const md = (node as Turn).model;
-								if (typeof md === 'string' && md.trim()) meta.model = md.trim();
 							}
+						}
+						if (node && typeof node === 'object') {
+							const ut = node.user_text;
+							if (typeof ut === 'string' && ut.trim()) meta.title = truncate(ut.trim(), 64);
+							const ts = node.timestamp;
+							if (typeof ts === 'string' && ts.trim()) {
+								const ms = Date.parse(ts);
+								if (!Number.isNaN(ms)) meta.date = ms;
+							}
+							const md = node.model;
+							if (typeof md === 'string' && md.trim()) meta.model = md.trim();
 						}
 					} catch {
 						/* leave meta empty — session keeps its id label, no date */
@@ -754,31 +784,31 @@
 						</ol>
 					{/if}
 
-					<h3>Memories</h3>
+					<h3>Memories {#if memories.length}<span class="count">{memories.length}</span>{/if}</h3>
 					{#if memoriesLoading}
 						<p class="muted">Loading memories…</p>
 					{:else if memories.length === 0}
 						<p class="muted hint">
-							No memories tagged <code>session:{selected.session_id}</code>.
-							New <code>remember</code> calls from this session are auto-tagged.
+							No memories from this session. Transcript turns show in the
+							Conversation panel above; this lists facts captured via
+							<code>remember</code>.
 						</p>
 					{:else}
 						<ul class="memory-list">
 							{#each memories as m}
-								<li class="memory-item">
-									<div class="memory-head">
-										<code class="memory-id">{m.id.slice(0, 12)}</code>
-										<span class="memory-agent">{m.agent_id}</span>
-										<span class="memory-time">{new Date(m.timestamp).toLocaleString()}</span>
-									</div>
-									<div class="memory-desc">{m.intent.description}</div>
-									{#if m.intent.tags?.length}
-										<div class="memory-tags">
-											{#each m.intent.tags as t}
-												<span class="tag">{t}</span>
-											{/each}
+								<li>
+									<button
+										class="memory-item"
+										onclick={() => (openMemory = m)}
+										title="View memory"
+									>
+										<div class="memory-head">
+											<code class="memory-id">{m.id.slice(0, 12)}</code>
+											<span class="memory-agent">{m.agent_id}</span>
+											<span class="memory-time">{new Date(m.timestamp).toLocaleString()}</span>
 										</div>
-									{/if}
+										<div class="memory-desc">{m.intent.description}</div>
+									</button>
 								</li>
 							{/each}
 						</ul>
@@ -792,6 +822,40 @@
 		</div>
 	{/if}
 </div>
+
+{#if openMemory}
+	<!-- svelte-ignore a11y_click_events_have_key_events -->
+	<!-- svelte-ignore a11y_no_static_element_interactions -->
+	<div class="mem-backdrop" onclick={() => (openMemory = null)}>
+		<div class="mem-modal" onclick={(e) => e.stopPropagation()}>
+			<div class="mem-modal-head">
+				<h4>Memory</h4>
+				<button class="mem-close" onclick={() => (openMemory = null)} aria-label="Close">×</button>
+			</div>
+			<div class="mem-body">{openMemory.intent.description}</div>
+			<dl class="mem-meta">
+				<dt>Commit</dt>
+				<dd><code>{openMemory.id}</code></dd>
+				<dt>Agent</dt>
+				<dd>{openMemory.agent_id}</dd>
+				<dt>When</dt>
+				<dd>{new Date(openMemory.timestamp).toLocaleString()}</dd>
+			</dl>
+			{#if openMemory.intent.tags?.length}
+				<div class="memory-tags">
+					{#each openMemory.intent.tags as t}<span class="tag">{t}</span>{/each}
+				</div>
+			{/if}
+			{#if memPath(openMemory)}
+				<a class="mem-link" href={`/browse?path=${encodeURIComponent(memPath(openMemory) ?? '')}`}>
+					Open in Browse →
+				</a>
+			{/if}
+		</div>
+	</div>
+{/if}
+
+<svelte:window onkeydown={(e) => e.key === 'Escape' && (openMemory = null)} />
 
 <style>
 	.page { max-width: 1100px; }
@@ -948,10 +1012,105 @@
 	}
 
 	.memory-item {
+		display: block;
+		width: 100%;
+		text-align: left;
 		background: var(--bg-0);
 		border: 1px solid var(--border);
 		border-radius: 6px;
 		padding: 0.6rem 0.8rem;
+		cursor: pointer;
+		transition: border-color var(--lens-dur-fast, 120ms) ease;
+		font: inherit;
+		color: inherit;
+	}
+	.memory-item:hover {
+		border-color: var(--lens-accent, #6ea8ff);
+	}
+	h3 .count {
+		font-size: var(--lens-font-size-xs, 0.75rem);
+		color: var(--lens-muted, #96a2bd);
+		font-weight: 400;
+		margin-left: 0.35rem;
+	}
+	.mem-backdrop {
+		position: fixed;
+		inset: 0;
+		background: rgb(0 0 0 / 0.55);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		z-index: 50;
+		padding: 1rem;
+	}
+	.mem-modal {
+		background: var(--lens-surface-raised, var(--bg-1));
+		border: 1px solid var(--lens-border-strong, var(--border));
+		border-radius: var(--lens-radius-md, 10px);
+		box-shadow: 0 12px 40px rgb(0 0 0 / 0.5);
+		max-width: 560px;
+		width: 100%;
+		max-height: 80vh;
+		overflow-y: auto;
+		padding: 1rem 1.1rem;
+	}
+	.mem-modal-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		margin-bottom: 0.6rem;
+	}
+	.mem-modal-head h4 {
+		margin: 0;
+		font-size: var(--lens-font-size-sm, 0.9rem);
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		color: var(--lens-muted, #96a2bd);
+	}
+	.mem-close {
+		background: none;
+		border: none;
+		color: var(--lens-muted, #96a2bd);
+		font-size: 1.4rem;
+		line-height: 1;
+		cursor: pointer;
+	}
+	.mem-close:hover {
+		color: var(--lens-text, #f4f6fa);
+	}
+	.mem-body {
+		white-space: pre-wrap;
+		word-break: break-word;
+		line-height: 1.55;
+		color: var(--lens-text, #f4f6fa);
+		margin-bottom: 0.8rem;
+	}
+	.mem-meta {
+		display: grid;
+		grid-template-columns: max-content 1fr;
+		gap: 0.2rem 0.8rem;
+		font-size: var(--lens-font-size-xs, 0.78rem);
+		margin: 0 0 0.6rem;
+	}
+	.mem-meta dt {
+		color: var(--lens-muted, #96a2bd);
+		text-transform: uppercase;
+		letter-spacing: 0.03em;
+		font-size: var(--lens-font-size-2xs, 0.68rem);
+	}
+	.mem-meta dd {
+		margin: 0;
+		color: var(--lens-text, #dfe4ec);
+	}
+	.mem-link {
+		display: inline-block;
+		margin-top: 0.4rem;
+		color: var(--lens-accent, #6ea8ff);
+		font-size: var(--lens-font-size-xs, 0.8rem);
+		text-decoration: none;
+	}
+	.mem-link:hover {
+		text-decoration: underline;
 	}
 
 	.memory-head {
