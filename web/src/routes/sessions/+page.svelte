@@ -261,6 +261,38 @@
 		if (selected) await loadMemories(selected.session_id);
 	});
 
+	// Git commits made during the session, pulled from the transcript's
+	// Bash tool calls, joined to the ctx plan/task named in the commit
+	// message. The message carries the task ref (e.g. "(asd-plan-t-lens
+	// t-004)") — the transcript stores the command, not the resulting SHA,
+	// so the message is the reliable join.
+	interface SessionCommit {
+		subject: string;
+		tasks: { plan: string; task: string }[];
+	}
+	const TASK_REF = /\(([a-z][a-z0-9-]*)\s+(t-\d+)\)/gi;
+	const sessionCommits = $derived.by<SessionCommit[]>(() => {
+		const out: SessionCommit[] = [];
+		const seen = new Set<string>();
+		for (const t of turns) {
+			for (const raw of (t.tool_calls_raw ?? []) as { name?: string; input?: { command?: string } }[]) {
+				const cmd = raw?.input?.command;
+				if (typeof cmd !== 'string' || !cmd.includes('git commit')) continue;
+				// Extract each -m "…" message body (may appear more than once).
+				for (const m of cmd.matchAll(/-m\s+"((?:[^"\\]|\\.)*)"/g)) {
+					const msg = m[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').trim();
+					const subject = msg.split('\n')[0].trim();
+					if (!subject || seen.has(subject)) continue;
+					seen.add(subject);
+					const tasks: { plan: string; task: string }[] = [];
+					for (const r of msg.matchAll(TASK_REF)) tasks.push({ plan: r[1], task: r[2] });
+					out.push({ subject, tasks });
+				}
+			}
+		}
+		return out;
+	});
+
 	function ratioColor(r: number): string {
 		if (r >= 5) return 'var(--success)';
 		if (r >= 2) return 'var(--success)';
@@ -782,6 +814,30 @@
 								</li>
 							{/each}
 						</ol>
+					{/if}
+
+					{#if sessionCommits.length}
+						<h3>Commits <span class="count">{sessionCommits.length}</span></h3>
+						<ul class="commit-list">
+							{#each sessionCommits as c}
+								<li class="commit-item">
+									<div class="commit-subject">{c.subject}</div>
+									{#if c.tasks.length}
+										<div class="commit-tasks">
+											{#each c.tasks as t}
+												<a
+													class="commit-task"
+													href={`/plans?plan=${encodeURIComponent(t.plan)}&task=${t.task}`}
+													title={`Open ${t.plan} ${t.task} in Plans`}
+												>
+													{t.plan} <strong>{t.task}</strong>
+												</a>
+											{/each}
+										</div>
+									{/if}
+								</li>
+							{/each}
+						</ul>
 					{/if}
 
 					<h3>Memories {#if memories.length}<span class="count">{memories.length}</span>{/if}</h3>
@@ -1450,5 +1506,46 @@
 		background: color-mix(in srgb, var(--lens-warn, #f5c451) 45%, transparent);
 		color: inherit;
 		border-radius: 2px;
+	}
+
+	.commit-list {
+		list-style: none;
+		margin: 0 0 1rem;
+		padding: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.4rem;
+	}
+	.commit-item {
+		background: var(--bg-0);
+		border: 1px solid var(--border);
+		border-left: 2px solid var(--lens-ok, #4ade80);
+		border-radius: 6px;
+		padding: 0.5rem 0.7rem;
+	}
+	.commit-subject {
+		font-family: var(--lens-font-mono, monospace);
+		font-size: var(--lens-font-size-xs, 0.8rem);
+		color: var(--lens-text, #f4f6fa);
+		word-break: break-word;
+	}
+	.commit-tasks {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.35rem;
+		margin-top: 0.35rem;
+	}
+	.commit-task {
+		font-size: var(--lens-font-size-2xs, 0.68rem);
+		padding: 0.05rem 0.4rem;
+		border-radius: 999px;
+		background: color-mix(in srgb, var(--lens-accent, #6ea8ff) 14%, transparent);
+		border: 1px solid color-mix(in srgb, var(--lens-accent, #6ea8ff) 40%, var(--border));
+		color: var(--lens-accent, #93c5fd);
+		text-decoration: none;
+		white-space: nowrap;
+	}
+	.commit-task:hover {
+		background: color-mix(in srgb, var(--lens-accent, #6ea8ff) 24%, transparent);
 	}
 </style>
