@@ -18,6 +18,9 @@
 		llm_cache_read_tokens: number;
 		llm_call_count: number;
 		last_model: string | null;
+		/** Every model the session used (server; t-022). Optional — older
+		 * hubs omit it, so we fall back to last_model + derived first-turn. */
+		models_used?: string[];
 		last_provider: string | null;
 		/** Optional on newer hubs — agent/tool origin. Absent on older ones. */
 		source?: string | null;
@@ -299,6 +302,17 @@
 	function sessionModel(s: Session): string | null {
 		return s.last_model ?? derivedMeta[s.session_id]?.model ?? null;
 	}
+	// Every model a session touched: server models_used when present, else
+	// the union of last_model + the derived first-turn model. Lets the model
+	// filter match a session by ANY model it used, not just its last one.
+	function sessionModels(s: Session): string[] {
+		if (s.models_used?.length) return s.models_used;
+		const set = new Set<string>();
+		if (s.last_model) set.add(s.last_model);
+		const dm = derivedMeta[s.session_id]?.model;
+		if (dm) set.add(dm);
+		return [...set];
+	}
 	function shortDate(ms: number, now = Date.now()): string {
 		const diff = now - ms;
 		const day = 86_400_000;
@@ -372,7 +386,7 @@
 	// Distinct filter options derived from the loaded set.
 	const agentOptions: string[] = $derived([...new Set(sessions.map(agentType))].sort());
 	const modelOptions: string[] = $derived(
-		[...new Set(sessions.map((s) => sessionModel(s)).filter((m): m is string => !!m))].sort()
+		[...new Set(sessions.flatMap(sessionModels).filter((m): m is string => !!m))].sort()
 	);
 
 	function toggle(list: string[], v: string): string[] {
@@ -389,8 +403,9 @@
 			}
 			if (agentFilter.length && !agentFilter.includes(agentType(s))) return false;
 			if (modelFilter.length) {
-				const m = sessionModel(s);
-				if (!m || !modelFilter.includes(m)) return false;
+				// Match if the session used ANY of the filtered models.
+				const used = sessionModels(s);
+				if (!used.some((m) => modelFilter.includes(m))) return false;
 			}
 			return true;
 		});
@@ -637,7 +652,12 @@
 								<div class="stat-label">Cache read tokens</div>
 							</div>
 						</div>
-						{#if selected.last_model}
+						{#if selected.models_used && selected.models_used.length > 1}
+							<p class="model-info">
+								Models: {#each selected.models_used as m, i}<code>{m}</code>{#if i < selected.models_used.length - 1}, {/if}{/each}
+								{#if selected.last_provider}via {selected.last_provider}{/if}
+							</p>
+						{:else if selected.last_model}
 							<p class="model-info">
 								Last model: <code>{selected.last_model}</code>
 								{#if selected.last_provider}via {selected.last_provider}{/if}
