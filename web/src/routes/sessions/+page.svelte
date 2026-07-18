@@ -19,6 +19,11 @@
 		llm_call_count: number;
 		last_model: string | null;
 		last_provider: string | null;
+		/** Optional on newer hubs — agent/tool origin. Absent on older ones. */
+		source?: string | null;
+		/** Optional ISO timestamps on newer hubs. Absent → derived client-side. */
+		started_at?: string | null;
+		updated_at?: string | null;
 	}
 
 	interface MemoryCommit {
@@ -66,6 +71,7 @@
 		turnsError = null;
 		turns = [];
 		expandedTools = {};
+		turnSearch = ''; // reset within-session search on session change
 		try {
 			// One subtree fetch returns every turn for the session.
 			const r = await hubFetch(
@@ -104,10 +110,19 @@
 		}
 	}
 
-	// Client-derived list titles: for GUID sessions the server hasn't named
-	// yet, fetch just the first turn's user_text (one small leaf, cached).
-	// Superseded by the server `name` field once session-metrics lands.
-	let derivedNames: Record<string, string> = $state({});
+	// Client-derived per-session metadata: for GUID sessions the server hasn't
+	// named/dated yet, fetch the first turn once and cache {title, date, model}.
+	// The whole t0000 node carries user_text (→ title), timestamp (→ date), and
+	// model. Cached by session id and only fetched for sessions not yet seen —
+	// the 15s auto-refresh reuses the cache and only derives brand-new ids.
+	// Superseded by server `name`/`started_at` fields once they land on the hub.
+	interface DerivedMeta {
+		title?: string;
+		/** epoch ms of the first turn, or undefined when no t0000 timestamp. */
+		date?: number;
+		model?: string;
+	}
+	let derivedMeta: Record<string, DerivedMeta> = $state({});
 
 	// Sync = re-scan this machine's Claude Code transcripts into the hub
 	// (turns, titles, token metrics). Runs the local CLI via a hub endpoint;
@@ -134,7 +149,7 @@
 			}
 			const res = await r.json();
 			syncMsg = `Synced ${res.sessions ?? '?'} sessions · ${fmt(res.tokens ?? 0)} tokens`;
-			derivedNames = {}; // titles may now come from the server
+			derivedMeta = {}; // titles/dates may now come from the server
 			await load();
 		} catch (e) {
 			syncErr = true;
@@ -161,26 +176,41 @@
 	}
 
 	async function deriveListNames() {
-		// Only GUID-looking sessions with no server name and no cache hit.
-		const todo = sessions.filter(
-			(s) => !s.name?.trim() && UUID_RE.test(s.session_id) && !(s.session_id in derivedNames)
-		);
+		// Only sessions we haven't derived yet (cache by id). We still derive
+		// dates for server-named sessions, so the gate is purely "not seen".
+		// The auto-refresh reuses this cache and only fetches genuinely-new ids.
+		const todo = sessions.filter((s) => !(s.session_id in derivedMeta));
 		const CONCURRENCY = 8;
 		for (let i = 0; i < todo.length; i += CONCURRENCY) {
 			await Promise.all(
 				todo.slice(i, i + CONCURRENCY).map(async (s) => {
+					// Mark as attempted up-front so a 404 (no t0000) still counts as
+					// "seen" and we never refetch it on every tick.
+					const meta: DerivedMeta = {};
 					try {
+						// One node fetch carries user_text (→ title), timestamp (→ date)
+						// and model. Older hubs return just the leaf if the node 404s.
 						const r = await hubFetch(
-							`/api/state/main?path=/sessions/${encodeURIComponent(s.session_id)}/turns/t0000/user_text`
+							`/api/state/main?path=/sessions/${encodeURIComponent(s.session_id)}/turns/t0000`
 						);
-						if (!r.ok) return;
-						const txt = await r.json();
-						if (typeof txt === 'string' && txt.trim()) {
-							derivedNames[s.session_id] = truncate(txt.trim(), 64);
+						if (r.ok) {
+							const node = await r.json();
+							if (node && typeof node === 'object') {
+								const ut = (node as Turn).user_text;
+								if (typeof ut === 'string' && ut.trim()) meta.title = truncate(ut.trim(), 64);
+								const ts = (node as Turn).timestamp;
+								if (typeof ts === 'string' && ts.trim()) {
+									const ms = Date.parse(ts);
+									if (!Number.isNaN(ms)) meta.date = ms;
+								}
+								const md = (node as Turn).model;
+								if (typeof md === 'string' && md.trim()) meta.model = md.trim();
+							}
 						}
 					} catch {
-						/* leave as id */
+						/* leave meta empty — session keeps its id label, no date */
 					}
+					derivedMeta[s.session_id] = meta;
 				})
 			);
 		}
@@ -216,15 +246,14 @@
 
 	// A session that carries a name (server, or a client-derived first-turn
 	// title) gets a human label; otherwise the id stands in.
-	const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 	function truncate(s: string, n: number): string {
 		return s.length > n ? s.slice(0, n - 1) + '…' : s;
 	}
 	function listLabel(s: Session): string {
-		return s.name?.trim() || derivedNames[s.session_id] || s.session_id;
+		return s.name?.trim() || derivedMeta[s.session_id]?.title || s.session_id;
 	}
 	function hasDistinctName(s: Session): boolean {
-		return !!(s.name?.trim() || derivedNames[s.session_id]);
+		return !!(s.name?.trim() || derivedMeta[s.session_id]?.title);
 	}
 	// Detail title: server name > first user message (turns already loaded) > id.
 	const detailTitle: string = $derived.by(() => {
@@ -235,6 +264,194 @@
 		if (firstUser) return truncate(firstUser, 80);
 		return sel.session_id;
 	});
+
+	// ── Agent-type derivation ──────────────────────────────────────────────
+	// Prefer a server `source` when present; otherwise heuristic from id/name.
+	function mapSource(src: string): string {
+		const s = src.toLowerCase();
+		if (s.includes('codex')) return 'Codex';
+		if (s.includes('cursor')) return 'Cursor';
+		if (s.includes('copilot')) return 'Copilot';
+		if (s.includes('claude')) return 'Claude Code';
+		// Unknown but present source — surface it verbatim (title-cased-ish).
+		return src;
+	}
+	function agentType(s: Session): string {
+		if (s.source?.trim()) return mapSource(s.source.trim());
+		const hay = `${s.session_id} ${s.name ?? ''}`.toLowerCase();
+		if (hay.includes('codex')) return 'Codex';
+		if (hay.includes('cursor')) return 'Cursor';
+		if (hay.includes('copilot')) return 'Copilot';
+		return 'Claude Code'; // GUID / claude default
+	}
+
+	// ── Per-session date ───────────────────────────────────────────────────
+	// Server timestamps win when present; else the derived first-turn date.
+	// Undefined → undated (sinks to the bottom of any sort).
+	function sessionDate(s: Session): number | undefined {
+		const srv = s.updated_at ?? s.started_at;
+		if (srv) {
+			const ms = Date.parse(srv);
+			if (!Number.isNaN(ms)) return ms;
+		}
+		return derivedMeta[s.session_id]?.date;
+	}
+	function sessionModel(s: Session): string | null {
+		return s.last_model ?? derivedMeta[s.session_id]?.model ?? null;
+	}
+	function shortDate(ms: number, now = Date.now()): string {
+		const diff = now - ms;
+		const day = 86_400_000;
+		if (diff < 0) return 'now';
+		if (diff < 60_000) return 'just now';
+		if (diff < 3_600_000) return `${Math.round(diff / 60_000)}m ago`;
+		if (diff < day) return `${Math.round(diff / 3_600_000)}h ago`;
+		if (diff < 7 * day) return `${Math.round(diff / day)}d ago`;
+		const d = new Date(ms);
+		const sameYear = new Date(now).getFullYear() === d.getFullYear();
+		return d.toLocaleDateString(undefined, {
+			month: 'short',
+			day: 'numeric',
+			...(sameYear ? {} : { year: 'numeric' })
+		});
+	}
+
+	// ── Toolbar: search / sort / filter (persisted to localStorage) ─────────
+	type SortKey = 'date' | 'used' | 'saved' | 'ratio' | 'name';
+	type SortDir = 'asc' | 'desc';
+	const SORT_LABELS: Record<SortKey, string> = {
+		date: 'Date',
+		used: 'Tokens used',
+		saved: 'Tokens saved',
+		ratio: 'Ratio',
+		name: 'Name'
+	};
+	const LS_KEY = 'ctxone:sessions:toolbar';
+
+	let searchInput = $state(''); // raw box value
+	let searchQuery = $state(''); // debounced, drives filtering
+	let sortKey: SortKey = $state('used'); // default: tokens used desc (unchanged)
+	let sortDir: SortDir = $state('desc');
+	let agentFilter: string[] = $state([]); // empty = all
+	let modelFilter: string[] = $state([]); // empty = all
+	const PAGE_SIZE = 30;
+	let visibleCount = $state(PAGE_SIZE);
+
+	// Restore persisted sort + filter choices once, on mount.
+	$effect(() => {
+		if (typeof localStorage === 'undefined') return;
+		try {
+			const raw = localStorage.getItem(LS_KEY);
+			if (!raw) return;
+			const p = JSON.parse(raw);
+			if (p.sortKey in SORT_LABELS) sortKey = p.sortKey;
+			if (p.sortDir === 'asc' || p.sortDir === 'desc') sortDir = p.sortDir;
+			if (Array.isArray(p.agentFilter)) agentFilter = p.agentFilter;
+			if (Array.isArray(p.modelFilter)) modelFilter = p.modelFilter;
+		} catch {
+			/* ignore malformed persisted state */
+		}
+	});
+	// Persist on change.
+	$effect(() => {
+		const snapshot = JSON.stringify({ sortKey, sortDir, agentFilter, modelFilter });
+		if (typeof localStorage !== 'undefined') localStorage.setItem(LS_KEY, snapshot);
+	});
+	// Debounce the search box → searchQuery (250ms).
+	$effect(() => {
+		const v = searchInput;
+		const id = setTimeout(() => (searchQuery = v), 250);
+		return () => clearTimeout(id);
+	});
+	// Any filter/sort/search change resets paging to the first page.
+	$effect(() => {
+		void [searchQuery, sortKey, sortDir, agentFilter, modelFilter];
+		visibleCount = PAGE_SIZE;
+	});
+
+	// Distinct filter options derived from the loaded set.
+	const agentOptions: string[] = $derived([...new Set(sessions.map(agentType))].sort());
+	const modelOptions: string[] = $derived(
+		[...new Set(sessions.map((s) => sessionModel(s)).filter((m): m is string => !!m))].sort()
+	);
+
+	function toggle(list: string[], v: string): string[] {
+		return list.includes(v) ? list.filter((x) => x !== v) : [...list, v];
+	}
+
+	// Filtered + sorted list (the pipeline the count and paging observe).
+	const filtered: Session[] = $derived.by(() => {
+		const q = searchQuery.trim().toLowerCase();
+		let list = sessions.filter((s) => {
+			if (q) {
+				const hay = `${s.name ?? ''} ${derivedMeta[s.session_id]?.title ?? ''} ${s.session_id}`.toLowerCase();
+				if (!hay.includes(q)) return false;
+			}
+			if (agentFilter.length && !agentFilter.includes(agentType(s))) return false;
+			if (modelFilter.length) {
+				const m = sessionModel(s);
+				if (!m || !modelFilter.includes(m)) return false;
+			}
+			return true;
+		});
+		const dir = sortDir === 'asc' ? 1 : -1;
+		list = [...list].sort((a, b) => {
+			switch (sortKey) {
+				case 'date': {
+					// Undated always sink to the bottom regardless of direction.
+					const da = sessionDate(a);
+					const db = sessionDate(b);
+					if (da === undefined && db === undefined) return 0;
+					if (da === undefined) return 1;
+					if (db === undefined) return -1;
+					return (da - db) * dir;
+				}
+				case 'used':
+					return (a.session_tokens_used - b.session_tokens_used) * dir;
+				case 'saved':
+					return (a.session_tokens_saved - b.session_tokens_saved) * dir;
+				case 'ratio':
+					return (a.cumulative_ratio - b.cumulative_ratio) * dir;
+				case 'name':
+					return listLabel(a).localeCompare(listLabel(b)) * dir;
+			}
+		});
+		return list;
+	});
+	const paged: Session[] = $derived(filtered.slice(0, visibleCount));
+
+	// ── Within-session transcript search ───────────────────────────────────
+	let turnSearch = $state(''); // cleared on session change (see loadTurns)
+	const filteredTurns: Turn[] = $derived.by(() => {
+		const q = turnSearch.trim().toLowerCase();
+		if (!q) return turns;
+		return turns.filter((t) => {
+			if (t.user_text?.toLowerCase().includes(q)) return true;
+			if (t.assistant_text?.toLowerCase().includes(q)) return true;
+			if (t.tool_calls?.some((tc) => tc.toLowerCase().includes(q))) return true;
+			return false;
+		});
+	});
+	// Split text into {text, hit} segments so matches can be <mark>-highlighted
+	// without {@html} (keeps it XSS-safe).
+	function segments(text: string, q: string): { text: string; hit: boolean }[] {
+		const needle = q.trim().toLowerCase();
+		if (!needle) return [{ text, hit: false }];
+		const out: { text: string; hit: boolean }[] = [];
+		const hay = text.toLowerCase();
+		let i = 0;
+		for (;;) {
+			const idx = hay.indexOf(needle, i);
+			if (idx === -1) {
+				out.push({ text: text.slice(i), hit: false });
+				break;
+			}
+			if (idx > i) out.push({ text: text.slice(i, idx), hit: false });
+			out.push({ text: text.slice(idx, idx + needle.length), hit: true });
+			i = idx + needle.length;
+		}
+		return out;
+	}
 </script>
 
 <div class="page">
@@ -265,25 +482,101 @@
 		<p class="muted">No sessions yet. Run <code>ctx recall</code> or <code>ctx remember</code> to start one.</p>
 	{:else}
 		<div class="layout">
-			<div class="list">
-				{#each sessions as s}
-					<button
-						class="session-row"
-						class:active={selected?.session_id === s.session_id}
-						onclick={() => selected = s}
-					>
-						<div class="session-name">{listLabel(s)}</div>
-						{#if hasDistinctName(s)}
-							<div class="session-id" title={s.session_id}>{s.session_id}</div>
-						{/if}
-						<div class="session-meta">
-							<span>{fmt(s.session_tokens_used)} tokens used</span>
-							<span class="ratio" style="color: {ratioColor(s.cumulative_ratio)}">
-								{s.cumulative_ratio.toFixed(1)}x
-							</span>
+			<div class="list-col">
+				<div class="toolbar">
+					<input
+						class="search"
+						type="search"
+						placeholder="Search name / title / id…"
+						bind:value={searchInput}
+						aria-label="Search sessions"
+					/>
+					<div class="toolbar-row">
+						<div class="sort">
+							<select class="sort-select" bind:value={sortKey} aria-label="Sort by">
+								{#each Object.entries(SORT_LABELS) as [k, label]}
+									<option value={k}>{label}</option>
+								{/each}
+							</select>
+							<button
+								class="dir-btn"
+								onclick={() => (sortDir = sortDir === 'asc' ? 'desc' : 'asc')}
+								title={sortDir === 'asc' ? 'Ascending' : 'Descending'}
+								aria-label="Toggle sort direction"
+							>
+								{sortDir === 'asc' ? '↑' : '↓'}
+							</button>
 						</div>
-					</button>
-				{/each}
+						<span class="count">{filtered.length} of {sessions.length}</span>
+					</div>
+					{#if agentOptions.length > 1 || modelOptions.length > 1 || agentFilter.length || modelFilter.length}
+						<div class="chips">
+							{#if agentOptions.length > 1 || agentFilter.length}
+								{#each agentOptions as a}
+									<button
+										class="chip"
+										class:on={agentFilter.includes(a)}
+										onclick={() => (agentFilter = toggle(agentFilter, a))}
+									>{a}</button>
+								{/each}
+							{/if}
+							{#if (agentOptions.length > 1 || agentFilter.length) && (modelOptions.length > 1 || modelFilter.length)}
+								<span class="chip-sep" aria-hidden="true"></span>
+							{/if}
+							{#if modelOptions.length > 1 || modelFilter.length}
+								{#each modelOptions as m}
+									<button
+										class="chip model"
+										class:on={modelFilter.includes(m)}
+										onclick={() => (modelFilter = toggle(modelFilter, m))}
+									>{m}</button>
+								{/each}
+							{/if}
+							{#if agentFilter.length || modelFilter.length}
+								<button
+									class="chip clear"
+									onclick={() => { agentFilter = []; modelFilter = []; }}
+								>Clear</button>
+							{/if}
+						</div>
+					{/if}
+				</div>
+
+				<div class="list">
+					{#if filtered.length === 0}
+						<p class="muted no-match">No sessions match.</p>
+					{/if}
+					{#each paged as s (s.session_id)}
+						{@const date = sessionDate(s)}
+						<button
+							class="session-row"
+							class:active={selected?.session_id === s.session_id}
+							onclick={() => selected = s}
+						>
+							<div class="session-name">{listLabel(s)}</div>
+							{#if hasDistinctName(s)}
+								<div class="session-id" title={s.session_id}>{s.session_id}</div>
+							{/if}
+							<div class="session-tags">
+								<span class="agent-chip">{agentType(s)}</span>
+								{#if date !== undefined}
+									<span class="row-date" title={new Date(date).toLocaleString()}>{shortDate(date)}</span>
+								{/if}
+							</div>
+							<div class="session-meta">
+								<span>{fmt(s.session_tokens_used)} tokens used</span>
+								<span class="ratio" style="color: {ratioColor(s.cumulative_ratio)}">
+									{s.cumulative_ratio.toFixed(1)}x
+								</span>
+							</div>
+						</button>
+					{/each}
+					{#if filtered.length > visibleCount}
+						<button class="load-more" onclick={() => (visibleCount += PAGE_SIZE)}>
+							Load more ({filtered.length - visibleCount} remaining)
+						</button>
+					{/if}
+				</div>
 			</div>
 
 			{#if selected}
@@ -357,7 +650,23 @@
 						</p>
 					{/if}
 
-					<h3>Conversation {#if turns.length}<span class="count">{turns.length} turns</span>{/if}</h3>
+					<h3>
+							Conversation
+							{#if turns.length}
+								<span class="count"
+									>{turnSearch.trim() ? `${filteredTurns.length} of ${turns.length}` : turns.length} turns</span
+								>
+							{/if}
+						</h3>
+						{#if turns.length > 0 && !turnsLoading && !turnsError}
+							<input
+								class="turn-search"
+								type="search"
+								placeholder="Search this transcript…"
+								bind:value={turnSearch}
+								aria-label="Search transcript"
+							/>
+						{/if}
 					{#if turnsLoading}
 						<p class="muted">Loading transcript…</p>
 					{:else if turnsError}
@@ -368,9 +677,12 @@
 							agent posts to <code>/api/sessions/{'{sid}'}/turns</code> (e.g. via the
 							session-ingest tooling).
 						</p>
+					{:else if filteredTurns.length === 0}
+						<p class="muted hint">No turns match this search.</p>
 					{:else}
 						<ol class="turns">
-							{#each turns as t (t.key)}
+							{#each filteredTurns as t (t.key)}
+								{@const q = turnSearch.trim()}
 								<li class="turn">
 									<div class="turn-head">
 										<span class="turn-idx">#{(t.turn_index ?? 0) + 1}</span>
@@ -387,13 +699,13 @@
 									{#if t.user_text?.trim()}
 										<div class="msg user">
 											<span class="msg-role">User</span>
-											<div class="msg-body">{t.user_text}</div>
+											<div class="msg-body">{#each segments(t.user_text ?? '', q) as seg}{#if seg.hit}<mark>{seg.text}</mark>{:else}{seg.text}{/if}{/each}</div>
 										</div>
 									{/if}
 									{#if t.assistant_text?.trim()}
 										<div class="msg assistant">
 											<span class="msg-role">Assistant</span>
-											<div class="msg-body">{t.assistant_text}</div>
+											<div class="msg-body">{#each segments(t.assistant_text ?? '', q) as seg}{#if seg.hit}<mark>{seg.text}</mark>{:else}{seg.text}{/if}{/each}</div>
 										</div>
 									{/if}
 									{#if t.tool_calls?.length}
@@ -409,7 +721,7 @@
 											</button>
 											<div class="msg-body">
 												{#each t.tool_calls as tc}
-													<div class="tool-summary">{tc}</div>
+													<div class="tool-summary">{#each segments(tc, q) as seg}{#if seg.hit}<mark>{seg.text}</mark>{:else}{seg.text}{/if}{/each}</div>
 												{/each}
 												{#if expandedTools[t.key] && t.tool_calls_raw?.length}
 													<pre class="tool-raw">{JSON.stringify(t.tool_calls_raw, null, 2)}</pre>
@@ -805,4 +1117,159 @@
 		color: var(--lens-ok, #4ade80);
 	}
 	.sync-msg.err { color: var(--lens-danger, #ff6b6b); }
+
+	/* ── Toolbar ─────────────────────────────────────────────────────────── */
+	.list-col {
+		display: flex;
+		flex-direction: column;
+		gap: 0.6rem;
+		min-width: 0;
+	}
+	.toolbar {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+	}
+	.search,
+	.turn-search {
+		width: 100%;
+		background: var(--bg-0);
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		color: var(--text-0);
+		padding: 0.4rem 0.6rem;
+		font-size: 0.85rem;
+		font-family: inherit;
+	}
+	.search:focus,
+	.turn-search:focus {
+		outline: none;
+		border-color: var(--lens-accent, #6ea8ff);
+	}
+	.turn-search {
+		margin-bottom: 0.6rem;
+	}
+	.toolbar-row {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+	}
+	.sort {
+		display: flex;
+		gap: 0.3rem;
+	}
+	.sort-select {
+		background: var(--bg-hover);
+		border: 1px solid var(--border);
+		color: var(--text-1);
+		border-radius: 6px;
+		padding: 0.3rem 0.4rem;
+		font-size: 0.8rem;
+		cursor: pointer;
+	}
+	.dir-btn {
+		background: var(--bg-hover);
+		border: 1px solid var(--border);
+		color: var(--text-1);
+		border-radius: 6px;
+		padding: 0.3rem 0.5rem;
+		font-size: 0.85rem;
+		cursor: pointer;
+		line-height: 1;
+	}
+	.dir-btn:hover {
+		border-color: var(--text-3);
+		color: var(--text-0);
+	}
+	.count {
+		font-size: var(--lens-font-size-xs, 0.78rem);
+		color: var(--lens-muted, var(--text-3));
+		margin-left: auto;
+		white-space: nowrap;
+	}
+	.chips {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.3rem;
+		align-items: center;
+	}
+	.chip {
+		background: var(--bg-hover);
+		border: 1px solid var(--border);
+		color: var(--text-2);
+		font-size: 0.72rem;
+		padding: 0.15rem 0.5rem;
+		border-radius: 999px;
+		cursor: pointer;
+		font-family: inherit;
+	}
+	.chip:hover {
+		border-color: var(--text-3);
+		color: var(--text-0);
+	}
+	.chip.on {
+		background: color-mix(in srgb, var(--lens-accent, #6ea8ff) 22%, var(--bg-hover));
+		border-color: color-mix(in srgb, var(--lens-accent, #6ea8ff) 55%, var(--border));
+		color: var(--lens-accent, #93c5fd);
+	}
+	.chip.model {
+		font-family: var(--lens-font-mono, monospace);
+	}
+	.chip.clear {
+		color: var(--lens-muted, var(--text-3));
+	}
+	.chip-sep {
+		width: 1px;
+		align-self: stretch;
+		background: var(--border);
+		margin: 0.1rem 0.2rem;
+	}
+	.no-match {
+		padding: 0.5rem 0.2rem;
+	}
+
+	.session-tags {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		margin: 0.25rem 0;
+	}
+	.agent-chip {
+		font-size: 0.68rem;
+		font-weight: 600;
+		padding: 0.1rem 0.4rem;
+		border-radius: 4px;
+		background: color-mix(in srgb, var(--lens-accent, #6ea8ff) 14%, var(--bg-0));
+		border: 1px solid color-mix(in srgb, var(--lens-accent, #6ea8ff) 30%, var(--border));
+		color: var(--lens-accent, #93c5fd);
+	}
+	.row-date {
+		font-size: 0.72rem;
+		color: var(--text-3);
+	}
+	.load-more {
+		background: var(--bg-hover);
+		border: 1px solid var(--border);
+		color: var(--text-2);
+		border-radius: 8px;
+		padding: 0.5rem;
+		font-size: 0.8rem;
+		cursor: pointer;
+		font-family: inherit;
+	}
+	.load-more:hover {
+		border-color: var(--text-3);
+		color: var(--text-0);
+	}
+	.msg-body :global(mark) {
+		background: color-mix(in srgb, var(--lens-warn, #f5c451) 45%, transparent);
+		color: inherit;
+		border-radius: 2px;
+		padding: 0 1px;
+	}
+	.tool-summary :global(mark) {
+		background: color-mix(in srgb, var(--lens-warn, #f5c451) 45%, transparent);
+		color: inherit;
+		border-radius: 2px;
+	}
 </style>
