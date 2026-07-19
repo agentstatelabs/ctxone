@@ -135,7 +135,7 @@
 	// named/dated yet, fetch the first turn once and cache {title, date, model}.
 	// The whole t0000 node carries user_text (→ title), timestamp (→ date), and
 	// model. Cached by session id and only fetched for sessions not yet seen —
-	// the 15s auto-refresh reuses the cache and only derives brand-new ids.
+	// the 30s auto-refresh reuses the cache and only derives brand-new ids.
 	// Superseded by server `name`/`started_at` fields once they land on the hub.
 	interface DerivedMeta {
 		title?: string;
@@ -270,8 +270,35 @@
 	interface SessionCommit {
 		subject: string;
 		tasks: { plan: string; task: string }[];
+		/** Conventional-commit type, lowercased; 'other' when the subject
+		 * doesn't use one (this repo mixes in bare-scope subjects like
+		 * "lens: …", which must not be mistaken for a type). */
+		type: string;
 	}
 	const TASK_REF = /\(([a-z][a-z0-9-]*)\s+(t-\d+)\)/gi;
+
+	/** Types we recognise and colour. Anything else falls to 'other'. */
+	const COMMIT_TYPES = [
+		'feat',
+		'fix',
+		'docs',
+		'refactor',
+		'test',
+		'chore',
+		'build',
+		'ci',
+		'style',
+		'perf',
+		'merge',
+		'release'
+	];
+	function commitType(subject: string): string {
+		// `type(scope)!: …` or `type!: …` — the scope and the breaking-change
+		// bang are both optional.
+		const m = /^([a-z]+)(\([^)]*\))?!?:/i.exec(subject.trim());
+		const t = m?.[1]?.toLowerCase();
+		return t && COMMIT_TYPES.includes(t) ? t : 'other';
+	}
 	const sessionCommits = $derived.by<SessionCommit[]>(() => {
 		const out: SessionCommit[] = [];
 		const seen = new Set<string>();
@@ -287,11 +314,47 @@
 					seen.add(subject);
 					const tasks: { plan: string; task: string }[] = [];
 					for (const r of msg.matchAll(TASK_REF)) tasks.push({ plan: r[1], task: r[2] });
-					out.push({ subject, tasks });
+					out.push({ subject, tasks, type: commitType(subject) });
 				}
 			}
 		}
 		return out;
+	});
+
+	// ── Commits toolbar: type chips + linked/orphan toggle ──────────────────
+	// Filters are per-session view state (not persisted): the useful set of
+	// types differs from session to session, so a sticky choice would more
+	// often hide commits than help.
+	let commitTypeFilter: string[] = $state([]);
+	let commitLinkFilter: 'all' | 'linked' | 'orphan' = $state('all');
+
+	/** Types actually present in this session, in COMMIT_TYPES order so the
+	 * chip row is stable rather than ordered by first appearance. */
+	const commitTypesPresent = $derived.by<string[]>(() => {
+		const present = new Set(sessionCommits.map((c) => c.type));
+		return [...COMMIT_TYPES, 'other'].filter((t) => present.has(t));
+	});
+
+	const visibleCommits = $derived.by<SessionCommit[]>(() =>
+		sessionCommits.filter((c) => {
+			if (commitTypeFilter.length && !commitTypeFilter.includes(c.type)) return false;
+			if (commitLinkFilter === 'linked' && c.tasks.length === 0) return false;
+			if (commitLinkFilter === 'orphan' && c.tasks.length > 0) return false;
+			return true;
+		})
+	);
+
+	function toggleCommitType(t: string) {
+		commitTypeFilter = commitTypeFilter.includes(t)
+			? commitTypeFilter.filter((x) => x !== t)
+			: [...commitTypeFilter, t];
+	}
+	// Reset filters when switching sessions, so a filter chosen on one
+	// session doesn't silently empty the next one's list.
+	$effect(() => {
+		void selected?.session_id;
+		commitTypeFilter = [];
+		commitLinkFilter = 'all';
 	});
 
 	function ratioColor(r: number): string {
@@ -570,7 +633,7 @@
 
 	{#if error}
 		<p class="error">{error}</p>
-	{:else if loading}
+	{:else if loading && sessions.length === 0}
 		<p class="muted">Loading sessions…</p>
 	{:else if sessions.length === 0}
 		<p class="muted">No sessions yet. Run <code>ctx recall</code> or <code>ctx remember</code> to start one.</p>
@@ -844,11 +907,57 @@
 					{/if}
 
 					{#if sessionCommits.length}
-						<h3>Commits <span class="count">{sessionCommits.length}</span></h3>
+						<h3>
+							Commits
+							<span class="count">
+								{visibleCommits.length === sessionCommits.length
+									? sessionCommits.length
+									: `${visibleCommits.length}/${sessionCommits.length}`}
+							</span>
+						</h3>
+						<div class="commit-filters">
+							<div class="chip-row">
+								{#each commitTypesPresent as t}
+									<button
+										type="button"
+										class="type-chip t-{t}"
+										class:active={commitTypeFilter.includes(t)}
+										aria-pressed={commitTypeFilter.includes(t)}
+										onclick={() => toggleCommitType(t)}
+										title={`Show only ${t} commits`}
+									>
+										{t}
+									</button>
+								{/each}
+							</div>
+							<div class="seg-group">
+								{#each [['all', 'All'], ['linked', 'Linked'], ['orphan', 'Orphan']] as [val, label]}
+									<button
+										type="button"
+										class="seg"
+										class:active={commitLinkFilter === val}
+										onclick={() => (commitLinkFilter = val as typeof commitLinkFilter)}
+										title={val === 'linked'
+											? 'Commits that reference a ctx plan task'
+											: val === 'orphan'
+												? 'Commits with no plan task reference'
+												: 'All commits'}
+									>
+										{label}
+									</button>
+								{/each}
+							</div>
+						</div>
+						{#if visibleCommits.length === 0}
+							<p class="muted">No commits match these filters.</p>
+						{/if}
 						<ul class="commit-list">
-							{#each sessionCommits as c}
-								<li class="commit-item">
-									<div class="commit-subject">{c.subject}</div>
+							{#each visibleCommits as c}
+								<li class="commit-item t-{c.type}" class:orphan={c.tasks.length === 0}>
+									<div class="commit-subject">
+										<span class="type-badge t-{c.type}">{c.type}</span>
+										{c.subject}
+									</div>
 									{#if c.tasks.length}
 										<div class="commit-tasks">
 											{#each c.tasks as t}
@@ -1701,12 +1810,123 @@
 		flex-direction: column;
 		gap: 0.4rem;
 	}
+	/* One hue per commit type, exposed as --ct so the badge and the row's
+	   left border stay in sync from a single declaration. Values come from
+	   the app palette (app.css) rather than fresh hex so the section
+	   re-themes with everything else. */
+	.t-feat {
+		--ct: var(--success);
+	}
+	.t-fix {
+		--ct: var(--danger);
+	}
+	.t-docs {
+		--ct: var(--info);
+	}
+	.t-refactor {
+		--ct: var(--accent);
+	}
+	.t-test {
+		--ct: var(--warning);
+	}
+	.t-perf {
+		--ct: var(--warning);
+	}
+	.t-build,
+	.t-ci,
+	.t-chore,
+	.t-style {
+		--ct: var(--text-3);
+	}
+	.t-merge,
+	.t-release {
+		--ct: var(--accent);
+	}
+	.t-other {
+		--ct: var(--text-3);
+	}
+
 	.commit-item {
 		background: var(--bg-0);
 		border: 1px solid var(--border);
-		border-left: 2px solid var(--lens-ok, #4ade80);
+		/* Type drives the hue; linkage drives whether it reads as solid.
+		   Orphan commits (no plan task) get a dashed edge so they're
+		   distinguishable without relying on colour alone. */
+		border-left: 3px solid var(--ct, var(--text-3));
 		border-radius: 6px;
 		padding: 0.5rem 0.7rem;
+	}
+	.commit-item.orphan {
+		border-left-style: dashed;
+	}
+	.type-badge {
+		display: inline-block;
+		font-family: var(--lens-font-mono, monospace);
+		font-size: var(--lens-font-size-2xs, 0.68rem);
+		line-height: 1.4;
+		padding: 0.05rem 0.4rem;
+		margin-right: 0.4rem;
+		border-radius: 4px;
+		background: color-mix(in srgb, var(--ct, var(--text-3)) 16%, transparent);
+		border: 1px solid color-mix(in srgb, var(--ct, var(--text-3)) 45%, var(--border));
+		color: var(--ct, var(--text-2));
+		vertical-align: baseline;
+	}
+
+	/* Same segmented-control idiom the Pinned page uses, kept visually
+	   identical so the two pages don't drift. */
+	.seg-group {
+		display: inline-flex;
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		overflow: hidden;
+	}
+	.seg {
+		background: var(--bg-1);
+		border: 0;
+		color: var(--text-2);
+		padding: 0.2rem 0.6rem;
+		font-size: var(--lens-font-size-2xs, 0.7rem);
+		font-family: var(--lens-font-mono, monospace);
+		cursor: pointer;
+	}
+	.seg:not(:last-child) {
+		border-right: 1px solid var(--border);
+	}
+	.seg.active {
+		background: var(--accent-bg);
+		color: var(--accent);
+	}
+
+	.commit-filters {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 0.5rem;
+		margin-bottom: 0.6rem;
+	}
+	.chip-row {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.3rem;
+	}
+	.type-chip {
+		font-family: var(--lens-font-mono, monospace);
+		font-size: var(--lens-font-size-2xs, 0.68rem);
+		padding: 0.15rem 0.5rem;
+		border-radius: 999px;
+		cursor: pointer;
+		background: transparent;
+		border: 1px solid color-mix(in srgb, var(--ct, var(--text-3)) 35%, var(--border));
+		color: var(--text-2);
+	}
+	.type-chip:hover {
+		background: color-mix(in srgb, var(--ct, var(--text-3)) 10%, transparent);
+	}
+	.type-chip.active {
+		background: color-mix(in srgb, var(--ct, var(--text-3)) 22%, transparent);
+		border-color: var(--ct, var(--text-3));
+		color: var(--ct, var(--text-1));
 	}
 	.commit-subject {
 		font-family: var(--lens-font-mono, monospace);
