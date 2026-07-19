@@ -728,28 +728,16 @@ pub async fn store_memory(
 // ── File discovery ────────────────────────────────────────────────────────────
 
 /// Find Claude Code session JSONL files for a given project directory.
+///
+/// Thin wrapper over the Claude Code [`SessionSource`](crate::sources::SessionSource);
+/// kept so existing call sites keep working while sources are added.
 pub fn find_session_files(project_dir: &Path) -> Vec<PathBuf> {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
-    // Claude Code hashes the project path: replace '/' with '-'.
-    let hash = project_dir.to_string_lossy().replace('/', "-");
-    let sessions_dir = home.join(".claude").join("projects").join(&hash);
-
-    if !sessions_dir.exists() {
-        return vec![];
-    }
-
-    let mut files: Vec<PathBuf> = std::fs::read_dir(&sessions_dir)
+    use crate::sources::SessionSource;
+    crate::sources::ClaudeCode
+        .discover_for_project(project_dir)
         .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().map(|e| e == "jsonl").unwrap_or(false))
-        .collect();
-
-    // Sort by modification time, oldest first.
-    files.sort_by_key(|p| p.metadata().and_then(|m| m.modified()).ok());
-
-    files
+        .map(|r| r.path)
+        .collect()
 }
 
 /// Find the single most-recent session file (for capture-turn).
@@ -770,48 +758,8 @@ pub fn latest_session_file(project_dir: &Path) -> Option<PathBuf> {
 /// This is the `--all` counterpart to [`find_session_files`], which scans
 /// only the single project matching a given directory.
 pub fn find_all_session_files() -> Vec<(String, Vec<PathBuf>)> {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
-    let projects_dir = home.join(".claude").join("projects");
-
-    let mut result: Vec<(String, Vec<PathBuf>)> = vec![];
-    let Ok(entries) = std::fs::read_dir(&projects_dir) else {
-        return result;
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let hash = path.file_name().unwrap_or_default().to_string_lossy();
-        // Recover a readable label. The hash is `project_path.replace('/', "-")`,
-        // so an absolute path leads with '-'. Take the last two components.
-        let label = if let Some(stripped) = hash.strip_prefix('-') {
-            let parts: Vec<&str> = stripped.split('-').collect();
-            if parts.len() >= 2 {
-                format!("{}/{}", parts[parts.len() - 2], parts[parts.len() - 1])
-            } else {
-                hash.to_string()
-            }
-        } else {
-            hash.to_string()
-        };
-
-        let mut files: Vec<PathBuf> = std::fs::read_dir(&path)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().map(|e| e == "jsonl").unwrap_or(false))
-            .collect();
-        files.sort_by_key(|p| p.metadata().and_then(|m| m.modified()).ok());
-
-        if !files.is_empty() {
-            result.push((label, files));
-        }
-    }
-    result.sort_by(|a, b| a.0.cmp(&b.0));
-    result
+    use crate::sources::SessionSource;
+    crate::sources::group_by_label(crate::sources::ClaudeCode.discover_all())
 }
 
 /// Return the last N turns from a session file (for per-turn hook capture).

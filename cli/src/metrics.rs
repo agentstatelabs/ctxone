@@ -490,50 +490,12 @@ pub fn find_session_files(project_dir: &Path) -> Vec<PathBuf> {
 }
 
 /// List every project in ~/.claude/projects/ and return (label, files) pairs.
+///
+/// This was a verbatim second copy of the walk in `ingest.rs` — same hash
+/// decoding, same mtime sort — which meant a discovery fix had to be made
+/// twice. Both now go through the Claude Code source.
 pub fn all_project_sessions() -> Vec<(String, Vec<PathBuf>)> {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
-    let projects_dir = home.join(".claude").join("projects");
-
-    let mut result = vec![];
-    let Ok(entries) = std::fs::read_dir(&projects_dir) else {
-        return result;
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let hash = path.file_name().unwrap_or_default().to_string_lossy();
-        // Reverse the hash: replace leading '-' then split on '-' to recover path
-        // Hash is: project_path.replace('/', '-'), so starts with '-' for absolute paths.
-        let label = if hash.starts_with('-') {
-            // Take last two path components for a readable label
-            let parts: Vec<&str> = hash.trim_start_matches('-').split('-').collect();
-            if parts.len() >= 2 {
-                format!("{}/{}", parts[parts.len() - 2], parts[parts.len() - 1])
-            } else {
-                hash.to_string()
-            }
-        } else {
-            hash.to_string()
-        };
-
-        let mut files: Vec<PathBuf> = std::fs::read_dir(&path)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().map(|e| e == "jsonl").unwrap_or(false))
-            .collect();
-        files.sort_by_key(|p| p.metadata().and_then(|m| m.modified()).ok());
-
-        if !files.is_empty() {
-            result.push((label, files));
-        }
-    }
-    result.sort_by(|a, b| a.0.cmp(&b.0));
-    result
+    crate::ingest::find_all_session_files()
 }
 
 // ── Formatting helpers ─────────────────────────────────────────────────────────

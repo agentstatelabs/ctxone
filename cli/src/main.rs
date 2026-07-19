@@ -2,6 +2,7 @@ mod ingest;
 mod metrics;
 mod onboarding;
 mod service;
+mod sources;
 
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
