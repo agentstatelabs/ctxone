@@ -3,6 +3,7 @@
 //! Higher-level memory operations built on top of AgentStateGraph primitives.
 //! Each tool includes token usage metadata (`_ctxone_stats`) for tracking savings.
 
+use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -188,6 +189,19 @@ pub struct SessionStats {
     /// code tools to default the `repo` parameter when the caller omits it.
     /// Set via the `set_active_repo` MCP tool / HTTP equivalent.
     active_repo: RwLock<Option<String>>,
+
+    /// Token classes this Hub has no column for, accumulated under the
+    /// reporting agent's own field names.
+    ///
+    /// The four `llm_*` counters above are the Anthropic shape. Other agents
+    /// report classes it cannot express — Codex `reasoning_output_tokens`,
+    /// Gemini `thoughts` and `tool`, Android Studio's TEXT/IMAGE modality
+    /// split. Folding those into `llm_output_tokens` would silently destroy
+    /// the distinction and make cross-agent comparison wrong, so they are
+    /// kept verbatim instead. Nothing needs to know how to *display* a class
+    /// for it to be safely captured — which is the point: imports do not have
+    /// to be redone once we do.
+    extra_tokens: RwLock<BTreeMap<String, u64>>,
 }
 
 impl Default for SessionStats {
@@ -211,6 +225,7 @@ impl SessionStats {
             last_model: RwLock::new(None),
             last_provider: RwLock::new(None),
             active_repo: RwLock::new(None),
+            extra_tokens: RwLock::new(BTreeMap::new()),
         }
     }
 
@@ -225,6 +240,7 @@ impl SessionStats {
         llm_call_count: u64,
         last_model: Option<String>,
         last_provider: Option<String>,
+        extra_tokens: BTreeMap<String, u64>,
     ) -> Self {
         Self {
             tokens_sent: AtomicU64::new(tokens_sent),
@@ -239,7 +255,32 @@ impl SessionStats {
             last_model: RwLock::new(last_model),
             last_provider: RwLock::new(last_provider),
             active_repo: RwLock::new(None),
+            extra_tokens: RwLock::new(extra_tokens),
         }
+    }
+
+    /// Accumulate source-native token classes under their own names.
+    ///
+    /// Additive like the `llm_*` counters, so re-reporting a session tops up
+    /// rather than clobbers. Unknown keys are accepted deliberately: the
+    /// point is to capture classes this Hub does not model yet.
+    pub fn record_extra_tokens(&self, extra: &BTreeMap<String, u64>) {
+        if extra.is_empty() {
+            return;
+        }
+        if let Ok(mut w) = self.extra_tokens.write() {
+            for (k, v) in extra {
+                *w.entry(k.clone()).or_insert(0) += *v;
+            }
+        }
+    }
+
+    /// Read the accumulated source-native token classes.
+    pub fn extra_tokens(&self) -> BTreeMap<String, u64> {
+        self.extra_tokens
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     /// Currently active ASD repo for this session, if any.
@@ -354,6 +395,12 @@ pub struct SessionSnapshot {
     #[serde(default)]
     pub last_provider: Option<String>,
 
+    /// Source-native token classes the four `llm_*` fields cannot express
+    /// (Codex `reasoning_output_tokens`, Gemini `thoughts`/`tool`, modality
+    /// splits). Empty for sessions reported by Anthropic-shaped agents.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra_tokens: BTreeMap<String, u64>,
+
     /// Human-readable session title (t-016). Populated best-effort by the
     /// HTTP layer from the `/sessions/{id}/title` graph node; `None` when no
     /// title was ingested. `session_id` stays the GUID — this is display-only.
@@ -405,6 +452,7 @@ impl SessionSnapshot {
             llm_call_count: stats.llm_call_count.load(Ordering::Relaxed),
             last_model: stats.last_model(),
             last_provider: stats.last_provider(),
+            extra_tokens: stats.extra_tokens(),
             // Filled in best-effort by the HTTP layer (reads the title/meta nodes).
             name: None,
             source: None,
@@ -554,8 +602,12 @@ impl SessionRegistry {
         let mut llm_cache_read = 0u64;
         let mut llm_cache_create = 0u64;
         let mut llm_calls = 0u64;
+        let mut extra: BTreeMap<String, u64> = BTreeMap::new();
 
         for (_, s) in w.iter() {
+            for (k, v) in s.extra_tokens() {
+                *extra.entry(k).or_insert(0) += v;
+            }
             total_used += s.tokens_sent.load(Ordering::Relaxed);
             total_saved += s.tokens_saved.load(Ordering::Relaxed);
             graph_chars = graph_chars.max(s.total_graph_size_chars.load(Ordering::Relaxed));
@@ -588,6 +640,9 @@ impl SessionRegistry {
             // metadata — it's a roll-up, not a single session's view.
             last_model: None,
             last_provider: None,
+            // Summed across sessions like the other counters, so a mixed-agent
+            // machine still reports its true reasoning/thoughts totals.
+            extra_tokens: extra,
             // The aggregate is a roll-up, not a single named session.
             name: None,
             source: None,
@@ -641,10 +696,15 @@ impl SessionRegistry {
             tracing::warn!(error = %e, "session-db schema init failed");
             return registry;
         }
+        // Migrate dbs created before extra_tokens existed. ALTER TABLE errors
+        // when the column is already there, which is the steady state — hence
+        // the discarded result rather than a warning on every startup.
+        let _ = conn.execute_batch("ALTER TABLE ctxone_sessions ADD COLUMN extra_tokens TEXT;");
         let mut stmt = match conn.prepare(
             "SELECT session_id, tokens_sent, tokens_saved,
                     llm_input_tokens, llm_output_tokens, llm_cache_read_tokens,
-                    llm_cache_create_tokens, llm_call_count, last_model, last_provider
+                    llm_cache_create_tokens, llm_call_count, last_model, last_provider,
+                    extra_tokens
              FROM ctxone_sessions",
         ) {
             Ok(s) => s,
@@ -665,6 +725,7 @@ impl SessionRegistry {
                 row.get::<_, u64>(7)?,
                 row.get::<_, Option<String>>(8)?,
                 row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<String>>(10)?,
             ))
         });
         let rows = match rows {
@@ -678,10 +739,27 @@ impl SessionRegistry {
         {
             let mut lru = registry.sessions.lock().expect("sessions lock");
             for row in rows.flatten() {
-                let (id, sent, saved, llm_in, llm_out, llm_cr, llm_cc, calls, model, provider) =
-                    row;
+                let (
+                    id,
+                    sent,
+                    saved,
+                    llm_in,
+                    llm_out,
+                    llm_cr,
+                    llm_cc,
+                    calls,
+                    model,
+                    provider,
+                    extra_json,
+                ) = row;
+                // Unparseable extras degrade to empty rather than dropping the
+                // whole session — the four core counters still matter.
+                let extra = extra_json
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str::<BTreeMap<String, u64>>(s).ok())
+                    .unwrap_or_default();
                 let stats = Arc::new(SessionStats::with_values(
-                    sent, saved, llm_in, llm_out, llm_cr, llm_cc, calls, model, provider,
+                    sent, saved, llm_in, llm_out, llm_cr, llm_cc, calls, model, provider, extra,
                 ));
                 lru.put(id, stats);
                 loaded += 1;
@@ -721,6 +799,8 @@ impl SessionRegistry {
                 updated_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
             );",
         );
+        // See the load path: no-op once the column exists.
+        let _ = conn.execute_batch("ALTER TABLE ctxone_sessions ADD COLUMN extra_tokens TEXT;");
         let mut written = 0usize;
         for s in &snaps {
             let ok = conn.execute(
@@ -728,8 +808,8 @@ impl SessionRegistry {
                     (session_id, tokens_sent, tokens_saved,
                      llm_input_tokens, llm_output_tokens, llm_cache_read_tokens,
                      llm_cache_create_tokens, llm_call_count, last_model, last_provider,
-                     updated_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                     extra_tokens, updated_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,strftime('%Y-%m-%dT%H:%M:%SZ','now'))
                  ON CONFLICT(session_id) DO UPDATE SET
                     tokens_sent             = excluded.tokens_sent,
                     tokens_saved            = excluded.tokens_saved,
@@ -740,6 +820,7 @@ impl SessionRegistry {
                     llm_call_count          = excluded.llm_call_count,
                     last_model              = excluded.last_model,
                     last_provider           = excluded.last_provider,
+                    extra_tokens            = excluded.extra_tokens,
                     updated_at              = excluded.updated_at",
                 sqlite_params![
                     s.session_id,
@@ -752,6 +833,11 @@ impl SessionRegistry {
                     s.llm_call_count,
                     s.last_model,
                     s.last_provider,
+                    // NULL rather than "{}" so the column stays sparse for the
+                    // overwhelmingly common Anthropic-shaped session.
+                    (!s.extra_tokens.is_empty())
+                        .then(|| serde_json::to_string(&s.extra_tokens).ok())
+                        .flatten(),
                 ],
             );
             if ok.is_ok() {
@@ -4095,6 +4181,78 @@ mod tests {
         let registry = SessionRegistry::new();
         let ids = registry.list_ids();
         assert_eq!(ids, vec!["default".to_string()]);
+    }
+
+    #[test]
+    fn extra_tokens_accumulate_rather_than_clobber() {
+        let s = SessionStats::new();
+        s.record_extra_tokens(&BTreeMap::from([
+            ("reasoning_output_tokens".to_string(), 100),
+            ("thoughts".to_string(), 5),
+        ]));
+        s.record_extra_tokens(&BTreeMap::from([(
+            "reasoning_output_tokens".to_string(),
+            50,
+        )]));
+        let got = s.extra_tokens();
+        assert_eq!(got.get("reasoning_output_tokens"), Some(&150));
+        assert_eq!(got.get("thoughts"), Some(&5));
+    }
+
+    #[test]
+    fn extra_tokens_survive_a_flush_and_reload() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("sessions.db");
+        let db_path = db.to_string_lossy().to_string();
+
+        {
+            let registry = SessionRegistry::new();
+            let codex = registry.get_or_create("codex-session");
+            codex.record_llm_usage(10, 20, 0, 0, Some("gpt-5.2".into()), None);
+            codex.record_extra_tokens(&BTreeMap::from([
+                ("reasoning_output_tokens".to_string(), 171),
+                ("cached_input_tokens".to_string(), 14592),
+            ]));
+            registry.flush_to_db(&db_path);
+        }
+
+        let reloaded = SessionRegistry::load_from_db(&db_path);
+        let snap = reloaded
+            .snapshot("codex-session")
+            .expect("session should reload from db");
+        assert_eq!(
+            snap.extra_tokens.get("reasoning_output_tokens"),
+            Some(&171),
+            "source-native token classes must survive a hub restart"
+        );
+        assert_eq!(snap.extra_tokens.get("cached_input_tokens"), Some(&14592));
+        // The normalised counters must be unaffected by the new column.
+        assert_eq!(snap.llm_input_tokens, 10);
+        assert_eq!(snap.llm_output_tokens, 20);
+    }
+
+    #[test]
+    fn sessions_without_extras_round_trip_unchanged() {
+        // The overwhelmingly common case: an Anthropic-shaped session must
+        // not gain an empty map or lose its counters through the new column.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("sessions.db");
+        let db_path = db.to_string_lossy().to_string();
+
+        {
+            let registry = SessionRegistry::new();
+            registry
+                .get_or_create("claude-session")
+                .record_llm_usage(7, 8, 9, 10, None, None);
+            registry.flush_to_db(&db_path);
+        }
+
+        let snap = SessionRegistry::load_from_db(&db_path)
+            .snapshot("claude-session")
+            .expect("session should reload from db");
+        assert!(snap.extra_tokens.is_empty());
+        assert_eq!(snap.llm_input_tokens, 7);
+        assert_eq!(snap.llm_cache_create_tokens, 10);
     }
 
     #[test]

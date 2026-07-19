@@ -3,6 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Truncate `s` to at most `max_bytes` bytes on a UTF-8 char boundary.
@@ -30,11 +31,17 @@ pub struct TurnTokens {
     pub output: u64,
     pub cache_read: u64,
     pub cache_creation: u64,
+    /// Token classes these four fields cannot express, under the reporting
+    /// agent's own names — Codex `reasoning_output_tokens`, Gemini
+    /// `thoughts`/`tool`. Carried verbatim to the Hub's `extra_tokens` so a
+    /// class we cannot yet display is still never lost.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, u64>,
 }
 
 impl TurnTokens {
     pub fn is_empty(&self) -> bool {
-        self.input == 0 && self.output == 0
+        self.input == 0 && self.output == 0 && self.extra.is_empty()
     }
 
     pub fn add(&mut self, other: &TurnTokens) {
@@ -42,6 +49,9 @@ impl TurnTokens {
         self.output += other.output;
         self.cache_read += other.cache_read;
         self.cache_creation += other.cache_creation;
+        for (k, v) in &other.extra {
+            *self.extra.entry(k.clone()).or_insert(0) += *v;
+        }
     }
 }
 
@@ -359,6 +369,8 @@ fn extract_tokens(msg: &Value) -> TurnTokens {
             .get("cache_creation_input_tokens")
             .and_then(|v| v.as_u64())
             .unwrap_or(0),
+        // Claude's usage has no classes beyond the four; extras stay empty.
+        extra: BTreeMap::new(),
     }
 }
 
@@ -506,9 +518,30 @@ pub async fn extract_memories(
 
 // ── Hub writes ────────────────────────────────────────────────────────────────
 
+/// Best-effort provider for a model name.
+///
+/// The provider used to be hardcoded to "anthropic", which was true while
+/// Claude Code was the only source and silently wrong the moment a Codex or
+/// Gemini turn came through the same path. Derived from the model rather than
+/// threaded from the source so turns keep the right provider even when they
+/// are replayed outside their originating adapter.
+pub fn provider_for_model(model: &str) -> &'static str {
+    let m = model.to_ascii_lowercase();
+    if m.starts_with("claude") {
+        "anthropic"
+    } else if m.starts_with("gpt") || m.starts_with("o1") || m.starts_with("o3") {
+        "openai"
+    } else if m.starts_with("gemini") {
+        "google"
+    } else {
+        "unknown"
+    }
+}
+
 pub async fn record_turn_tokens(
     tokens: &TurnTokens,
     model: &str,
+    provider: &str,
     hub: &str,
     session: Option<&str>,
     client: &reqwest::Client,
@@ -521,8 +554,9 @@ pub async fn record_turn_tokens(
         "output_tokens": tokens.output,
         "cache_read_tokens": tokens.cache_read,
         "cache_creation_tokens": tokens.cache_creation,
+        "extra_tokens": tokens.extra,
         "model": model,
-        "provider": "anthropic",
+        "provider": provider,
     });
     let mut req = client
         .post(format!("{}/api/stats/llm_usage", hub))
@@ -728,28 +762,16 @@ pub async fn store_memory(
 // ── File discovery ────────────────────────────────────────────────────────────
 
 /// Find Claude Code session JSONL files for a given project directory.
+///
+/// Thin wrapper over the Claude Code [`SessionSource`](crate::sources::SessionSource);
+/// kept so existing call sites keep working while sources are added.
 pub fn find_session_files(project_dir: &Path) -> Vec<PathBuf> {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
-    // Claude Code hashes the project path: replace '/' with '-'.
-    let hash = project_dir.to_string_lossy().replace('/', "-");
-    let sessions_dir = home.join(".claude").join("projects").join(&hash);
-
-    if !sessions_dir.exists() {
-        return vec![];
-    }
-
-    let mut files: Vec<PathBuf> = std::fs::read_dir(&sessions_dir)
+    use crate::sources::SessionSource;
+    crate::sources::ClaudeCode
+        .discover_for_project(project_dir)
         .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().map(|e| e == "jsonl").unwrap_or(false))
-        .collect();
-
-    // Sort by modification time, oldest first.
-    files.sort_by_key(|p| p.metadata().and_then(|m| m.modified()).ok());
-
-    files
+        .map(|r| r.path)
+        .collect()
 }
 
 /// Find the single most-recent session file (for capture-turn).
@@ -770,48 +792,8 @@ pub fn latest_session_file(project_dir: &Path) -> Option<PathBuf> {
 /// This is the `--all` counterpart to [`find_session_files`], which scans
 /// only the single project matching a given directory.
 pub fn find_all_session_files() -> Vec<(String, Vec<PathBuf>)> {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
-    let projects_dir = home.join(".claude").join("projects");
-
-    let mut result: Vec<(String, Vec<PathBuf>)> = vec![];
-    let Ok(entries) = std::fs::read_dir(&projects_dir) else {
-        return result;
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let hash = path.file_name().unwrap_or_default().to_string_lossy();
-        // Recover a readable label. The hash is `project_path.replace('/', "-")`,
-        // so an absolute path leads with '-'. Take the last two components.
-        let label = if let Some(stripped) = hash.strip_prefix('-') {
-            let parts: Vec<&str> = stripped.split('-').collect();
-            if parts.len() >= 2 {
-                format!("{}/{}", parts[parts.len() - 2], parts[parts.len() - 1])
-            } else {
-                hash.to_string()
-            }
-        } else {
-            hash.to_string()
-        };
-
-        let mut files: Vec<PathBuf> = std::fs::read_dir(&path)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().map(|e| e == "jsonl").unwrap_or(false))
-            .collect();
-        files.sort_by_key(|p| p.metadata().and_then(|m| m.modified()).ok());
-
-        if !files.is_empty() {
-            result.push((label, files));
-        }
-    }
-    result.sort_by(|a, b| a.0.cmp(&b.0));
-    result
+    use crate::sources::SessionSource;
+    crate::sources::group_by_label(crate::sources::ClaudeCode.discover_all())
 }
 
 /// Return the last N turns from a session file (for per-turn hook capture).

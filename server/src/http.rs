@@ -935,6 +935,16 @@ struct LlmUsageRequest {
     model: Option<String>,
     #[serde(default)]
     provider: Option<String>,
+    /// Token classes the four fields above cannot express, under the
+    /// reporting agent's own names (Codex `reasoning_output_tokens`, Gemini
+    /// `thoughts`/`tool`, Android Studio's TEXT/IMAGE modality split).
+    ///
+    /// Captured verbatim and accumulated additively. Callers should send
+    /// these *in addition to* the normalised four, not instead of them: the
+    /// four remain the cross-agent common denominator that ratios are
+    /// computed from.
+    #[serde(default)]
+    extra_tokens: std::collections::BTreeMap<String, u64>,
 }
 
 /// `POST /api/stats/llm_usage` — record one LLM turn's token usage
@@ -969,6 +979,7 @@ async fn record_llm_usage(
         req.model.clone(),
         req.provider.clone(),
     );
+    session.record_extra_tokens(&req.extra_tokens);
 
     // Refresh the flat-size cache so the returned snapshot's
     // graph-size fields aren't stale — cheap, one walk at worst.
