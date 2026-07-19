@@ -5,7 +5,7 @@
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
 
 	/** Tail polls fast (3s) — this page IS the auto-refresh, so it runs its
-	 * own interval instead of the global 15s useAutoRefresh loop. */
+	 * own interval instead of the global 30s useAutoRefresh loop. */
 	const POLL_MS = 3_000;
 	const LIMIT = 20;
 

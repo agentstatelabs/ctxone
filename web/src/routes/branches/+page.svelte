@@ -115,7 +115,7 @@
 
 	{#if error}
 		<p class="error">{error}</p>
-	{:else if loading}
+	{:else if loading && rows.length === 0}
 		<p class="muted">Loading branches…</p>
 	{:else if rows.length === 0}
 		<p class="muted">No branches.</p>

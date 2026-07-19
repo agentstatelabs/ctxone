@@ -177,7 +177,7 @@
 	<p class="error">{error}</p>
 {/if}
 
-{#if loading}
+{#if loading && pinned.length === 0}
 	<p class="muted">Loading...</p>
 {:else if grouped.length === 0}
 	<p class="muted">No pinned memories yet. Upload a markdown file above or run <code>ctx prime ./docs/VISION.md --pin</code>.</p>
