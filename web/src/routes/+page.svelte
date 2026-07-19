@@ -589,14 +589,14 @@
 
 	<!-- ── 5 · Quick capture ────────────────────────────────────────────── -->
 	<!--
-		Spans both columns. The grid rows are as tall as their tallest panel
-		and `align-items: start` does not stretch the shorter one, so pairing
-		this 214px input strip with a ~500px panel left a ~290px hole beneath
-		it. It is the only panel materially shorter than the rest, so giving
-		it the full width removes the mismatch instead of trying to find it a
-		better-matched partner.
+		Stretches to its row's height instead of leaving a hole beneath it.
+		The grid rows are as tall as their tallest panel and `align-items:
+		start` does not stretch the shorter one, so this 214px input strip
+		beside a ~500px panel left a ~290px gap. Rather than span the full
+		width, it fills the row and gives the reclaimed space to the textarea
+		— a taller capture box is useful, an empty one is not.
 	-->
-	<div class="span-all">
+	<div class="fill-row">
 		<Panel title="Remember a fact">
 			<QuickCapture {connected} onSaved={() => refreshAll(false)} />
 		</Panel>
@@ -742,9 +742,30 @@
 		align-items: start;
 	}
 
-	/* Full-width row. Harmless in the single-column layout below. */
-	.span-all {
-		grid-column: 1 / -1;
+	/*
+		Stretch this grid item to its row height and let the chain of
+		containers pass that height down to the textarea. Scoped here rather
+		than changed in Panel/QuickCapture, which every other panel shares and
+		which should stay intrinsically sized.
+	*/
+	.fill-row {
+		align-self: stretch;
+		display: flex;
+		min-width: 0;
+	}
+	.fill-row :global(.panel) {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.fill-row :global(.capture) {
+		flex: 1;
+	}
+	.fill-row :global(.capture textarea) {
+		/* Grows into the reclaimed space; the floor keeps it usable when the
+		   neighbouring panel is short. */
+		flex: 1;
+		min-height: 5rem;
 	}
 
 	@media (max-width: 1100px) {
