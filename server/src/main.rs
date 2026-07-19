@@ -51,6 +51,49 @@ fn init_tracing(mcp_stdio: bool) {
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+/// Resolve when the process is asked to stop, by either Ctrl-C or SIGTERM.
+///
+/// SIGTERM matters more than Ctrl-C in practice: it is what `launchctl
+/// bootout`, the systemd unit, `docker stop` and a plain `kill` all send. This
+/// previously awaited `ctrl_c()` alone, so every one of those paths killed the
+/// hub before the post-shutdown session flush could run, silently losing
+/// everything written since the last 30s periodic flush.
+///
+/// Returns on whichever signal arrives first. Errors installing a handler are
+/// logged and that arm is then parked forever rather than aborting shutdown —
+/// losing one signal source is survivable, panicking in the shutdown path is
+/// not.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            error!(error = %e, "failed to install Ctrl-C handler");
+            std::future::pending::<()>().await;
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(e) => {
+                error!(error = %e, "failed to install SIGTERM handler");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    // No SIGTERM on Windows; Ctrl-C is the only stop signal there.
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => info!("shutdown: received Ctrl-C"),
+        _ = terminate => info!("shutdown: received SIGTERM"),
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
 
@@ -748,13 +791,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
                 );
                 // Graceful shutdown on Ctrl-C / SIGTERM: flush sessions before exit.
-                let result = serve
-                    .with_graceful_shutdown(async {
-                        tokio::signal::ctrl_c()
-                            .await
-                            .expect("failed to listen for ctrl-c");
-                    })
-                    .await;
+                let result = serve.with_graceful_shutdown(shutdown_signal()).await;
                 if let Some(ref path) = flush_db_path {
                     info!("Flushing session stats to db on shutdown");
                     sessions.flush_to_db(path);
