@@ -494,6 +494,7 @@
 	<!-- ── 2 · Token economics ──────────────────────────────────────────── -->
 	<Panel
 		title="Token economics"
+		scope="all branches"
 		links={[{ href: '/sessions', label: 'Sessions' }]}
 		status={econStatus}
 		errorText={sessionsL.error}
@@ -534,6 +535,7 @@
 	<!-- ── 4b · Token usage over time ───────────────────────────────────── -->
 	<Panel
 		title="Token usage over time"
+		scope="all branches"
 		links={[{ href: '/sessions', label: 'Sessions' }]}
 		status={econStatus}
 		errorText={sessionsL.error}
@@ -597,7 +599,7 @@
 		— a taller capture box is useful, an empty one is not.
 	-->
 	<div class="fill-row">
-		<Panel title="Remember a fact">
+		<Panel title="Remember a fact" scope={branchStore.current}>
 			<QuickCapture {connected} onSaved={() => refreshAll(false)} />
 		</Panel>
 	</div>
@@ -605,6 +607,7 @@
 	<!-- ── 3 · Plan health ──────────────────────────────────────────────── -->
 	<Panel
 		title="Plan health"
+		scope={branchStore.current}
 		links={[{ href: '/plans', label: 'Plans' }]}
 		status={planStatus}
 		errorText={plansL.error}
@@ -634,6 +637,7 @@
 	<!-- ── 4 · Activity ─────────────────────────────────────────────────── -->
 	<Panel
 		title="Activity"
+		scope={branchStore.current}
 		links={[
 			{ href: '/history', label: 'History' },
 			{ href: '/tail', label: 'Live Tail' }
