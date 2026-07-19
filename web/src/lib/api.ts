@@ -52,6 +52,20 @@ export interface TokenStats {
 
 export interface SessionSnapshot extends TokenStats {
 	session_id: string;
+	/** Human-readable title, server-derived from the first user turn. */
+	name?: string | null;
+	/** Originating agent ("Claude Code", "Codex", …). */
+	source?: string | null;
+	/** ISO timestamps. All optional: older Hubs omit them, and sessions
+	 * ingested before session-meta capture have no start time. */
+	started_at?: string | null;
+	updated_at?: string | null;
+	/** Every model the session touched, not just the last one. */
+	models_used?: string[];
+	/** Token classes the normalised counters cannot express, under the
+	 * reporting agent's own field names (Codex `reasoning_output_tokens`,
+	 * Gemini `thoughts`/`tool`). Absent for Anthropic-shaped sessions. */
+	extra_tokens?: Record<string, number>;
 }
 
 export interface CommitEntry {

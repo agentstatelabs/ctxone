@@ -176,6 +176,158 @@
 		return s.length > 12 ? s.slice(0, 11) + '…' : s;
 	}
 
+	// ── Token usage over time ────────────────────────────────────────────
+	//
+	// Built from the sessions list rather than a new endpoint: each session
+	// carries started_at plus its LLM totals, which is enough for a
+	// per-period view. The cost is granularity — a session lands entirely in
+	// the bucket it *started* in, so a long session is not spread across the
+	// days it actually ran. Per-turn precision would need one request per
+	// session; not worth it for a dashboard overview.
+
+	/** Sessions with both a timestamp and reported usage. */
+	const timedSessions = $derived(
+		sessionList.filter(
+			(s) => s.started_at && (s.llm_input_tokens ?? 0) + (s.llm_output_tokens ?? 0) > 0
+		)
+	);
+
+	/** Sessions excluded for want of a timestamp — surfaced, never silent. */
+	const untimedCount = $derived(
+		sessionList.filter(
+			(s) => !s.started_at && (s.llm_input_tokens ?? 0) + (s.llm_output_tokens ?? 0) > 0
+		).length
+	);
+
+	const DAY_MS = 86_400_000;
+
+	/** Day buckets while the span is short; weeks once a daily axis would be
+	 * unreadable. Returns the bucket key (an epoch ms) for a timestamp. */
+	const bucketMs = $derived.by(() => {
+		const times = timedSessions.map((s) => Date.parse(s.started_at!)).filter((n) => !isNaN(n));
+		if (times.length === 0) return DAY_MS;
+		const span = Math.max(...times) - Math.min(...times);
+		return span > 60 * DAY_MS ? 7 * DAY_MS : DAY_MS;
+	});
+	function bucketOf(iso: string): number {
+		return Math.floor(Date.parse(iso) / bucketMs) * bucketMs;
+	}
+
+	/** Total tokens per bucket — one series, so no legend is needed. */
+	const usageOverTime = $derived.by((): AreaPoint[] => {
+		const acc = new Map<number, number>();
+		for (const s of timedSessions) {
+			const b = bucketOf(s.started_at!);
+			if (isNaN(b)) continue;
+			acc.set(b, (acc.get(b) ?? 0) + (s.llm_input_tokens ?? 0) + (s.llm_output_tokens ?? 0));
+		}
+		return [...acc.entries()].sort((a, b) => a[0] - b[0]).map(([t, tokens]) => ({ t, tokens }));
+	});
+	const usageSeries: SeriesDef[] = [
+		{ key: 'tokens', label: 'Tokens', color: 'var(--lens-accent, #6ea8ff)' }
+	];
+
+	/** Categorical hues for the by-model chart.
+	 *
+	 * Deliberately NOT lens-core's SERIES_COLORS: its first two slots are
+	 * --lens-accent and --lens-info, and inside `.app` this theme aliases
+	 * both onto --accent/--info, which are the same #93c5fd. Two series
+	 * rendered identically before this was pinned down. These four resolve
+	 * distinctly under the app theme and clear CVD separation comfortably
+	 * (worst adjacent ΔE 33.2 protan / 22.5 tritan against the dark surface).
+	 */
+	const SERIES_HUES = [
+		'var(--accent, #93c5fd)',
+		'var(--success, #4ade80)',
+		'var(--lens-kind-module, #b48ead)',
+		'var(--lens-kind-class, #d08770)'
+	];
+
+	/** Models charted individually — the rest fold into one "Other" band.
+	 * A model is attributed by last_model; only 5-in-87 sessions here touch
+	 * more than one, and splitting a session's single total across several
+	 * models would invent data rather than measure it. */
+	const CHARTED_MODELS = 4;
+	const modelSplit = $derived.by(() => {
+		const totals = new Map<string, number>();
+		for (const s of timedSessions) {
+			const m = s.last_model ?? 'unknown';
+			totals.set(m, (totals.get(m) ?? 0) + (s.llm_input_tokens ?? 0) + (s.llm_output_tokens ?? 0));
+		}
+		const ranked = [...totals.entries()].sort((a, b) => b[1] - a[1]);
+		return {
+			charted: ranked.slice(0, CHARTED_MODELS).map(([m]) => m),
+			otherCount: Math.max(0, ranked.length - CHARTED_MODELS)
+		};
+	});
+
+	const usageByModel = $derived.by((): AreaPoint[] => {
+		const charted = new Set(modelSplit.charted);
+		const rows = new Map<number, Record<string, number>>();
+		for (const s of timedSessions) {
+			const b = bucketOf(s.started_at!);
+			if (isNaN(b)) continue;
+			const tok = (s.llm_input_tokens ?? 0) + (s.llm_output_tokens ?? 0);
+			const m = s.last_model ?? 'unknown';
+			const key = charted.has(m) ? m : 'Other';
+			const row = rows.get(b) ?? {};
+			row[key] = (row[key] ?? 0) + tok;
+			rows.set(b, row);
+		}
+		return [...rows.entries()]
+			.sort((a, b) => a[0] - b[0])
+			.map(([t, row]) => ({ t, ...row }) as AreaPoint);
+	});
+
+	/** Hue per charted model.
+	 *
+	 * Assigned over the charted set only, never over every model seen: with
+	 * more models than hues, indexing into the full list wraps and two
+	 * charted series silently land on the same colour (gpt-5.6-sol and
+	 * gpt-5.2-codex both did). Sorted by name so the mapping is
+	 * deterministic rather than following token rank, which would repaint
+	 * every series whenever one model overtook another.
+	 *
+	 * The honest limit: with 11 models and 5 hues, a colour cannot be
+	 * permanently bound to a model. Stability holds while the charted set
+	 * does, and the legend carries identity regardless.
+	 */
+	const modelColors = $derived.by((): Map<string, string> => {
+		const named = [...modelSplit.charted].sort();
+		return new Map(named.map((m, i) => [m, SERIES_HUES[i]]));
+	});
+
+	const modelSeries = $derived.by((): SeriesDef[] => {
+		const out: SeriesDef[] = modelSplit.charted.map((m) => ({
+			key: m,
+			label: m,
+			color: modelColors.get(m) ?? 'var(--lens-muted, #667089)'
+		}));
+		if (modelSplit.otherCount > 0) {
+			out.push({
+				key: 'Other',
+				label: `Other (${modelSplit.otherCount})`,
+				color: 'var(--lens-muted, #667089)'
+			});
+		}
+		return out;
+	});
+
+	/** Axis label: numeric "4/15", with a 2-digit year only when it is not
+	 * the current one ("12/3/25").
+	 *
+	 * Deliberately terse. These panels are ~320px wide and the chart draws a
+	 * tick every few buckets, so "Apr 15" / "May 13" collided into an
+	 * unreadable run at week granularity. Numeric survives the width. */
+	function formatBucket(t: number | string): string {
+		const d = new Date(Number(t));
+		if (isNaN(d.getTime())) return String(t);
+		const md = `${d.getMonth() + 1}/${d.getDate()}`;
+		return d.getFullYear() === new Date().getFullYear()
+			? md
+			: `${md}/${String(d.getFullYear()).slice(2)}`;
+	}
+
 	// Per-model LLM token totals across sessions (only when agents reported).
 	const modelBars = $derived.by((): ChartDatum[] => {
 		const acc = new Map<string, number>();
@@ -367,6 +519,62 @@
 				<LlmStats snapshot={tokensL.data} />
 			{/if}
 		</div>
+	</Panel>
+
+	<!-- ── 4b · Token usage over time ───────────────────────────────────── -->
+	<Panel
+		title="Token usage over time"
+		links={[{ href: '/sessions', label: 'Sessions' }]}
+		status={econStatus}
+		errorText={sessionsL.error}
+		emptyTitle="No dated usage yet"
+		emptyText="Sessions need a start time and reported LLM usage to chart."
+	>
+		{#if usageOverTime.length > 0}
+			<div class="usage-block">
+				<h4>All models</h4>
+				<AreaLine
+					data={usageOverTime}
+					series={usageSeries}
+					area
+					height={200}
+					formatX={formatBucket}
+					ariaLabel="Total LLM tokens per {bucketMs === 86_400_000 ? 'day' : 'week'}"
+				/>
+			</div>
+
+			<div class="usage-block">
+				<h4>By model</h4>
+				<!-- Legend, not colour alone: the palette's worst-case tritan
+				     separation sits in the floor band, so identity has to be
+				     carried by a label as well as a hue. -->
+				<ul class="usage-legend">
+					{#each modelSeries as s}
+						<li><span class="swatch" style="background: {s.color}"></span>{s.label}</li>
+					{/each}
+				</ul>
+				<AreaLine
+					data={usageByModel}
+					series={modelSeries}
+					area
+					stacked
+					height={220}
+					formatX={formatBucket}
+					ariaLabel="LLM tokens per {bucketMs === 86_400_000
+						? 'day'
+						: 'week'}, split by model"
+				/>
+			</div>
+
+			<p class="usage-note">
+				Bucketed by {bucketMs === 86_400_000 ? 'day' : 'week'}; each session counts in the period
+				it started. Attributed by last model used.
+				{#if untimedCount > 0}
+					{untimedCount} session{untimedCount === 1 ? '' : 's'} with usage but no start time
+					{untimedCount === 1 ? 'is' : 'are'} excluded.
+				{/if}
+			</p>
+		{/if}
 	</Panel>
 
 	<!-- ── 5 · Quick capture ────────────────────────────────────────────── -->
@@ -625,5 +833,44 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+	}
+
+	.usage-block + .usage-block {
+		margin-top: var(--lens-space-4, 1rem);
+	}
+	.usage-block h4 {
+		margin: 0 0 var(--lens-space-2, 0.5rem);
+		font-size: var(--lens-font-size-2xs, 0.7rem);
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: var(--lens-tracking-caps, 0.06em);
+		color: var(--lens-muted, #667089);
+	}
+	.usage-legend {
+		list-style: none;
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.25rem 0.85rem;
+		margin: 0 0 var(--lens-space-2, 0.5rem);
+		padding: 0;
+		font-size: var(--lens-font-size-2xs, 0.7rem);
+		/* Text keeps text ink; the swatch beside it carries identity. */
+		color: var(--lens-text-secondary, var(--text-2));
+	}
+	.usage-legend li {
+		display: flex;
+		align-items: center;
+		gap: 0.35rem;
+	}
+	.usage-legend .swatch {
+		width: 10px;
+		height: 10px;
+		border-radius: 2px;
+		flex: none;
+	}
+	.usage-note {
+		margin: var(--lens-space-2, 0.5rem) 0 0;
+		font-size: var(--lens-font-size-2xs, 0.7rem);
+		color: var(--lens-muted, #667089);
 	}
 </style>
