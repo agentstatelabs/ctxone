@@ -1280,7 +1280,7 @@ async fn activity_stats(
         .map_err(internal_error)?;
     let scanned = commits.len();
 
-    let mut per_day: std::collections::BTreeMap<String, u64> = Default::default();
+    let mut counts: std::collections::BTreeMap<chrono::NaiveDate, u64> = Default::default();
     let mut oldest_seen: Option<chrono::NaiveDate> = None;
     for c in &commits {
         let d = c.timestamp.date_naive();
@@ -1288,7 +1288,25 @@ async fn activity_stats(
         if d < cutoff {
             continue;
         }
-        *per_day.entry(d.format("%Y-%m-%d").to_string()).or_insert(0) += 1;
+        *counts.entry(d).or_insert(0) += 1;
+    }
+
+    // Emit EVERY day in the window, zero-filled — not just the days with
+    // activity. The heatmap derives its grid from the min/max date it is
+    // handed, so a sparse series makes the chart's span (and width) a
+    // function of when work happened: it visibly resizes between refreshes,
+    // and a quiet stretch at either end silently shortens the range. A dense
+    // series pins the grid to the requested window. 120 days of {date,count}
+    // is a few KB.
+    let today = chrono::Utc::now().date_naive();
+    let mut per_day: Vec<(String, u64)> = Vec::with_capacity(days as usize);
+    let mut d = cutoff;
+    while d <= today {
+        per_day.push((
+            d.format("%Y-%m-%d").to_string(),
+            counts.get(&d).copied().unwrap_or(0),
+        ));
+        d += chrono::Duration::days(1);
     }
 
     // Truncated only if the walk was capped AND never reached back past the
@@ -1296,6 +1314,7 @@ async fn activity_stats(
     // the purpose of this request.
     let truncated = scanned >= ACTIVITY_SCAN_LIMIT && oldest_seen.is_some_and(|o| o >= cutoff);
 
+    let active_days = per_day.iter().filter(|(_, c)| *c > 0).count();
     let out: Vec<serde_json::Value> = per_day
         .into_iter()
         .map(|(date, count)| serde_json::json!({ "date": date, "count": count }))
@@ -1304,6 +1323,7 @@ async fn activity_stats(
     Ok(Json(serde_json::json!({
         "days": out,
         "requested_days": days,
+        "active_days": active_days,
         "scanned": scanned,
         "truncated": truncated,
     })))
