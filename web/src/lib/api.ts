@@ -151,6 +151,28 @@ export async function getLog(ref_name = 'main', limit = 20): Promise<CommitEntry
 	return fetchJson(`/api/log/${encodeURIComponent(ref_name)}?limit=${limit}`);
 }
 
+/** Per-day commit counts for the activity heatmap. */
+export interface ActivityResponse {
+	days: Array<{ date: string; count: number }>;
+	requested_days: number;
+	/** Commits the server walked to build this. */
+	scanned: number;
+	/** True when the walk hit its cap before reaching the requested cutoff —
+	 * the history shown is partial, not a quiet period. */
+	truncated: boolean;
+}
+
+/**
+ * Commits per day over the last `days`.
+ *
+ * Replaces counting `getLog(ref, 1000)` client-side, which charted a
+ * commit-count window rather than a time window: on a busy machine those
+ * 1000 commits covered under two hours.
+ */
+export async function getActivity(ref_name = 'main', days = 120): Promise<ActivityResponse> {
+	return fetchJson(`/api/stats/activity/${encodeURIComponent(ref_name)}?days=${days}`);
+}
+
 export async function getBlame(ref_name = 'main', path: string): Promise<BlameEntry[]> {
 	return fetchJson(`/api/blame/${encodeURIComponent(ref_name)}?path=${encodeURIComponent(path)}`);
 }

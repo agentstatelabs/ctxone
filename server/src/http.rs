@@ -498,6 +498,9 @@ fn router_with_config_inner(
         .route("/api/state/{ref_name}/paths", get(list_paths))
         .route("/api/state/{ref_name}/search", get(search_values))
         .route("/api/log/{ref_name}", get(get_log))
+        // Per-day commit counts for the activity heatmap. Aggregated here so
+        // the browser does not fetch thousands of commits just to count them.
+        .route("/api/stats/activity/{ref_name}", get(activity_stats))
         .route("/api/blame/{ref_name}", get(blame))
         .route("/api/diff", get(diff_refs))
         .route("/api/merge", post(merge_refs))
@@ -1233,6 +1236,77 @@ struct SearchResult {
 #[derive(Deserialize)]
 struct LogQuery {
     limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct ActivityQuery {
+    /// Days of history to report, counting back from today. Default 120.
+    days: Option<u32>,
+}
+
+/// How far back the walk is willing to read before giving up.
+///
+/// The underlying `repo.log` takes a commit count, not a date, so a day
+/// window has to be carved out of a bounded walk. Full-turn capture writes
+/// one commit per turn, so a busy day can be thousands — this needs to be
+/// large enough that the cap is rare, while still bounding a pathological
+/// request. When it does bite, the response says so rather than silently
+/// reporting a short history as if it were the whole truth.
+const ACTIVITY_SCAN_LIMIT: usize = 50_000;
+
+/// `GET /api/stats/activity?days=N` — commits per day, for the dashboard
+/// heatmap.
+///
+/// Exists because the heatmap previously counted `/api/log?limit=1000`
+/// client-side, which charts *a commit-count window, not a time window*:
+/// the busier the machine, the less history it showed. On a machine mid
+/// session-import, 1000 commits covered 80 minutes.
+///
+/// Returns `{ days: [{date, count}], truncated, scanned }`. `truncated` is
+/// true when the scan hit its cap before reaching the requested cutoff, so
+/// the UI can say the history is partial instead of implying a quiet period.
+async fn activity_stats(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+    Path(ref_name): Path<String>,
+    Query(q): Query<ActivityQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
+    let days = q.days.unwrap_or(120).clamp(1, 730) as i64;
+    let cutoff = chrono::Utc::now().date_naive() - chrono::Duration::days(days - 1);
+
+    let commits = repo
+        .log(&ref_name, ACTIVITY_SCAN_LIMIT)
+        .map_err(internal_error)?;
+    let scanned = commits.len();
+
+    let mut per_day: std::collections::BTreeMap<String, u64> = Default::default();
+    let mut oldest_seen: Option<chrono::NaiveDate> = None;
+    for c in &commits {
+        let d = c.timestamp.date_naive();
+        oldest_seen = Some(oldest_seen.map_or(d, |o: chrono::NaiveDate| o.min(d)));
+        if d < cutoff {
+            continue;
+        }
+        *per_day.entry(d.format("%Y-%m-%d").to_string()).or_insert(0) += 1;
+    }
+
+    // Truncated only if the walk was capped AND never reached back past the
+    // cutoff — a capped walk that already covers the window is complete for
+    // the purpose of this request.
+    let truncated = scanned >= ACTIVITY_SCAN_LIMIT && oldest_seen.is_some_and(|o| o >= cutoff);
+
+    let out: Vec<serde_json::Value> = per_day
+        .into_iter()
+        .map(|(date, count)| serde_json::json!({ "date": date, "count": count }))
+        .collect();
+
+    Ok(Json(serde_json::json!({
+        "days": out,
+        "requested_days": days,
+        "scanned": scanned,
+        "truncated": truncated,
+    })))
 }
 
 async fn get_log(

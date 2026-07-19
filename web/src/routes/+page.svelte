@@ -5,6 +5,7 @@
 		getTokenStats,
 		getSessions,
 		getLog,
+		getActivity,
 		getDueReminders
 	} from '$lib/api';
 	import type {
@@ -12,7 +13,8 @@
 		TokenStats,
 		SessionSnapshot,
 		CommitEntry,
-		Reminder
+		Reminder,
+		ActivityResponse
 	} from '$lib/api';
 	import { listPlans, listPlanTasks, type Plan, type Task } from '$lib/plansApi';
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
@@ -69,6 +71,7 @@
 	let logL = $state<Load<CommitEntry[]>>(pending());
 	let plansL = $state<Load<PlansData>>(pending());
 	let remindersL = $state<Load<Reminder[]>>(pending());
+	let activityL = $state<Load<ActivityResponse>>(pending());
 
 	function friendly(e: unknown): string {
 		const msg = e instanceof Error ? e.message : String(e);
@@ -109,6 +112,7 @@
 			logL = pending();
 			plansL = pending();
 			remindersL = pending();
+			activityL = pending();
 		}
 		connected = await getHealth();
 		await Promise.all([
@@ -117,7 +121,8 @@
 			track(() => getStats(branch), (l) => (statsL = l)),
 			track(() => getLog(branch, 1000), (l) => (logL = l)),
 			track(() => loadPlans(branch), (l) => (plansL = l)),
-			track(() => getDueReminders(), (l) => (remindersL = l))
+			track(() => getDueReminders(), (l) => (remindersL = l)),
+			track(() => getActivity(branch, 120), (l) => (activityL = l))
 		]);
 	}
 
@@ -389,15 +394,15 @@
 	);
 
 	// Activity: commits bucketed per UTC day (timestamps are RFC 3339 Z).
-	const heatCells = $derived.by((): HeatCell[] => {
-		const byDay = new Map<string, number>();
-		for (const c of logL.data ?? []) {
-			const day = c.timestamp.slice(0, 10);
-			if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) continue;
-			byDay.set(day, (byDay.get(day) ?? 0) + 1);
-		}
-		return [...byDay.entries()].map(([date, count]) => ({ date, count }));
-	});
+	// Per-day counts come from the server. Counting getLog(ref, 1000)
+	// client-side charted a commit-count window, not a time window: the
+	// busier the machine, the less history appeared — 1000 commits covered
+	// 80 minutes mid-import, which read as "no activity since April".
+	const heatCells = $derived.by((): HeatCell[] =>
+		(activityL.data?.days ?? []).map((d) => ({ date: d.date, count: d.count }))
+	);
+	/** Set when the server's walk was capped before reaching the cutoff. */
+	const activityTruncated = $derived(activityL.data?.truncated === true);
 	const recentCommits = $derived((logL.data ?? []).slice(0, 8));
 
 	// Panel status helpers.
@@ -408,7 +413,12 @@
 	}
 	const econStatus = $derived(statusOf(sessionsL, () => !hasEconTraffic));
 	const planStatus = $derived(statusOf(plansL, () => activePlans.length === 0));
-	const activityStatus = $derived(statusOf(logL, (d) => d.length === 0));
+	// Follows the activity load: the heatmap is the panel's primary content
+	// now, so an activity failure must surface rather than being masked by a
+	// healthy log fetch.
+	const activityStatus = $derived(
+		statusOf(activityL, (d) => d.days.length === 0 && (logL.data ?? []).length === 0)
+	);
 </script>
 
 <header class="dash-head">
@@ -619,11 +629,17 @@
 			{ href: '/tail', label: 'Live Tail' }
 		]}
 		status={activityStatus}
-		errorText={logL.error}
+		errorText={activityL.error || logL.error}
 		emptyTitle="No commits yet"
 		emptyText="Memory writes on {branchStore.current} will show up here."
 	>
 		<CalendarHeatmap data={heatCells} ariaLabel="Memory commits per day" />
+		{#if activityTruncated}
+			<!-- A capped walk must never read as a quiet period. -->
+			<p class="activity-note">
+				History is partial — the scan reached its limit before covering the full window.
+			</p>
+		{/if}
 		<ul class="commits">
 			{#each recentCommits as commit (commit.id)}
 				<li class="commit">
@@ -869,6 +885,12 @@
 		flex: none;
 	}
 	.usage-note {
+		margin: var(--lens-space-2, 0.5rem) 0 0;
+		font-size: var(--lens-font-size-2xs, 0.7rem);
+		color: var(--lens-muted, #667089);
+	}
+
+	.activity-note {
 		margin: var(--lens-space-2, 0.5rem) 0 0;
 		font-size: var(--lens-font-size-2xs, 0.7rem);
 		color: var(--lens-muted, #667089);
