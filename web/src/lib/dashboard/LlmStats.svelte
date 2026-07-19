@@ -7,7 +7,16 @@
 -->
 <script lang="ts">
 	import type { TokenStats } from '$lib/api';
+	import { formatCompact } from '@agentstate/lens-core';
 	import { estimateCost, estimateWithoutCtxone, formatUsd, pricingFor } from '$lib/pricing';
+
+	// Compact (12.4K / 4.3M / 10.5B / 1.2T) so a row cannot blow out the
+	// panel width — Codex sessions report input counts in the billions, which
+	// rendered as a 13-character comma-grouped number here. The exact value
+	// stays one hover away via `title`, which is the only place it is legible
+	// anyway.
+	const fmt = (n: number) => formatCompact(n ?? 0);
+	const exact = (n: number) => (n ?? 0).toLocaleString();
 
 	let { snapshot }: { snapshot: TokenStats } = $props();
 
@@ -61,11 +70,11 @@
 		<dl class="rows">
 			<div class="row">
 				<dt>Input tokens</dt>
-				<dd data-testid="llm-input">{llmInput.toLocaleString()}</dd>
+				<dd data-testid="llm-input" title={exact(llmInput)}>{fmt(llmInput)}</dd>
 			</div>
 			<div class="row">
 				<dt>Output tokens</dt>
-				<dd data-testid="llm-output">{llmOutput.toLocaleString()}</dd>
+				<dd data-testid="llm-output" title={exact(llmOutput)}>{fmt(llmOutput)}</dd>
 			</div>
 			<div class="row">
 				<dt>
@@ -76,15 +85,15 @@
 						</span>
 					{/if}
 				</dt>
-				<dd data-testid="llm-cache-read">{llmCacheRead.toLocaleString()}</dd>
+				<dd data-testid="llm-cache-read" title={exact(llmCacheRead)}>{fmt(llmCacheRead)}</dd>
 			</div>
 			<div class="row">
 				<dt>Cache create</dt>
-				<dd data-testid="llm-cache-create">{llmCacheCreate.toLocaleString()}</dd>
+				<dd data-testid="llm-cache-create" title={exact(llmCacheCreate)}>{fmt(llmCacheCreate)}</dd>
 			</div>
 			<div class="row">
 				<dt>LLM calls</dt>
-				<dd data-testid="llm-calls">{llmCalls.toLocaleString()}</dd>
+				<dd data-testid="llm-calls" title={exact(llmCalls)}>{fmt(llmCalls)}</dd>
 			</div>
 			{#if lastModel}
 				<div class="row">
