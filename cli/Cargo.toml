@@ -24,3 +24,6 @@ chrono = { workspace = true }
 # Shared agent-onboarding engine (suite-onboarding). Git/tag dep like the ASG
 # family. For local dev against a working copy, patch it back to a path.
 agent-skillgen = { git = "https://git.internal.example/agentstategroup/agent-skillgen.git", tag = "v0.1.0" }
+
+[dev-dependencies]
+tempfile = "3"

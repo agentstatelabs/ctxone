@@ -27,6 +27,7 @@
 //!   so its `discover_all` will emit more refs than there are top-level files.
 
 use crate::ingest::Turn;
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 /// One importable session, as located by a [`SessionSource`].
@@ -195,11 +196,155 @@ impl SessionSource for ClaudeCode {
     }
 }
 
+// ── Codex ─────────────────────────────────────────────────────────────────────
+
+/// Codex CLI / Desktop: one "rollout" JSONL per session under
+/// `~/.codex/sessions/` (live) and `~/.codex/archived_sessions/`.
+///
+/// Every line is `{timestamp, type, payload}`. The types that matter:
+///
+/// - `session_meta` — one per file, first line: session id, `cwd`,
+///   `originator`, `cli_version`, `model_provider`.
+/// - `response_item` — the conversation. `payload.type` is `message`
+///   (with `role`), `function_call`, `function_call_output`, `reasoning`, …
+/// - `event_msg` with `payload.type == "token_count"` — usage. Carries both
+///   `total_token_usage` (cumulative for the session) and `last_token_usage`
+///   (this turn). We read the latter and sum, so a truncated file still
+///   yields the usage of the turns it does contain.
+pub struct Codex;
+
+impl Codex {
+    fn roots() -> Vec<PathBuf> {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
+        let codex = home.join(".codex");
+        vec![codex.join("sessions"), codex.join("archived_sessions")]
+    }
+
+    /// `rollout-*.jsonl` anywhere under `dir` — Codex nests live sessions in
+    /// dated subdirectories, so this recurses rather than reading one level.
+    fn rollout_files(dir: &Path) -> Vec<PathBuf> {
+        let mut out = vec![];
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&d) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().map(|x| x == "jsonl").unwrap_or(false)
+                    && p.file_name()
+                        .map(|n| n.to_string_lossy().starts_with("rollout-"))
+                        .unwrap_or(false)
+                {
+                    out.push(p);
+                }
+            }
+        }
+        out.sort_by_key(|p| p.metadata().and_then(|m| m.modified()).ok());
+        out
+    }
+
+    /// Read the `session_meta` line without parsing the whole file.
+    ///
+    /// Discovery runs over every rollout on the machine, and these files reach
+    /// tens of MB — reading only the first lines keeps a scan cheap. The meta
+    /// record is the first line in practice; we scan a few in case that
+    /// changes rather than assuming position.
+    fn read_meta(path: &Path) -> Option<(String, String)> {
+        use std::io::{BufRead, BufReader};
+        let f = std::fs::File::open(path).ok()?;
+        for line in BufReader::new(f).lines().take(10).map_while(Result::ok) {
+            let v: Value = match serde_json::from_str(&line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if v.get("type").and_then(|t| t.as_str()) != Some("session_meta") {
+                continue;
+            }
+            let p = v.get("payload")?;
+            let id = p.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let cwd = p.get("cwd").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            return Some((id, cwd));
+        }
+        None
+    }
+
+    /// `/Users/user/Apps/Thing` -> `Apps/Thing`, matching how the Claude Code
+    /// source labels projects so mixed listings read consistently.
+    fn label_for_cwd(cwd: &str) -> String {
+        let parts: Vec<&str> = cwd.trim_end_matches('/').split('/').filter(|s| !s.is_empty()).collect();
+        match parts.len() {
+            0 => "unknown".to_string(),
+            1 => parts[0].to_string(),
+            n => format!("{}/{}", parts[n - 2], parts[n - 1]),
+        }
+    }
+}
+
+impl SessionSource for Codex {
+    fn id(&self) -> &'static str {
+        "codex"
+    }
+
+    fn label(&self) -> &'static str {
+        "Codex"
+    }
+
+    fn is_available(&self) -> bool {
+        Self::roots().iter().any(|r| r.is_dir())
+    }
+
+    fn discover_all(&self) -> Vec<SessionRef> {
+        let mut refs: Vec<SessionRef> = Self::roots()
+            .iter()
+            .filter(|r| r.is_dir())
+            .flat_map(|r| Self::rollout_files(r))
+            .map(|path| {
+                let (id, cwd) = Self::read_meta(&path).unwrap_or_default();
+                SessionRef {
+                    label: if cwd.is_empty() {
+                        "unknown".to_string()
+                    } else {
+                        Self::label_for_cwd(&cwd)
+                    },
+                    // Fall back to the filename's uuid when meta is missing;
+                    // session_id() handles the None case via the file stem.
+                    native_id: (!id.is_empty()).then_some(id),
+                    path,
+                }
+            })
+            .collect();
+        // Group projects together and keep them label-sorted, matching Claude.
+        refs.sort_by(|a, b| a.label.cmp(&b.label));
+        refs
+    }
+
+    fn discover_for_project(&self, project_dir: &Path) -> Vec<SessionRef> {
+        let want = project_dir.to_string_lossy().to_string();
+        let want = want.trim_end_matches('/').to_string();
+        self.discover_all()
+            .into_iter()
+            .filter(|r| {
+                // Re-read cwd rather than trusting the label, which is lossy.
+                Self::read_meta(&r.path)
+                    .map(|(_, cwd)| cwd.trim_end_matches('/') == want)
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
+
+    fn parse(&self, session: &SessionRef) -> Vec<Turn> {
+        crate::codex::parse_rollout(&session.path)
+    }
+}
+
 // ── Registry ──────────────────────────────────────────────────────────────────
 
 /// Every known source, in the order they should be scanned.
 pub fn all_sources() -> Vec<Box<dyn SessionSource>> {
-    vec![Box::new(ClaudeCode)]
+    vec![Box::new(ClaudeCode), Box::new(Codex)]
 }
 
 /// Look up a source by its `--source` id.

@@ -1,3 +1,4 @@
+mod codex;
 mod ingest;
 mod metrics;
 mod onboarding;
@@ -4298,6 +4299,7 @@ async fn run_ingest_session(
                         crate::ingest::record_turn_tokens(
                             &turn.tokens,
                             &turn.model,
+                            crate::ingest::provider_for_model(&turn.model),
                             server,
                             effective_session,
                             &client,
@@ -4679,6 +4681,7 @@ async fn run_capture_turn(
             crate::ingest::record_turn_tokens(
                 &turn.tokens,
                 &turn.model,
+                crate::ingest::provider_for_model(&turn.model),
                 server,
                 effective_session,
                 &client,
