@@ -588,9 +588,19 @@
 	</Panel>
 
 	<!-- ── 5 · Quick capture ────────────────────────────────────────────── -->
-	<Panel title="Remember a fact">
-		<QuickCapture {connected} onSaved={() => refreshAll(false)} />
-	</Panel>
+	<!--
+		Spans both columns. The grid rows are as tall as their tallest panel
+		and `align-items: start` does not stretch the shorter one, so pairing
+		this 214px input strip with a ~500px panel left a ~290px hole beneath
+		it. It is the only panel materially shorter than the rest, so giving
+		it the full width removes the mismatch instead of trying to find it a
+		better-matched partner.
+	-->
+	<div class="span-all">
+		<Panel title="Remember a fact">
+			<QuickCapture {connected} onSaved={() => refreshAll(false)} />
+		</Panel>
+	</div>
 
 	<!-- ── 3 · Plan health ──────────────────────────────────────────────── -->
 	<Panel
@@ -730,6 +740,11 @@
 		grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
 		gap: var(--lens-space-4);
 		align-items: start;
+	}
+
+	/* Full-width row. Harmless in the single-column layout below. */
+	.span-all {
+		grid-column: 1 / -1;
 	}
 
 	@media (max-width: 1100px) {
