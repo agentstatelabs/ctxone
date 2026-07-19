@@ -5,6 +5,7 @@
 		getTokenStats,
 		getSessions,
 		getLog,
+		getActivity,
 		getDueReminders
 	} from '$lib/api';
 	import type {
@@ -12,7 +13,8 @@
 		TokenStats,
 		SessionSnapshot,
 		CommitEntry,
-		Reminder
+		Reminder,
+		ActivityResponse
 	} from '$lib/api';
 	import { listPlans, listPlanTasks, type Plan, type Task } from '$lib/plansApi';
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
@@ -69,6 +71,7 @@
 	let logL = $state<Load<CommitEntry[]>>(pending());
 	let plansL = $state<Load<PlansData>>(pending());
 	let remindersL = $state<Load<Reminder[]>>(pending());
+	let activityL = $state<Load<ActivityResponse>>(pending());
 
 	function friendly(e: unknown): string {
 		const msg = e instanceof Error ? e.message : String(e);
@@ -109,6 +112,7 @@
 			logL = pending();
 			plansL = pending();
 			remindersL = pending();
+			activityL = pending();
 		}
 		connected = await getHealth();
 		await Promise.all([
@@ -117,7 +121,8 @@
 			track(() => getStats(branch), (l) => (statsL = l)),
 			track(() => getLog(branch, 1000), (l) => (logL = l)),
 			track(() => loadPlans(branch), (l) => (plansL = l)),
-			track(() => getDueReminders(), (l) => (remindersL = l))
+			track(() => getDueReminders(), (l) => (remindersL = l)),
+			track(() => getActivity(branch, 120), (l) => (activityL = l))
 		]);
 	}
 
@@ -174,6 +179,158 @@
 	function shortId(t: number | string): string {
 		const s = String(t);
 		return s.length > 12 ? s.slice(0, 11) + '…' : s;
+	}
+
+	// ── Token usage over time ────────────────────────────────────────────
+	//
+	// Built from the sessions list rather than a new endpoint: each session
+	// carries started_at plus its LLM totals, which is enough for a
+	// per-period view. The cost is granularity — a session lands entirely in
+	// the bucket it *started* in, so a long session is not spread across the
+	// days it actually ran. Per-turn precision would need one request per
+	// session; not worth it for a dashboard overview.
+
+	/** Sessions with both a timestamp and reported usage. */
+	const timedSessions = $derived(
+		sessionList.filter(
+			(s) => s.started_at && (s.llm_input_tokens ?? 0) + (s.llm_output_tokens ?? 0) > 0
+		)
+	);
+
+	/** Sessions excluded for want of a timestamp — surfaced, never silent. */
+	const untimedCount = $derived(
+		sessionList.filter(
+			(s) => !s.started_at && (s.llm_input_tokens ?? 0) + (s.llm_output_tokens ?? 0) > 0
+		).length
+	);
+
+	const DAY_MS = 86_400_000;
+
+	/** Day buckets while the span is short; weeks once a daily axis would be
+	 * unreadable. Returns the bucket key (an epoch ms) for a timestamp. */
+	const bucketMs = $derived.by(() => {
+		const times = timedSessions.map((s) => Date.parse(s.started_at!)).filter((n) => !isNaN(n));
+		if (times.length === 0) return DAY_MS;
+		const span = Math.max(...times) - Math.min(...times);
+		return span > 60 * DAY_MS ? 7 * DAY_MS : DAY_MS;
+	});
+	function bucketOf(iso: string): number {
+		return Math.floor(Date.parse(iso) / bucketMs) * bucketMs;
+	}
+
+	/** Total tokens per bucket — one series, so no legend is needed. */
+	const usageOverTime = $derived.by((): AreaPoint[] => {
+		const acc = new Map<number, number>();
+		for (const s of timedSessions) {
+			const b = bucketOf(s.started_at!);
+			if (isNaN(b)) continue;
+			acc.set(b, (acc.get(b) ?? 0) + (s.llm_input_tokens ?? 0) + (s.llm_output_tokens ?? 0));
+		}
+		return [...acc.entries()].sort((a, b) => a[0] - b[0]).map(([t, tokens]) => ({ t, tokens }));
+	});
+	const usageSeries: SeriesDef[] = [
+		{ key: 'tokens', label: 'Tokens', color: 'var(--lens-accent, #6ea8ff)' }
+	];
+
+	/** Categorical hues for the by-model chart.
+	 *
+	 * Deliberately NOT lens-core's SERIES_COLORS: its first two slots are
+	 * --lens-accent and --lens-info, and inside `.app` this theme aliases
+	 * both onto --accent/--info, which are the same #93c5fd. Two series
+	 * rendered identically before this was pinned down. These four resolve
+	 * distinctly under the app theme and clear CVD separation comfortably
+	 * (worst adjacent ΔE 33.2 protan / 22.5 tritan against the dark surface).
+	 */
+	const SERIES_HUES = [
+		'var(--accent, #93c5fd)',
+		'var(--success, #4ade80)',
+		'var(--lens-kind-module, #b48ead)',
+		'var(--lens-kind-class, #d08770)'
+	];
+
+	/** Models charted individually — the rest fold into one "Other" band.
+	 * A model is attributed by last_model; only 5-in-87 sessions here touch
+	 * more than one, and splitting a session's single total across several
+	 * models would invent data rather than measure it. */
+	const CHARTED_MODELS = 4;
+	const modelSplit = $derived.by(() => {
+		const totals = new Map<string, number>();
+		for (const s of timedSessions) {
+			const m = s.last_model ?? 'unknown';
+			totals.set(m, (totals.get(m) ?? 0) + (s.llm_input_tokens ?? 0) + (s.llm_output_tokens ?? 0));
+		}
+		const ranked = [...totals.entries()].sort((a, b) => b[1] - a[1]);
+		return {
+			charted: ranked.slice(0, CHARTED_MODELS).map(([m]) => m),
+			otherCount: Math.max(0, ranked.length - CHARTED_MODELS)
+		};
+	});
+
+	const usageByModel = $derived.by((): AreaPoint[] => {
+		const charted = new Set(modelSplit.charted);
+		const rows = new Map<number, Record<string, number>>();
+		for (const s of timedSessions) {
+			const b = bucketOf(s.started_at!);
+			if (isNaN(b)) continue;
+			const tok = (s.llm_input_tokens ?? 0) + (s.llm_output_tokens ?? 0);
+			const m = s.last_model ?? 'unknown';
+			const key = charted.has(m) ? m : 'Other';
+			const row = rows.get(b) ?? {};
+			row[key] = (row[key] ?? 0) + tok;
+			rows.set(b, row);
+		}
+		return [...rows.entries()]
+			.sort((a, b) => a[0] - b[0])
+			.map(([t, row]) => ({ t, ...row }) as AreaPoint);
+	});
+
+	/** Hue per charted model.
+	 *
+	 * Assigned over the charted set only, never over every model seen: with
+	 * more models than hues, indexing into the full list wraps and two
+	 * charted series silently land on the same colour (gpt-5.6-sol and
+	 * gpt-5.2-codex both did). Sorted by name so the mapping is
+	 * deterministic rather than following token rank, which would repaint
+	 * every series whenever one model overtook another.
+	 *
+	 * The honest limit: with 11 models and 5 hues, a colour cannot be
+	 * permanently bound to a model. Stability holds while the charted set
+	 * does, and the legend carries identity regardless.
+	 */
+	const modelColors = $derived.by((): Map<string, string> => {
+		const named = [...modelSplit.charted].sort();
+		return new Map(named.map((m, i) => [m, SERIES_HUES[i]]));
+	});
+
+	const modelSeries = $derived.by((): SeriesDef[] => {
+		const out: SeriesDef[] = modelSplit.charted.map((m) => ({
+			key: m,
+			label: m,
+			color: modelColors.get(m) ?? 'var(--lens-muted, #667089)'
+		}));
+		if (modelSplit.otherCount > 0) {
+			out.push({
+				key: 'Other',
+				label: `Other (${modelSplit.otherCount})`,
+				color: 'var(--lens-muted, #667089)'
+			});
+		}
+		return out;
+	});
+
+	/** Axis label: numeric "4/15", with a 2-digit year only when it is not
+	 * the current one ("12/3/25").
+	 *
+	 * Deliberately terse. These panels are ~320px wide and the chart draws a
+	 * tick every few buckets, so "Apr 15" / "May 13" collided into an
+	 * unreadable run at week granularity. Numeric survives the width. */
+	function formatBucket(t: number | string): string {
+		const d = new Date(Number(t));
+		if (isNaN(d.getTime())) return String(t);
+		const md = `${d.getMonth() + 1}/${d.getDate()}`;
+		return d.getFullYear() === new Date().getFullYear()
+			? md
+			: `${md}/${String(d.getFullYear()).slice(2)}`;
 	}
 
 	// Per-model LLM token totals across sessions (only when agents reported).
@@ -237,15 +394,15 @@
 	);
 
 	// Activity: commits bucketed per UTC day (timestamps are RFC 3339 Z).
-	const heatCells = $derived.by((): HeatCell[] => {
-		const byDay = new Map<string, number>();
-		for (const c of logL.data ?? []) {
-			const day = c.timestamp.slice(0, 10);
-			if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) continue;
-			byDay.set(day, (byDay.get(day) ?? 0) + 1);
-		}
-		return [...byDay.entries()].map(([date, count]) => ({ date, count }));
-	});
+	// Per-day counts come from the server. Counting getLog(ref, 1000)
+	// client-side charted a commit-count window, not a time window: the
+	// busier the machine, the less history appeared — 1000 commits covered
+	// 80 minutes mid-import, which read as "no activity since April".
+	const heatCells = $derived.by((): HeatCell[] =>
+		(activityL.data?.days ?? []).map((d) => ({ date: d.date, count: d.count }))
+	);
+	/** Set when the server's walk was capped before reaching the cutoff. */
+	const activityTruncated = $derived(activityL.data?.truncated === true);
 	const recentCommits = $derived((logL.data ?? []).slice(0, 8));
 
 	// Panel status helpers.
@@ -256,7 +413,12 @@
 	}
 	const econStatus = $derived(statusOf(sessionsL, () => !hasEconTraffic));
 	const planStatus = $derived(statusOf(plansL, () => activePlans.length === 0));
-	const activityStatus = $derived(statusOf(logL, (d) => d.length === 0));
+	// Follows the activity load: the heatmap is the panel's primary content
+	// now, so an activity failure must surface rather than being masked by a
+	// healthy log fetch.
+	const activityStatus = $derived(
+		statusOf(activityL, (d) => d.days.length === 0 && (logL.data ?? []).length === 0)
+	);
 </script>
 
 <header class="dash-head">
@@ -332,6 +494,7 @@
 	<!-- ── 2 · Token economics ──────────────────────────────────────────── -->
 	<Panel
 		title="Token economics"
+		scope="all branches"
 		links={[{ href: '/sessions', label: 'Sessions' }]}
 		status={econStatus}
 		errorText={sessionsL.error}
@@ -369,14 +532,82 @@
 		</div>
 	</Panel>
 
-	<!-- ── 5 · Quick capture ────────────────────────────────────────────── -->
-	<Panel title="Remember a fact">
-		<QuickCapture {connected} onSaved={() => refreshAll(false)} />
+	<!-- ── 4b · Token usage over time ───────────────────────────────────── -->
+	<Panel
+		title="Token usage over time"
+		scope="all branches"
+		links={[{ href: '/sessions', label: 'Sessions' }]}
+		status={econStatus}
+		errorText={sessionsL.error}
+		emptyTitle="No dated usage yet"
+		emptyText="Sessions need a start time and reported LLM usage to chart."
+	>
+		{#if usageOverTime.length > 0}
+			<div class="usage-block">
+				<h4>All models</h4>
+				<AreaLine
+					data={usageOverTime}
+					series={usageSeries}
+					area
+					height={200}
+					formatX={formatBucket}
+					ariaLabel="Total LLM tokens per {bucketMs === 86_400_000 ? 'day' : 'week'}"
+				/>
+			</div>
+
+			<div class="usage-block">
+				<h4>By model</h4>
+				<!-- Legend, not colour alone: the palette's worst-case tritan
+				     separation sits in the floor band, so identity has to be
+				     carried by a label as well as a hue. -->
+				<ul class="usage-legend">
+					{#each modelSeries as s}
+						<li><span class="swatch" style="background: {s.color}"></span>{s.label}</li>
+					{/each}
+				</ul>
+				<AreaLine
+					data={usageByModel}
+					series={modelSeries}
+					area
+					stacked
+					height={220}
+					formatX={formatBucket}
+					ariaLabel="LLM tokens per {bucketMs === 86_400_000
+						? 'day'
+						: 'week'}, split by model"
+				/>
+			</div>
+
+			<p class="usage-note">
+				Bucketed by {bucketMs === 86_400_000 ? 'day' : 'week'}; each session counts in the period
+				it started. Attributed by last model used.
+				{#if untimedCount > 0}
+					{untimedCount} session{untimedCount === 1 ? '' : 's'} with usage but no start time
+					{untimedCount === 1 ? 'is' : 'are'} excluded.
+				{/if}
+			</p>
+		{/if}
 	</Panel>
+
+	<!-- ── 5 · Quick capture ────────────────────────────────────────────── -->
+	<!--
+		Stretches to its row's height instead of leaving a hole beneath it.
+		The grid rows are as tall as their tallest panel and `align-items:
+		start` does not stretch the shorter one, so this 214px input strip
+		beside a ~500px panel left a ~290px gap. Rather than span the full
+		width, it fills the row and gives the reclaimed space to the textarea
+		— a taller capture box is useful, an empty one is not.
+	-->
+	<div class="fill-row">
+		<Panel title="Remember a fact" scope={branchStore.current}>
+			<QuickCapture {connected} onSaved={() => refreshAll(false)} />
+		</Panel>
+	</div>
 
 	<!-- ── 3 · Plan health ──────────────────────────────────────────────── -->
 	<Panel
 		title="Plan health"
+		scope={branchStore.current}
 		links={[{ href: '/plans', label: 'Plans' }]}
 		status={planStatus}
 		errorText={plansL.error}
@@ -406,16 +637,23 @@
 	<!-- ── 4 · Activity ─────────────────────────────────────────────────── -->
 	<Panel
 		title="Activity"
+		scope={branchStore.current}
 		links={[
 			{ href: '/history', label: 'History' },
 			{ href: '/tail', label: 'Live Tail' }
 		]}
 		status={activityStatus}
-		errorText={logL.error}
+		errorText={activityL.error || logL.error}
 		emptyTitle="No commits yet"
 		emptyText="Memory writes on {branchStore.current} will show up here."
 	>
 		<CalendarHeatmap data={heatCells} ariaLabel="Memory commits per day" />
+		{#if activityTruncated}
+			<!-- A capped walk must never read as a quiet period. -->
+			<p class="activity-note">
+				History is partial — the scan reached its limit before covering the full window.
+			</p>
+		{/if}
 		<ul class="commits">
 			{#each recentCommits as commit (commit.id)}
 				<li class="commit">
@@ -506,6 +744,32 @@
 		grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
 		gap: var(--lens-space-4);
 		align-items: start;
+	}
+
+	/*
+		Stretch this grid item to its row height and let the chain of
+		containers pass that height down to the textarea. Scoped here rather
+		than changed in Panel/QuickCapture, which every other panel shares and
+		which should stay intrinsically sized.
+	*/
+	.fill-row {
+		align-self: stretch;
+		display: flex;
+		min-width: 0;
+	}
+	.fill-row :global(.panel) {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+	.fill-row :global(.capture) {
+		flex: 1;
+	}
+	.fill-row :global(.capture textarea) {
+		/* Grows into the reclaimed space; the floor keeps it usable when the
+		   neighbouring panel is short. */
+		flex: 1;
+		min-height: 5rem;
 	}
 
 	@media (max-width: 1100px) {
@@ -625,5 +889,50 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+	}
+
+	.usage-block + .usage-block {
+		margin-top: var(--lens-space-4, 1rem);
+	}
+	.usage-block h4 {
+		margin: 0 0 var(--lens-space-2, 0.5rem);
+		font-size: var(--lens-font-size-2xs, 0.7rem);
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: var(--lens-tracking-caps, 0.06em);
+		color: var(--lens-muted, #667089);
+	}
+	.usage-legend {
+		list-style: none;
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.25rem 0.85rem;
+		margin: 0 0 var(--lens-space-2, 0.5rem);
+		padding: 0;
+		font-size: var(--lens-font-size-2xs, 0.7rem);
+		/* Text keeps text ink; the swatch beside it carries identity. */
+		color: var(--lens-text-secondary, var(--text-2));
+	}
+	.usage-legend li {
+		display: flex;
+		align-items: center;
+		gap: 0.35rem;
+	}
+	.usage-legend .swatch {
+		width: 10px;
+		height: 10px;
+		border-radius: 2px;
+		flex: none;
+	}
+	.usage-note {
+		margin: var(--lens-space-2, 0.5rem) 0 0;
+		font-size: var(--lens-font-size-2xs, 0.7rem);
+		color: var(--lens-muted, #667089);
+	}
+
+	.activity-note {
+		margin: var(--lens-space-2, 0.5rem) 0 0;
+		font-size: var(--lens-font-size-2xs, 0.7rem);
+		color: var(--lens-muted, #667089);
 	}
 </style>

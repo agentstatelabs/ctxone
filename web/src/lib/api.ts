@@ -52,6 +52,20 @@ export interface TokenStats {
 
 export interface SessionSnapshot extends TokenStats {
 	session_id: string;
+	/** Human-readable title, server-derived from the first user turn. */
+	name?: string | null;
+	/** Originating agent ("Claude Code", "Codex", …). */
+	source?: string | null;
+	/** ISO timestamps. All optional: older Hubs omit them, and sessions
+	 * ingested before session-meta capture have no start time. */
+	started_at?: string | null;
+	updated_at?: string | null;
+	/** Every model the session touched, not just the last one. */
+	models_used?: string[];
+	/** Token classes the normalised counters cannot express, under the
+	 * reporting agent's own field names (Codex `reasoning_output_tokens`,
+	 * Gemini `thoughts`/`tool`). Absent for Anthropic-shaped sessions. */
+	extra_tokens?: Record<string, number>;
 }
 
 export interface CommitEntry {
@@ -135,6 +149,28 @@ export async function searchValues(ref_name = 'main', query: string): Promise<Se
 
 export async function getLog(ref_name = 'main', limit = 20): Promise<CommitEntry[]> {
 	return fetchJson(`/api/log/${encodeURIComponent(ref_name)}?limit=${limit}`);
+}
+
+/** Per-day commit counts for the activity heatmap. */
+export interface ActivityResponse {
+	days: Array<{ date: string; count: number }>;
+	requested_days: number;
+	/** Commits the server walked to build this. */
+	scanned: number;
+	/** True when the walk hit its cap before reaching the requested cutoff —
+	 * the history shown is partial, not a quiet period. */
+	truncated: boolean;
+}
+
+/**
+ * Commits per day over the last `days`.
+ *
+ * Replaces counting `getLog(ref, 1000)` client-side, which charted a
+ * commit-count window rather than a time window: on a busy machine those
+ * 1000 commits covered under two hours.
+ */
+export async function getActivity(ref_name = 'main', days = 120): Promise<ActivityResponse> {
+	return fetchJson(`/api/stats/activity/${encodeURIComponent(ref_name)}?days=${days}`);
 }
 
 export async function getBlame(ref_name = 'main', path: string): Promise<BlameEntry[]> {

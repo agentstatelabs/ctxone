@@ -16,8 +16,9 @@
 import { onMount } from 'svelte';
 
 const KEY = 'ctxone:autorefresh';
-/** Polling cadence, ms. 15s is the t-021 spec default. */
-export const REFRESH_INTERVAL_MS = 15_000;
+/** Polling cadence, ms. Was 15s (t-021 spec default); widened to 30s to
+ * cut background load now that refreshes update data in place. */
+export const REFRESH_INTERVAL_MS = 30_000;
 
 function loadEnabled(): boolean {
 	if (typeof localStorage === 'undefined') return true;
@@ -84,7 +85,7 @@ export function useAutoRefresh(refresh: () => void | Promise<void>) {
 		const id = setInterval(tick, refreshStore.intervalMs);
 		// On visibility *gain*, do an immediate refresh so a user
 		// returning to the tab sees fresh data right away rather than
-		// waiting up to 15s for the next interval.
+		// waiting up to 30s for the next interval.
 		const onVisibility = () => {
 			if (typeof document !== 'undefined' && !document.hidden) {
 				void tick();

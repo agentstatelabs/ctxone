@@ -11,6 +11,7 @@
 	let {
 		title,
 		links = [],
+		scope,
 		status = 'ready',
 		errorText = '',
 		emptyTitle = 'Nothing yet',
@@ -20,6 +21,18 @@
 		title: string;
 		/** Link-throughs rendered in the header (e.g. Plans →). */
 		links?: Array<{ href: string; label: string }>;
+		/**
+		 * What this panel's numbers cover — a branch name, or something like
+		 * "all branches".
+		 *
+		 * The dashboard mixes scopes: token/session figures are global while
+		 * plans and activity are branch-scoped. Switching branch therefore
+		 * changes half the page and leaves the rest identical, which reads as
+		 * a bug (an empty Activity panel looks like collection stopped rather
+		 * than like a finished branch). Naming the scope per panel is the
+		 * cheapest way to make that legible.
+		 */
+		scope?: string;
 		status?: 'loading' | 'error' | 'empty' | 'ready';
 		errorText?: string;
 		emptyTitle?: string;
@@ -31,6 +44,9 @@
 <section class="panel">
 	<header class="panel-head">
 		<h3>{title}</h3>
+		{#if scope}
+			<span class="panel-scope" title="These figures cover {scope}">{scope}</span>
+		{/if}
 		{#if links.length > 0}
 			<span class="panel-links">
 				{#each links as l (l.href)}
@@ -98,5 +114,19 @@
 
 	.panel-links a:hover {
 		color: var(--lens-accent);
+	}
+
+	.panel-scope {
+		font-family: var(--lens-font-mono, monospace);
+		font-size: var(--lens-font-size-2xs, 0.68rem);
+		color: var(--lens-muted, #667089);
+		background: var(--lens-surface-raised, rgba(255, 255, 255, 0.04));
+		border: 1px solid var(--lens-border-subtle, var(--lens-border));
+		border-radius: 999px;
+		padding: 0.05rem 0.45rem;
+		white-space: nowrap;
+		/* Sits with the title, not the links, so it reads as part of the
+		   heading rather than another action. */
+		margin-left: 0.15rem;
 	}
 </style>

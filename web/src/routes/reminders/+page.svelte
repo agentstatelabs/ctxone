@@ -278,7 +278,7 @@
 
 	{#if error}
 		<p class="error">{error}</p>
-	{:else if loading}
+	{:else if loading && reminders.length === 0}
 		<p class="muted">Loading reminders…</p>
 	{:else if reminders.length === 0}
 		<p class="muted">
