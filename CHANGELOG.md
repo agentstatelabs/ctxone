@@ -4,6 +4,70 @@ All notable changes to CTXone are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 the project's `0.9.x` series (incremented by 0.0.01 per release).
 
+## [v0.9.15] — 2026-07-19
+
+Two themes: the first step of **multi-agent session import** (Claude Code is no
+longer the only source), and a round of **Lens fixes** for figures that were
+quietly misleading.
+
+### Added — multi-source ingestion
+
+- A `SessionSource` seam splits "where transcripts live" from "what we do with
+  them". Claude Code moves behind it unchanged; `metrics.rs` no longer carries a
+  duplicate copy of the directory walk.
+- **Codex adapter** — imports `rollout-*.jsonl` from `~/.codex/sessions` and
+  `~/.codex/archived_sessions`. Verified against 195 sessions / 5,865 turns.
+- `ctx ingest-session --source claude|codex|all`. An unknown source is an error
+  listing the known ids, not a silent empty result.
+- Session ids are namespaced by source (`codex:<uuid>`). Claude Code is exempt:
+  its ids are already keyed into existing rows, memory tags and turn paths.
+- Sessions now carry the real agent label in `source` instead of a hardcoded
+  "Claude Code", and the reported provider is derived from the model rather than
+  always being `anthropic`.
+
+### Added — source-native token classes
+
+- `extra_tokens` preserves token classes the four normalised counters cannot
+  express — Codex `reasoning_output_tokens`, Gemini `thoughts`/`tool` — verbatim
+  under the reporting agent's own field names, persisted in a new sparse column.
+  Folding them into `output_tokens` would have destroyed the distinction and made
+  cross-agent comparison wrong.
+- `GET /api/stats/activity/{ref}?days=N` — per-day commit counts for the
+  activity heatmap, aggregated server-side.
+
+### Fixed
+
+- **Session stats were lost on SIGTERM.** The shutdown handler awaited `ctrl_c`
+  alone despite its comment; `launchctl bootout`, `docker stop`, a reboot and a
+  plain `kill` all skipped the final flush, dropping up to 30s of usage on every
+  service stop.
+- **Auto-refresh blanked the page.** Pages guarded on a bare `loading` flag
+  replaced their content with a skeleton every poll, losing scroll position and
+  any open panel. Refresh cadence also widened 15s → 30s.
+- **The activity heatmap charted a commit-count window, not a time window.** It
+  bucketed the 1000 most recent commits, so a busy machine saw *less* history —
+  at one point 80 minutes. Now a fixed, zero-filled day window.
+
+### Changed — Lens
+
+- Session commits are colour-coded by conventional-commit type with an
+  orphan/linked accent, plus type and linkage filters.
+- New **token usage over time** charts, total and split by model.
+- LLM consumption figures render compact (5.6B) with the exact value on hover.
+- **Every dashboard panel now states its scope** — `all branches` for global
+  token figures, the branch name for branch-scoped ones. The dashboard mixes
+  both, and an empty Activity panel previously read as "collection stopped"
+  rather than "this branch finished in May".
+
+### Known gaps
+
+- Cursor, Gemini CLI and Android Studio adapters are designed but not built.
+- Memory-op savings still pool into the `default` session: MCP-over-HTTP does not
+  resolve a session id, so per-session `tokens used`/`saved` read 0 for sessions
+  created since HTTP became the default transport.
+- The heatmap intensity ramp is linear against the maximum, so one very busy day
+  flattens the rest of the range.
+
 ## [v0.9.14] — 2026-07-18
 
 The headline work since v0.9.13: project **namespaces** and the **unified
