@@ -57,6 +57,23 @@ impl SessionRef {
                 .unwrap_or_default()
         })
     }
+
+    /// The stored session id, namespaced by source so two agents cannot
+    /// collide on the same underlying id.
+    ///
+    /// Claude Code is deliberately **not** prefixed: its ids are already in
+    /// the wild, keyed into every existing session row, memory tag and
+    /// `/sessions/{id}/turns` path. Prefixing it would orphan all of that and
+    /// re-import every session as a duplicate. New sources pay the prefix;
+    /// the incumbent keeps its ids.
+    pub fn namespaced_id(&self, source_id: &str) -> String {
+        let id = self.session_id();
+        if source_id == "claude" {
+            id
+        } else {
+            format!("{}:{}", source_id, id)
+        }
+    }
 }
 
 /// An agent whose sessions we can import.
@@ -403,6 +420,33 @@ mod tests {
             native_id: Some("composer-7".into()),
         };
         assert_eq!(r.session_id(), "composer-7");
+    }
+
+    #[test]
+    fn claude_ids_are_not_namespaced_so_existing_rows_keep_working() {
+        let r = SessionRef {
+            label: "a/b".into(),
+            path: PathBuf::from("/x/9117346d.jsonl"),
+            native_id: None,
+        };
+        assert_eq!(r.namespaced_id("claude"), "9117346d");
+    }
+
+    #[test]
+    fn other_sources_are_namespaced_to_avoid_collisions() {
+        let r = SessionRef {
+            label: "a/b".into(),
+            path: PathBuf::from("/x/rollout-abc.jsonl"),
+            native_id: Some("019e5540".into()),
+        };
+        assert_eq!(r.namespaced_id("codex"), "codex:019e5540");
+    }
+
+    #[test]
+    fn codex_label_matches_the_claude_two_component_style() {
+        assert_eq!(Codex::label_for_cwd("/Users/user/Apps/Thing"), "Apps/Thing");
+        assert_eq!(Codex::label_for_cwd("/solo"), "solo");
+        assert_eq!(Codex::label_for_cwd(""), "unknown");
     }
 
     #[test]

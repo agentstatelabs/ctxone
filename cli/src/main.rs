@@ -423,18 +423,25 @@ enum Commands {
         #[arg(long)]
         lens: bool,
     },
-    /// Import a Claude Code session JSONL into CTXone memory
+    /// Import an agent session transcript into CTXone memory
     ///
     /// Extracts structured memories and token usage from each conversation
-    /// turn and stores them in the Hub. Requires ANTHROPIC_API_KEY.
+    /// turn and stores them in the Hub. Requires ANTHROPIC_API_KEY for
+    /// memory extraction; turn and token capture work without it.
     IngestSession {
-        /// Path to a specific .jsonl file (default: all sessions for this project)
+        /// Path to a specific transcript file (default: all sessions for this project)
         #[arg(long)]
         file: Option<String>,
 
-        /// Scan EVERY project under ~/.claude/projects (not just this one).
-        /// Forces full-turn + token capture; extraction still requires an API
-        /// key. Prints per-project counts and a final JSON summary line.
+        /// Which agent's transcripts to import: claude, codex, or all.
+        /// Defaults to claude. `--source all` scans every agent installed on
+        /// this machine.
+        #[arg(long, default_value = "claude")]
+        source: String,
+
+        /// Scan EVERY project the selected source knows about, not just this
+        /// one. Forces full-turn + token capture; extraction still requires an
+        /// API key. Prints per-project counts and a final JSON summary line.
         #[arg(long)]
         all: bool,
 
@@ -1813,6 +1820,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         Commands::IngestSession {
             file,
+            source,
             all,
             since,
             last,
@@ -1828,6 +1836,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &cli.branch,
                 cli.session.as_deref(),
                 file,
+                &source,
                 all,
                 since,
                 last,
@@ -4091,6 +4100,7 @@ async fn run_ingest_session(
     branch: &str,
     session: Option<&str>,
     file: Option<String>,
+    source: &str,
     all: bool,
     since: Option<String>,
     last: Option<usize>,
@@ -4115,22 +4125,78 @@ async fn run_ingest_session(
     // Build the (project-label, files) groups to ingest. A single explicit
     // --file or the cwd project are one-group cases; --all fans out across
     // every project under ~/.claude/projects so per-project counts print.
-    let groups: Vec<(String, Vec<std::path::PathBuf>)> = if let Some(f) = file {
-        vec![(String::new(), vec![std::path::PathBuf::from(f)])]
-    } else if all {
-        crate::ingest::find_all_session_files()
+    // Resolve which source(s) to scan. `--source all` fans out over every
+    // agent that actually left data on this machine; naming one that is not
+    // installed is a hard error rather than a silent empty result, because
+    // "found nothing" and "you typo'd the source" should not look identical.
+    use crate::sources::{SessionRef, SessionSource};
+    let selected: Vec<Box<dyn SessionSource>> = if source == "all" {
+        crate::sources::all_sources()
+            .into_iter()
+            .filter(|s| s.is_available())
+            .collect()
     } else {
-        let cwd = std::env::current_dir()?;
-        let label = cwd
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-        vec![(label, crate::ingest::find_session_files(&cwd))]
+        match crate::sources::source_by_id(source) {
+            Some(s) => vec![s],
+            None => {
+                let known: Vec<&str> = crate::sources::all_sources()
+                    .iter()
+                    .map(|s| s.id())
+                    .collect();
+                return Err(format!(
+                    "unknown --source '{}' (known: {}, all)",
+                    source,
+                    known.join(", ")
+                )
+                .into());
+            }
+        }
     };
 
-    if groups.iter().all(|(_, f)| f.is_empty()) {
+    // (source-id, source-label, project-label, sessions)
+    let groups: Vec<(&'static str, &'static str, String, Vec<SessionRef>)> = if let Some(f) = file {
+        // An explicit --file is parsed by the named source; with `--source
+        // all` that is ambiguous, so require a concrete one.
+        let src = selected
+            .first()
+            .filter(|_| source != "all")
+            .ok_or("--file requires a concrete --source (not 'all')")?;
+        vec![(
+            src.id(),
+            src.label(),
+            String::new(),
+            vec![SessionRef {
+                label: String::new(),
+                path: std::path::PathBuf::from(f),
+                native_id: None,
+            }],
+        )]
+    } else {
+        let cwd = if all { None } else { Some(std::env::current_dir()?) };
+        let mut out = vec![];
+        for src in &selected {
+            let refs = match &cwd {
+                Some(dir) => src.discover_for_project(dir),
+                None => src.discover_all(),
+            };
+            // Re-group by project label so per-project counts still print.
+            let mut by_label: Vec<(String, Vec<SessionRef>)> = vec![];
+            for r in refs {
+                match by_label.last_mut() {
+                    Some((l, v)) if *l == r.label => v.push(r),
+                    _ => by_label.push((r.label.clone(), vec![r])),
+                }
+            }
+            for (label, refs) in by_label {
+                out.push((src.id(), src.label(), label, refs));
+            }
+        }
+        out
+    };
+
+    if groups.iter().all(|(_, _, _, f)| f.is_empty()) {
         if all {
-            println!("No Claude Code session files found in ~/.claude/projects/");
+            println!("No session transcripts found for source '{}'.", source);
             // Still emit the machine-readable summary so the hub's session-sync
             // parser always finds a final JSON line (zeros = clean no-op).
             println!("{}", serde_json::json!({ "sessions": 0, "turns": 0, "tokens": 0 }));
@@ -4150,18 +4216,24 @@ async fn run_ingest_session(
     let mut total_full_turns = 0usize;
     let mut total_tokens = crate::ingest::TurnTokens::default();
 
-    for (label, files) in &groups {
+    for (source_id, source_label, label, files) in &groups {
         if files.is_empty() {
             continue;
         }
         if all && !label.is_empty() {
-            println!("\n=== project: {} ({} files) ===", label, files.len());
+            println!(
+                "\n=== {} · project: {} ({} files) ===",
+                source_label,
+                label,
+                files.len()
+            );
         }
         let mut proj_sessions = 0usize;
         let mut proj_turns = 0usize;
         let mut proj_tokens = crate::ingest::TurnTokens::default();
 
-        for path in files {
+        for session_ref in files {
+            let path = &session_ref.path;
             let fname = path.file_name().unwrap_or_default().to_string_lossy();
             // If the caller didn't pin an explicit --session, give each file
             // its own session id derived from the filename so the Sessions
@@ -4171,7 +4243,10 @@ async fn run_ingest_session(
             let effective_session: Option<&str> = match session {
                 Some(s) => Some(s),
                 None => {
-                    derived_sid = session_id_for_file(path);
+                    // Namespaced by source so a Codex uuid cannot land on a
+                    // Claude session's row. Claude keeps bare ids (see
+                    // SessionRef::namespaced_id).
+                    derived_sid = session_ref.namespaced_id(source_id);
                     Some(derived_sid.as_str())
                 }
             };
@@ -4181,7 +4256,9 @@ async fn run_ingest_session(
                 effective_session.unwrap_or("default")
             );
 
-            let mut turns = crate::ingest::parse_turns(path);
+            let source_impl = crate::sources::source_by_id(source_id)
+                .expect("source id came from the registry");
+            let mut turns = source_impl.parse(session_ref);
             if !turns.is_empty() {
                 proj_sessions += 1;
             }
@@ -4253,7 +4330,7 @@ async fn run_ingest_session(
                 );
             } else {
                 crate::ingest::store_session_meta(
-                    "Claude Code",
+                    source_label,
                     &started_at,
                     &updated_at,
                     &models_used,
