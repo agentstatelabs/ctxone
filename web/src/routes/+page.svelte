@@ -651,21 +651,6 @@
 		</div>
 	</Panel>
 
-	<!-- ── 5 · Quick capture ────────────────────────────────────────────── -->
-	<!--
-		Stretches to its row's height instead of leaving a hole beneath it.
-		The grid rows are as tall as their tallest panel and `align-items:
-		start` does not stretch the shorter one, so this 214px input strip
-		beside a ~500px panel left a ~290px gap. Rather than span the full
-		width, it fills the row and gives the reclaimed space to the textarea
-		— a taller capture box is useful, an empty one is not.
-	-->
-	<div class="fill-row">
-		<Panel title="Remember a fact" scope={branchStore.current}>
-			<QuickCapture {connected} onSaved={() => refreshAll(false)} />
-		</Panel>
-	</div>
-
 	<!-- ── 6 · Least efficient sessions ─────────────────────────────────── -->
 	<!--
 		Genuinely branch-scoped, unlike the token/session panels above:
@@ -683,6 +668,19 @@
 	>
 		<BurnBoard sessions={sessionsL.data ?? []} branch={branchStore.current} />
 	</Panel>
+
+	<!-- ── 5 · Quick capture ────────────────────────────────────────────── -->
+	<!--
+		The grid stretches row-mates itself now (`align-items: stretch`), so
+		this wrapper no longer exists to equalise height. It survives only to
+		hand the reclaimed space to the textarea — a taller capture box is
+		useful, an empty one is not.
+	-->
+	<div class="fill-row">
+		<Panel title="Remember a fact" scope={branchStore.current}>
+			<QuickCapture {connected} onSaved={() => refreshAll(false)} />
+		</Panel>
+	</div>
 </div>
 
 <style>

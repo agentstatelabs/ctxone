@@ -46,7 +46,6 @@
 	/** Hard cap on transcripts pulled per scan — the cost control. */
 	const MAX_CANDIDATES = 15;
 	const CONCURRENCY = 4;
-	const SHOW = 5;
 
 	interface Row {
 		id: string;
@@ -144,8 +143,10 @@
 				}
 			};
 			await Promise.all(Array.from({ length: Math.min(CONCURRENCY, pool.length) }, worker));
+			// Every rankable session, worst first — the list scrolls rather than
+			// truncating, so a scan of 15 shows all 15 it could judge.
 			out.sort((a, b) => (b.burn.ratio ?? 0) - (a.burn.ratio ?? 0));
-			rows = out.slice(0, SHOW);
+			rows = out;
 			scanned = true;
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
@@ -251,6 +252,12 @@
 		display: flex;
 		flex-direction: column;
 		gap: var(--lens-space-2);
+		/* Scrolls instead of truncating, so every rankable session is reachable
+		   without the panel dictating the height of its dashboard row. */
+		max-height: 15rem;
+		overflow-y: auto;
+		scrollbar-gutter: stable;
+		padding-right: var(--lens-space-1, 4px);
 	}
 
 	.bb-row {
