@@ -2117,11 +2117,15 @@ impl CtxOneServer {
         ensure_flat_size(&self.repo, &self.session, "main");
         let flat = self.session.total_graph_size_chars.load(Ordering::Relaxed) as usize;
 
+        // Name the workspace. Sessions now live in per-project namespaces,
+        // so a summary written while bound to the wrong one is an orphan no
+        // session view will show — the agent should be able to see that.
         let response = format!(
-            "Session '{}' saved: {} key points, {} decisions",
+            "Session '{}' saved: {} key points, {} decisions (workspace: {})",
             p.session_id,
             p.key_points.len(),
-            p.decisions.len()
+            p.decisions.len(),
+            self.namespace,
         );
         with_stats(&response, flat, &self.session)
     }

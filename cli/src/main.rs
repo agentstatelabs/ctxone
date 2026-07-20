@@ -4453,6 +4453,36 @@ async fn run_ingest_session(
                 .await;
             }
 
+            // Provenance: every branch this session touched, plus where it
+            // was routed. Built from the FULL turn list, before the
+            // --since/--last filters below, so the rollup describes the
+            // session rather than the slice being re-imported.
+            let provenance = crate::ingest::build_provenance(&turns);
+            if let Some(prov) = &provenance {
+                if dry_run {
+                    println!(
+                        "  [dry] provenance: /sessions/{}/provenance = {}",
+                        effective_session.unwrap_or("default"),
+                        serde_json::to_string(prov).unwrap_or_default()
+                    );
+                } else {
+                    crate::ingest::store_session_provenance(
+                        prov,
+                        routed.namespace(),
+                        routed.namespace(), // project id == namespace for auto-registered repos
+                        &fname,
+                        // Codex files under archived_sessions/ are archived,
+                        // which is a state and not a reason to skip them.
+                        path.to_string_lossy().contains("/archived_sessions/"),
+                        server,
+                        branch,
+                        effective_session,
+                        &client,
+                    )
+                    .await;
+                }
+            }
+
             // Apply --since filter on timestamp.
             if !since_ts.is_empty() {
                 turns.retain(|t| t.timestamp.as_str() >= since_ts);

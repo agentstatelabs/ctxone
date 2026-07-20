@@ -40,6 +40,9 @@ pub fn parse_rollout(path: &Path) -> Vec<Turn> {
     let mut turns: Vec<Turn> = vec![];
     let mut cur: Option<Turn> = None;
     let mut model = String::new();
+    // Codex states provenance once in `session_meta` and restates it in
+    // `turn_context` when it changes, so this carries forward to each turn.
+    let mut prov = Prov::default();
 
     for line in content.lines().filter(|l| !l.trim().is_empty()) {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
@@ -55,12 +58,15 @@ pub fn parse_rollout(path: &Path) -> Vec<Turn> {
                 if let Some(m) = payload.get("model").and_then(|m| m.as_str()) {
                     model = m.to_string();
                 }
+                prov.absorb(payload);
             }
             ("turn_context", _) => {
                 // Codex records the active model here when it changes.
                 if let Some(m) = payload.get("model").and_then(|m| m.as_str()) {
                     model = m.to_string();
                 }
+                // ...and the working directory / git state, when those change.
+                prov.absorb(payload);
             }
             ("response_item", "message") => {
                 let role = payload.get("role").and_then(|r| r.as_str()).unwrap_or("");
@@ -82,10 +88,13 @@ pub fn parse_rollout(path: &Path) -> Vec<Turn> {
                             tokens: TurnTokens::default(),
                             model: model.clone(),
                             timestamp: ts.to_string(),
+                            cwd: prov.cwd.clone(),
+                            git_branches: prov.branch.clone().into_iter().collect(),
+                            git_commit: prov.commit.clone(),
                         });
                     }
                     "assistant" => {
-                        let t = cur.get_or_insert_with(|| empty_turn(&model, ts));
+                        let t = cur.get_or_insert_with(|| empty_turn(&model, ts, &prov));
                         if !t.assistant_text.is_empty() {
                             t.assistant_text.push_str("\n\n");
                         }
@@ -103,7 +112,7 @@ pub fn parse_rollout(path: &Path) -> Vec<Turn> {
                     .get("name")
                     .and_then(|n| n.as_str())
                     .unwrap_or("tool");
-                let t = cur.get_or_insert_with(|| empty_turn(&model, ts));
+                let t = cur.get_or_insert_with(|| empty_turn(&model, ts, &prov));
                 t.tool_calls.push(name.to_string());
                 // Keep the raw call so the real arguments survive, matching
                 // what the Claude path stores. Shape it like a Claude
@@ -121,7 +130,7 @@ pub fn parse_rollout(path: &Path) -> Vec<Turn> {
                 // the file reconstructs the total without trusting a single
                 // cumulative record that may be missing from a truncated file.
                 if let Some(last) = payload.get("info").and_then(|i| i.get("last_token_usage")) {
-                    let t = cur.get_or_insert_with(|| empty_turn(&model, ts));
+                    let t = cur.get_or_insert_with(|| empty_turn(&model, ts, &prov));
                     t.tokens.add(&tokens_from(last));
                 }
             }
@@ -135,7 +144,7 @@ pub fn parse_rollout(path: &Path) -> Vec<Turn> {
     turns
 }
 
-fn empty_turn(model: &str, ts: &str) -> Turn {
+fn empty_turn(model: &str, ts: &str, prov: &Prov) -> Turn {
     Turn {
         user_text: String::new(),
         assistant_text: String::new(),
@@ -144,7 +153,46 @@ fn empty_turn(model: &str, ts: &str) -> Turn {
         tokens: TurnTokens::default(),
         model: model.to_string(),
         timestamp: ts.to_string(),
+        cwd: prov.cwd.clone(),
+        git_branches: prov.branch.clone().into_iter().collect(),
+        git_commit: prov.commit.clone(),
     }
+}
+
+/// Working directory and git state, as last stated by the rollout.
+///
+/// Codex reports these in `session_meta` and again in `turn_context` when
+/// they change, so a turn records where it actually ran rather than
+/// inheriting the session's opening state.
+#[derive(Default, Clone)]
+struct Prov {
+    cwd: Option<String>,
+    branch: Option<String>,
+    commit: Option<String>,
+}
+
+impl Prov {
+    /// Take whatever this payload states, leaving prior values in place for
+    /// fields it does not mention.
+    fn absorb(&mut self, payload: &Value) {
+        if let Some(c) = non_empty(payload.get("cwd")) {
+            self.cwd = Some(c);
+        }
+        let git = payload.get("git");
+        if let Some(b) = git.and_then(|g| non_empty(g.get("branch"))) {
+            self.branch = Some(b);
+        }
+        if let Some(h) = git.and_then(|g| non_empty(g.get("commit_hash"))) {
+            self.commit = Some(h);
+        }
+    }
+}
+
+fn non_empty(v: Option<&Value>) -> Option<String> {
+    v.and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// Concatenate the `text` of every content block.

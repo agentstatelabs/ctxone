@@ -67,6 +67,24 @@ pub struct Turn {
     pub tokens: TurnTokens,
     pub model: String,
     pub timestamp: String,
+    /// Working directory this turn ran in, as the agent recorded it.
+    pub cwd: Option<String>,
+    /// Every git branch this turn touched, in first-seen order.
+    ///
+    /// A set rather than one value because the branch can change *within* a
+    /// turn — the user types on one branch and the agent works on another, or
+    /// a checkout happens mid-turn. Recording only the assistant's branch
+    /// silently dropped those: a real transcript had a branch that appeared on
+    /// a user entry alone, and it vanished from the rollup entirely.
+    ///
+    /// Per-turn rather than per-session because a session is not one branch
+    /// either: of the 12 largest transcripts measured, 7 spanned several.
+    /// `HEAD` is kept verbatim rather than normalised away — a detached HEAD
+    /// (common in worktrees) is signal, not noise.
+    pub git_branches: Vec<String>,
+    /// Commit the working tree was on. Codex records this; Claude Code does
+    /// not, so it is usually `None`.
+    pub git_commit: Option<String>,
 }
 
 impl Turn {
@@ -122,6 +140,8 @@ pub fn parse_turns(path: &Path) -> Vec<Turn> {
     let mut turns: Vec<Turn> = vec![];
     let mut current_user: Option<String> = None;
     let mut current_ts: String = String::new();
+    let mut current_cwd: Option<String> = None;
+    let mut current_branch: Option<String> = None;
 
     for entry in &entries {
         let typ = entry.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -142,6 +162,23 @@ pub fn parse_turns(path: &Path) -> Vec<Turn> {
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
+                    // The user side carries provenance too, and it is not
+                    // always the same as the assistant's — capture it so a
+                    // branch that only ever appears here is not lost.
+                    current_cwd = str_field(entry, "cwd");
+                    current_branch = str_field(entry, "gitBranch");
+                } else {
+                    // A textless entry is a bare tool_result, which belongs to
+                    // the turn already in flight — but it still records where
+                    // it ran, and a checkout DURING a tool call shows up here
+                    // and nowhere else. One real transcript's third branch
+                    // existed only on an entry like this.
+                    let branch = str_field(entry, "gitBranch");
+                    match turns.last_mut() {
+                        Some(last) => push_unique(&mut last.git_branches, branch),
+                        // Nothing to attach to yet; hand it to the next turn.
+                        None => push_unique_opt(&mut current_branch, branch),
+                    }
                 }
             }
             "assistant" => {
@@ -174,6 +211,12 @@ pub fn parse_turns(path: &Path) -> Vec<Turn> {
                         if !model.is_empty() && model != "unknown" {
                             last.model = model;
                         }
+                        // A split response can carry provenance the first
+                        // fragment lacked, or move to another branch mid-turn.
+                        if last.cwd.is_none() {
+                            last.cwd = str_field(entry, "cwd");
+                        }
+                        push_unique(&mut last.git_branches, str_field(entry, "gitBranch"));
                         continue;
                     }
                 }
@@ -186,6 +229,18 @@ pub fn parse_turns(path: &Path) -> Vec<Turn> {
                     tokens,
                     model,
                     timestamp: current_ts.clone(),
+                    // `cwd` and `gitBranch` are top-level on every Claude Code
+                    // record, so a turn carries the branches it actually ran
+                    // on rather than one inferred for the whole session. The
+                    // user side is listed first because it came first.
+                    cwd: str_field(entry, "cwd").or_else(|| current_cwd.clone()),
+                    git_branches: {
+                        let mut b = Vec::new();
+                        push_unique(&mut b, current_branch.clone());
+                        push_unique(&mut b, str_field(entry, "gitBranch"));
+                        b
+                    },
+                    git_commit: None, // Claude Code does not record it
                 });
             }
             _ => {}
@@ -193,6 +248,35 @@ pub fn parse_turns(path: &Path) -> Vec<Turn> {
     }
 
     turns
+}
+
+/// Fill `slot` from `v` only when it is currently empty.
+///
+/// Used for provenance seen before any turn exists: the first branch observed
+/// wins, and later ones attach to the turn in flight instead.
+fn push_unique_opt(slot: &mut Option<String>, v: Option<String>) {
+    if slot.is_none() {
+        *slot = v;
+    }
+}
+
+/// Append `v` if it is present and not already there, preserving order.
+fn push_unique(list: &mut Vec<String>, v: Option<String>) {
+    if let Some(v) = v
+        && !list.iter().any(|x| *x == v)
+    {
+        list.push(v);
+    }
+}
+
+/// A non-empty string field, or `None`. Empty strings are treated as absent
+/// so a blank `gitBranch` never becomes a branch name in the rollup.
+fn str_field(v: &Value, key: &str) -> Option<String> {
+    v.get(key)
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// Harness-injected tags that arrive inside a "user" turn but are NOT
@@ -595,6 +679,12 @@ pub async fn store_full_turn(
         "tool_calls": turn.tool_calls,
         "tool_calls_raw": turn.tool_calls_raw,
         "tokens": turn.tokens,
+        // Provenance. Omitted when unknown rather than written as null or "",
+        // so a reader can distinguish "this turn ran on no recorded branch"
+        // from "this turn predates provenance capture".
+        "cwd": turn.cwd,
+        "git_branches": turn.git_branches,
+        "git_commit": turn.git_commit,
     });
     let url = format!(
         "{}/api/sessions/{}/turns/{}?ref={}",
@@ -735,6 +825,140 @@ pub async fn store_session_meta(
     let _ = req.send().await;
 }
 
+/// Roll a session's turns up into the provenance summary.
+///
+/// Reports **every** branch the session touched with its turn count, not a
+/// single dominant one: 7 of the 12 largest transcripts measured span more
+/// than one branch, so collapsing to one label would be wrong more often than
+/// not. Branch names are kept verbatim, `HEAD` included — a detached HEAD is
+/// what a worktree session legitimately ran on.
+///
+/// Returns `None` when no turn carried provenance, so callers can skip the
+/// write entirely rather than store an empty object that a reader could not
+/// distinguish from "this session ran nowhere".
+pub fn build_provenance(turns: &[Turn]) -> Option<serde_json::Value> {
+    let mut cwds: Vec<String> = Vec::new();
+    // (branch, turns, first_ts, last_ts, commit) in first-seen order, which
+    // keeps the list stable across re-ingests of the same transcript.
+    let mut branches: Vec<(String, u64, String, String, Option<String>)> = Vec::new();
+
+    for t in turns {
+        if let Some(c) = &t.cwd
+            && !cwds.iter().any(|x| x == c)
+        {
+            cwds.push(c.clone());
+        }
+        // A turn can touch more than one branch; each gets the credit.
+        for b in &t.git_branches {
+            match branches.iter_mut().find(|(name, ..)| name == b) {
+                Some((_, count, first, last, commit)) => {
+                    *count += 1;
+                    if !t.timestamp.is_empty() {
+                        if first.is_empty() || t.timestamp < *first {
+                            *first = t.timestamp.clone();
+                        }
+                        if t.timestamp > *last {
+                            *last = t.timestamp.clone();
+                        }
+                    }
+                    if commit.is_none() {
+                        *commit = t.git_commit.clone();
+                    }
+                }
+                None => branches.push((
+                    b.clone(),
+                    1,
+                    t.timestamp.clone(),
+                    t.timestamp.clone(),
+                    t.git_commit.clone(),
+                )),
+            }
+        }
+    }
+
+    if cwds.is_empty() && branches.is_empty() {
+        return None;
+    }
+
+    // Busiest branch first: the eye should land on where the work happened,
+    // while the long tail stays visible.
+    branches.sort_by(|a, b| b.1.cmp(&a.1));
+
+    let branches: Vec<serde_json::Value> = branches
+        .into_iter()
+        .map(|(branch, turns, first_ts, last_ts, commit_hash)| {
+            let mut o = serde_json::Map::new();
+            o.insert("branch".into(), serde_json::json!(branch));
+            o.insert("turns".into(), serde_json::json!(turns));
+            if !first_ts.is_empty() {
+                o.insert("first_ts".into(), serde_json::json!(first_ts));
+            }
+            if !last_ts.is_empty() {
+                o.insert("last_ts".into(), serde_json::json!(last_ts));
+            }
+            if let Some(c) = commit_hash {
+                o.insert("commit_hash".into(), serde_json::json!(c));
+            }
+            serde_json::Value::Object(o)
+        })
+        .collect();
+
+    let mut out = serde_json::Map::new();
+    if !cwds.is_empty() {
+        out.insert("cwds".into(), serde_json::json!(cwds));
+    }
+    if !branches.is_empty() {
+        out.insert("branches".into(), serde_json::json!(branches));
+    }
+    Some(serde_json::Value::Object(out))
+}
+
+/// Persist the provenance rollup at `/sessions/{session}/provenance`.
+///
+/// Separate from `meta` on purpose: `meta` has a fixed shape the Lens filters
+/// read and a different writer, so widening it would risk existing readers for
+/// no gain.
+#[allow(clippy::too_many_arguments)]
+pub async fn store_session_provenance(
+    provenance: &serde_json::Value,
+    namespace: Option<&str>,
+    project_id: Option<&str>,
+    source_file: &str,
+    archived: bool,
+    hub: &str,
+    branch: &str,
+    session: Option<&str>,
+    client: &reqwest::Client,
+) {
+    let sid = session.unwrap_or("default");
+    let url = format!(
+        "{}/api/sessions/{}/provenance?ref={}",
+        hub,
+        crate::urlencoding(sid),
+        crate::urlencoding(branch),
+    );
+    let mut body = provenance.as_object().cloned().unwrap_or_default();
+    if let Some(ns) = namespace {
+        body.insert("namespace".into(), serde_json::json!(ns));
+    }
+    if let Some(p) = project_id {
+        body.insert("project_id".into(), serde_json::json!(p));
+    }
+    if !source_file.is_empty() {
+        body.insert("source_file".into(), serde_json::json!(source_file));
+    }
+    if archived {
+        // A state, not a deletion — an archived Codex session is still real
+        // history and still ingests.
+        body.insert("archived".into(), serde_json::json!(true));
+    }
+    let mut req = client.put(url).json(&serde_json::Value::Object(body));
+    if let Some(s) = session {
+        req = req.header("X-CTXone-Session", s);
+    }
+    let _ = req.send().await;
+}
+
 pub async fn store_memory(
     mem: &ExtractedMemory,
     hub: &str,
@@ -806,6 +1030,73 @@ pub fn last_turns(path: &Path, n: usize) -> Vec<Turn> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn turn_on(branches: &[&str], ts: &str) -> Turn {
+        Turn {
+            user_text: "u".into(),
+            assistant_text: "a".into(),
+            tool_calls: vec![],
+            tool_calls_raw: vec![],
+            tokens: TurnTokens::default(),
+            model: "m".into(),
+            timestamp: ts.into(),
+            cwd: Some("/repo".into()),
+            git_branches: branches.iter().map(|s| s.to_string()).collect(),
+            git_commit: None,
+        }
+    }
+
+    #[test]
+    fn provenance_lists_every_branch_not_just_the_dominant_one() {
+        // The whole point: a session is not one branch. Measured on real
+        // transcripts, 7 of the 12 largest spanned several.
+        let turns = vec![
+            turn_on(&["main"], "2026-05-01T00:00:00Z"),
+            turn_on(&["feature"], "2026-05-02T00:00:00Z"),
+            turn_on(&["feature"], "2026-05-03T00:00:00Z"),
+        ];
+        let p = build_provenance(&turns).expect("has provenance");
+        let branches = p["branches"].as_array().unwrap();
+        assert_eq!(branches.len(), 2);
+        // Busiest first.
+        assert_eq!(branches[0]["branch"], "feature");
+        assert_eq!(branches[0]["turns"], 2);
+        assert_eq!(branches[1]["branch"], "main");
+        assert_eq!(branches[0]["first_ts"], "2026-05-02T00:00:00Z");
+        assert_eq!(branches[0]["last_ts"], "2026-05-03T00:00:00Z");
+    }
+
+    #[test]
+    fn provenance_counts_a_turn_that_touched_two_branches_under_both() {
+        // A checkout mid-turn: the user typed on one branch, the agent worked
+        // on another. Attributing the turn to only one silently loses a branch.
+        let turns = vec![turn_on(&["old", "new"], "2026-05-01T00:00:00Z")];
+        let p = build_provenance(&turns).unwrap();
+        let names: Vec<&str> = p["branches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["branch"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"old") && names.contains(&"new"));
+    }
+
+    #[test]
+    fn provenance_keeps_head_verbatim() {
+        // Detached HEAD is what a worktree session legitimately ran on;
+        // normalising it away would erase real signal.
+        let p = build_provenance(&[turn_on(&["HEAD"], "2026-05-01T00:00:00Z")]).unwrap();
+        assert_eq!(p["branches"][0]["branch"], "HEAD");
+    }
+
+    #[test]
+    fn provenance_is_none_when_nothing_was_recorded() {
+        // Distinguishes "predates provenance capture" from "ran nowhere", so
+        // the caller can skip the write instead of storing an empty object.
+        let mut t = turn_on(&[], "2026-05-01T00:00:00Z");
+        t.cwd = None;
+        assert!(build_provenance(&[t]).is_none());
+    }
 
     #[test]
     fn strip_synthetic_removes_task_notification() {

@@ -633,6 +633,10 @@ fn router_with_config_inner(
             "/api/sessions/{sid}/meta",
             axum::routing::put(put_session_meta),
         )
+        .route(
+            "/api/sessions/{sid}/provenance",
+            axum::routing::put(put_session_provenance),
+        )
         // Session sync (t-019): re-ingest local Claude Code transcripts by
         // spawning the co-located `ctx ingest-session --all` CLI.
         .route("/api/sessions/sync", post(sync_sessions))
@@ -1789,6 +1793,15 @@ struct SummarizeSessionRequest {
     decisions: Vec<String>,
 }
 
+/// Writes `/sessions/{id}/{summary,decisions,details}` into the REQUEST's
+/// namespace at ref `main` — the same place `ctx ingest-session` puts a
+/// session's turns, title and meta.
+///
+/// Now that sessions live in per-project workspaces rather than all in
+/// `default`, summarising a session while pointed at the wrong workspace
+/// writes an orphan node that no session view will ever show. The namespace
+/// is echoed in the response so a caller can catch that rather than have it
+/// pass silently.
 async fn summarize_session(
     State(s): State<HubState>,
     ns: NamespaceId,
@@ -1838,6 +1851,9 @@ async fn summarize_session(
         "session_id": req.session_id,
         "key_points": req.key_points.len(),
         "decisions": req.decisions.len(),
+        // Which workspace this landed in. Silent scope is what put 98
+        // sessions in the wrong one.
+        "namespace": ns.0,
     })))
 }
 
@@ -3149,6 +3165,10 @@ fn session_meta_path(sid: &str) -> String {
     format!("/sessions/{}/meta", sid)
 }
 
+fn session_provenance_path(sid: &str) -> String {
+    format!("/sessions/{}/provenance", sid)
+}
+
 /// Read a session's meta (source / started_at / updated_at) from the graph,
 /// best-effort. Any missing piece is `None`. Populates the matching
 /// `SessionSnapshot` fields so the Lens can filter by agent and sort by date.
@@ -3189,6 +3209,51 @@ fn read_session_meta(repo: &Repository, ref_name: &str, sid: &str) -> SessionMet
         updated_at: str_field("updated_at"),
         models_used,
     }
+}
+
+/// `PUT /api/sessions/{sid}/provenance` — where a session ran.
+///
+/// Body is `{cwds?, branches?, namespace?, project_id?, source_file?,
+/// archived?}` where `branches` is every branch the session touched, with
+/// per-branch turn counts. Deliberately a separate node from `meta`: `meta`
+/// has a fixed shape the Lens filters consume and a different writer.
+///
+/// Stored verbatim, like `meta`, so a newer CLI can add fields without
+/// needing the hub rebuilt in lockstep.
+async fn put_session_provenance(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+    Path(sid): Path<String>,
+    agent_id: AgentId,
+    Query(q): Query<SessionTurnQuery>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !body.is_object() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "provenance body must be a JSON object {cwds?, branches?, …}".to_string(),
+        ));
+    }
+    let repo = s.repo_for(&ns)?;
+    let path = session_provenance_path(&sid);
+    let opts = CommitOptions::new(
+        &agent_id.0,
+        IntentCategory::Custom("Observe".to_string()),
+        format!("session provenance {}", sid),
+    )
+    .with_tags(vec![
+        format!("session:{}", sid),
+        "kind:session-provenance".to_string(),
+    ]);
+    let commit_id = repo
+        .set_json(&q.ref_name, &path, &body, opts)
+        .map_err(internal_error)?;
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "ref": q.ref_name,
+        "path": path,
+        "commit_id": format!("{}", commit_id.short()),
+    })))
 }
 
 /// `PUT /api/sessions/{sid}/meta` — set a session's meta object. Body is
