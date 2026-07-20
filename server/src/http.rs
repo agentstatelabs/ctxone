@@ -970,10 +970,81 @@ async fn session_token_stats(
 /// Each snapshot's `name` is populated best-effort from the
 /// `/sessions/{id}/title` graph node in the request's namespace (t-016);
 /// sessions with no ingested title report `name: null`.
+/// `GET /api/stats/sessions` — the sessions that live in this workspace.
+///
+/// The session REGISTRY (token/burn stats) is process-global — one LRU keyed
+/// by globally-unique session id — but a session's NODES live in exactly one
+/// namespace's graph (Phase 4 moved the pre-existing ones there). So the graph
+/// is the source of truth for which workspace a session belongs to, and this
+/// filters the global registry down to the sessions actually present in the
+/// requested namespace.
+///
+/// Membership is a shallow `repo.get` on `/sessions/{id}` — it returns the map
+/// node without resolving its children, so this stays cheap even for the
+/// default namespace's large sessions. It also catches the titleless early
+/// sessions (only turns, no title/meta) that a title-based filter would miss.
+///
+/// Session ids that have a node in this namespace's graph.
+///
+/// One `list_paths` at depth 2 rather than a `get` per session: a session in a
+/// named namespace always carries a `title`/`meta` leaf, and depth 2 stops
+/// above the `turns` map — so a 900-turn session contributes ~5 leaves, not
+/// 900. Reliable for named namespaces, where every session was ingested or
+/// moved with a full subtree.
+fn session_ids_with_nodes(repo: &Repository) -> std::collections::HashSet<String> {
+    repo.list_paths("main", "/sessions", Some(2))
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|p| p.strip_prefix("/sessions/"))
+        .filter_map(|rest| rest.split('/').next())
+        .map(str::to_string)
+        .collect()
+}
+
+/// `GET /api/stats/sessions` — the sessions that live in this workspace.
+///
+/// The registry (token/burn stats) is process-global — one LRU keyed by
+/// globally-unique session id — but a session's NODES live in one namespace's
+/// graph (Phase 4 placed the pre-existing ones). Two kinds of session need
+/// different treatment, which is why this is not a single graph check:
+///
+/// - **Ingested / moved** sessions have a `/sessions/{id}` subtree in exactly
+///   one namespace. They show in that workspace.
+/// - **Registry-only** sessions — created by `recall` or `record_llm_usage`
+///   with a session header but never ingested — have stats and NO node
+///   anywhere. Their rightful home is `default`, the catch-all.
+///
+/// So `default` shows everything NOT placed in a named workspace, and a named
+/// workspace shows the sessions whose nodes are actually there. `default` is
+/// computed as the complement over named namespaces (each small, one
+/// `list_paths` apiece) so a registry-only session is never orphaned.
 async fn list_sessions(State(s): State<HubState>, ns: NamespaceId) -> impl IntoResponse {
     let default_session = s.sessions.get_or_create(DEFAULT_SESSION_ID);
     ensure_flat_size(&s.repo, &default_session, "main");
     let mut snaps = s.sessions.snapshot_all();
+    let is_default_ns = ns.0 == Namespace::DEFAULT;
+
+    if is_default_ns {
+        // Placed elsewhere = has a node in any named namespace. Everything
+        // else (default-resident sessions AND registry-only ghosts) stays.
+        let mut placed = std::collections::HashSet::new();
+        if let Ok(names) = s.repo.list_namespaces() {
+            for name in names {
+                if name.as_str() == Namespace::DEFAULT {
+                    continue;
+                }
+                if let Ok(repo) = s.repo_for(&NamespaceId(name.as_str().to_string())) {
+                    placed.extend(session_ids_with_nodes(&repo));
+                }
+            }
+        }
+        snaps.retain(|snap| !placed.contains(&snap.session_id));
+    } else if let Ok(repo) = s.repo_for(&ns) {
+        let here = session_ids_with_nodes(&repo);
+        snaps.retain(|snap| here.contains(&snap.session_id));
+    }
+
+    // Decorate with title/meta from the workspace being viewed.
     if let Ok(repo) = s.repo_for(&ns) {
         for snap in &mut snaps {
             snap.name = read_session_title(&repo, "main", &snap.session_id);

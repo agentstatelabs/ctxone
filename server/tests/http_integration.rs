@@ -1676,6 +1676,26 @@ fn get_ns(uri: &str, ns: &str) -> Request<Body> {
         .unwrap()
 }
 
+fn put_json_ns(uri: &str, ns: &str, body: Value) -> Request<Body> {
+    Request::builder()
+        .uri(uri)
+        .method("PUT")
+        .header("content-type", "application/json")
+        .header("x-ctxone-namespace", ns)
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap()
+}
+
+fn get_with_session_ns(uri: &str, session: &str, ns: &str) -> Request<Body> {
+    Request::builder()
+        .uri(uri)
+        .method("GET")
+        .header("x-ctxone-session", session)
+        .header("x-ctxone-namespace", ns)
+        .body(Body::empty())
+        .unwrap()
+}
+
 #[tokio::test]
 async fn namespaces_isolate_memory_and_branches() {
     let (_dir, _repo, router) = sqlite_router();
@@ -1751,6 +1771,67 @@ async fn namespaces_isolate_memory_and_branches() {
         !branches(&body).contains(&"feature-x".to_string()),
         "branch leaked across namespaces"
     );
+}
+
+#[tokio::test]
+async fn session_listing_is_scoped_to_its_workspace() {
+    let (_dir, _repo, router) = sqlite_router();
+    for id in ["repo-a", "repo-b"] {
+        let (status, _) =
+            call_json(router.clone(), post_json("/api/projects", json!({ "id": id }))).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    // A session ingested into repo-a: a graph node (title) AND a registry
+    // entry, which is what an ingest produces — turns record token usage. The
+    // list is registry-driven and graph-filtered, so both are needed, exactly
+    // as in production.
+    call_json(
+        router.clone(),
+        get_with_session_ns("/api/memory/recall?topic=x", "sess-a", "repo-a"),
+    )
+    .await;
+    let (status, _) = call_json(
+        router.clone(),
+        put_json_ns("/api/sessions/sess-a/title", "repo-a", json!("Work in A")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // A registry-only session: stats via a session header, but never ingested,
+    // so it has no node in any namespace.
+    call_json(
+        router.clone(),
+        get_with_session("/api/memory/recall?topic=x", "ghost-session"),
+    )
+    .await;
+
+    let ids = |body: &Value| -> Vec<String> {
+        body.as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["session_id"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // repo-a shows its session and NOT the registry-only ghost.
+    let (_, body) = call_json(router.clone(), get_ns("/api/stats/sessions", "repo-a")).await;
+    let a = ids(&body);
+    assert!(a.contains(&"sess-a".to_string()), "repo-a missing its session: {a:?}");
+    assert!(!a.contains(&"ghost-session".to_string()), "ghost leaked into repo-a");
+
+    // repo-b shows neither.
+    let (_, body) = call_json(router.clone(), get_ns("/api/stats/sessions", "repo-b")).await;
+    let b = ids(&body);
+    assert!(!b.contains(&"sess-a".to_string()), "sess-a leaked into repo-b");
+    assert!(!b.contains(&"ghost-session".to_string()), "ghost leaked into repo-b");
+
+    // default is the catch-all: the registry-only ghost lands here, the placed
+    // session does not.
+    let (_, body) = call_json(router.clone(), get("/api/stats/sessions")).await;
+    let d = ids(&body);
+    assert!(d.contains(&"ghost-session".to_string()), "ghost missing from default: {d:?}");
+    assert!(!d.contains(&"sess-a".to_string()), "placed session leaked into default");
 }
 
 #[tokio::test]
