@@ -153,6 +153,23 @@ describe('computeBurn — knee', () => {
 		expect(shelf.sinceKneeTokens).toBeGreaterThan(0);
 	});
 
+	it('suppresses a knee that lands inside the trailing window', () => {
+		// Crossing over "just now" cannot tell anyone where to have stopped —
+		// a 233-turn session reporting "crossed over around turn #233" is noise.
+		const good = () => turn(4, 2, 100_000);
+		const bad = () => turn(1, 8, 800_000);
+		const r = computeBurn([...Array.from({ length: 34 }, good), ...Array.from({ length: 6 }, bad)]);
+		expect(r.knee).toBeNull();
+		expect(r.sinceKneeTokens).toBe(0);
+
+		// ...but a knee with real runway after it is still reported.
+		const early = computeBurn([
+			...Array.from({ length: 20 }, good),
+			...Array.from({ length: 20 }, bad)
+		]);
+		expect(early.knee).not.toBeNull();
+	});
+
 	it('emits one series point per turn', () => {
 		const r = computeBurn(steady(40));
 		expect(r.series).toHaveLength(40);

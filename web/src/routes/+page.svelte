@@ -33,6 +33,7 @@
 	import Panel from '$lib/dashboard/Panel.svelte';
 	import QuickCapture from '$lib/dashboard/QuickCapture.svelte';
 	import LlmStats from '$lib/dashboard/LlmStats.svelte';
+	import BurnBoard from '$lib/dashboard/BurnBoard.svelte';
 
 	/**
 	 * Bridge for StatTile's `spark` snippet prop: lens-core is a symlinked
@@ -664,6 +665,19 @@
 			<QuickCapture {connected} onSaved={() => refreshAll(false)} />
 		</Panel>
 	</div>
+
+	<!-- ── 6 · Least efficient sessions ─────────────────────────────────── -->
+	<Panel
+		title="Least efficient sessions"
+		scope={branchStore.current}
+		links={[{ href: '/sessions', label: 'Sessions' }]}
+		status={sessionsL.status}
+		errorText={sessionsL.error}
+		emptyTitle="No sessions"
+		emptyText="Nothing to rank on {branchStore.current}."
+	>
+		<BurnBoard sessions={sessionsL.data ?? []} branch={branchStore.current} />
+	</Panel>
 </div>
 
 <style>

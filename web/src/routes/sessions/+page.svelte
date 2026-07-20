@@ -297,10 +297,32 @@
 			sessions = await r.json();
 			sessions.sort((a, b) => b.session_tokens_used - a.session_tokens_used);
 			void deriveListNames();
+			applyDeepLink();
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
 			loading = false;
+		}
+	}
+
+	/**
+	 * `?session=<id>` opens that session directly — the dashboard's burn board
+	 * links here. Runs after each load but only selects once, so an
+	 * auto-refresh cannot yank the user back to the linked session after they
+	 * have clicked elsewhere.
+	 */
+	let deepLinkApplied = false;
+	function applyDeepLink() {
+		if (deepLinkApplied || typeof window === 'undefined') return;
+		const want = new URLSearchParams(window.location.search).get('session');
+		if (!want) {
+			deepLinkApplied = true;
+			return;
+		}
+		const hit = sessions.find((s) => s.session_id === want);
+		if (hit) {
+			selected = hit;
+			deepLinkApplied = true;
 		}
 	}
 

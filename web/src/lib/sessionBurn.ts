@@ -230,6 +230,12 @@ export function computeBurn(turns: BurnTurn[]): BurnResult {
 			break;
 		}
 	}
+	// A knee inside the trailing window is not a finding — it says "you
+	// crossed over just now", which cannot tell anyone where to have stopped.
+	// A 233-turn session reporting "crossed over around turn #233" is noise;
+	// the ratio in the headline already carries that. Only keep a knee with
+	// enough run left after it to have been worth acting on.
+	if (knee !== null && knee > series.length - 1 - WINDOW) knee = null;
 	const sinceKneeTokens =
 		knee === null
 			? 0
