@@ -637,6 +637,11 @@ fn router_with_config_inner(
             "/api/sessions/{sid}/provenance",
             axum::routing::put(put_session_provenance),
         )
+        .route("/api/sessions/{sid}", axum::routing::delete(delete_session))
+        .route(
+            "/api/session_tombstones",
+            get(list_session_tombstones),
+        )
         // Session sync (t-019): re-ingest local Claude Code transcripts by
         // spawning the co-located `ctx ingest-session --all` CLI.
         .route("/api/sessions/sync", post(sync_sessions))
@@ -3024,6 +3029,10 @@ async fn put_session_turn(
     let commit_id = repo
         .set_json(&q.ref_name, &path, &body, opts)
         .map_err(internal_error)?;
+    // Session writes change the graph, so cached flat sizes are stale. The
+    // other write paths have always done this; these four did not, which left
+    // token-savings figures computed against a tree that no longer existed.
+    s.sessions.mark_all_dirty();
     Ok(Json(serde_json::json!({
         "status": "ok",
         "ref": q.ref_name,
@@ -3136,6 +3145,10 @@ async fn put_session_title(
     let commit_id = repo
         .set_json(&q.ref_name, &path, &serde_json::json!(title), opts)
         .map_err(internal_error)?;
+    // Session writes change the graph, so cached flat sizes are stale. The
+    // other write paths have always done this; these four did not, which left
+    // token-savings figures computed against a tree that no longer existed.
+    s.sessions.mark_all_dirty();
     Ok(Json(serde_json::json!({
         "status": "ok",
         "ref": q.ref_name,
@@ -3167,6 +3180,143 @@ fn session_meta_path(sid: &str) -> String {
 
 fn session_provenance_path(sid: &str) -> String {
     format!("/sessions/{}/provenance", sid)
+}
+
+/// Where a deleted session is remembered as deleted.
+///
+/// A top-level prefix mirroring `/plan_links`, deliberately NOT under
+/// `/_meta/` — that subtree is reserved for migrations and is skipped by
+/// `/api/import`, so a tombstone placed there would not survive an
+/// export/import round trip.
+fn session_tombstone_path(sid: &str) -> String {
+    format!("/session_tombstones/{}", sid)
+}
+
+#[derive(Deserialize, Default)]
+struct DeleteSessionQuery {
+    #[serde(default = "default_ref")]
+    ref_name: String,
+    /// Why it was deleted, kept on the tombstone for later readers.
+    #[serde(default)]
+    reason: Option<String>,
+    /// Delete the data but allow a future sync to re-import it.
+    #[serde(default)]
+    no_tombstone: bool,
+}
+
+/// `DELETE /api/sessions/{sid}` — remove a session and remember the deletion.
+///
+/// Two things have to happen together, and doing either alone leaves the hub
+/// in a worse state than before:
+///
+/// 1. **The graph subtree.** `/sessions/{sid}` and everything under it goes in
+///    a single commit — the tree delete is recursive, so a 200-turn session
+///    costs one commit rather than the 200+ `forget` calls this previously
+///    required.
+/// 2. **The session registry.** Token stats live outside the graph; leaving
+///    them behind shows the session in `/api/stats/sessions` with totals and
+///    no title.
+///
+/// A tombstone at `/session_tombstones/{sid}` stops the next
+/// `ctx ingest-session` re-importing it from the transcript still sitting on
+/// disk. Without it "delete" means "delete until the next sync", which is not
+/// a deletion. Pass `no_tombstone=true` to deliberately allow re-import.
+async fn delete_session(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+    Path(sid): Path<String>,
+    agent_id: AgentId,
+    Query(q): Query<DeleteSessionQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
+    let root = format!("/sessions/{}", sid);
+
+    // Count what is there first, so the response can report what went — and
+    // so a caller can tell "deleted 214 nodes" from "there was nothing here".
+    let removed = repo
+        .list_paths(&q.ref_name, &root, None)
+        .map(|p| p.len())
+        .unwrap_or(0);
+
+    let opts = CommitOptions::new(
+        &agent_id.0,
+        IntentCategory::Rollback,
+        format!("delete session {}", sid),
+    )
+    .with_tags(vec![format!("session:{}", sid), "kind:session-delete".to_string()]);
+
+    // A session with no nodes is not an error: the registry may still hold
+    // stats for it, and the tombstone is still worth writing.
+    let deleted = match repo.delete(&q.ref_name, &root, opts) {
+        Ok(id) => Some(format!("{}", id.short())),
+        Err(_) if removed == 0 => None,
+        Err(e) => return Err(internal_error(e)),
+    };
+
+    let tombstoned = if q.no_tombstone {
+        false
+    } else {
+        let t = serde_json::json!({
+            "deleted_at": chrono::Utc::now().to_rfc3339(),
+            "deleted_by": agent_id.0,
+            "reason": q.reason,
+            "namespace": ns.0,
+        });
+        let t_opts = CommitOptions::new(
+            &agent_id.0,
+            IntentCategory::Custom("Observe".to_string()),
+            format!("tombstone session {}", sid),
+        )
+        .with_tags(vec![
+            format!("session:{}", sid),
+            "kind:session-tombstone".to_string(),
+        ]);
+        repo.set_json(&q.ref_name, &session_tombstone_path(&sid), &t, t_opts)
+            .map_err(internal_error)?;
+        true
+    };
+
+    let from_registry = s.sessions.remove(&sid, s.db_path.as_deref());
+    // Cached flat sizes reference a tree that no longer has this session.
+    s.sessions.mark_all_dirty();
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "session_id": sid,
+        "namespace": ns.0,
+        "ref": q.ref_name,
+        "nodes_removed": removed,
+        "commit_id": deleted,
+        "tombstoned": tombstoned,
+        "removed_from_registry": from_registry,
+    })))
+}
+
+/// `GET /api/session_tombstones` — session ids that must not be re-imported.
+///
+/// Read once per run by `ctx ingest-session`; returning the whole list beats
+/// probing per session, since a machine-wide sync considers hundreds.
+async fn list_session_tombstones(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+    Query(q): Query<SessionTurnQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
+    // Absent prefix = nothing deleted yet, which is not an error.
+    let paths = repo
+        .list_paths(&q.ref_name, "/session_tombstones", None)
+        .unwrap_or_default();
+    let ids: Vec<String> = paths
+        .iter()
+        .filter_map(|p| p.strip_prefix("/session_tombstones/"))
+        // list_paths returns leaves, so a tombstone's fields appear as
+        // `/session_tombstones/<sid>/deleted_at`; keep the id segment only.
+        .filter_map(|rest| rest.split('/').next())
+        .map(str::to_string)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    Ok(Json(serde_json::json!({ "sessions": ids })))
 }
 
 /// Read a session's meta (source / started_at / updated_at) from the graph,
@@ -3248,6 +3398,10 @@ async fn put_session_provenance(
     let commit_id = repo
         .set_json(&q.ref_name, &path, &body, opts)
         .map_err(internal_error)?;
+    // Session writes change the graph, so cached flat sizes are stale. The
+    // other write paths have always done this; these four did not, which left
+    // token-savings figures computed against a tree that no longer existed.
+    s.sessions.mark_all_dirty();
     Ok(Json(serde_json::json!({
         "status": "ok",
         "ref": q.ref_name,
@@ -3285,6 +3439,10 @@ async fn put_session_meta(
     let commit_id = repo
         .set_json(&q.ref_name, &path, &body, opts)
         .map_err(internal_error)?;
+    // Session writes change the graph, so cached flat sizes are stale. The
+    // other write paths have always done this; these four did not, which left
+    // token-savings figures computed against a tree that no longer existed.
+    s.sessions.mark_all_dirty();
     Ok(Json(serde_json::json!({
         "status": "ok",
         "ref": q.ref_name,

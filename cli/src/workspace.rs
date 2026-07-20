@@ -67,6 +67,10 @@ pub struct Router {
     memo: HashMap<String, Routed>,
     /// namespace → client. `None` key is the default-namespace client.
     clients: HashMap<Option<String>, reqwest::Client>,
+    /// namespace → tombstoned session ids, fetched on first use of that
+    /// workspace. Tombstones are namespace-scoped, so a session is checked
+    /// against the workspace it actually routes to.
+    tombstones: HashMap<Option<String>, std::collections::HashSet<String>>,
 }
 
 impl Router {
@@ -83,7 +87,24 @@ impl Router {
             auto_register,
             memo: HashMap::new(),
             clients: HashMap::new(),
+            tombstones: HashMap::new(),
         }
+    }
+
+    /// Whether this session was deleted and must not be re-imported.
+    ///
+    /// The transcript of a deleted session is still on disk, so without this
+    /// the next sync would faithfully restore what the user asked to remove.
+    pub async fn is_tombstoned(&mut self, ns: Option<&str>, sid: &str) -> bool {
+        let key = ns.map(str::to_string);
+        if !self.tombstones.contains_key(&key) {
+            let set = fetch_tombstones(&self.server, &self.probe, ns).await;
+            self.tombstones.insert(key.clone(), set);
+        }
+        self.tombstones
+            .get(&key)
+            .map(|s| s.contains(sid))
+            .unwrap_or(false)
     }
 
     /// Route one transcript. `cwd` is whatever the source recorded.
@@ -204,6 +225,44 @@ impl Router {
         out.sort_by(|a, b| a.0.cmp(b.0));
         out
     }
+}
+
+/// Session ids the hub has been told to forget, fetched once per run.
+///
+/// Read up-front rather than probed per session: a machine-wide sync
+/// considers hundreds of transcripts, and the transcripts of deleted sessions
+/// are still sitting on disk. Without this, "delete" would mean "delete until
+/// the next sync".
+///
+/// A failure here returns an empty set — a hub too old to have the endpoint,
+/// or briefly unreachable, must not silently start skipping sessions.
+pub async fn fetch_tombstones(
+    server: &str,
+    client: &reqwest::Client,
+    namespace: Option<&str>,
+) -> std::collections::HashSet<String> {
+    let mut url = format!("{server}/api/session_tombstones");
+    if let Some(ns) = namespace {
+        url.push_str(&format!("?namespace={}", crate::urlencoding(ns)));
+    }
+    let Ok(resp) = client.get(url).send().await else {
+        return Default::default();
+    };
+    if !resp.status().is_success() {
+        return Default::default();
+    }
+    let Ok(v) = resp.json::<serde_json::Value>().await else {
+        return Default::default();
+    };
+    v["sessions"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Derive a stable, kebab-case project id for a repo.

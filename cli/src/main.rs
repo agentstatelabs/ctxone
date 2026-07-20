@@ -4305,6 +4305,9 @@ async fn run_ingest_session(
     let since_ts = since.as_deref().unwrap_or("");
 
     let mut total_sessions = 0usize;
+    // Reported explicitly: a sync that quietly imported fewer sessions than
+    // it found would look like data loss.
+    let mut skipped_deleted = 0usize;
     let mut total_turns_seen = 0usize;
     let mut total_memories = 0usize;
     let mut total_full_turns = 0usize;
@@ -4353,6 +4356,18 @@ async fn run_ingest_session(
             // process-wide one, which is what stops N repos collapsing into
             // one namespace.
             let routed = router.route(session_ref.cwd.as_deref()).await;
+
+            // A deleted session must stay deleted. Its transcript is still on
+            // disk, so without this check the next sync would faithfully
+            // restore exactly what the user asked to remove.
+            if let Some(sid) = effective_session
+                && router.is_tombstoned(routed.namespace(), sid).await
+            {
+                println!("→ {}  (session: {}) — skipped, deleted", fname, sid);
+                skipped_deleted += 1;
+                continue;
+            }
+
             let client = router.client_for(routed.namespace(), |ns| clients.build(ns));
 
             println!(
@@ -4600,6 +4615,13 @@ async fn run_ingest_session(
         "Done. {} sessions, {} turns processed, {} memories stored, {} full turns persisted.",
         total_sessions, total_turns_seen, total_memories, total_full_turns
     );
+    if skipped_deleted > 0 {
+        println!(
+            "Skipped {} deleted session{} (tombstoned; their transcripts are still on disk).",
+            skipped_deleted,
+            if skipped_deleted == 1 { "" } else { "s" }
+        );
+    }
     println!(
         "Tokens — input: {}  output: {}  cache_read: {}  cache_create: {}",
         total_tokens.input,

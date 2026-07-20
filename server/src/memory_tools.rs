@@ -558,6 +558,31 @@ impl SessionRegistry {
         s
     }
 
+    /// Drop a session from the in-memory registry and its persisted row.
+    ///
+    /// Session stats live outside the graph, so deleting a session's nodes is
+    /// only half the job — without this the session keeps appearing in
+    /// `/api/stats/sessions` with its token totals and no title, which reads
+    /// as data corruption rather than a deletion.
+    ///
+    /// Returns whether the session was present in memory.
+    pub fn remove(&self, id: &str, db_path: Option<&str>) -> bool {
+        let existed = {
+            let mut w = self.sessions.lock().expect("sessions lock");
+            w.pop(id).is_some()
+        };
+        if let Some(db) = db_path
+            && let Ok(conn) = SqliteConn::open(db)
+        {
+            // Best-effort: a missing table just means nothing was persisted.
+            let _ = conn.execute(
+                "DELETE FROM ctxone_sessions WHERE session_id = ?1",
+                rusqlite::params![id],
+            );
+        }
+        existed
+    }
+
     /// Invalidate every session's cached flat-size. Call after any write.
     pub fn mark_all_dirty(&self) {
         let w = self.sessions.lock().expect("sessions lock");
