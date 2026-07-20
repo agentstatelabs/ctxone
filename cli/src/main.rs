@@ -4,6 +4,7 @@ mod metrics;
 mod onboarding;
 mod service;
 mod sources;
+mod workspace;
 
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
@@ -151,6 +152,18 @@ impl Cli {
         }
     }
 
+    /// The pieces `http_client` needs, detached from `Cli`.
+    ///
+    /// Ingest builds one client per workspace, but the dispatch `match` moves
+    /// out of `cli.command`, so a `&Cli` cannot be held across it. Cloning the
+    /// three header inputs is cheaper than restructuring the dispatch.
+    fn client_factory(&self) -> ClientFactory {
+        ClientFactory {
+            session: self.session.clone(),
+            token: self.token.clone(),
+        }
+    }
+
     /// Build a reqwest client with X-CTXone-Session, X-CTXone-Namespace, and
     /// (for an authenticated hub) `Authorization: Bearer <token>` baked in as
     /// default headers.
@@ -175,6 +188,44 @@ impl Cli {
         }
         let builder = reqwest::Client::builder().default_headers(headers);
         builder.build().unwrap_or_default()
+    }
+}
+
+/// Builds namespace-scoped HTTP clients after `Cli` has been consumed.
+///
+/// Mirrors [`Cli::http_client`] exactly — same headers, same fallbacks — so a
+/// workspace-routed write differs from a default-namespace one only in the
+/// `X-CTXone-Namespace` header.
+#[derive(Clone, Default)]
+struct ClientFactory {
+    session: Option<String>,
+    token: Option<String>,
+}
+
+impl ClientFactory {
+    fn build(&self, namespace: Option<&str>) -> reqwest::Client {
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Some(ref sid) = self.session
+            && let Ok(val) = reqwest::header::HeaderValue::from_str(sid)
+        {
+            headers.insert("X-CTXone-Session", val);
+        }
+        if let Some(ns) = namespace
+            && let Ok(val) = reqwest::header::HeaderValue::from_str(ns)
+        {
+            headers.insert("X-CTXone-Namespace", val);
+        }
+        if let Some(ref token) = self.token
+            && let Ok(mut val) =
+                reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+        {
+            val.set_sensitive(true);
+            headers.insert(reqwest::header::AUTHORIZATION, val);
+        }
+        reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .unwrap_or_default()
     }
 }
 
@@ -469,6 +520,15 @@ enum Commands {
         /// Skip persisting the full turn JSON (only extracted memories + tokens)
         #[arg(long, conflicts_with = "full_turn")]
         no_full_turn: bool,
+
+        /// Do not create a workspace for a repo that has no registered
+        /// project. Those sessions land in the default namespace instead.
+        ///
+        /// Auto-registration is on for `--all`, because a whole-machine sync
+        /// would otherwise route nothing until every repo had been added by
+        /// hand. Pass this to keep the set of workspaces under manual control.
+        #[arg(long)]
+        no_auto_register: bool,
     },
 
     /// Analyze token usage, cost, and cache metrics for Claude Code sessions.
@@ -1396,6 +1456,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => cli.resolve_namespace().await,
     };
     let client = cli.http_client(namespace.as_deref());
+    // Captured before the dispatch `match` moves out of `cli.command`, so
+    // ingest can still mint namespace-scoped clients afterwards.
+    let client_factory = cli.client_factory();
 
     // Branch mirroring: inside a project namespace, default the working
     // branch to the sanitized current git branch. Explicit --branch /
@@ -1828,6 +1891,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             dry_run,
             full_turn,
             no_full_turn,
+            no_auto_register,
         } => {
             // `--full-turn` forces on; `--no-full-turn` forces off; default is on.
             let full_turn_effective = full_turn || !no_full_turn;
@@ -1843,7 +1907,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tokens_only,
                 dry_run,
                 full_turn_effective,
-                client.clone(),
+                client_factory,
+                // Whole-machine sync would otherwise need every repo
+                // hand-registered before it routed anything; a targeted
+                // single-project run stays conservative.
+                all && !no_auto_register,
             )
             .await?;
         }
@@ -4107,7 +4175,12 @@ async fn run_ingest_session(
     tokens_only: bool,
     dry_run: bool,
     mut full_turn: bool,
-    client: reqwest::Client,
+    // Every write here goes through a workspace-routed client minted by
+    // `clients`, so no process-wide client is taken: passing one would imply
+    // some writes bypass routing, and none do. The factory carries the session
+    // id and auth token, so a routed client differs only in its namespace.
+    clients: ClientFactory,
+    auto_register: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
     if api_key.is_empty() && !tokens_only {
@@ -4167,6 +4240,10 @@ async fn run_ingest_session(
             String::new(),
             vec![SessionRef {
                 label: String::new(),
+                // An explicit --file names a transcript, not a project, so the
+                // cwd is read from the file itself during routing rather than
+                // assumed from the caller's shell.
+                cwd: None,
                 path: std::path::PathBuf::from(f),
                 native_id: None,
             }],
@@ -4216,6 +4293,10 @@ async fn run_ingest_session(
     let mut total_full_turns = 0usize;
     let mut total_tokens = crate::ingest::TurnTokens::default();
 
+    // Routes each transcript to the workspace its `cwd` belongs to. Memoized
+    // per directory, so ~350 transcripts cost a few dozen probes.
+    let mut router = crate::workspace::Router::new(server, auto_register, dry_run);
+
     for (source_id, source_label, label, files) in &groups {
         if files.is_empty() {
             continue;
@@ -4250,10 +4331,23 @@ async fn run_ingest_session(
                     Some(derived_sid.as_str())
                 }
             };
+            // Route to the workspace this transcript was recorded in. Every
+            // write below uses `client` (workspace-scoped) rather than the
+            // process-wide one, which is what stops N repos collapsing into
+            // one namespace.
+            let routed = router.route(session_ref.cwd.as_deref()).await;
+            let client = router.client_for(routed.namespace(), |ns| clients.build(ns));
+
             println!(
-                "→ {}  (session: {})",
+                "→ {}  (session: {}, workspace: {})",
                 fname,
-                effective_session.unwrap_or("default")
+                effective_session.unwrap_or("default"),
+                match &routed {
+                    crate::workspace::Routed::Existing(ns) => ns.clone(),
+                    crate::workspace::Routed::Registered(ns) => format!("{ns} (new)"),
+                    crate::workspace::Routed::WouldRegister(ns) => format!("{ns} (would create)"),
+                    crate::workspace::Routed::Fallback => "default".to_string(),
+                }
             );
 
             let source_impl = crate::sources::source_by_id(source_id)
@@ -4466,6 +4560,23 @@ async fn run_ingest_session(
         total_tokens.cache_read,
         total_tokens.cache_creation,
     );
+
+    // Where each directory was routed. Printed for a whole-machine run because
+    // "which workspace did my sessions land in" is the question this feature
+    // exists to answer, and a dry run should answer it without writing.
+    let decisions = router.decisions();
+    if !decisions.is_empty() && (all || dry_run) {
+        println!("\nWorkspaces:");
+        for (cwd, routed) in &decisions {
+            let (ns, note) = match routed {
+                crate::workspace::Routed::Existing(ns) => (ns.as_str(), ""),
+                crate::workspace::Routed::Registered(ns) => (ns.as_str(), "  (registered)"),
+                crate::workspace::Routed::WouldRegister(ns) => (ns.as_str(), "  (would register)"),
+                crate::workspace::Routed::Fallback => ("default", "  (no project)"),
+            };
+            println!("  {:<20} {}{}", ns, cwd, note);
+        }
+    }
 
     // Machine-readable final line so a caller (the hub's session-sync
     // endpoint) can parse the outcome without scraping prose. Always the LAST

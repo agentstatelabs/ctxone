@@ -223,6 +223,13 @@ pub enum DetectResult {
         namespace_id: String,
         remote_url: String,
     },
+    /// Found a project because `cwd` is inside one of its registered
+    /// `local_paths`.
+    FoundByPath {
+        project_id: String,
+        namespace_id: String,
+        local_path: String,
+    },
     /// No project found — caller should warn and fall back to "default".
     NotFound,
     /// Registry is unavailable (non-sqlite backend). Silently use default.
@@ -236,7 +243,13 @@ pub enum DetectResult {
 /// 1. `.ctxproject` file in `cwd` or any parent — read project ID, resolve
 ///    namespace from the registry.
 /// 2. Git remote URL lookup in the registry.
-/// 3. Return `NotFound`.
+/// 3. Longest-prefix match against registered `local_paths`.
+/// 4. Return `NotFound`.
+///
+/// Step 3 exists because `register_project` has always stored `local_paths`
+/// while detection never consulted them, so a repo with no remote and no
+/// `.ctxproject` marker stayed undetectable however it was registered.
+/// Longest-prefix wins so a nested checkout beats its parent.
 ///
 /// `db_path` is `None` for memory/postgres backends, in which case detection
 /// is skipped entirely (`RegistryUnavailable`).
@@ -281,7 +294,50 @@ pub fn detect_project(cwd: &Path, db_path: Option<&str>) -> DetectResult {
         }
     }
 
+    // Step 3: longest registered local_path that contains `cwd`.
+    match resolve_by_local_path(db, cwd) {
+        Ok(Some((p, local_path))) => {
+            return DetectResult::FoundByPath {
+                project_id: p.id,
+                namespace_id: p.namespace_id,
+                local_path,
+            };
+        }
+        Ok(None) => {}
+        Err(_) => return DetectResult::RegistryUnavailable,
+    }
+
     DetectResult::NotFound
+}
+
+/// The project whose registered `local_path` is the longest prefix of `cwd`.
+///
+/// Compared on path components, not raw strings, so `/a/repo-two` cannot match
+/// a registration for `/a/repo`.
+fn resolve_by_local_path(db_path: &str, cwd: &Path) -> SqlResult<Option<(Project, String)>> {
+    let conn = rusqlite::Connection::open(db_path)?;
+    let mut stmt = conn.prepare("SELECT project_id, local_path FROM project_paths")?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
+
+    let mut best: Option<(String, String, usize)> = None;
+    for row in rows {
+        let (project_id, local_path) = row?;
+        let candidate = Path::new(&local_path);
+        if !cwd.starts_with(candidate) {
+            continue;
+        }
+        let depth = candidate.components().count();
+        if best.as_ref().map(|(_, _, d)| depth > *d).unwrap_or(true) {
+            best = Some((project_id, local_path, depth));
+        }
+    }
+
+    let Some((project_id, local_path, _)) = best else {
+        return Ok(None);
+    };
+    Ok(resolve_by_id(db_path, &project_id)?.map(|p| (p, local_path)))
 }
 
 /// Walk `start` and its parents looking for a `.ctxproject` file.

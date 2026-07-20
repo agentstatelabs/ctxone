@@ -3200,7 +3200,10 @@ const SESSION_SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// `--ctx-binary`); non-zero CLI exit → 500 with the stderr tail.
 async fn sync_sessions(
     State(s): State<HubState>,
-    ns: NamespaceId,
+    // Deliberately not used to target the import: sync is machine-wide and
+    // each transcript routes to its own workspace. Kept so the extractor still
+    // validates the header and the handler signature documents the choice.
+    _ns: NamespaceId,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let ctx_bin = s
         .ctx_binary
@@ -3219,13 +3222,27 @@ async fn sync_sessions(
     cmd.arg("ingest-session")
         .arg("--all")
         .arg("--full-turn")
+        // Every installed agent, not just Claude Code. The CLI's `--source`
+        // default is `claude`, so omitting this silently skipped Codex —
+        // a fully implemented source — and any source added later. "Sync"
+        // that quietly covers one agent is worse than no sync at all.
+        .arg("--source")
+        .arg("all")
         .arg("--server")
         .arg(&base_url)
-        // Target this request's namespace so sync lands where session reads do.
-        // Passing it explicitly also stops the CLI from re-detecting a project
-        // from the hub's cwd (deterministic: sync writes exactly one namespace).
+        // NOT this request's namespace. `--all` walks every project on the
+        // machine, so pinning one namespace for the whole run is what
+        // collapsed transcripts from N repos into a single workspace. The CLI
+        // now routes each transcript by its own recorded `cwd`.
+        //
+        // `default` is still passed explicitly, for two reasons: it stops the
+        // CLI re-detecting a project from the *hub daemon's* cwd (which has
+        // nothing to do with the transcripts being imported), and it pins
+        // where unroutable sessions land — otherwise they would drift into
+        // whichever workspace the user happened to be viewing when they hit
+        // sync.
         .arg("--namespace")
-        .arg(&ns.0)
+        .arg("default")
         // Pin the ref to `main`. Session titles/turns are read from `main`
         // (see `read_session_title` / `default_ref`), and an EXPLICIT --branch
         // also suppresses the CLI's git-branch mirroring — which would
@@ -3317,7 +3334,9 @@ async fn sync_sessions(
         turns,
         tokens,
         elapsed_ms,
-        namespace = %ns.0,
+        // The namespace the request arrived on, for correlation only — the
+        // import itself routes per transcript and may write many workspaces.
+        requested_namespace = %_ns.0,
         "session sync complete"
     );
 
@@ -3719,6 +3738,15 @@ async fn detect_project_handler(
             "status": "found", "via": "remote",
             "project_id": project_id, "namespace": namespace_id,
             "remote_url": remote_url,
+        }),
+        DetectResult::FoundByPath {
+            project_id,
+            namespace_id,
+            local_path,
+        } => serde_json::json!({
+            "status": "found", "via": "local_path",
+            "project_id": project_id, "namespace": namespace_id,
+            "local_path": local_path,
         }),
         DetectResult::NotFound => serde_json::json!({
             "status": "not_found", "namespace": "default",

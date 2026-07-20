@@ -42,6 +42,15 @@ pub struct SessionRef {
     /// The agent's own id for this session, when it is known before parsing.
     /// `None` means the caller derives one (Claude Code uses the file stem).
     pub native_id: Option<String>,
+    /// Absolute working directory the session ran in, when the source records
+    /// one. This is what routes a session to its workspace — it is resolved
+    /// against the project registry, unlike [`label`](Self::label), which is
+    /// derived from Claude Code's hashed directory name and cannot tell a
+    /// literal dash from a path separator.
+    ///
+    /// `None` for sources that do not record it; such sessions fall back to
+    /// the default namespace rather than being guessed at.
+    pub cwd: Option<String>,
 }
 
 impl SessionRef {
@@ -133,6 +142,32 @@ impl ClaudeCode {
         }
     }
 
+    /// Read `cwd` from the head of a transcript without parsing all of it.
+    ///
+    /// Every Claude Code entry carries top-level `cwd` and `gitBranch`; the
+    /// first one that has it is enough to route the session to a workspace.
+    /// Whole-machine scans touch every transcript and these reach tens of MB,
+    /// so this stops at the first hit — the same reasoning as Codex's
+    /// [`read_meta`](Codex::read_meta).
+    ///
+    /// Early lines are occasionally summary/meta records without `cwd`, hence
+    /// scanning a few rather than trusting line 1.
+    fn read_cwd(path: &Path) -> Option<String> {
+        use std::io::{BufRead, BufReader};
+        let f = std::fs::File::open(path).ok()?;
+        for line in BufReader::new(f).lines().take(20).map_while(Result::ok) {
+            let Ok(v) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if let Some(cwd) = v.get("cwd").and_then(|x| x.as_str()) {
+                if !cwd.is_empty() {
+                    return Some(cwd.to_string());
+                }
+            }
+        }
+        None
+    }
+
     /// `.jsonl` files in `dir`, oldest first by mtime.
     fn jsonl_files(dir: &Path) -> Vec<PathBuf> {
         let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
@@ -184,6 +219,7 @@ impl SessionSource for ClaudeCode {
             .flat_map(|(label, files)| {
                 files.into_iter().map(move |path| SessionRef {
                     label: label.clone(),
+                    cwd: Self::read_cwd(&path),
                     path,
                     native_id: None, // file stem is the session id
                 })
@@ -198,10 +234,15 @@ impl SessionSource for ClaudeCode {
             return vec![];
         }
         let label = Self::label_for(&hash);
+        // The caller already named the directory, so prefer it over re-reading
+        // the transcript; fall back to the file for the odd session whose cwd
+        // differs from the directory it was filed under.
+        let dir_cwd = project_dir.to_string_lossy().to_string();
         Self::jsonl_files(&dir)
             .into_iter()
             .map(|path| SessionRef {
                 label: label.clone(),
+                cwd: Self::read_cwd(&path).or_else(|| Some(dir_cwd.clone())),
                 path,
                 native_id: None,
             })
@@ -326,6 +367,7 @@ impl SessionSource for Codex {
                     } else {
                         Self::label_for_cwd(&cwd)
                     },
+                    cwd: (!cwd.is_empty()).then_some(cwd),
                     // Fall back to the filename's uuid when meta is missing;
                     // session_id() handles the None case via the file stem.
                     native_id: (!id.is_empty()).then_some(id),
@@ -344,9 +386,12 @@ impl SessionSource for Codex {
         self.discover_all()
             .into_iter()
             .filter(|r| {
-                // Re-read cwd rather than trusting the label, which is lossy.
-                Self::read_meta(&r.path)
-                    .map(|(_, cwd)| cwd.trim_end_matches('/') == want)
+                // Match on the recorded cwd, not the label, which is lossy.
+                // `discover_all` already read it, so this no longer re-opens
+                // every rollout on the machine to answer one project.
+                r.cwd
+                    .as_deref()
+                    .map(|c| c.trim_end_matches('/') == want)
                     .unwrap_or(false)
             })
             .collect()
@@ -406,6 +451,7 @@ mod tests {
     fn session_id_falls_back_to_file_stem() {
         let r = SessionRef {
             label: "x/y".into(),
+            cwd: None,
             path: PathBuf::from("/tmp/abc-123.jsonl"),
             native_id: None,
         };
@@ -416,6 +462,7 @@ mod tests {
     fn session_id_prefers_native_id() {
         let r = SessionRef {
             label: "x/y".into(),
+            cwd: None,
             path: PathBuf::from("/tmp/state.vscdb"),
             native_id: Some("composer-7".into()),
         };
@@ -426,6 +473,7 @@ mod tests {
     fn claude_ids_are_not_namespaced_so_existing_rows_keep_working() {
         let r = SessionRef {
             label: "a/b".into(),
+            cwd: None,
             path: PathBuf::from("/x/9117346d.jsonl"),
             native_id: None,
         };
@@ -436,6 +484,7 @@ mod tests {
     fn other_sources_are_namespaced_to_avoid_collisions() {
         let r = SessionRef {
             label: "a/b".into(),
+            cwd: None,
             path: PathBuf::from("/x/rollout-abc.jsonl"),
             native_id: Some("019e5540".into()),
         };
@@ -453,6 +502,7 @@ mod tests {
     fn group_by_label_keeps_projects_together() {
         let mk = |label: &str, p: &str| SessionRef {
             label: label.into(),
+            cwd: None,
             path: PathBuf::from(p),
             native_id: None,
         };
