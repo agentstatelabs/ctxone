@@ -129,6 +129,18 @@
 		selAt = { x: r.left + r.width / 2, y: r.top };
 	}
 
+	/**
+	 * Drop the floating button. Its position is viewport-fixed and computed
+	 * once from the selection rect, so anything that moves the text out from
+	 * under it — now including the detail column's own scroll — must clear it
+	 * rather than let it strand over unrelated content.
+	 */
+	function clearSelectionAffordance() {
+		if (memOpen || !selText) return;
+		selText = '';
+		selAt = null;
+	}
+
 	function openMemoryEditor() {
 		memFact = selText;
 		memContext = selected ? listLabel(selected) : '';
@@ -833,7 +845,8 @@
 			</div>
 
 			{#if selected}
-				<div class="detail">
+				<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+				<div class="detail" onscroll={clearSelectionAffordance}>
 					<h2>{detailTitle}</h2>
 					{#if detailTitle !== selected.session_id}
 						<div class="detail-id" title="session id">{selected.session_id}</div>
@@ -1426,6 +1439,46 @@
 		grid-template-columns: 300px 1fr;
 		gap: 1.5rem;
 		align-items: start;
+	}
+
+	/*
+		Each column owns its own scroll: a long transcript no longer drags the
+		session list off-screen, and paging the list no longer moves the
+		transcript you are reading.
+
+		Sticky + a viewport-relative max-height rather than a fixed-height flex
+		chain, because the shell (`.app` is min-height:100vh, `main` is
+		flex:1 + overflow-y:auto) leaves the scroll container ambiguous — the
+		document scrolls when content outgrows the viewport, `main` scrolls
+		when it doesn't. Sticky behaves correctly under both; a hard height on
+		.layout would need the whole shell converted to a fixed-height chain.
+
+		4rem = main's 2rem vertical padding, top and bottom.
+	*/
+	.list-col,
+	.detail {
+		position: sticky;
+		top: 0;
+		max-height: calc(100vh - 4rem);
+		overflow-y: auto;
+		/* Grid/flex children need this or min-content height wins over max-height. */
+		min-height: 0;
+		/* Reserve the scrollbar so content doesn't reflow when it appears. */
+		scrollbar-gutter: stable;
+		padding-right: var(--lens-space-2);
+	}
+
+	/* Matches the dashboard's breakpoint. Short viewports get two cramped
+	   scroll panes out of one usable one, so below this hand scrolling back
+	   to the page and let the columns run their natural height. */
+	@media (max-width: 1100px), (max-height: 600px) {
+		.list-col,
+		.detail {
+			position: static;
+			max-height: none;
+			overflow-y: visible;
+			padding-right: 0;
+		}
 	}
 
 	.list {
