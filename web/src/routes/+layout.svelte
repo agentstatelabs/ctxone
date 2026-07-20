@@ -421,9 +421,22 @@
 </div>
 
 <style>
+	/*
+		`height` + `overflow:hidden`, not `min-height`. `main` has carried
+		`overflow-y:auto` all along but never had a height to work against:
+		the nav is taller than the viewport (~1167px), which stretched .app,
+		which stretched main, so main never scrolled and the DOCUMENT did
+		instead. Anything a page pinned to the viewport then rode that outer
+		scroll — which is what made the Sessions panes appear to move
+		together despite each being independently scrollable.
+
+		With the shell pinned, each region scrolls itself: the nav below, the
+		page inside main.
+	*/
 	.app {
 		display: flex;
-		min-height: 100vh;
+		height: 100vh;
+		overflow: hidden;
 		background: var(--lens-bg);
 	}
 
@@ -436,6 +449,8 @@
 		display: flex;
 		flex-direction: column;
 		gap: var(--lens-space-5);
+		/* A nav longer than the viewport scrolls itself rather than the page. */
+		overflow-y: auto;
 	}
 
 	/* ── Brand ─────────────────────────────────────────────────────────────── */
