@@ -17,10 +17,25 @@
 	import { computeBurn, type BurnResult, type BurnTurn } from '$lib/sessionBurn';
 	import type { SessionSnapshot } from '$lib/api';
 
-	let {
-		sessions = [],
-		branch = 'main'
-	}: { sessions?: SessionSnapshot[]; branch?: string } = $props();
+	let { sessions = [] }: { sessions?: SessionSnapshot[] } = $props();
+
+	/**
+	 * Transcripts are read from `main`, NOT the currently-selected branch.
+	 *
+	 * This panel is not branch-scoped, and wiring it to `branchStore.current`
+	 * was wrong in both directions. The candidate list comes from
+	 * `/api/stats/sessions`, which is a global session registry — it is
+	 * namespace-scoped but reads every title and timestamp from `main`
+	 * regardless of branch. Pointing the turn lookup at another branch
+	 * therefore checked a global candidate set against a ref that holds
+	 * almost no transcripts: on `homesite-ios` that produced 12 of 15
+	 * "unrankable" and ranked only the few sessions that happened to have
+	 * turns there — a ranking that looked real and meant nothing.
+	 *
+	 * `main` also matches what the Sessions page reads, so the two views
+	 * agree instead of quietly disagreeing.
+	 */
+	const TURNS_REF = 'main';
 
 	/** Sessions below this many LLM calls are too small to rank meaningfully. */
 	const MIN_CALLS = 40;
@@ -59,7 +74,7 @@
 
 	async function fetchTurns(id: string): Promise<BurnTurn[]> {
 		const r = await hubFetch(
-			`/api/state/${encodeURIComponent(branch)}?path=/sessions/${encodeURIComponent(id)}/turns`
+			`/api/state/${TURNS_REF}?path=/sessions/${encodeURIComponent(id)}/turns`
 		);
 		if (r.status === 404) return []; // predates turn capture
 		if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);

@@ -667,16 +667,21 @@
 	</div>
 
 	<!-- ── 6 · Least efficient sessions ─────────────────────────────────── -->
+	<!--
+		"all branches", matching the other session/token panels: the session
+		registry is global and its transcripts are read from main, so this
+		does not change when you switch branch.
+	-->
 	<Panel
 		title="Least efficient sessions"
-		scope={branchStore.current}
+		scope="all branches"
 		links={[{ href: '/sessions', label: 'Sessions' }]}
 		status={sessionsL.status}
 		errorText={sessionsL.error}
 		emptyTitle="No sessions"
-		emptyText="Nothing to rank on {branchStore.current}."
+		emptyText="No sessions recorded yet."
 	>
-		<BurnBoard sessions={sessionsL.data ?? []} branch={branchStore.current} />
+		<BurnBoard sessions={sessionsL.data ?? []} />
 	</Panel>
 </div>
 
