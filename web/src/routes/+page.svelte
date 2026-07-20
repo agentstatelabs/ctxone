@@ -668,20 +668,20 @@
 
 	<!-- ── 6 · Least efficient sessions ─────────────────────────────────── -->
 	<!--
-		"all branches", matching the other session/token panels: the session
-		registry is global and its transcripts are read from main, so this
-		does not change when you switch branch.
+		Genuinely branch-scoped, unlike the token/session panels above:
+		transcripts are captured per ref, so the ranking is per branch. The
+		workspace half is implicit — hubFetch sends X-CTXone-Namespace.
 	-->
 	<Panel
 		title="Least efficient sessions"
-		scope="all branches"
+		scope={branchStore.current}
 		links={[{ href: '/sessions', label: 'Sessions' }]}
 		status={sessionsL.status}
 		errorText={sessionsL.error}
 		emptyTitle="No sessions"
-		emptyText="No sessions recorded yet."
+		emptyText="No sessions recorded in this workspace yet."
 	>
-		<BurnBoard sessions={sessionsL.data ?? []} />
+		<BurnBoard sessions={sessionsL.data ?? []} branch={branchStore.current} />
 	</Panel>
 </div>
 
@@ -762,8 +762,24 @@
 		display: grid;
 		grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
 		gap: var(--lens-space-4);
-		align-items: start;
+		/*
+			`stretch` (the default), not `start`: panels sharing a row match
+			their row's height, so the two columns line up instead of each
+			panel ending wherever its content happens to stop. This is also
+			what `.fill-row` was hand-rolling for the capture box — that
+			wrapper now only handles growing the textarea into the space.
+		*/
+		align-items: stretch;
 	}
+
+	/*
+		No `height: 100%` on grid children. A percentage height resolves
+		against the grid area, which for an auto-sized row is indefinite, so it
+		falls back to content height — and worse, giving an item a non-`auto`
+		height DISABLES `align-self: stretch`, defeating the one mechanism that
+		does work here. `align-items: stretch` above equalises the row on its
+		own, provided the children keep `height: auto`.
+	*/
 
 	/*
 		Stretch this grid item to its row height and let the chain of
