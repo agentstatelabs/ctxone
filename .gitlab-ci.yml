@@ -20,6 +20,10 @@ frontend:
   script:
     - cd web
     - npm ci
+    # Before the build, so a failing test stops the pipeline instead of
+    # shipping a green artifact. Nothing ran these until now, which is how
+    # the suite sat unrunnable (vitest 2 vs vite 8) without anyone noticing.
+    - npm run test:unit
     - npm run build
   artifacts:
     paths:
