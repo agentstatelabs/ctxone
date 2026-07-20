@@ -980,6 +980,23 @@ enum SessionAction {
         #[arg(long)]
         verbose: bool,
     },
+
+    /// Move existing sessions into the workspace of the repo they ran in.
+    ///
+    /// One-time migration for sessions imported into `default` before
+    /// per-transcript routing existed. Resolves each session's working
+    /// directory from its on-disk transcript, routes it, and moves the
+    /// `/sessions/<id>` subtree — deleting the copy left in `default`.
+    Reattribute {
+        /// Show the plan without moving anything.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Create a workspace for a repo that has no registered project,
+        /// rather than leaving those sessions in `default`.
+        #[arg(long)]
+        auto_register: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1895,7 +1912,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Commands::Session { action } => {
-            run_session_action(action).await?;
+            run_session_action(action, &cli.server, client_factory).await?;
         }
 
         Commands::IngestSession {
@@ -4665,7 +4682,11 @@ async fn run_ingest_session(
 
 // ── ctx session metrics ───────────────────────────────────────────────────────
 
-async fn run_session_action(action: SessionAction) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_session_action(
+    action: SessionAction,
+    server: &str,
+    clients: ClientFactory,
+) -> Result<(), Box<dyn std::error::Error>> {
     match action {
         SessionAction::Metrics {
             project,
@@ -4678,7 +4699,125 @@ async fn run_session_action(action: SessionAction) -> Result<(), Box<dyn std::er
         } => {
             run_session_metrics(project, session, list, all, json, gap, verbose).await?;
         }
+        SessionAction::Reattribute {
+            dry_run,
+            auto_register,
+        } => {
+            run_reattribute(server, &clients, dry_run, auto_register).await?;
+        }
     }
+    Ok(())
+}
+
+/// Move existing sessions into the workspace of the repo they ran in.
+///
+/// The 98 sessions imported before per-transcript routing all sit in
+/// `default`. This resolves each one's cwd from the transcript still on disk
+/// — the session id is exactly what the sources key on — routes it, and asks
+/// the hub to move the subtree, deleting the `default` copy.
+///
+/// Deliberately transcript-driven rather than trusting the stored session
+/// list: a session's origin is a property of where it ran, which lives in the
+/// transcript, not in whatever namespace it currently happens to sit in.
+async fn run_reattribute(
+    server: &str,
+    clients: &ClientFactory,
+    dry_run: bool,
+    auto_register: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::sources::SessionSource;
+
+    // session id -> cwd, straight from the sources. Same discovery ingest
+    // uses, so a session routes to exactly where a fresh ingest would put it.
+    let mut cwd_by_sid: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for src in crate::sources::all_sources() {
+        if !src.is_available() {
+            continue;
+        }
+        for r in src.discover_all() {
+            if let Some(cwd) = &r.cwd {
+                cwd_by_sid
+                    .entry(r.namespaced_id(src.id()))
+                    .or_insert_with(|| cwd.clone());
+            }
+        }
+    }
+
+    // Every session currently in `default`.
+    let default_client = clients.build(Some("default"));
+    let sessions: Vec<serde_json::Value> = default_client
+        .get(format!("{server}/api/stats/sessions"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    println!("{} sessions in `default`.", sessions.len());
+
+    let mut router = crate::workspace::Router::new(server, auto_register, dry_run);
+    let mut plan: Vec<(String, String)> = Vec::new(); // (sid, target-ns)
+    let mut unresolved = 0usize;
+
+    for s in &sessions {
+        let Some(sid) = s["session_id"].as_str() else {
+            continue;
+        };
+        let Some(cwd) = cwd_by_sid.get(sid) else {
+            // No transcript on disk for this id — cannot know where it ran, so
+            // it stays in `default` rather than being guessed at.
+            unresolved += 1;
+            continue;
+        };
+        match router.route(Some(cwd)).await.namespace() {
+            Some(ns) if ns != "default" => plan.push((sid.to_string(), ns.to_string())),
+            _ => {} // routes to default (or would-register under dry run): leave it
+        }
+    }
+
+    println!(
+        "\n{} to move, {} staying in `default` ({} unresolved, rest already default):",
+        plan.len(),
+        sessions.len() - plan.len(),
+        unresolved,
+    );
+    for (sid, ns) in &plan {
+        println!("  {}  default → {}", &sid[..sid.len().min(24)], ns);
+    }
+
+    if dry_run {
+        println!("\nDry run — nothing moved. Re-run without --dry-run to apply.");
+        return Ok(());
+    }
+
+    let mut moved = 0usize;
+    let mut already = 0usize;
+    let mut failed = 0usize;
+    for (sid, ns) in &plan {
+        let body = serde_json::json!({ "to_namespace": ns });
+        let resp = default_client
+            .post(format!("{server}/api/sessions/{}/move", urlencoding(sid)))
+            .json(&body)
+            .send()
+            .await;
+        match resp {
+            Ok(r) if r.status().is_success() => moved += 1,
+            // 404 = the subtree is no longer in `default`, i.e. a previous run
+            // already moved it. The global session registry (Phase 5 will
+            // scope it) still lists it here, so a re-run re-plans the move;
+            // treating "not in source" as done is what makes the sweep safely
+            // repeatable.
+            Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND => already += 1,
+            Ok(r) => {
+                failed += 1;
+                eprintln!("  move {} → {} failed: {}", sid, ns, r.status());
+            }
+            Err(e) => {
+                failed += 1;
+                eprintln!("  move {} → {} error: {}", sid, ns, e);
+            }
+        }
+    }
+    println!("\nMoved {moved}, already in place {already}, failed {failed}.");
     Ok(())
 }
 

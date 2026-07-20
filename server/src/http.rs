@@ -639,6 +639,10 @@ fn router_with_config_inner(
         )
         .route("/api/sessions/{sid}", axum::routing::delete(delete_session))
         .route(
+            "/api/sessions/{sid}/move",
+            axum::routing::post(move_session),
+        )
+        .route(
             "/api/session_tombstones",
             get(list_session_tombstones),
         )
@@ -3289,6 +3293,107 @@ async fn delete_session(
         "commit_id": deleted,
         "tombstoned": tombstoned,
         "removed_from_registry": from_registry,
+    })))
+}
+
+#[derive(Deserialize)]
+struct MoveSessionRequest {
+    to_namespace: String,
+    #[serde(default = "default_ref")]
+    ref_name: String,
+}
+
+/// `POST /api/sessions/{sid}/move` — relocate a session to another workspace.
+///
+/// The migration for sessions that were all imported into `default` before
+/// per-transcript routing existed. Reads the `/sessions/{sid}` subtree from
+/// the request namespace, writes it whole into `to_namespace`, then deletes
+/// the original — the delete is the point, since re-ingesting alone would
+/// leave the stale copy behind and produce duplicates.
+///
+/// Idempotent by `updated_at`: if the target already holds a copy that is
+/// equal or newer, the source is removed but the target is left untouched, so
+/// a re-run cannot clobber a target that has moved on.
+async fn move_session(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+    Path(sid): Path<String>,
+    agent_id: AgentId,
+    Json(req): Json<MoveSessionRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if req.to_namespace == ns.0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "to_namespace is the current namespace; nothing to move".to_string(),
+        ));
+    }
+    let src = s.repo_for(&ns)?;
+    let dst = s.repo_for(&NamespaceId(req.to_namespace.clone()))?;
+    let root = format!("/sessions/{}", sid);
+
+    // The subtree to move. A session with no nodes here is a 404 — moving
+    // nothing is a caller error worth surfacing, not a silent success.
+    let subtree = src
+        .get_tree(&req.ref_name, &root)
+        .map_err(|_| (StatusCode::NOT_FOUND, format!("no session {} in {}", sid, ns.0)))?;
+
+    // Skip the write when the target already has an equal-or-newer copy, so a
+    // re-run does not overwrite a session that was updated in its new home.
+    let src_updated = subtree
+        .get("meta")
+        .and_then(|m| m.get("updated_at"))
+        .and_then(|v| v.as_str());
+    let dst_existing = dst.get_tree(&req.ref_name, &root).ok();
+    let dst_updated = dst_existing
+        .as_ref()
+        .and_then(|t| t.get("meta"))
+        .and_then(|m| m.get("updated_at"))
+        .and_then(|v| v.as_str());
+    let target_is_current = match (src_updated, dst_updated) {
+        (Some(src_ts), Some(dst_ts)) => dst_ts >= src_ts,
+        // Target has a copy but neither carries a timestamp: treat as current
+        // rather than risk clobbering.
+        (_, _) if dst_existing.is_some() => true,
+        _ => false,
+    };
+
+    if !target_is_current {
+        let opts = CommitOptions::new(
+            &agent_id.0,
+            IntentCategory::Custom("Migrate".to_string()),
+            format!("move session {} to {}", sid, req.to_namespace),
+        )
+        .with_tags(vec![
+            format!("session:{}", sid),
+            "kind:session-move".to_string(),
+        ]);
+        dst.set_json(&req.ref_name, &root, &subtree, opts)
+            .map_err(internal_error)?;
+    }
+
+    // Remove the original. This is what makes the move a move rather than a
+    // copy, and what stops the migration leaving duplicates in `default`.
+    let del_opts = CommitOptions::new(
+        &agent_id.0,
+        IntentCategory::Rollback,
+        format!("remove session {} after move to {}", sid, req.to_namespace),
+    )
+    .with_tags(vec![
+        format!("session:{}", sid),
+        "kind:session-move-cleanup".to_string(),
+    ]);
+    src.delete(&req.ref_name, &root, del_opts)
+        .map_err(internal_error)?;
+
+    s.sessions.mark_all_dirty();
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "session_id": sid,
+        "from": ns.0,
+        "to": req.to_namespace,
+        "wrote_target": !target_is_current,
+        "target_was_current": target_is_current,
     })))
 }
 
