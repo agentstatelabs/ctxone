@@ -41,11 +41,18 @@
 		branch = 'main'
 	}: { sessions?: SessionSnapshot[]; branch?: string } = $props();
 
-	/** Sessions below this many LLM calls are too small to rank meaningfully. */
-	const MIN_CALLS = 40;
-	/** Hard cap on transcripts pulled per scan — the cost control. */
-	const MAX_CANDIDATES = 15;
-	const CONCURRENCY = 4;
+	/**
+	 * Every session in the workspace gets scanned — no activity threshold and
+	 * no candidate cap. Measured against the live hub: 98 sessions, 92 with a
+	 * transcript, averaging 0.32MB, so a full scan is ~29MB. That is fine for
+	 * an explicit on-demand action (and far cheaper than the per-session
+	 * worst case suggested — the big transcripts are outliers, not typical).
+	 *
+	 * Sessions with no transcript cost a 404 and are counted, not ranked.
+	 */
+	const CONCURRENCY = 6;
+	/** Rows kept after ranking. The scan is exhaustive; the list is not. */
+	const SHOW = 15;
 
 	interface Row {
 		id: string;
@@ -62,6 +69,8 @@
 	let skipped = $state(0);
 	let absent = $state(0);
 	let failed = $state(0);
+	/** How many ranked in total, so a capped list can say what it is hiding. */
+	let ranked = $state(0);
 	let error = $state<string | null>(null);
 
 	// Results belong to the branch they were scanned on. Showing one branch's
@@ -74,13 +83,14 @@
 		skipped = 0;
 		absent = 0;
 		failed = 0;
+		ranked = 0;
 		error = null;
 	});
 
+	// Busiest first, so the sessions most likely to rank resolve early and the
+	// progress counter is useful rather than back-loaded.
 	const candidates = $derived(
-		[...sessions]
-			.filter((s) => (s.llm_call_count ?? 0) >= MIN_CALLS)
-			.sort((a, b) => (b.llm_call_count ?? 0) - (a.llm_call_count ?? 0))
+		[...sessions].sort((a, b) => (b.llm_call_count ?? 0) - (a.llm_call_count ?? 0))
 	);
 
 	function label(s: SessionSnapshot): string {
@@ -109,8 +119,9 @@
 		error = null;
 		done = 0;
 		skipped = 0;
+		absent = 0;
 		failed = 0;
-		const pool = candidates.slice(0, MAX_CANDIDATES);
+		const pool = candidates;
 		total = pool.length;
 		const out: Row[] = [];
 
@@ -143,10 +154,11 @@
 				}
 			};
 			await Promise.all(Array.from({ length: Math.min(CONCURRENCY, pool.length) }, worker));
-			// Every rankable session, worst first — the list scrolls rather than
-			// truncating, so a scan of 15 shows all 15 it could judge.
+			// Worst first, top SHOW kept. The scan covers every session; the list
+			// is capped because past ~15 rows this stops being a dashboard panel.
 			out.sort((a, b) => (b.burn.ratio ?? 0) - (a.burn.ratio ?? 0));
-			rows = out;
+			ranked = out.length;
+			rows = out.slice(0, SHOW);
 			scanned = true;
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
@@ -160,11 +172,12 @@
 	{#if !scanned && !scanning}
 		<p class="bb-intro">
 			Ranks this workspace's sessions on <code>{branch}</code> by context tokens
-			spent per edit landed, against each session's own baseline. Reads up to
-			{MAX_CANDIDATES} transcripts, so it runs on request rather than on every refresh.
+			spent per edit landed, against each session's own baseline. Reads every
+			transcript on the branch, so it runs on request rather than on every
+			refresh.
 		</p>
 		<button class="bb-run" onclick={scan} disabled={candidates.length === 0}>
-			{candidates.length ? `Scan ${Math.min(candidates.length, MAX_CANDIDATES)} sessions` : 'No sessions large enough'}
+			{candidates.length ? `Scan all ${candidates.length} sessions` : 'No sessions yet'}
 		</button>
 	{:else if scanning}
 		<p class="bb-progress">Scanning transcripts… {done}/{total}</p>
@@ -198,7 +211,8 @@
 		{/if}
 		<div class="bb-foot">
 			<span>
-				scanned {total}{absent ? ` · ${absent} not on ${branch}` : ''}{skipped
+				{ranked > rows.length ? `top ${rows.length} of ${ranked} ranked · ` : ''}scanned
+				{total}{absent ? ` · ${absent} not on ${branch}` : ''}{skipped
 					? ` · ${skipped} unrankable`
 					: ''}{failed ? ` · ${failed} failed` : ''}
 			</span>
