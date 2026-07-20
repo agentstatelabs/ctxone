@@ -15,6 +15,7 @@
 <script lang="ts">
 	import { hubFetch } from '$lib/api';
 	import { computeBurn, type BurnResult, type BurnTurn } from '$lib/sessionBurn';
+	import { namespaceStore } from '$lib/namespaceStore.svelte';
 	import type { SessionSnapshot } from '$lib/api';
 
 	/**
@@ -58,7 +59,35 @@
 		id: string;
 		name: string;
 		turns: number;
-		burn: BurnResult;
+		/** Ratio and level only — a whole BurnResult carries a per-turn series
+		 *  that would bloat the cache for data the row never renders. */
+		ratio: number;
+		level: BurnResult['level'];
+		/** Epoch ms of the first and last turn, or null when unstamped. */
+		from: number | null;
+		to: number | null;
+	}
+
+	interface Cached {
+		v: 1;
+		scannedAt: number;
+		rows: Row[];
+		total: number;
+		absent: number;
+		skipped: number;
+		failed: number;
+		ranked: number;
+	}
+
+	/**
+	 * Results persist per workspace+branch, so switching away and back — or
+	 * reloading the dashboard — does not force a fresh ~29MB scan. The key
+	 * carries both scopes because a cache shown under the wrong branch is the
+	 * mislabeling bug this panel has already shipped once.
+	 */
+	const CACHE_V = 1;
+	function cacheKey(ns: string, br: string): string {
+		return `ctxone.burnboard.v${CACHE_V}.${ns}.${br}`;
 	}
 
 	let rows = $state<Row[]>([]);
@@ -71,27 +100,133 @@
 	let failed = $state(0);
 	/** How many ranked in total, so a capped list can say what it is hiding. */
 	let ranked = $state(0);
+	let scannedAt = $state<number | null>(null);
 	let error = $state<string | null>(null);
 
-	// Results belong to the branch they were scanned on. Showing one branch's
-	// ranking under another's name is precisely the bug this panel already had
-	// once, so a branch switch clears rather than silently mislabels.
-	$effect(() => {
-		branch;
+	function reset() {
 		rows = [];
 		scanned = false;
 		skipped = 0;
 		absent = 0;
 		failed = 0;
 		ranked = 0;
+		scannedAt = null;
 		error = null;
+	}
+
+	// Results belong to the workspace+branch they were scanned on, so a switch
+	// loads THAT scope's cache rather than leaving the previous one on screen
+	// under a new name — the mislabeling bug this panel already shipped once.
+	$effect(() => {
+		const key = cacheKey(namespaceStore.current, branch);
+		reset();
+		if (typeof localStorage === 'undefined') return;
+		try {
+			const raw = localStorage.getItem(key);
+			if (!raw) return;
+			const c = JSON.parse(raw) as Cached;
+			if (c?.v !== CACHE_V || !Array.isArray(c.rows)) return;
+			rows = c.rows;
+			total = c.total;
+			absent = c.absent;
+			skipped = c.skipped;
+			failed = c.failed;
+			ranked = c.ranked;
+			scannedAt = c.scannedAt;
+			scanned = true;
+		} catch {
+			// A corrupt or unreadable entry just means "not scanned yet".
+		}
 	});
+
+	function persist() {
+		if (typeof localStorage === 'undefined') return;
+		const payload: Cached = {
+			v: CACHE_V,
+			scannedAt: scannedAt ?? Date.now(),
+			rows,
+			total,
+			absent,
+			skipped,
+			failed,
+			ranked
+		};
+		try {
+			localStorage.setItem(cacheKey(namespaceStore.current, branch), JSON.stringify(payload));
+		} catch {
+			// Quota or private-mode failure — the scan still stands for this
+			// session, it just will not survive a reload.
+		}
+	}
 
 	// Busiest first, so the sessions most likely to rank resolve early and the
 	// progress counter is useful rather than back-loaded.
 	const candidates = $derived(
 		[...sessions].sort((a, b) => (b.llm_call_count ?? 0) - (a.llm_call_count ?? 0))
 	);
+
+	/**
+	 * When the transcript actually ran, taken from the turns themselves rather
+	 * than the session's `started_at`/`updated_at`. Session meta is written on
+	 * `main` and covers the session as a whole; the turns are what this branch
+	 * holds, so they are the honest answer to "what period does this ranking
+	 * cover". Falls back to session meta when turns carry no timestamps.
+	 */
+	function turnSpan(
+		turns: BurnTurn[],
+		s: SessionSnapshot
+	): { from: number | null; to: number | null } {
+		let lo = Infinity;
+		let hi = -Infinity;
+		for (const t of turns) {
+			const raw = (t as { timestamp?: string }).timestamp;
+			if (!raw) continue;
+			const ms = Date.parse(raw);
+			if (Number.isNaN(ms)) continue;
+			if (ms < lo) lo = ms;
+			if (ms > hi) hi = ms;
+		}
+		if (lo !== Infinity) return { from: lo, to: hi };
+		const a = s.started_at ? Date.parse(s.started_at) : NaN;
+		const b = s.updated_at ? Date.parse(s.updated_at) : NaN;
+		return { from: Number.isNaN(a) ? null : a, to: Number.isNaN(b) ? null : b };
+	}
+
+	const DAY = 86_400_000;
+
+	/** "Jun 1", or "May 28 – Jun 1" when it spans days. */
+	function rangeLabel(from: number | null, to: number | null): string {
+		if (from === null) return '—';
+		const d = (ms: number) =>
+			new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+		const start = d(from);
+		if (to === null) return start;
+		const end = d(to);
+		return start === end ? start : `${start} – ${end}`;
+	}
+
+	/** Full timestamps plus elapsed, for the hover title. */
+	function rangeTitle(from: number | null, to: number | null): string {
+		if (from === null) return 'No timestamps on these turns';
+		const f = new Date(from).toLocaleString();
+		if (to === null) return f;
+		const ms = to - from;
+		const span =
+			ms >= DAY
+				? `${(ms / DAY).toFixed(1)}d`
+				: ms >= 3_600_000
+					? `${(ms / 3_600_000).toFixed(1)}h`
+					: `${Math.max(1, Math.round(ms / 60_000))}m`;
+		return `${f} → ${new Date(to).toLocaleString()} (${span})`;
+	}
+
+	function agoLabel(ms: number): string {
+		const s = Math.max(0, Date.now() - ms) / 1000;
+		if (s < 90) return 'just now';
+		if (s < 5400) return `${Math.round(s / 60)}m ago`;
+		if (s < DAY / 1000) return `${Math.round(s / 3600)}h ago`;
+		return `${Math.round(s / 86400)}d ago`;
+	}
 
 	function label(s: SessionSnapshot): string {
 		const n = (s.name ?? '').trim();
@@ -145,7 +280,18 @@
 						// no productive baseline). Ranking those would be inventing a
 						// number the metric explicitly refused to give.
 						if (burn.level === 'unknown' || burn.ratio === null) skipped++;
-						else out.push({ id: s.session_id, name: label(s), turns: turns.length, burn });
+						else {
+							const span = turnSpan(turns, s);
+							out.push({
+								id: s.session_id,
+								name: label(s),
+								turns: turns.length,
+								ratio: burn.ratio,
+								level: burn.level,
+								from: span.from,
+								to: span.to
+							});
+						}
 					} catch {
 						failed++;
 					} finally {
@@ -156,10 +302,12 @@
 			await Promise.all(Array.from({ length: Math.min(CONCURRENCY, pool.length) }, worker));
 			// Worst first, top SHOW kept. The scan covers every session; the list
 			// is capped because past ~15 rows this stops being a dashboard panel.
-			out.sort((a, b) => (b.burn.ratio ?? 0) - (a.burn.ratio ?? 0));
+			out.sort((a, b) => b.ratio - a.ratio);
 			ranked = out.length;
 			rows = out.slice(0, SHOW);
+			scannedAt = Date.now();
 			scanned = true;
+			persist();
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -203,7 +351,10 @@
 						<a class="bb-name" href={`/sessions?session=${encodeURIComponent(r.id)}`} title={r.name}>
 							{r.name}
 						</a>
-						<span class="bb-ratio bb-{r.burn.level}">{r.burn.ratio?.toFixed(1)}×</span>
+						<span class="bb-range" title={rangeTitle(r.from, r.to)}>
+							{rangeLabel(r.from, r.to)}
+						</span>
+						<span class="bb-ratio bb-{r.level}">{r.ratio.toFixed(1)}×</span>
 						<span class="bb-turns">{r.turns} turns</span>
 					</li>
 				{/each}
@@ -214,7 +365,9 @@
 				{ranked > rows.length ? `top ${rows.length} of ${ranked} ranked · ` : ''}scanned
 				{total}{absent ? ` · ${absent} not on ${branch}` : ''}{skipped
 					? ` · ${skipped} unrankable`
-					: ''}{failed ? ` · ${failed} failed` : ''}
+					: ''}{failed ? ` · ${failed} failed` : ''}{scannedAt
+					? ` · ${agoLabel(scannedAt)}`
+					: ''}
 			</span>
 			<button class="bb-rescan" onclick={scan} disabled={scanning}>Rescan</button>
 		</div>
@@ -276,10 +429,17 @@
 
 	.bb-row {
 		display: grid;
-		grid-template-columns: 1.2rem 1fr auto auto;
+		grid-template-columns: 1.2rem 1fr auto auto auto;
 		align-items: baseline;
 		gap: var(--lens-space-2);
 		font-size: var(--lens-font-size-sm);
+	}
+
+	.bb-range {
+		font-family: var(--lens-font-mono);
+		font-size: var(--lens-font-size-xs);
+		color: var(--lens-text-muted);
+		white-space: nowrap;
 	}
 
 	.bb-rank {
