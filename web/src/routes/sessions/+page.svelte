@@ -1446,23 +1446,39 @@
 		session list off-screen, and paging the list no longer moves the
 		transcript you are reading.
 
-		Sticky + a viewport-relative max-height rather than a fixed-height flex
-		chain, because the shell (`.app` is min-height:100vh, `main` is
-		flex:1 + overflow-y:auto) leaves the scroll container ambiguous — the
-		document scrolls when content outgrows the viewport, `main` scrolls
-		when it doesn't. Sticky behaves correctly under both; a hard height on
-		.layout would need the whole shell converted to a fixed-height chain.
+		Done by pinning the page to the viewport and letting the columns take
+		the leftover height, rather than sticky + a `calc(100vh - …)` guess on
+		each column. The guess version measured 76px of the detail pane
+		hanging below the fold: the columns start at y=90 (header + main's
+		padding), and `content-box` leaves their own 24px/24px padding outside
+		max-height. Deriving the height from the flex chain has no such
+		off-by-a-header — whatever the header costs, .layout gets the rest.
 
-		4rem = main's 2rem vertical padding, top and bottom.
+		4rem = main's 2rem vertical padding, top and bottom. That is the one
+		number still assumed from the shell; everything else falls out.
 	*/
+	.page {
+		display: flex;
+		flex-direction: column;
+		height: calc(100vh - 4rem);
+		min-height: 0;
+	}
+
+	.header { flex: none; }
+
+	.layout {
+		flex: 1 1 auto;
+		/* Without this, the grid's min-content height wins and nothing scrolls. */
+		min-height: 0;
+	}
+
 	.list-col,
 	.detail {
-		position: sticky;
-		top: 0;
-		max-height: calc(100vh - 4rem);
+		height: 100%;
 		overflow-y: auto;
-		/* Grid/flex children need this or min-content height wins over max-height. */
 		min-height: 0;
+		/* Padding must count against the height, or it pushes past the fold. */
+		box-sizing: border-box;
 		/* Reserve the scrollbar so content doesn't reflow when it appears. */
 		scrollbar-gutter: stable;
 		padding-right: var(--lens-space-2);
@@ -1472,10 +1488,15 @@
 	   scroll panes out of one usable one, so below this hand scrolling back
 	   to the page and let the columns run their natural height. */
 	@media (max-width: 1100px), (max-height: 600px) {
+		/* Unwind the whole chain, not just the columns — leaving .page pinned
+		   to the viewport while the columns run free would clip them. */
+		.page {
+			display: block;
+			height: auto;
+		}
 		.list-col,
 		.detail {
-			position: static;
-			max-height: none;
+			height: auto;
 			overflow-y: visible;
 			padding-right: 0;
 		}
