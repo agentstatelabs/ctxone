@@ -589,20 +589,36 @@
 		{/if}
 	</Panel>
 
-	<!-- ── 5 · Quick capture ────────────────────────────────────────────── -->
-	<!--
-		Stretches to its row's height instead of leaving a hole beneath it.
-		The grid rows are as tall as their tallest panel and `align-items:
-		start` does not stretch the shorter one, so this 214px input strip
-		beside a ~500px panel left a ~290px gap. Rather than span the full
-		width, it fills the row and gives the reclaimed space to the textarea
-		— a taller capture box is useful, an empty one is not.
-	-->
-	<div class="fill-row">
-		<Panel title="Remember a fact" scope={branchStore.current}>
-			<QuickCapture {connected} onSaved={() => refreshAll(false)} />
-		</Panel>
-	</div>
+	<!-- ── 4 · Activity ─────────────────────────────────────────────────── -->
+	<Panel
+		title="Activity"
+		scope={branchStore.current}
+		links={[
+			{ href: '/history', label: 'History' },
+			{ href: '/tail', label: 'Live Tail' }
+		]}
+		status={activityStatus}
+		errorText={activityL.error || logL.error}
+		emptyTitle="No commits yet"
+		emptyText="Memory writes on {branchStore.current} will show up here."
+	>
+		<CalendarHeatmap data={heatCells} ariaLabel="Memory commits per day" />
+		{#if activityTruncated}
+			<!-- A capped walk must never read as a quiet period. -->
+			<p class="activity-note">
+				History is partial — the scan reached its limit before covering the full window.
+			</p>
+		{/if}
+		<ul class="commits">
+			{#each recentCommits as commit (commit.id)}
+				<li class="commit">
+					<span class="commit-time">{commit.timestamp.slice(0, 19).replace('T', ' ')}</span>
+					<span class="commit-category">[{commit.intent.category}]</span>
+					<span class="commit-desc">{commit.intent.description}</span>
+				</li>
+			{/each}
+		</ul>
+	</Panel>
 
 	<!-- ── 3 · Plan health ──────────────────────────────────────────────── -->
 	<Panel
@@ -634,36 +650,20 @@
 		</div>
 	</Panel>
 
-	<!-- ── 4 · Activity ─────────────────────────────────────────────────── -->
-	<Panel
-		title="Activity"
-		scope={branchStore.current}
-		links={[
-			{ href: '/history', label: 'History' },
-			{ href: '/tail', label: 'Live Tail' }
-		]}
-		status={activityStatus}
-		errorText={activityL.error || logL.error}
-		emptyTitle="No commits yet"
-		emptyText="Memory writes on {branchStore.current} will show up here."
-	>
-		<CalendarHeatmap data={heatCells} ariaLabel="Memory commits per day" />
-		{#if activityTruncated}
-			<!-- A capped walk must never read as a quiet period. -->
-			<p class="activity-note">
-				History is partial — the scan reached its limit before covering the full window.
-			</p>
-		{/if}
-		<ul class="commits">
-			{#each recentCommits as commit (commit.id)}
-				<li class="commit">
-					<span class="commit-time">{commit.timestamp.slice(0, 19).replace('T', ' ')}</span>
-					<span class="commit-category">[{commit.intent.category}]</span>
-					<span class="commit-desc">{commit.intent.description}</span>
-				</li>
-			{/each}
-		</ul>
-	</Panel>
+	<!-- ── 5 · Quick capture ────────────────────────────────────────────── -->
+	<!--
+		Stretches to its row's height instead of leaving a hole beneath it.
+		The grid rows are as tall as their tallest panel and `align-items:
+		start` does not stretch the shorter one, so this 214px input strip
+		beside a ~500px panel left a ~290px gap. Rather than span the full
+		width, it fills the row and gives the reclaimed space to the textarea
+		— a taller capture box is useful, an empty one is not.
+	-->
+	<div class="fill-row">
+		<Panel title="Remember a fact" scope={branchStore.current}>
+			<QuickCapture {connected} onSaved={() => refreshAll(false)} />
+		</Panel>
+	</div>
 </div>
 
 <style>

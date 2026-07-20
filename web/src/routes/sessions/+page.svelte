@@ -1,5 +1,6 @@
 <script lang="ts">
-	import { hubFetch } from '$lib/api';
+	import { hubFetch, remember } from '$lib/api';
+	import { computeBurn } from '$lib/sessionBurn';
 	import { formatCompact } from '@agentstate/lens-core';
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
 	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
@@ -74,6 +75,101 @@
 	let turns: Turn[] = $state([]);
 	let turnsLoading = $state(false);
 	let turnsError: string | null = $state(null);
+
+	// ── Burn metric ─────────────────────────────────────────────────────────
+	// Context tokens spent per edit landed, trailing window vs this session's
+	// own baseline. Thresholds are calibrated in sessionBurn.ts against the
+	// real rolling-window distribution — do not retune them here.
+	const burn = $derived(computeBurn(turns));
+
+	/** Sparkline path for the rolling ratio, clamped so outliers don't flatten it. */
+	function burnSpark(series: number[], w = 240, h = 32): string {
+		if (series.length < 2) return '';
+		const cap = 12; // above this the shape stops mattering; it's all "bad"
+		const v = series.map((x) => Math.min(x, cap));
+		const max = Math.max(...v, 4);
+		const dx = w / (v.length - 1);
+		return v
+			.map((y, i) => `${i === 0 ? 'M' : 'L'}${(i * dx).toFixed(1)},${(h - (y / max) * h).toFixed(1)}`)
+			.join(' ');
+	}
+
+	// ── Selection → memory ──────────────────────────────────────────────────
+	// Highlight any part of the transcript and save it as a real memory. The
+	// selection is captured on mouseup/keyup within the transcript only, so a
+	// selection elsewhere on the page never arms the button.
+	let selText = $state('');
+	let selAt: { x: number; y: number } | null = $state(null);
+	let memOpen = $state(false);
+	let memFact = $state('');
+	let memImportance = $state<'high' | 'medium' | 'low'>('medium');
+	let memContext = $state('');
+	let memSaving = $state(false);
+	let memMsg: string | null = $state(null);
+	let memFailed = $state(false);
+
+	function captureSelection(e: Event) {
+		if (memOpen) return; // don't fight the editor while it's open
+		const sel = window.getSelection();
+		const text = sel?.toString().trim() ?? '';
+		if (!text || !sel || sel.rangeCount === 0) {
+			selText = '';
+			selAt = null;
+			return;
+		}
+		// Only arm for selections that live inside the transcript.
+		const host = (e.currentTarget as HTMLElement) ?? null;
+		if (host && !host.contains(sel.anchorNode)) {
+			selText = '';
+			selAt = null;
+			return;
+		}
+		const r = sel.getRangeAt(0).getBoundingClientRect();
+		selText = text;
+		selAt = { x: r.left + r.width / 2, y: r.top };
+	}
+
+	function openMemoryEditor() {
+		memFact = selText;
+		memContext = selected ? listLabel(selected) : '';
+		memMsg = null;
+		memFailed = false;
+		memOpen = true;
+	}
+
+	function closeMemoryEditor() {
+		memOpen = false;
+		selText = '';
+		selAt = null;
+	}
+
+	async function saveSelectionAsMemory() {
+		if (!memFact.trim()) return;
+		memSaving = true;
+		memMsg = null;
+		memFailed = false;
+		try {
+			const tags = ['kind:excerpt'];
+			if (selected) tags.push(`session:${selected.session_id}`);
+			const res = await remember({
+				fact: memFact.trim(),
+				importance: memImportance,
+				context: memContext.trim() || undefined,
+				tags
+			});
+			memMsg = `Saved: ${res.path}`;
+			if (selected) await loadMemories(selected.session_id);
+			// Leave the panel up briefly so the path is readable, then reset.
+			setTimeout(() => {
+				if (!memFailed) closeMemoryEditor();
+			}, 1200);
+		} catch (err) {
+			memFailed = true;
+			memMsg = err instanceof Error ? err.message : 'Save failed';
+		} finally {
+			memSaving = false;
+		}
+	}
 	let expandedTools: Record<string, boolean> = $state({});
 
 	$effect(() => {
@@ -812,6 +908,34 @@
 						</p>
 					{/if}
 
+					{#if turns.length > 0 && !turnsLoading && !turnsError}
+						<h3>Session efficiency</h3>
+						<div class="burn burn-{burn.level}">
+							<div class="burn-head">
+								<span class="burn-badge">{burn.level}</span>
+								<span class="burn-headline">{burn.headline}</span>
+							</div>
+							<p class="burn-detail">{burn.detail}</p>
+							{#if burn.series.length > 1}
+								<svg
+									class="burn-spark"
+									viewBox="0 0 240 32"
+									preserveAspectRatio="none"
+									role="img"
+									aria-label="Cost per edit over the session, relative to its baseline"
+								>
+									<path d={burnSpark(burn.series)} fill="none" stroke="currentColor" stroke-width="1.5" />
+								</svg>
+								<div class="burn-foot">
+									<span>cost per edit vs this session’s baseline →</span>
+									{#if burn.knee !== null}
+										<span class="burn-knee">crossed over around turn #{burn.knee + 1}</span>
+									{/if}
+								</div>
+							{/if}
+						</div>
+					{/if}
+
 					<h3>
 							Conversation
 							{#if turns.length}
@@ -842,7 +966,8 @@
 					{:else if filteredTurns.length === 0}
 						<p class="muted hint">No turns match this search.</p>
 					{:else}
-						<ol class="turns">
+						<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+						<ol class="turns" onmouseup={captureSelection} onkeyup={captureSelection}>
 							{#each filteredTurns as t (t.key)}
 								{@const q = turnSearch.trim()}
 								<li class="turn">
@@ -1047,9 +1172,221 @@
 	</div>
 {/if}
 
-<svelte:window onkeydown={(e) => e.key === 'Escape' && (openMemory = null)} />
+<!-- Floating "save this" affordance, anchored to the live selection. -->
+{#if selText && !memOpen && selAt}
+	<button
+		class="sel-save"
+		style="left:{selAt.x}px; top:{selAt.y}px"
+		onclick={openMemoryEditor}
+		title="Save the highlighted text as a memory"
+	>
+		✦ Save as memory
+	</button>
+{/if}
+
+{#if memOpen}
+	<!-- svelte-ignore a11y_click_events_have_key_events -->
+	<!-- svelte-ignore a11y_no_static_element_interactions -->
+	<div class="mem-backdrop" onclick={closeMemoryEditor}>
+		<!-- svelte-ignore a11y_click_events_have_key_events -->
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div class="mem-card sel-card" onclick={(e) => e.stopPropagation()}>
+			<div class="mem-head">
+				<h3>Save excerpt as memory</h3>
+				<button class="mem-close" onclick={closeMemoryEditor} aria-label="Close">×</button>
+			</div>
+			<label class="sel-label" for="sel-fact">Fact</label>
+			<textarea id="sel-fact" class="sel-text" rows="6" bind:value={memFact} disabled={memSaving}
+			></textarea>
+			<div class="sel-row">
+				<select bind:value={memImportance} disabled={memSaving} aria-label="Importance">
+					<option value="high">High</option>
+					<option value="medium">Medium</option>
+					<option value="low">Low</option>
+				</select>
+				<input
+					type="text"
+					bind:value={memContext}
+					placeholder="context"
+					disabled={memSaving}
+					aria-label="Context"
+				/>
+			</div>
+			<div class="sel-actions">
+				<button
+					class="sel-primary"
+					onclick={saveSelectionAsMemory}
+					disabled={memSaving || !memFact.trim()}
+				>
+					{memSaving ? 'Saving…' : 'Remember'}
+				</button>
+				<button class="sel-secondary" onclick={closeMemoryEditor} disabled={memSaving}>Cancel</button>
+			</div>
+			{#if memMsg}
+				<p class="sel-msg" class:failed={memFailed}>{memMsg}</p>
+			{/if}
+		</div>
+	</div>
+{/if}
+
+<svelte:window
+	onkeydown={(e) => {
+		if (e.key !== 'Escape') return;
+		if (memOpen) closeMemoryEditor();
+		else openMemory = null;
+	}}
+	onmousedown={(e) => {
+		// A click anywhere else collapses the selection, so the floating
+		// button must go with it — otherwise it strands over dead text.
+		// The button itself is exempt: its own mousedown precedes its click.
+		if (memOpen || !selText) return;
+		if ((e.target as HTMLElement)?.closest?.('.sel-save')) return;
+		selText = '';
+		selAt = null;
+	}}
+/>
 
 <style>
+	/* ── Burn metric ─────────────────────────────────────────────────────── */
+	.burn {
+		border: 1px solid var(--lens-border);
+		border-left-width: 3px;
+		border-radius: var(--lens-radius-sm);
+		padding: var(--lens-space-3);
+		margin-bottom: var(--lens-space-4);
+		background: var(--lens-surface-raised);
+	}
+	.burn-productive { border-left-color: var(--lens-ok, #4ade80); color: var(--lens-ok, #4ade80); }
+	.burn-diminishing { border-left-color: var(--lens-warn, #fbbf24); color: var(--lens-warn, #fbbf24); }
+	.burn-burning { border-left-color: var(--lens-danger, #f87171); color: var(--lens-danger, #f87171); }
+	.burn-unknown { border-left-color: var(--lens-border-strong); color: var(--lens-text-muted); }
+
+	.burn-head {
+		display: flex;
+		align-items: baseline;
+		gap: var(--lens-space-2);
+		flex-wrap: wrap;
+	}
+	.burn-badge {
+		font-family: var(--lens-font-mono);
+		font-size: var(--lens-font-size-xs);
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		border: 1px solid currentColor;
+		border-radius: var(--lens-radius-sm);
+		padding: 0 var(--lens-space-2);
+	}
+	.burn-headline {
+		font-weight: 600;
+		font-size: var(--lens-font-size-sm);
+	}
+	.burn-detail {
+		margin: var(--lens-space-2) 0 0;
+		color: var(--lens-text);
+		font-size: var(--lens-font-size-sm);
+	}
+	.burn-spark {
+		display: block;
+		width: 100%;
+		height: 32px;
+		margin-top: var(--lens-space-3);
+		overflow: visible;
+	}
+	.burn-foot {
+		display: flex;
+		justify-content: space-between;
+		gap: var(--lens-space-2);
+		flex-wrap: wrap;
+		margin-top: var(--lens-space-1, 4px);
+		font-size: var(--lens-font-size-xs);
+		font-family: var(--lens-font-mono);
+		color: var(--lens-text-muted);
+	}
+	.burn-knee { color: currentColor; }
+
+	/* ── Selection → memory ──────────────────────────────────────────────── */
+	.sel-save {
+		position: fixed;
+		transform: translate(-50%, calc(-100% - 8px));
+		z-index: 60;
+		background: var(--lens-accent-surface);
+		border: 1px solid var(--lens-accent, var(--lens-border-strong));
+		border-radius: var(--lens-radius-sm);
+		color: var(--lens-accent-hover, var(--lens-accent));
+		padding: var(--lens-space-1, 4px) var(--lens-space-3);
+		font-size: var(--lens-font-size-xs);
+		font-weight: 600;
+		cursor: pointer;
+		box-shadow: 0 2px 10px rgb(0 0 0 / 0.35);
+		white-space: nowrap;
+	}
+	.sel-save:hover { border-color: var(--lens-accent-hover, var(--lens-accent)); }
+
+	.sel-card { max-width: 560px; }
+	.sel-label {
+		display: block;
+		font-size: var(--lens-font-size-xs);
+		color: var(--lens-text-muted);
+		margin-bottom: var(--lens-space-1, 4px);
+	}
+	.sel-text,
+	.sel-row input,
+	.sel-row select {
+		background: var(--lens-surface);
+		border: 1px solid var(--lens-border);
+		border-radius: var(--lens-radius-sm);
+		color: var(--lens-text);
+		padding: var(--lens-space-2);
+		font-size: var(--lens-font-size-sm);
+		font-family: var(--lens-font-sans);
+		box-sizing: border-box;
+	}
+	.sel-text {
+		width: 100%;
+		resize: vertical;
+		font-family: var(--lens-font-mono);
+		line-height: 1.5;
+	}
+	.sel-row {
+		display: flex;
+		gap: var(--lens-space-2);
+		margin-top: var(--lens-space-2);
+	}
+	.sel-row input { flex: 1; min-width: 0; }
+	.sel-actions {
+		display: flex;
+		gap: var(--lens-space-2);
+		margin-top: var(--lens-space-3);
+	}
+	.sel-primary,
+	.sel-secondary {
+		border-radius: var(--lens-radius-sm);
+		padding: var(--lens-space-2) var(--lens-space-4);
+		font-size: var(--lens-font-size-sm);
+		font-weight: 600;
+		cursor: pointer;
+	}
+	.sel-primary {
+		background: var(--lens-accent-surface);
+		border: 1px solid var(--lens-accent, var(--lens-border));
+		color: var(--lens-accent-hover, var(--lens-accent));
+	}
+	.sel-secondary {
+		background: transparent;
+		border: 1px solid var(--lens-border);
+		color: var(--lens-text-muted);
+	}
+	.sel-primary:disabled,
+	.sel-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
+	.sel-msg {
+		margin: var(--lens-space-2) 0 0;
+		font-size: var(--lens-font-size-xs);
+		font-family: var(--lens-font-mono);
+		color: var(--lens-ok, #4ade80);
+		overflow-wrap: anywhere;
+	}
+	.sel-msg.failed { color: var(--lens-danger); }
+
 	.page { max-width: 1100px; }
 
 	.header {
