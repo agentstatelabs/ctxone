@@ -295,16 +295,18 @@ pub fn detect_project(cwd: &Path, db_path: Option<&str>) -> DetectResult {
     }
 
     // Step 3: longest registered local_path that contains `cwd`.
-    match resolve_by_local_path(db, cwd) {
-        Ok(Some((p, local_path))) => {
-            return DetectResult::FoundByPath {
-                project_id: p.id,
-                namespace_id: p.namespace_id,
-                local_path,
-            };
-        }
-        Ok(None) => {}
-        Err(_) => return DetectResult::RegistryUnavailable,
+    //
+    // A query error here means "nothing registered by path" — most often the
+    // `project_paths` table does not exist yet because no project has been
+    // registered — not "the registry is down". Reporting RegistryUnavailable
+    // would turn a normal first-run detection into a hard failure, so this
+    // falls through to NotFound.
+    if let Ok(Some((p, local_path))) = resolve_by_local_path(db, cwd) {
+        return DetectResult::FoundByPath {
+            project_id: p.id,
+            namespace_id: p.namespace_id,
+            local_path,
+        };
     }
 
     DetectResult::NotFound

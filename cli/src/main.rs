@@ -6,6 +6,13 @@ mod service;
 mod sources;
 mod workspace;
 
+/// The workspace used when nothing more specific is detected.
+///
+/// Must match `Namespace::DEFAULT` on the hub — the CLI names this
+/// explicitly on every request rather than omitting the header, so the
+/// server never has to guess which workspace a caller meant.
+const DEFAULT_NAMESPACE: &str = "default";
+
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
 use serde_json::Value;
@@ -164,6 +171,17 @@ impl Cli {
         }
     }
 
+    /// The namespace this invocation operates in, always a concrete name.
+    ///
+    /// `resolve_namespace` returns `None` when nothing is detected, which used
+    /// to mean "send no header" — so the hub picked `default` on the CLI's
+    /// behalf and neither side recorded that a choice had been made. The CLI
+    /// now names the workspace on every request, `default` included: an
+    /// explicit `default` is a decision, an absent header is an accident.
+    fn effective_namespace(namespace: Option<&str>) -> &str {
+        namespace.unwrap_or(DEFAULT_NAMESPACE)
+    }
+
     /// Build a reqwest client with X-CTXone-Session, X-CTXone-Namespace, and
     /// (for an authenticated hub) `Authorization: Bearer <token>` baked in as
     /// default headers.
@@ -174,8 +192,7 @@ impl Cli {
         {
             headers.insert("X-CTXone-Session", val);
         }
-        if let Some(ns) = namespace
-            && let Ok(val) = reqwest::header::HeaderValue::from_str(ns)
+        if let Ok(val) = reqwest::header::HeaderValue::from_str(Self::effective_namespace(namespace))
         {
             headers.insert("X-CTXone-Namespace", val);
         }
@@ -210,8 +227,8 @@ impl ClientFactory {
         {
             headers.insert("X-CTXone-Session", val);
         }
-        if let Some(ns) = namespace
-            && let Ok(val) = reqwest::header::HeaderValue::from_str(ns)
+        // Always named, `default` included — see `Cli::effective_namespace`.
+        if let Ok(val) = reqwest::header::HeaderValue::from_str(Cli::effective_namespace(namespace))
         {
             headers.insert("X-CTXone-Namespace", val);
         }
@@ -7006,6 +7023,28 @@ async fn handle_docs(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn effective_namespace_is_always_concrete() {
+        // The CLI names its workspace on every request. An unresolved
+        // namespace becomes an explicit `default`, never an absent header —
+        // otherwise the hub picks the workspace and neither side records that
+        // a choice was made.
+        assert_eq!(Cli::effective_namespace(Some("ctxone")), "ctxone");
+        assert_eq!(Cli::effective_namespace(None), DEFAULT_NAMESPACE);
+        assert_eq!(DEFAULT_NAMESPACE, "default", "must match Namespace::DEFAULT on the hub");
+    }
+
+    #[test]
+    fn every_client_sends_a_namespace_header() {
+        // Guards the invariant rather than the call site: a future refactor
+        // that reintroduces "omit when None" would fail here.
+        let f = ClientFactory::default();
+        for ns in [None, Some("ctxone")] {
+            let _ = f.build(ns); // must not panic
+        }
+        assert_eq!(Cli::effective_namespace(None), "default");
+    }
 
     // -------- urlencoding --------
 

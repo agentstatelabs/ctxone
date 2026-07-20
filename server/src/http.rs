@@ -177,23 +177,75 @@ where
         // Valid namespace names are ASCII [A-Za-z0-9_-], so no
         // percent-decoding is needed; an encoded (thus invalid) name
         // fails Namespace::new with a 400 downstream.
-        let from_query = parts.uri.query().and_then(|q| {
-            q.split('&').find_map(|pair| {
-                let (k, v) = pair.split_once('=')?;
-                (k == "namespace").then(|| v.to_string())
+        // Emptiness is filtered per source, NOT once at the end: a bare
+        // `?namespace=` used to win the `or_else` as `Some("")` and then get
+        // filtered away, so a malformed query silently suppressed a perfectly
+        // good header and the request fell through to `default`.
+        let from_query = parts
+            .uri
+            .query()
+            .and_then(|q| {
+                q.split('&').find_map(|pair| {
+                    let (k, v) = pair.split_once('=')?;
+                    (k == "namespace").then(|| v.trim().to_string())
+                })
             })
+            .filter(|s| !s.is_empty());
+        let explicit = from_query.or_else(|| {
+            parts
+                .headers
+                .get("x-ctxone-namespace")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
         });
-        let id = from_query
-            .or_else(|| {
-                parts
-                    .headers
-                    .get("x-ctxone-namespace")
-                    .and_then(|v| v.to_str().ok())
-                    .map(|s| s.trim().to_string())
-            })
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| Namespace::DEFAULT.to_string());
-        Ok(NamespaceId(id))
+
+        match explicit {
+            Some(id) => Ok(NamespaceId(id)),
+            None => {
+                // This extractor only runs for namespace-scoped handlers, so
+                // an absent namespace here means a caller is operating on a
+                // workspace it never named. Silently answering "default" is
+                // how sessions from ~40 repos ended up in one workspace, and
+                // how a ranking got rendered under the wrong branch. Falling
+                // back is still the compatible behaviour, but it is no longer
+                // a secret.
+                warn_implicit_namespace(parts.uri.path());
+                Ok(NamespaceId(Namespace::DEFAULT.to_string()))
+            }
+        }
+    }
+}
+
+/// Warn once per path that a namespace-scoped request arrived without one.
+///
+/// Deduped because a polling client would otherwise bury the log in identical
+/// lines; the first occurrence per path is what tells you which caller still
+/// needs updating.
+fn warn_implicit_namespace(path: &str) {
+    if first_time_for_path(path) {
+        tracing::warn!(
+            path,
+            "request has no namespace; assuming 'default'. Send X-CTXone-Namespace \
+             (or ?namespace=) to name the workspace explicitly."
+        );
+    }
+}
+
+/// True the first time `path` is seen this process.
+///
+/// Split out from the warning so the dedup can be tested without capturing
+/// log output.
+fn first_time_for_path(path: &str) -> bool {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(|| Mutex::new(HashSet::new()));
+    match seen.lock() {
+        Ok(mut s) => s.insert(path.to_string()),
+        // A poisoned lock must not take the request down; warning twice is
+        // strictly better than failing here.
+        Err(_) => true,
     }
 }
 
@@ -3761,6 +3813,49 @@ async fn detect_project_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Resolve a namespace the way a real request would.
+    async fn extract_ns(uri: &str, header: Option<&str>) -> String {
+        use axum::extract::FromRequestParts;
+        let mut req = axum::http::Request::builder().uri(uri);
+        if let Some(h) = header {
+            req = req.header("X-CTXone-Namespace", h);
+        }
+        let (mut parts, _) = req.body(()).unwrap().into_parts();
+        NamespaceId::from_request_parts(&mut parts, &())
+            .await
+            .unwrap()
+            .0
+    }
+
+    #[tokio::test]
+    async fn namespace_query_param_beats_the_header() {
+        // Load-bearing: session ingest retargets per request via the query
+        // string while its client carries a fixed header, so the query must
+        // win or every routed write would land in the client's namespace.
+        assert_eq!(
+            extract_ns("/api/state/main?namespace=ctxone", Some("default")).await,
+            "ctxone"
+        );
+    }
+
+    #[tokio::test]
+    async fn namespace_falls_back_to_header_then_default() {
+        assert_eq!(extract_ns("/api/state/main", Some("ctxone")).await, "ctxone");
+        assert_eq!(extract_ns("/api/state/main", None).await, "default");
+        // An empty value is not a namespace; it must not become one.
+        assert_eq!(extract_ns("/api/state/main", Some("   ")).await, "default");
+        assert_eq!(extract_ns("/api/state/main?namespace=", Some("ctxone")).await, "ctxone");
+    }
+
+    #[test]
+    fn implicit_namespace_warning_is_deduped_per_path() {
+        // First hit for a path warns, later ones stay quiet — a polling client
+        // must not bury the log.
+        assert!(first_time_for_path("/api/test/dedupe/a"));
+        assert!(!first_time_for_path("/api/test/dedupe/a"));
+        assert!(first_time_for_path("/api/test/dedupe/b"));
+    }
 
     #[test]
     fn llm_usage_accepts_cache_creation_alias() {
