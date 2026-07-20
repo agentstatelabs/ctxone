@@ -62,6 +62,14 @@ pub struct Router {
     /// A dry run resolves and reports but never registers — creating a
     /// namespace is a write, and `--dry-run` promises none.
     dry_run: bool,
+    /// Where a transcript with no resolvable cwd goes.
+    ///
+    /// For `--all` this is `default`: the machine-wide sync fans across repos
+    /// and unroutable transcripts should not scatter. For a single `--file` or
+    /// `--namespace X` run it is that namespace, so an explicit target is
+    /// honoured instead of being silently overridden to `default` — the bug
+    /// that let a `--file` re-ingest land a duplicate in `default`.
+    fallback: Option<String>,
     /// cwd → routing outcome. Includes negative results so a directory that
     /// cannot be resolved is not re-probed once per transcript.
     memo: HashMap<String, Routed>,
@@ -74,10 +82,11 @@ pub struct Router {
 }
 
 impl Router {
-    pub fn new(server: &str, auto_register: bool, dry_run: bool) -> Self {
+    pub fn new(server: &str, auto_register: bool, dry_run: bool, fallback: Option<String>) -> Self {
         Self {
             server: server.to_string(),
             dry_run,
+            fallback,
             // Short timeout: routing must never be the reason a sync stalls.
             // A miss costs one session its workspace, not the run.
             probe: reqwest::Client::builder()
@@ -109,8 +118,11 @@ impl Router {
 
     /// Route one transcript. `cwd` is whatever the source recorded.
     pub async fn route(&mut self, cwd: Option<&str>) -> Routed {
+        // No cwd (e.g. an explicit `--file`) → the configured fallback, which
+        // for a targeted run is the caller's `--namespace`. Returning a bare
+        // `Fallback` here is what silently overrode `--namespace` to `default`.
         let Some(cwd) = cwd.map(str::trim).filter(|c| !c.is_empty()) else {
-            return Routed::Fallback;
+            return self.fallback();
         };
         if let Some(hit) = self.memo.get(cwd) {
             return hit.clone();
@@ -125,18 +137,28 @@ impl Router {
             return Routed::Existing(ns);
         }
         if !self.auto_register {
-            return Routed::Fallback;
+            return self.fallback();
         }
         if self.dry_run {
             // Work out the id without calling the registry, so a dry run can
             // show the intended workspace while staying read-only.
             return match self.would_register(cwd) {
                 Some(id) => Routed::WouldRegister(id),
-                None => Routed::Fallback,
+                None => self.fallback(),
             };
         }
         match self.register(cwd).await {
             Some(ns) => Routed::Registered(ns),
+            None => self.fallback(),
+        }
+    }
+
+    /// The configured fallback as a routing outcome. An explicit fallback is
+    /// reported as `Existing` (it is a real namespace the caller named);
+    /// absent, it is `Fallback`, which resolves to the default namespace.
+    fn fallback(&self) -> Routed {
+        match &self.fallback {
+            Some(ns) => Routed::Existing(ns.clone()),
             None => Routed::Fallback,
         }
     }
@@ -346,5 +368,20 @@ mod tests {
         assert_eq!(Routed::Existing("a".into()).namespace(), Some("a"));
         assert_eq!(Routed::Registered("b".into()).namespace(), Some("b"));
         assert_eq!(Routed::Fallback.namespace(), None);
+    }
+
+    #[tokio::test]
+    async fn no_cwd_uses_the_configured_fallback_namespace() {
+        // An explicit `--file`/`--namespace` run has no transcript cwd to
+        // route by, and must honour the caller's namespace rather than
+        // silently landing in `default` — the bug that duplicated a session.
+        let mut with = Router::new("http://127.0.0.1:0", false, true, Some("asd".into()));
+        assert_eq!(with.route(None).await.namespace(), Some("asd"));
+        assert_eq!(with.route(Some("   ")).await.namespace(), Some("asd"));
+
+        // With no configured fallback, an unroutable transcript falls to the
+        // default namespace, as `--all` sync intends.
+        let mut without = Router::new("http://127.0.0.1:0", false, true, None);
+        assert_eq!(without.route(None).await.namespace(), None);
     }
 }

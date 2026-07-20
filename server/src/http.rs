@@ -32,6 +32,7 @@ use crate::memory_tools::{
     ensure_flat_size, run_prime, run_recall,
 };
 use crate::plan_tools;
+use crate::session_links;
 use crate::rate_limit;
 use crate::reminder_tools;
 
@@ -641,6 +642,10 @@ fn router_with_config_inner(
         .route(
             "/api/sessions/{sid}/move",
             axum::routing::post(move_session),
+        )
+        .route(
+            "/api/sessions/{sid}/derive_links",
+            axum::routing::post(derive_session_links),
         )
         .route(
             "/api/session_tombstones",
@@ -3364,6 +3369,110 @@ async fn delete_session(
         "commit_id": deleted,
         "tombstoned": tombstoned,
         "removed_from_registry": from_registry,
+    })))
+}
+
+fn session_links_path(sid: &str) -> String {
+    format!("/session_links/{}", sid)
+}
+
+/// `POST /api/sessions/{sid}/derive_links` — find the plan tasks this session
+/// worked on and persist them at `/session_links/{sid}`.
+///
+/// Replaces the client-side regex (recomputed per render, persisted nowhere,
+/// validated against nothing) with a whole-session server pass: it reads every
+/// turn once, extracts commit task-refs, validates each against the plan/task
+/// actually existing in this namespace, and writes a sidecar the whole system
+/// can read. Re-runnable and idempotent — a re-derive overwrites the node.
+async fn derive_session_links(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+    Path(sid): Path<String>,
+    agent_id: AgentId,
+    Query(q): Query<SessionTurnQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
+
+    // The turns subtree: `/sessions/{sid}/turns` = { tNNNN: {tool_calls_raw…} }.
+    let turns = repo
+        .get_json(&q.ref_name, &format!("/sessions/{}/turns", sid))
+        .map_err(|_| (StatusCode::NOT_FOUND, format!("no turns for session {}", sid)))?;
+
+    // Flatten to (turn_index, command) candidates. A turn's index is parsed
+    // from its `tNNNN` key so a link points back at the right turn.
+    let mut commands: Vec<(usize, String)> = Vec::new();
+    if let Some(map) = turns.as_object() {
+        let mut keys: Vec<&String> = map.keys().collect();
+        keys.sort();
+        for k in keys {
+            let idx = k
+                .trim_start_matches('t')
+                .parse::<usize>()
+                .unwrap_or(usize::MAX);
+            if let Some(raw) = map[k].get("tool_calls_raw").and_then(|v| v.as_array()) {
+                for call in raw {
+                    if let Some(cmd) = call
+                        .get("input")
+                        .and_then(|i| i.get("command"))
+                        .and_then(|c| c.as_str())
+                    {
+                        commands.push((idx, cmd.to_string()));
+                    }
+                }
+            }
+        }
+    }
+    let candidates: Vec<session_links::Candidate> = commands
+        .iter()
+        .map(|(i, c)| session_links::Candidate {
+            turn_index: *i,
+            command: c,
+        })
+        .collect();
+
+    // Validation closure: a plan/task exists iff the task store resolves it in
+    // this namespace. Built once and reused across every candidate.
+    let store = plan_tools::make_store(repo.clone(), &agent_id.0);
+    let ref_name = q.ref_name.clone();
+    let links = session_links::derive(&candidates, |plan, task| {
+        // `task` is normalized `t-NNN`; the store keys on the numeric id.
+        let Some(n) = task
+            .strip_prefix("t-")
+            .and_then(|d| d.parse::<u32>().ok())
+        else {
+            return false;
+        };
+        store
+            .get_task(&ref_name, plan, &agentstategraph_tasks::TaskId::new(n))
+            .is_ok()
+    });
+
+    let validated = links.iter().filter(|l| l.validated).count();
+    let node = serde_json::json!({
+        "links": links,
+        "generated_at": chrono::Utc::now().to_rfc3339(),
+    });
+
+    // Nothing found is a valid, writeable result: it records that the session
+    // was scanned and had no task refs, so a reader need not re-derive.
+    let opts = CommitOptions::new(
+        &agent_id.0,
+        IntentCategory::Custom("Observe".to_string()),
+        format!("session links {}", sid),
+    )
+    .with_tags(vec![
+        format!("session:{}", sid),
+        "kind:session-links".to_string(),
+    ]);
+    repo.set_json(&q.ref_name, &session_links_path(&sid), &node, opts)
+        .map_err(internal_error)?;
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "session_id": sid,
+        "namespace": ns.0,
+        "links": links.len(),
+        "validated": validated,
     })))
 }
 

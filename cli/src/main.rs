@@ -1946,6 +1946,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // hand-registered before it routed anything; a targeted
                 // single-project run stays conservative.
                 all && !no_auto_register,
+                // Fallback namespace for transcripts with no resolvable cwd.
+                // `--all` scatters across repos, so unroutable ones go to
+                // `default`; a targeted run honours the caller's `--namespace`
+                // (or detected project) instead of silently forcing `default`.
+                if all {
+                    None
+                } else {
+                    namespace.clone()
+                },
             )
             .await?;
         }
@@ -4215,6 +4224,11 @@ async fn run_ingest_session(
     // id and auth token, so a routed client differs only in its namespace.
     clients: ClientFactory,
     auto_register: bool,
+    // Where transcripts with no resolvable cwd land. For `--all` this is
+    // `default` (unroutable transcripts shouldn't scatter); for a targeted
+    // `--file`/`--namespace` run it is the caller's namespace, so an explicit
+    // target is honoured rather than silently overridden to `default`.
+    fallback_namespace: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
     if api_key.is_empty() && !tokens_only {
@@ -4332,7 +4346,8 @@ async fn run_ingest_session(
 
     // Routes each transcript to the workspace its `cwd` belongs to. Memoized
     // per directory, so ~350 transcripts cost a few dozen probes.
-    let mut router = crate::workspace::Router::new(server, auto_register, dry_run);
+    let mut router =
+        crate::workspace::Router::new(server, auto_register, dry_run, fallback_namespace);
 
     for (source_id, source_label, label, files) in &groups {
         if files.is_empty() {
@@ -4605,6 +4620,22 @@ async fn run_ingest_session(
                 }
                 total_memories += memories.len();
             }
+
+            // Derive plan links from the just-stored turns. A whole-session
+            // post-pass, so it sees every commit at once; the server validates
+            // each ref against the plans in this workspace. Best-effort — a
+            // failure here must not fail the ingest.
+            if !dry_run && full_turn && !tokens_only {
+                if let Some(sid) = effective_session {
+                    let url = format!(
+                        "{}/api/sessions/{}/derive_links?ref={}",
+                        server,
+                        urlencoding(sid),
+                        urlencoding(branch),
+                    );
+                    let _ = client.post(url).send().await;
+                }
+            }
         }
 
         if all && !label.is_empty() {
@@ -4754,7 +4785,9 @@ async fn run_reattribute(
         .await?;
     println!("{} sessions in `default`.", sessions.len());
 
-    let mut router = crate::workspace::Router::new(server, auto_register, dry_run);
+    // No fallback override: a session whose cwd doesn't resolve stays in
+    // `default`, which is exactly where reattribution should leave it.
+    let mut router = crate::workspace::Router::new(server, auto_register, dry_run, None);
     let mut plan: Vec<(String, String)> = Vec::new(); // (sid, target-ns)
     let mut unresolved = 0usize;
 
