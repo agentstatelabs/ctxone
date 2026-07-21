@@ -555,6 +555,7 @@ dependencies = [
  "clap_complete",
  "dirs",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

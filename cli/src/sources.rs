@@ -402,11 +402,218 @@ impl SessionSource for Codex {
     }
 }
 
+// ── Gemini CLI ──────────────────────────────────────────────────────────────
+
+/// Gemini CLI: one JSON file per session under
+/// `~/.gemini/tmp/<project>/chats/session-*.json`. The working directory is
+/// not on the messages, so it is recovered from `~/.gemini/projects.json`,
+/// which maps an absolute path to the `<project>` folder name.
+pub struct Gemini;
+
+impl Gemini {
+    fn gemini_dir() -> PathBuf {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("~"))
+            .join(".gemini")
+    }
+
+    /// `<project-folder-name>` → absolute cwd, inverted from projects.json
+    /// (`{ "projects": { "/abs/path": "folder-name" } }`).
+    fn project_dirs() -> std::collections::HashMap<String, String> {
+        let mut out = std::collections::HashMap::new();
+        let path = Self::gemini_dir().join("projects.json");
+        if let Ok(text) = std::fs::read_to_string(&path)
+            && let Ok(v) = serde_json::from_str::<Value>(&text)
+            && let Some(map) = v.get("projects").and_then(|p| p.as_object())
+        {
+            for (abs, name) in map {
+                if let Some(name) = name.as_str() {
+                    out.insert(name.to_string(), abs.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// `session-*.json` files under `tmp/<project>/chats/`, with their project
+    /// folder name (the parent of `chats`).
+    fn session_files() -> Vec<(String, PathBuf)> {
+        let tmp = Self::gemini_dir().join("tmp");
+        let Ok(projects) = std::fs::read_dir(&tmp) else {
+            return vec![];
+        };
+        let mut out = vec![];
+        for proj in projects.flatten() {
+            let name = proj.file_name().to_string_lossy().to_string();
+            let chats = proj.path().join("chats");
+            let Ok(files) = std::fs::read_dir(&chats) else {
+                continue;
+            };
+            for f in files.flatten() {
+                let p = f.path();
+                let is_session = p
+                    .file_name()
+                    .map(|n| {
+                        let n = n.to_string_lossy();
+                        n.starts_with("session-") && n.ends_with(".json")
+                    })
+                    .unwrap_or(false);
+                if is_session {
+                    out.push((name.clone(), p));
+                }
+            }
+        }
+        out.sort_by(|a, b| a.1.metadata().and_then(|m| m.modified()).ok()
+            .cmp(&b.1.metadata().and_then(|m| m.modified()).ok()));
+        out
+    }
+
+    /// The session id from the file's `sessionId`, without parsing the whole
+    /// (multi-MB) transcript — read the head and pull the first field.
+    fn read_session_id(path: &Path) -> Option<String> {
+        use std::io::Read;
+        let mut f = std::fs::File::open(path).ok()?;
+        let mut buf = vec![0u8; 4096];
+        let n = f.read(&mut buf).ok()?;
+        let head = String::from_utf8_lossy(&buf[..n]);
+        // "sessionId":"<uuid>"
+        let key = "\"sessionId\"";
+        let i = head.find(key)? + key.len();
+        let rest = &head[i..];
+        let start = rest.find('"')? + 1;
+        let end = rest[start..].find('"')? + start;
+        Some(rest[start..end].to_string())
+    }
+}
+
+impl SessionSource for Gemini {
+    fn id(&self) -> &'static str {
+        "gemini"
+    }
+
+    fn label(&self) -> &'static str {
+        "Gemini"
+    }
+
+    fn is_available(&self) -> bool {
+        Self::gemini_dir().join("tmp").is_dir()
+    }
+
+    fn discover_all(&self) -> Vec<SessionRef> {
+        let dirs = Self::project_dirs();
+        let mut refs: Vec<SessionRef> = Self::session_files()
+            .into_iter()
+            .map(|(project, path)| {
+                let cwd = dirs.get(&project).cloned();
+                SessionRef {
+                    label: cwd
+                        .as_deref()
+                        .map(Codex::label_for_cwd)
+                        .unwrap_or_else(|| project.clone()),
+                    cwd,
+                    native_id: Self::read_session_id(&path),
+                    path,
+                }
+            })
+            .collect();
+        refs.sort_by(|a, b| a.label.cmp(&b.label));
+        refs
+    }
+
+    fn discover_for_project(&self, project_dir: &Path) -> Vec<SessionRef> {
+        let want = project_dir.to_string_lossy().trim_end_matches('/').to_string();
+        self.discover_all()
+            .into_iter()
+            .filter(|r| r.cwd.as_deref().map(|c| c.trim_end_matches('/') == want).unwrap_or(false))
+            .collect()
+    }
+
+    fn parse(&self, session: &SessionRef) -> Vec<Turn> {
+        let mut turns = crate::gemini::parse_session(&session.path);
+        // Stamp the resolved cwd onto every turn so provenance and workspace
+        // routing work exactly as for the file-per-session sources.
+        if let Some(cwd) = &session.cwd {
+            for t in &mut turns {
+                if t.cwd.is_none() {
+                    t.cwd = Some(cwd.clone());
+                }
+            }
+        }
+        turns
+    }
+}
+
+// ── Cursor ────────────────────────────────────────────────────────────────────
+
+/// Cursor: chats live in a SQLite db, one row per message, not one file per
+/// session. The [`SessionRef`] `path` is the db and `native_id` is the
+/// composer id that selects the conversation within it.
+///
+/// The working directory is not in the global chat db, so Cursor sessions
+/// currently route to the default workspace.
+pub struct Cursor;
+
+impl Cursor {
+    /// The global chat store. Per-workspace dbs also exist but the global one
+    /// holds the composer/bubble chat data.
+    fn global_db() -> PathBuf {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("~"))
+            .join("Library/Application Support/Cursor/User/globalStorage/state.vscdb")
+    }
+}
+
+impl SessionSource for Cursor {
+    fn id(&self) -> &'static str {
+        "cursor"
+    }
+
+    fn label(&self) -> &'static str {
+        "Cursor"
+    }
+
+    fn is_available(&self) -> bool {
+        Self::global_db().is_file()
+    }
+
+    fn discover_all(&self) -> Vec<SessionRef> {
+        let db = Self::global_db();
+        crate::cursor::list_sessions(&db)
+            .into_iter()
+            .map(|s| SessionRef {
+                // Cursor names its chats; use that as the label when present.
+                label: s.name.clone().unwrap_or_else(|| "Cursor".to_string()),
+                cwd: None, // not in the global db
+                native_id: Some(s.composer_id),
+                path: db.clone(),
+            })
+            .collect()
+    }
+
+    fn discover_for_project(&self, _project_dir: &Path) -> Vec<SessionRef> {
+        // No per-project cwd mapping yet, so a project-scoped scan can't tell
+        // which Cursor sessions belong to it. Return none rather than guess.
+        vec![]
+    }
+
+    fn parse(&self, session: &SessionRef) -> Vec<Turn> {
+        let Some(id) = &session.native_id else {
+            return vec![];
+        };
+        crate::cursor::parse_session(&session.path, id)
+    }
+}
+
 // ── Registry ──────────────────────────────────────────────────────────────────
 
 /// Every known source, in the order they should be scanned.
 pub fn all_sources() -> Vec<Box<dyn SessionSource>> {
-    vec![Box::new(ClaudeCode), Box::new(Codex)]
+    vec![
+        Box::new(ClaudeCode),
+        Box::new(Codex),
+        Box::new(Gemini),
+        Box::new(Cursor),
+    ]
 }
 
 /// Look up a source by its `--source` id.

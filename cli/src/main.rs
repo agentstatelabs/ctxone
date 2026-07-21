@@ -3,6 +3,8 @@ mod ingest;
 mod metrics;
 mod onboarding;
 mod burn;
+mod cursor;
+mod gemini;
 mod service;
 mod sources;
 mod workspace;
@@ -4520,10 +4522,10 @@ async fn run_ingest_session(
             }
 
             // Session meta (t-021): source + first/last turn timestamps, so the
-            // Lens can filter by agent type and sort by date. `ctx
-            // ingest-session` only parses Claude Code transcripts today, so the
-            // source is "Claude Code"; Cursor/Copilot ingesters would set their
-            // own. Timestamps come from the full (pre-filter) turn list.
+            // Lens can filter by agent type and sort by date. `source_label`
+            // is the agent this transcript came from (Claude Code, Codex,
+            // Gemini, Cursor). Timestamps come from the full (pre-filter) turn
+            // list.
             let started_at = turns.first().map(|t| t.timestamp.clone()).unwrap_or_default();
             let updated_at = turns.last().map(|t| t.timestamp.clone()).unwrap_or_default();
             // Distinct real models across all turns, first-seen order — so a
@@ -4540,8 +4542,9 @@ async fn run_ingest_session(
             }
             if dry_run {
                 println!(
-                    "  [dry] meta: /sessions/{}/meta = {{source: \"Claude Code\", started_at: {:?}, updated_at: {:?}, models_used: {:?}}}",
+                    "  [dry] meta: /sessions/{}/meta = {{source: {:?}, started_at: {:?}, updated_at: {:?}, models_used: {:?}}}",
                     effective_session.unwrap_or("default"),
+                    source_label,
                     started_at,
                     updated_at,
                     models_used
