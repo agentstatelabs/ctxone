@@ -558,6 +558,10 @@ fn router_with_config_inner(
         .route("/api/diff", get(diff_refs))
         .route("/api/merge", post(merge_refs))
         .route("/api/branches", get(list_branches).post(create_branch))
+        .route(
+            "/api/branches/{name}",
+            axum::routing::delete(delete_branch),
+        )
         // Memory endpoints (high-level)
         .route("/api/memory/remember", post(remember))
         .route("/api/memory/forget", post(forget))
@@ -1616,6 +1620,33 @@ async fn create_branch(
         out["commit_id"] = serde_json::json!(format!("{}", id.short()));
     }
     Ok(Json(out))
+}
+
+/// `DELETE /api/branches/{name}` — drop a branch ref from this workspace.
+///
+/// Refuses `main`: it is the workspace's trunk and every other ref forks from
+/// it, so deleting it would strand the namespace. Content is content-addressed
+/// and shared, so removing a ref frees no other branch's nodes — this only
+/// forgets the label. `deleted:false` means the branch was already absent
+/// (idempotent, so re-running a prune is safe).
+async fn delete_branch(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if name == "main" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "refusing to delete 'main' — it is the workspace trunk".to_string(),
+        ));
+    }
+    let repo = s.repo_for(&ns)?;
+    let deleted = repo.delete_branch(&name).map_err(internal_error)?;
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "name": name,
+        "deleted": deleted,
+    })))
 }
 
 #[derive(Deserialize)]

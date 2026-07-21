@@ -361,6 +361,25 @@ impl CtxConfig {
 }
 
 #[derive(Subcommand)]
+enum BranchAction {
+    /// Create a new branch
+    Create {
+        /// Name of the new branch
+        name: String,
+        /// Ref to branch from (default: main)
+        #[arg(long, default_value = "main")]
+        from: String,
+    },
+    /// List all branches
+    List,
+    /// Delete a branch (cannot be `main`)
+    Rm {
+        /// Name of the branch to delete
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum ConfigAction {
     /// Print the current config file contents
     Show,
@@ -734,15 +753,13 @@ enum Commands {
         #[arg(long, default_value_t = 2000)]
         interval: u64,
     },
-    /// List all branches
+    /// List all branches (alias for `branch list`)
+    #[command(hide = true)]
     Branches,
-    /// Create a new branch
+    /// Create, list, or remove branches
     Branch {
-        /// Name of the new branch
-        name: String,
-        /// Ref to branch from (default: main)
-        #[arg(long, default_value = "main")]
-        from: String,
+        #[command(subcommand)]
+        action: BranchAction,
     },
     /// Read or write persistent defaults in ~/.ctxone/config.toml
     Config {
@@ -2586,50 +2603,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Tail { interval } => {
             run_tail(&cli.server, &cli.branch, interval, client.clone()).await?;
         }
+        // `ctx branches` is a hidden back-compat alias for `ctx branch list`.
         Commands::Branches => {
-            let resp = match client.get(format!("{}/api/branches", cli.server)).send().await {
-                Ok(r) => r,
-                Err(e) => unreachable_exit(&cli.server, e),
-            };
-            if !resp.status().is_success() {
-                http_error_exit(resp, "branches failed").await;
+            branch_list(&cli.server, cli.format, &cli.branch, &client).await?;
+        }
+        Commands::Branch { action } => match action {
+            BranchAction::List => {
+                branch_list(&cli.server, cli.format, &cli.branch, &client).await?;
             }
-            let branches: Vec<Value> = resp.json().await?;
-            let value = Value::Array(branches.clone());
-            emit(cli.format, &value, |_| {
-                if branches.is_empty() {
-                    println!("No branches.");
-                } else {
-                    for b in &branches {
-                        let name = b.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                        let id = b.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                        let marker = if name == cli.branch { "*" } else { " " };
-                        println!("{} {:30}  {}", marker, name, id);
-                    }
+            BranchAction::Create { name, from } => {
+                let body = serde_json::json!({ "name": name, "from": from });
+                let resp = match client
+                    .clone()
+                    .post(format!("{}/api/branches", cli.server))
+                    .json(&body)
+                    .send()
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => unreachable_exit(&cli.server, e),
+                };
+                if !resp.status().is_success() {
+                    http_error_exit(resp, "branch create failed").await;
                 }
-            });
-        }
-        Commands::Branch { name, from } => {
-            let body = serde_json::json!({ "name": name, "from": from });
-            let resp = match client
-                .clone()
-                .post(format!("{}/api/branches", cli.server))
-                .json(&body)
-                .send()
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => unreachable_exit(&cli.server, e),
-            };
-            if !resp.status().is_success() {
-                http_error_exit(resp, "branch create failed").await;
+                let parsed: Value = resp.json().await?;
+                emit(cli.format, &parsed, |v| {
+                    let commit = v.get("commit_id").and_then(|x| x.as_str()).unwrap_or("");
+                    println!("Branch '{}' created from '{}' at {}", name, from, commit);
+                });
             }
-            let parsed: Value = resp.json().await?;
-            emit(cli.format, &parsed, |v| {
-                let commit = v.get("commit_id").and_then(|x| x.as_str()).unwrap_or("");
-                println!("Branch '{}' created from '{}' at {}", name, from, commit);
-            });
-        }
+            BranchAction::Rm { name } => {
+                let resp = match client
+                    .delete(format!("{}/api/branches/{}", cli.server, urlencoding(&name)))
+                    .send()
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => unreachable_exit(&cli.server, e),
+                };
+                if !resp.status().is_success() {
+                    http_error_exit(resp, "branch rm failed").await;
+                }
+                let parsed: Value = resp.json().await?;
+                emit(cli.format, &parsed, |v| {
+                    if v.get("deleted").and_then(|d| d.as_bool()).unwrap_or(false) {
+                        println!("Branch '{}' deleted", name);
+                    } else {
+                        println!("Branch '{}' did not exist", name);
+                    }
+                });
+            }
+        },
         Commands::Config { action } => {
             handle_config(action, cli.format)?;
         }
@@ -6005,6 +6029,38 @@ fn merge_codex_ctxone_toml_http(
     servers.insert("ctxone".to_string(), Value::Table(ctxone));
 
     toml::to_string_pretty(&doc).map_err(|e| format!("serialize failed: {}", e))
+}
+
+/// List branches for the active namespace. Shared by `ctx branch list` and the
+/// hidden `ctx branches` alias.
+async fn branch_list(
+    server: &str,
+    format: OutputFormat,
+    current: &str,
+    client: &reqwest::Client,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let resp = match client.get(format!("{}/api/branches", server)).send().await {
+        Ok(r) => r,
+        Err(e) => unreachable_exit(server, e),
+    };
+    if !resp.status().is_success() {
+        http_error_exit(resp, "branches failed").await;
+    }
+    let branches: Vec<Value> = resp.json().await?;
+    let value = Value::Array(branches.clone());
+    emit(format, &value, |_| {
+        if branches.is_empty() {
+            println!("No branches.");
+        } else {
+            for b in &branches {
+                let name = b.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let id = b.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let marker = if name == current { "*" } else { " " };
+                println!("{} {:30}  {}", marker, name, id);
+            }
+        }
+    });
+    Ok(())
 }
 
 fn handle_config(
