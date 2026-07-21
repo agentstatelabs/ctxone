@@ -4679,79 +4679,72 @@ async fn run_ingest_session(
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
-            for (idx, turn) in turns.iter().enumerate() {
+            // One bulk write for all full turns, and one aggregated token
+            // record — instead of two HTTP round-trips + two graph commits per
+            // turn. A 900-turn session was ~1800 commits; it is now two.
+            // Memory extraction stays per-turn (it needs an LLM call per turn)
+            // and is gated on an API key, so it is off during a `--all` sync.
+            let mut session_tokens = crate::ingest::TurnTokens::default();
+            let mut last_model = String::new();
+            for turn in turns.iter() {
                 proj_turns += 1;
                 proj_tokens.add(&turn.tokens);
+                session_tokens.add(&turn.tokens);
+                let m = turn.model.trim();
+                if !m.is_empty() && !m.starts_with('<') {
+                    last_model = m.to_string();
+                }
+            }
 
-                if !turn.tokens.is_empty() {
-                    if dry_run {
-                        println!(
-                            "  [dry] token record: in={} out={} cache_read={} cache_create={} model={}",
-                            turn.tokens.input,
-                            turn.tokens.output,
-                            turn.tokens.cache_read,
-                            turn.tokens.cache_creation,
-                            turn.model,
-                        );
-                    } else {
-                        crate::ingest::record_turn_tokens(
-                            &turn.tokens,
-                            &turn.model,
-                            crate::ingest::provider_for_model(&turn.model),
-                            server,
-                            effective_session,
-                            &client,
-                        )
-                        .await;
+            if !session_tokens.is_empty() && !dry_run {
+                // Server-side these counters are summed, so one record with the
+                // session total and its last real model is equivalent to N
+                // per-turn records — same totals, same last_model.
+                crate::ingest::record_turn_tokens(
+                    &session_tokens,
+                    &last_model,
+                    crate::ingest::provider_for_model(&last_model),
+                    server,
+                    effective_session,
+                    &client,
+                )
+                .await;
+            }
+
+            if full_turn && !turns.is_empty() {
+                if dry_run {
+                    println!(
+                        "  [dry] full turns: /sessions/{}/turns ({} turns, 1 bulk write)",
+                        effective_session.unwrap_or("default"),
+                        turns.len(),
+                    );
+                } else {
+                    total_full_turns += crate::ingest::store_turns_bulk(
+                        &turns,
+                        &source_file,
+                        server,
+                        branch,
+                        effective_session,
+                        &client,
+                    )
+                    .await;
+                }
+            }
+
+            // Memory extraction, per turn — only when an API key is set (so
+            // it is skipped during whole-machine sync).
+            if !dry_run && !tokens_only && !api_key.is_empty() {
+                for turn in turns.iter() {
+                    if !turn.is_substantial() {
+                        continue;
                     }
-                }
-
-                if full_turn {
-                    if dry_run {
-                        println!(
-                            "  [dry] full turn: /sessions/{}/turns/{:04} ({} bytes assistant, {} tools)",
-                            effective_session.unwrap_or("default"),
-                            idx,
-                            turn.assistant_text.len(),
-                            turn.tool_calls_raw.len(),
-                        );
-                    } else {
-                        crate::ingest::store_full_turn(
-                            turn,
-                            idx,
-                            &source_file,
-                            server,
-                            branch,
-                            effective_session,
-                            &client,
-                        )
-                        .await;
-                        total_full_turns += 1;
-                    }
-                }
-
-                if tokens_only || api_key.is_empty() || !turn.is_substantial() {
-                    continue;
-                }
-
-                let memories = crate::ingest::extract_memories(turn, &api_key, &client).await;
-                for mem in &memories {
-                    if dry_run {
-                        println!(
-                            "  [dry] memory: {} ({}) — {}",
-                            mem.path, mem.importance, mem.title
-                        );
-                    } else {
+                    let memories = crate::ingest::extract_memories(turn, &api_key, &client).await;
+                    for mem in &memories {
                         crate::ingest::store_memory(mem, server, branch, effective_session, &client)
                             .await;
-                        print!(".");
-                        let _ = std::io::Write::flush(&mut std::io::stdout());
                     }
+                    total_memories += memories.len();
                 }
-                if !memories.is_empty() && !dry_run {
-                    println!(" {} memories", memories.len());
-                }
-                total_memories += memories.len();
             }
 
             // Derive plan links from the just-stored turns. A whole-session

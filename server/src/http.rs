@@ -621,7 +621,10 @@ fn router_with_config_inner(
         .route("/api/reminders/{id}/start", post(start_reminder_handler))
         .route("/api/reminders/{id}/record", post(record_reminder_handler))
         // Session turn capture (full request/response/tool/usage JSON)
-        .route("/api/sessions/{sid}/turns", get(list_session_turns))
+        .route(
+            "/api/sessions/{sid}/turns",
+            get(list_session_turns).put(put_session_turns_bulk),
+        )
         .route(
             "/api/sessions/{sid}/turns/{idx}",
             post(put_session_turn).get(get_session_turn),
@@ -3097,6 +3100,67 @@ fn session_turn_path(sid: &str, idx: u32) -> String {
 struct SessionTurnQuery {
     #[serde(default = "default_ref", rename = "ref")]
     ref_name: String,
+}
+
+/// Max bytes for a whole-session bulk turn write. Generous — it is one
+/// transcript — but bounded so a runaway payload can't exhaust memory.
+const SESSION_TURNS_BULK_MAX_BYTES: usize = 128 * 1024 * 1024;
+
+/// `PUT /api/sessions/{sid}/turns` — write ALL of a session's turns in ONE
+/// commit, replacing the turns subtree.
+///
+/// The per-turn endpoint (`.../turns/{idx}`) is one graph commit per turn, so
+/// a 900-turn session was 900 write-transactions against a large db — the
+/// dominant cost of the multi-hour sync. This collapses them to one commit.
+/// Body is the turns map `{ "t0000": {…}, "t0001": {…}, … }`.
+///
+/// A full replace is correct for how ingest uses it: a session is only
+/// re-written when its transcript changed (the fingerprint skip), and then
+/// every turn is re-derived, so there is nothing to preserve.
+async fn put_session_turns_bulk(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+    Path(sid): Path<String>,
+    agent_id: AgentId,
+    Query(q): Query<SessionTurnQuery>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !body.is_object() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "bulk turns body must be a map { tNNNN: turn }".to_string(),
+        ));
+    }
+    let bytes = serde_json::to_vec(&body).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    if bytes.len() > SESSION_TURNS_BULK_MAX_BYTES {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "bulk turns payload {} bytes exceeds {} byte cap",
+                bytes.len(),
+                SESSION_TURNS_BULK_MAX_BYTES
+            ),
+        ));
+    }
+    let repo = s.repo_for(&ns)?;
+    let path = format!("/sessions/{}/turns", sid);
+    let count = body.as_object().map(|m| m.len()).unwrap_or(0);
+    let opts = CommitOptions::new(
+        &agent_id.0,
+        IntentCategory::Custom("Observe".to_string()),
+        format!("capture session {} ({} turns)", sid, count),
+    )
+    .with_tags(vec![format!("session:{}", sid), "kind:full-turn".to_string()]);
+    let commit_id = repo
+        .set_json(&q.ref_name, &path, &body, opts)
+        .map_err(internal_error)?;
+    s.sessions.mark_all_dirty();
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "ref": q.ref_name,
+        "turns": count,
+        "commit_id": format!("{}", commit_id.short()),
+    })))
 }
 
 async fn put_session_turn(

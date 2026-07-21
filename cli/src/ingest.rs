@@ -658,17 +658,11 @@ pub async fn record_turn_tokens(
 ///
 /// Path: `/sessions/{session}/turns/{idx:04}` so turns sort lexically.
 /// `idx` is the per-session turn number (0-based).
-pub async fn store_full_turn(
-    turn: &Turn,
-    idx: usize,
-    source_file: &str,
-    hub: &str,
-    branch: &str,
-    session: Option<&str>,
-    client: &reqwest::Client,
-) {
-    let sid = session.unwrap_or("default");
-    let snapshot = serde_json::json!({
+///
+/// The stored JSON for one turn. Shared by the per-turn and bulk writers so
+/// the shape can't drift between them.
+pub fn turn_snapshot(turn: &Turn, idx: usize, sid: &str, source_file: &str) -> Value {
+    serde_json::json!({
         "session": sid,
         "turn_index": idx,
         "timestamp": turn.timestamp,
@@ -685,7 +679,22 @@ pub async fn store_full_turn(
         "cwd": turn.cwd,
         "git_branches": turn.git_branches,
         "git_commit": turn.git_commit,
-    });
+    })
+}
+
+/// Write one turn (the real-time per-turn hook path; the bulk sync uses
+/// [`store_turns_bulk`]).
+pub async fn store_full_turn(
+    turn: &Turn,
+    idx: usize,
+    source_file: &str,
+    hub: &str,
+    branch: &str,
+    session: Option<&str>,
+    client: &reqwest::Client,
+) {
+    let sid = session.unwrap_or("default");
+    let snapshot = turn_snapshot(turn, idx, sid, source_file);
     let url = format!(
         "{}/api/sessions/{}/turns/{}?ref={}",
         hub,
@@ -698,6 +707,55 @@ pub async fn store_full_turn(
         req = req.header("X-CTXone-Session", s);
     }
     let _ = req.send().await;
+}
+
+/// Write every full turn for a session in ONE request → one graph commit.
+///
+/// Replaces N per-turn POSTs (N commits, N write-transactions) with a single
+/// `PUT /api/sessions/{sid}/turns` — the change that takes a full sync from
+/// hours to minutes. `turns` are keyed `t0000`, `t0001`, … so they sort and
+/// land exactly where the per-turn path put them.
+pub async fn store_turns_bulk(
+    turns: &[Turn],
+    source_file: &str,
+    hub: &str,
+    branch: &str,
+    session: Option<&str>,
+    client: &reqwest::Client,
+) -> usize {
+    let sid = session.unwrap_or("default");
+    let mut map = serde_json::Map::with_capacity(turns.len());
+    for (idx, turn) in turns.iter().enumerate() {
+        map.insert(format!("t{idx:04}"), turn_snapshot(turn, idx, sid, source_file));
+    }
+    let url = format!(
+        "{}/api/sessions/{}/turns?ref={}",
+        hub,
+        crate::urlencoding(sid),
+        crate::urlencoding(branch),
+    );
+    let mut req = client.put(url).json(&serde_json::Value::Object(map));
+    if let Some(s) = session {
+        req = req.header("X-CTXone-Session", s);
+    }
+    // A silent failure here loses a session's entire transcript, so surface
+    // the reason rather than returning 0 quietly.
+    match req.send().await {
+        Ok(r) if r.status().is_success() => turns.len(),
+        Ok(r) => {
+            let st = r.status();
+            let b = r.text().await.unwrap_or_default();
+            eprintln!(
+                "  bulk turn write for {sid} failed: {st} {}",
+                b.lines().next().unwrap_or("").trim()
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("  bulk turn write for {sid} errored: {e}");
+            0
+        }
+    }
 }
 
 /// Max length of a derived session title (chars), before an ellipsis.
