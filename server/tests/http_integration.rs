@@ -1835,6 +1835,57 @@ async fn session_listing_is_scoped_to_its_workspace() {
 }
 
 #[tokio::test]
+async fn plan_relocate_moves_the_plan_and_its_tasks() {
+    let (_dir, _repo, router) = sqlite_router();
+    for id in ["repo-a", "repo-b"] {
+        let (s, _) = call_json(router.clone(), post_json("/api/projects", json!({ "id": id }))).await;
+        assert_eq!(s, StatusCode::OK);
+    }
+
+    // A plan with a task in repo-a.
+    let (s, _) = call_json(
+        router.clone(),
+        post_json_ns("/api/plans", "repo-a", json!({ "name": "migrate-me" })),
+    )
+    .await;
+    assert!(s.is_success(), "plan create failed: {s}");
+    let (s, _) = call_json(
+        router.clone(),
+        post_json_ns("/api/plans/migrate-me/tasks", "repo-a", json!({ "title": "do the thing" })),
+    )
+    .await;
+    assert!(s.is_success(), "task add failed: {s}");
+
+    // Relocate it to repo-b.
+    let (s, body) = call_json(
+        router.clone(),
+        post_json_ns("/api/plans/migrate-me/relocate", "repo-a", json!({ "to_namespace": "repo-b" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "relocate failed: {body}");
+    assert_eq!(body["wrote_target"], json!(true));
+
+    // Present in repo-b, WITH its task. Use list_plans (a child scan) and
+    // call_raw so an error body is inspected rather than panicking.
+    let (st, body) = call_raw(router.clone(), get_ns("/api/plans/migrate-me", "repo-b")).await;
+    assert_eq!(st, StatusCode::OK, "plan not in repo-b after move: {body}");
+    assert!(body.contains("migrate-me"));
+    assert!(body.contains("do the thing"), "task did not travel: {body}");
+
+    // Gone from repo-a.
+    let (st, _) = call_raw(router.clone(), get_ns("/api/plans/migrate-me", "repo-a")).await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "original not removed from source");
+
+    // Same-namespace move is rejected, not a silent no-op.
+    let (st, _) = call_raw(
+        router.clone(),
+        post_json_ns("/api/plans/migrate-me/relocate", "repo-b", json!({ "to_namespace": "repo-b" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn namespace_query_param_overrides_header() {
     let (_dir, _repo, router) = sqlite_router();
     let (status, _) =

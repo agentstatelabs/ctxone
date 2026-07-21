@@ -1218,6 +1218,18 @@ enum PlanAction {
         #[arg(long, short)]
         description: Option<String>,
     },
+    /// Move a plan to another workspace, carrying its tasks and links.
+    ///
+    /// For plans created in the wrong workspace (usually `default`, before
+    /// per-workspace routing). Reads from the current namespace; use
+    /// `--namespace <src>` if the plan is not in the resolved one.
+    Relocate {
+        /// Plan name.
+        name: String,
+        /// Target workspace (namespace) to move it into.
+        #[arg(long)]
+        to: String,
+    },
     /// Add a task to a plan
     Add {
         /// Plan name
@@ -6244,6 +6256,39 @@ async fn handle_plan(
                 println!("Plan created: {}", v["name"].as_str().unwrap_or(""));
                 if let Some(s) = v["status"].as_str() {
                     println!("  status: {}", s);
+                }
+            });
+        }
+        PlanAction::Relocate { name, to } => {
+            let body = serde_json::json!({ "to_namespace": to, "ref": branch });
+            let resp = match client
+                .post(format!("{}/api/plans/{}/relocate", server, urlencoding(&name)))
+                .header("X-CTXone-Agent", &agent_id)
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "plan relocate failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(format, &parsed, |v| {
+                if v["target_already_had_it"].as_bool().unwrap_or(false) {
+                    println!(
+                        "{} already in {} — removed the stale copy from {}",
+                        name,
+                        v["to"].as_str().unwrap_or(&to),
+                        v["from"].as_str().unwrap_or("?"),
+                    );
+                } else {
+                    println!(
+                        "Moved {} → {}",
+                        name,
+                        v["to"].as_str().unwrap_or(&to)
+                    );
                 }
             });
         }

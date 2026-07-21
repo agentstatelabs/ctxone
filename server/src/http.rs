@@ -604,6 +604,7 @@ fn router_with_config_inner(
             post(force_complete_plan),
         )
         .route("/api/plans/{name}/move", post(move_plan_handler))
+        .route("/api/plans/{name}/relocate", post(relocate_plan))
         // Reminder endpoints
         .route(
             "/api/reminders",
@@ -3675,6 +3676,112 @@ struct MoveSessionRequest {
     to_namespace: String,
     #[serde(default = "default_ref")]
     ref_name: String,
+}
+
+#[derive(Deserialize)]
+struct MovePlanRequest {
+    to_namespace: String,
+    #[serde(default = "default_ref")]
+    ref_name: String,
+}
+
+/// `POST /api/plans/{name}/relocate` — move a plan to another workspace.
+///
+/// Plans collapsed into `default` for the same reason sessions did — created
+/// before per-workspace routing — so this is the plan analogue of
+/// `move_session`. Not named `/move`: `/api/plans/{name}/move` already exists
+/// for reordering a task within a plan.
+///
+/// A plan is two subtrees, and both must travel together or the plan arrives
+/// broken: `/plans/{name}` (the `_meta` + tasks the substrate owns) and
+/// `/plan_links/{name}` (the cross-plan "satisfies" sidecars CTXone keeps
+/// alongside). The original of each is deleted, so this is a move, not a copy.
+///
+/// Idempotent by the plan's `created_at`: a target that already holds an
+/// equal-or-newer copy is left untouched, so a re-run cannot clobber a plan
+/// that moved on in its new home.
+async fn relocate_plan(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+    Path(name): Path<String>,
+    agent_id: AgentId,
+    Json(req): Json<MovePlanRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if req.to_namespace == ns.0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "to_namespace is the current namespace; nothing to move".to_string(),
+        ));
+    }
+    let src = s.repo_for(&ns)?;
+    let dst = s.repo_for(&NamespaceId(req.to_namespace.clone()))?;
+    let plan_root = format!("{}/{}", plan_tools::PLANS_PREFIX, name);
+
+    // The plan subtree. Absent = 404: moving a plan that isn't here is a
+    // caller error, not a silent success.
+    let plan_tree = src
+        .get_tree(&req.ref_name, &plan_root)
+        .map_err(|_| (StatusCode::NOT_FOUND, format!("no plan {} in {}", name, ns.0)))?;
+
+    // Idempotency on the plan's own `_meta.created_at` (plans are immutable in
+    // identity; created_at is the stable key). If the target already holds a
+    // plan by this name, don't overwrite.
+    let dst_has = dst.get_tree(&req.ref_name, &plan_root).is_ok();
+
+    if !dst_has {
+        let opts = CommitOptions::new(
+            &agent_id.0,
+            IntentCategory::Custom("Migrate".to_string()),
+            format!("move plan {} to {}", name, req.to_namespace),
+        )
+        .with_tags(vec![format!("plan:{}", name), "kind:plan-move".to_string()]);
+        dst.set_json(&req.ref_name, &plan_root, &plan_tree, opts)
+            .map_err(internal_error)?;
+
+        // Carry the cross-plan link sidecars, if any. Absent is fine — most
+        // plans have none.
+        let links_root = format!("/plan_links/{}", name);
+        if let Ok(links) = src.get_tree(&req.ref_name, &links_root) {
+            let link_opts = CommitOptions::new(
+                &agent_id.0,
+                IntentCategory::Custom("Migrate".to_string()),
+                format!("move plan links {} to {}", name, req.to_namespace),
+            )
+            .with_tags(vec![format!("plan:{}", name), "kind:plan-move".to_string()]);
+            dst.set_json(&req.ref_name, &links_root, &links, link_opts)
+                .map_err(internal_error)?;
+        }
+    }
+
+    // Remove the originals — plan subtree and its links. This is what makes it
+    // a move and stops the migration leaving duplicates in `default`.
+    let del_opts = CommitOptions::new(
+        &agent_id.0,
+        IntentCategory::Rollback,
+        format!("remove plan {} after move to {}", name, req.to_namespace),
+    )
+    .with_tags(vec![format!("plan:{}", name), "kind:plan-move-cleanup".to_string()]);
+    src.delete(&req.ref_name, &plan_root, del_opts)
+        .map_err(internal_error)?;
+    let links_root = format!("/plan_links/{}", name);
+    if src.get_tree(&req.ref_name, &links_root).is_ok() {
+        let del_links = CommitOptions::new(
+            &agent_id.0,
+            IntentCategory::Rollback,
+            format!("remove plan links {} after move", name),
+        )
+        .with_tags(vec![format!("plan:{}", name), "kind:plan-move-cleanup".to_string()]);
+        let _ = src.delete(&req.ref_name, &links_root, del_links);
+    }
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "plan": name,
+        "from": ns.0,
+        "to": req.to_namespace,
+        "wrote_target": !dst_has,
+        "target_already_had_it": dst_has,
+    })))
 }
 
 /// `POST /api/sessions/{sid}/move` — relocate a session to another workspace.
