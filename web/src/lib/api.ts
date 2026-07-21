@@ -177,7 +177,13 @@ export async function getBlame(ref_name = 'main', path: string): Promise<BlameEn
 	return fetchJson(`/api/blame/${encodeURIComponent(ref_name)}?path=${encodeURIComponent(path)}`);
 }
 
-export async function getBranches(): Promise<Array<{ name: string; id: string }>> {
+export interface BranchInfo {
+	name: string;
+	id: string;
+	/** Head-commit timestamp; absent on older hubs or unreadable heads. */
+	updated_at?: string | null;
+}
+export async function getBranches(): Promise<BranchInfo[]> {
 	return fetchJson('/api/branches');
 }
 

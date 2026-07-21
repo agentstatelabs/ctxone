@@ -1542,7 +1542,22 @@ async fn list_branches(
     let branches = repo.list_branches(None).map_err(internal_error)?;
     let out: Vec<serde_json::Value> = branches
         .into_iter()
-        .map(|(name, id)| serde_json::json!({ "name": name, "id": format!("{}", id.short()) }))
+        .map(|(name, id)| {
+            // The head commit's timestamp is the branch's "last updated" — what
+            // the dashboard's recently-updated panel sorts on. Best-effort: a
+            // branch whose head commit can't be read still lists, just without
+            // a timestamp.
+            let updated_at = repo
+                .get_commit(&id)
+                .ok()
+                .flatten()
+                .map(|c| c.timestamp.to_rfc3339());
+            serde_json::json!({
+                "name": name,
+                "id": format!("{}", id.short()),
+                "updated_at": updated_at,
+            })
+        })
         .collect();
     Ok(Json(out))
 }

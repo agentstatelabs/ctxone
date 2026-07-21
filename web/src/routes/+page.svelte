@@ -34,6 +34,7 @@
 	import QuickCapture from '$lib/dashboard/QuickCapture.svelte';
 	import LlmStats from '$lib/dashboard/LlmStats.svelte';
 	import BurnBoard from '$lib/dashboard/BurnBoard.svelte';
+	import RecentActivity from '$lib/dashboard/RecentActivity.svelte';
 
 	/**
 	 * Bridge for StatTile's `spark` snippet prop: lens-core is a symlinked
@@ -492,6 +493,27 @@
 </div>
 
 <div class="grid">
+	<!-- ── 1b · Recently updated ────────────────────────────────────────── -->
+	<!--
+		Spans both columns: a workspace pulse (newest branches / plans /
+		sessions) belongs across the top, not squeezed into one column.
+	-->
+	<div class="span-2">
+		<Panel
+			title="Recently updated"
+			scope={branchStore.current}
+			status={sessionsL.status === 'ready' && plansL.status === 'ready' ? 'ready' : sessionsL.status}
+			errorText={sessionsL.error || plansL.error}
+			emptyTitle="Nothing yet"
+			emptyText="Branches, plans, and sessions will appear here as work happens."
+		>
+			<RecentActivity
+				sessions={sessionsL.data ?? []}
+				plans={plansL.data?.plans ?? []}
+			/>
+		</Panel>
+	</div>
+
 	<!-- ── 2 · Token economics ──────────────────────────────────────────── -->
 	<Panel
 		title="Token economics"
@@ -768,6 +790,12 @@
 			wrapper now only handles growing the textarea into the space.
 		*/
 		align-items: stretch;
+	}
+
+	/* Full-width rows (the recently-updated overview) span both columns. */
+	.span-2 {
+		grid-column: 1 / -1;
+		min-width: 0;
 	}
 
 	/*
