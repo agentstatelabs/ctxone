@@ -19,6 +19,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tiktoken-rs = { workspace = true }
 tokio = { workspace = true }
+# Bounded-concurrency stream combinators for parallel session ingest
+# (`buffer_unordered`). Already in the lock graph transitively.
+futures = "0.3"
 toml = { workspace = true }
 chrono = { workspace = true }
 # Reading Cursor's chat store (a SQLite db). `bundled` avoids a system

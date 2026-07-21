@@ -39,34 +39,31 @@ pub struct CursorSession {
     pub last_updated_at: i64,
 }
 
-/// The composer's `lastUpdatedAt` for one session, read cheaply (no bubbles).
-/// The incremental-sync fingerprint for Cursor.
-pub fn last_updated_at(db_path: &Path, composer_id: &str) -> Option<i64> {
-    let conn = open_readonly(db_path).ok()?;
-    let composer = read_kv(&conn, &format!("composerData:{composer_id}"))?;
-    composer.get("lastUpdatedAt").and_then(|v| v.as_i64())
-}
-
 /// List every composer (session) in the db, oldest first. Best-effort: a db
 /// that can't be opened or has no chat table yields an empty list.
 pub fn list_sessions(db_path: &Path) -> Vec<CursorSession> {
     let Ok(conn) = open_readonly(db_path) else {
         return vec![];
     };
-    // `CAST(key AS TEXT) LIKE`, not a bare `LIKE`. Cursor stores these keys
-    // with BLOB affinity, and rusqlite's bundled SQLite is built with
-    // SQLITE_LIKE_DOESNT_MATCH_BLOBS — so a bare `LIKE 'composerData:%'`
-    // matched zero rows while the system `sqlite3` (no such flag) matched all
-    // 106. Casting the key to TEXT first restores the match. (Exact `key = ?`
-    // lookups below are unaffected and need no cast.)
-    // Both columns are read as TEXT via CAST. The key has BLOB affinity (so a
-    // bare LIKE misses it, see the note above) and the value column, though
-    // JSON text, can carry BLOB affinity too — reading it as `Vec<u8>` then
-    // errored every row, and `flatten()` silently dropped all 106. `CAST(...
-    // AS TEXT)` reads both as the strings they are.
+    // A half-open **range** on the key, not `LIKE`/`CAST` — this is the whole
+    // performance of discovery. `cursorDiskKV(key TEXT UNIQUE, value BLOB)` has
+    // ~100k rows (one per chat *bubble*) totalling several GB, since the big
+    // JSON lives inline in `value`. `WHERE CAST(key AS TEXT) LIKE
+    // 'composerData:%'` cannot use the key index — the CAST defeats it — so it
+    // FULL-SCANS the table, reading every value page: ~4GB off disk, ~150s on a
+    // cold cache (and it looked instant from the `sqlite3` CLI only because the
+    // file was already warm in RAM). The range `key >= 'composerData:' AND key
+    // < 'composerData;'` (';' is ':' + 1) is sargable: EXPLAIN QUERY PLAN shows
+    // SEARCH USING INDEX, touching only the ~106 composer rows. Identical
+    // result set, effectively instant.
+    //
+    // `value` is still read as `CAST(... AS TEXT)`: though it is JSON text it
+    // carries BLOB affinity, so reading it as `Vec<u8>` errored every row and
+    // `flatten()` silently dropped them all. (Exact `key = ?` lookups below use
+    // the index directly.)
     let mut stmt = match conn.prepare(
         "SELECT CAST(key AS TEXT), CAST(value AS TEXT) FROM cursorDiskKV \
-         WHERE CAST(key AS TEXT) LIKE 'composerData:%'",
+         WHERE key >= 'composerData:' AND key < 'composerData;'",
     ) {
         Ok(s) => s,
         Err(_) => return vec![],

@@ -51,6 +51,13 @@ pub struct SessionRef {
     /// `None` for sources that do not record it; such sessions fall back to
     /// the default namespace rather than being guessed at.
     pub cwd: Option<String>,
+    /// A fingerprint computed cheaply at discovery, when the source already
+    /// had the data in hand. Db-backed sources set this so the incremental
+    /// skip does not re-open the database once per session — the Cursor store
+    /// is a single multi-GB file, and re-opening it per conversation cost more
+    /// than the entire rest of a sync. `None` means "compute it the normal way"
+    /// (see [`SessionSource::fingerprint`]).
+    pub precomputed_fp: Option<String>,
 }
 
 impl SessionRef {
@@ -122,6 +129,11 @@ pub trait SessionSource {
     /// `None` disables the skip for that session (it re-ingests every time),
     /// which is the safe default when no fingerprint can be computed.
     fn fingerprint(&self, session: &SessionRef) -> Option<String> {
+        // A fingerprint captured at discovery wins — it is why db-backed
+        // sources need not override this method or re-open their store.
+        if let Some(fp) = &session.precomputed_fp {
+            return Some(fp.clone());
+        }
         let m = std::fs::metadata(&session.path).ok()?;
         let mtime = m
             .modified()
@@ -244,6 +256,7 @@ impl SessionSource for ClaudeCode {
                     cwd: Self::read_cwd(&path),
                     path,
                     native_id: None, // file stem is the session id
+                    precomputed_fp: None,
                 })
             })
             .collect()
@@ -267,6 +280,7 @@ impl SessionSource for ClaudeCode {
                 cwd: Self::read_cwd(&path).or_else(|| Some(dir_cwd.clone())),
                 path,
                 native_id: None,
+                precomputed_fp: None,
             })
             .collect()
     }
@@ -394,6 +408,7 @@ impl SessionSource for Codex {
                     // session_id() handles the None case via the file stem.
                     native_id: (!id.is_empty()).then_some(id),
                     path,
+                    precomputed_fp: None,
                 }
             })
             .collect();
@@ -535,6 +550,7 @@ impl SessionSource for Gemini {
                     cwd,
                     native_id: Self::read_session_id(&path),
                     path,
+                    precomputed_fp: None,
                 }
             })
             .collect();
@@ -608,6 +624,11 @@ impl SessionSource for Cursor {
                 cwd: None, // not in the global db
                 native_id: Some(s.composer_id),
                 path: db.clone(),
+                // `list_sessions` already read `lastUpdatedAt` in its single
+                // scan, so the incremental-skip fingerprint is free here.
+                // Without this, `fingerprint` would re-open the multi-GB store
+                // once per conversation.
+                precomputed_fp: Some(format!("cursor:{}", s.last_updated_at)),
             })
             .collect()
     }
@@ -625,11 +646,9 @@ impl SessionSource for Cursor {
         crate::cursor::parse_session(&session.path, id)
     }
 
-    fn fingerprint(&self, session: &SessionRef) -> Option<String> {
-        // Per-composer, not the shared db file's mtime.
-        let id = session.native_id.as_ref()?;
-        crate::cursor::last_updated_at(&session.path, id).map(|ts| format!("cursor:{ts}"))
-    }
+    // No `fingerprint` override: `discover_all` captured `lastUpdatedAt` per
+    // composer in its single scan and stored it in `precomputed_fp`, so the
+    // trait default returns it without re-opening the database.
 }
 
 // ── Registry ──────────────────────────────────────────────────────────────────
@@ -689,6 +708,7 @@ mod tests {
             cwd: None,
             path: PathBuf::from("/tmp/abc-123.jsonl"),
             native_id: None,
+            precomputed_fp: None,
         };
         assert_eq!(r.session_id(), "abc-123");
     }
@@ -700,6 +720,7 @@ mod tests {
             cwd: None,
             path: PathBuf::from("/tmp/state.vscdb"),
             native_id: Some("composer-7".into()),
+            precomputed_fp: None,
         };
         assert_eq!(r.session_id(), "composer-7");
     }
@@ -711,6 +732,7 @@ mod tests {
             cwd: None,
             path: PathBuf::from("/x/9117346d.jsonl"),
             native_id: None,
+            precomputed_fp: None,
         };
         assert_eq!(r.namespaced_id("claude"), "9117346d");
     }
@@ -722,6 +744,7 @@ mod tests {
             cwd: None,
             path: PathBuf::from("/x/rollout-abc.jsonl"),
             native_id: Some("019e5540".into()),
+            precomputed_fp: None,
         };
         assert_eq!(r.namespaced_id("codex"), "codex:019e5540");
     }
@@ -740,6 +763,7 @@ mod tests {
             cwd: None,
             path: PathBuf::from(p),
             native_id: None,
+            precomputed_fp: None,
         };
         let grouped = group_by_label(vec![
             mk("a/b", "/1.jsonl"),

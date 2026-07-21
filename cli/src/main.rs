@@ -4291,6 +4291,326 @@ fn session_id_for_file(path: &std::path::Path) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// How many sessions ingest at once. The work is network-latency-bound and the
+/// hub serialises its commits, so bounded concurrency hides round-trip latency
+/// without hammering the writer or exhausting connections — the difference
+/// between a cold sync measured in tens of minutes and one in minutes.
+const INGEST_CONCURRENCY: usize = 8;
+
+/// One session's ingest work, fully resolved so it can run without the Router.
+///
+/// Routing (`cwd` → namespace) and the tombstone check are done up front, on a
+/// single thread, because they hold the only `&mut` on the shared routing memo,
+/// client pool, and tombstone cache. Once a job carries its own workspace-scoped
+/// `client` and routing decision, it shares nothing — which is what lets many
+/// run concurrently.
+struct IngestJob {
+    session_ref: crate::sources::SessionRef,
+    source_id: String,
+    /// The session id to write under, already namespaced by source.
+    effective_session: Option<String>,
+    routed: crate::workspace::Routed,
+    /// Workspace-scoped client (its default header names the namespace).
+    client: reqwest::Client,
+}
+
+/// What one session contributed to the run, folded into the totals after the
+/// concurrent phase. `log` is the session's buffered stdout, printed as a unit
+/// so its lines stay together despite finishing out of order.
+#[derive(Default)]
+struct SessionOutcome {
+    sessions: usize,
+    turns: usize,
+    skipped: usize,
+    full_turns: usize,
+    memories: usize,
+    tokens: crate::ingest::TurnTokens,
+    log: String,
+}
+
+/// Ingest a single, already-routed session. Pure per-session work with no
+/// shared mutable state, so `buffer_unordered` can run many at once.
+#[allow(clippy::too_many_arguments)]
+async fn ingest_one_session(
+    job: IngestJob,
+    source_label: &str,
+    label: &str,
+    server: &str,
+    branch: &str,
+    since_ts: &str,
+    last: Option<usize>,
+    dry_run: bool,
+    full_turn: bool,
+    tokens_only: bool,
+    reingest: bool,
+    api_key: &str,
+) -> SessionOutcome {
+    use std::fmt::Write as _;
+    let mut out = SessionOutcome::default();
+
+    let session_ref = &job.session_ref;
+    let path = &session_ref.path;
+    let fname = path.file_name().unwrap_or_default().to_string_lossy();
+    let effective_session = job.effective_session.as_deref();
+    let client = &job.client;
+    let routed = &job.routed;
+    let source_impl = crate::sources::source_by_id(&job.source_id)
+        .expect("source id came from the registry");
+
+    // Incremental skip: if the transcript's fingerprint matches the one stored
+    // on its last ingest, nothing changed — skip the parse and all the writes.
+    // This is what turns a re-sync from hours into seconds; most sessions never
+    // change between runs. One small GET decides it, against hundreds of writes
+    // avoided.
+    let fingerprint = source_impl.fingerprint(session_ref);
+    if !reingest
+        && !dry_run
+        && let (Some(sid), Some(fp)) = (effective_session, fingerprint.as_deref())
+    {
+        let stored = crate::ingest::fetch_stored_fingerprint(server, branch, sid, client).await;
+        if stored.as_deref() == Some(fp) {
+            out.skipped = 1;
+            return out;
+        }
+    }
+
+    let _ = writeln!(
+        out.log,
+        "→ {}  (session: {}, workspace: {})",
+        fname,
+        effective_session.unwrap_or("default"),
+        match routed {
+            crate::workspace::Routed::Existing(ns) => ns.clone(),
+            crate::workspace::Routed::Registered(ns) => format!("{ns} (new)"),
+            crate::workspace::Routed::WouldRegister(ns) => format!("{ns} (would create)"),
+            crate::workspace::Routed::Fallback => "default".to_string(),
+        }
+    );
+
+    let mut turns = source_impl.parse(session_ref);
+    if !turns.is_empty() {
+        out.sessions = 1;
+    }
+
+    // Session title (t-016): derived from the FULL session (before the
+    // --since/--last filters) so it reflects where the session started.
+    // Fallback: "<project-label> · <date>".
+    let title = crate::ingest::derive_session_title(&turns).unwrap_or_else(|| {
+        let proj = if !label.is_empty() {
+            label.to_string()
+        } else {
+            std::env::current_dir()
+                .ok()
+                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                .unwrap_or_else(|| "session".to_string())
+        };
+        let date = turns
+            .first()
+            .map(|t| t.timestamp.clone())
+            .filter(|ts| ts.len() >= 10)
+            .map(|ts| ts[..10].to_string())
+            .unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%d").to_string());
+        crate::ingest::truncate_title(&format!("{} · {}", proj, date))
+    });
+    if dry_run {
+        let _ = writeln!(
+            out.log,
+            "  [dry] title: /sessions/{}/title = {:?}",
+            effective_session.unwrap_or("default"),
+            title
+        );
+    } else {
+        crate::ingest::store_session_title(&title, server, branch, effective_session, client).await;
+    }
+
+    // Session meta (t-021): source + first/last turn timestamps + models used,
+    // from the full (pre-filter) turn list. Skip synthetic/placeholder model
+    // markers (e.g. "<synthetic>") and empties.
+    let started_at = turns.first().map(|t| t.timestamp.clone()).unwrap_or_default();
+    let updated_at = turns.last().map(|t| t.timestamp.clone()).unwrap_or_default();
+    let mut models_used: Vec<String> = Vec::new();
+    for t in &turns {
+        let m = t.model.trim();
+        let real = !m.is_empty() && !m.starts_with('<');
+        if real && !models_used.iter().any(|x| x == m) {
+            models_used.push(m.to_string());
+        }
+    }
+    if dry_run {
+        let _ = writeln!(
+            out.log,
+            "  [dry] meta: /sessions/{}/meta = {{source: {:?}, started_at: {:?}, updated_at: {:?}, models_used: {:?}}}",
+            effective_session.unwrap_or("default"),
+            source_label,
+            started_at,
+            updated_at,
+            models_used
+        );
+    } else {
+        crate::ingest::store_session_meta(
+            source_label,
+            &started_at,
+            &updated_at,
+            &models_used,
+            fingerprint.as_deref(),
+            server,
+            branch,
+            effective_session,
+            client,
+        )
+        .await;
+    }
+
+    // Provenance: every branch this session touched, plus where it routed.
+    // From the FULL turn list, before the filters below.
+    let provenance = crate::ingest::build_provenance(&turns);
+    if let Some(prov) = &provenance {
+        if dry_run {
+            let _ = writeln!(
+                out.log,
+                "  [dry] provenance: /sessions/{}/provenance = {}",
+                effective_session.unwrap_or("default"),
+                serde_json::to_string(prov).unwrap_or_default()
+            );
+        } else {
+            crate::ingest::store_session_provenance(
+                prov,
+                routed.namespace(),
+                routed.namespace(), // project id == namespace for auto-registered repos
+                &fname,
+                // Codex files under archived_sessions/ are archived, which is a
+                // state and not a reason to skip them.
+                path.to_string_lossy().contains("/archived_sessions/"),
+                server,
+                branch,
+                effective_session,
+                client,
+            )
+            .await;
+        }
+    }
+
+    // Burn summary: from the FULL turn list, stored with the session's last-turn
+    // timestamp so the dashboard can tell a current score from a stale one.
+    let burn = crate::burn::compute(&turns);
+    let burn_updated_at = turns.last().map(|t| t.timestamp.clone()).unwrap_or_default();
+    if dry_run {
+        let _ = writeln!(
+            out.log,
+            "  [dry] burn: /sessions/{}/burn = level={} ratio={:?}",
+            effective_session.unwrap_or("default"),
+            burn.level,
+            burn.ratio,
+        );
+    } else {
+        crate::ingest::store_session_burn(
+            &burn.to_json(&burn_updated_at),
+            server,
+            branch,
+            effective_session,
+            client,
+        )
+        .await;
+    }
+
+    // Apply --since / --last filters before the per-turn work.
+    if !since_ts.is_empty() {
+        turns.retain(|t| t.timestamp.as_str() >= since_ts);
+    }
+    if let Some(n) = last {
+        let skip = turns.len().saturating_sub(n);
+        turns = turns.into_iter().skip(skip).collect();
+    }
+
+    let source_file = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+
+    // One bulk write for all full turns, and one aggregated token record —
+    // instead of two HTTP round-trips + two graph commits per turn. Memory
+    // extraction stays per-turn (an LLM call each) and is gated on an API key,
+    // so it is off during a whole-machine `--all` sync.
+    let mut session_tokens = crate::ingest::TurnTokens::default();
+    let mut last_model = String::new();
+    for turn in turns.iter() {
+        out.turns += 1;
+        out.tokens.add(&turn.tokens);
+        session_tokens.add(&turn.tokens);
+        let m = turn.model.trim();
+        if !m.is_empty() && !m.starts_with('<') {
+            last_model = m.to_string();
+        }
+    }
+
+    if !session_tokens.is_empty() && !dry_run {
+        // Server-side these counters are summed, so one record with the session
+        // total and its last real model is equivalent to N per-turn records.
+        crate::ingest::record_turn_tokens(
+            &session_tokens,
+            &last_model,
+            crate::ingest::provider_for_model(&last_model),
+            server,
+            effective_session,
+            client,
+        )
+        .await;
+    }
+
+    if full_turn && !turns.is_empty() {
+        if dry_run {
+            let _ = writeln!(
+                out.log,
+                "  [dry] full turns: /sessions/{}/turns ({} turns, 1 bulk write)",
+                effective_session.unwrap_or("default"),
+                turns.len(),
+            );
+        } else {
+            out.full_turns += crate::ingest::store_turns_bulk(
+                &turns,
+                &source_file,
+                server,
+                branch,
+                effective_session,
+                client,
+            )
+            .await;
+        }
+    }
+
+    // Memory extraction, per turn — only when an API key is set.
+    if !dry_run && !tokens_only && !api_key.is_empty() {
+        for turn in turns.iter() {
+            if !turn.is_substantial() {
+                continue;
+            }
+            let memories = crate::ingest::extract_memories(turn, api_key, client).await;
+            for mem in &memories {
+                crate::ingest::store_memory(mem, server, branch, effective_session, client).await;
+            }
+            out.memories += memories.len();
+        }
+    }
+
+    // Derive plan links from the just-stored turns. A whole-session post-pass,
+    // so it sees every commit at once; best-effort — a failure must not fail the
+    // ingest.
+    if !dry_run && full_turn && !tokens_only {
+        if let Some(sid) = effective_session {
+            let url = format!(
+                "{}/api/sessions/{}/derive_links?ref={}",
+                server,
+                urlencoding(sid),
+                urlencoding(branch),
+            );
+            let _ = client.post(url).send().await;
+        }
+    }
+
+    out
+}
+
 async fn run_ingest_session(
     server: &str,
     branch: &str,
@@ -4381,6 +4701,7 @@ async fn run_ingest_session(
                 cwd: None,
                 path: std::path::PathBuf::from(f),
                 native_id: None,
+                precomputed_fp: None,
             }],
         )]
     } else {
@@ -4454,314 +4775,85 @@ async fn run_ingest_session(
         let mut proj_skipped = 0usize;
         let mut proj_tokens = crate::ingest::TurnTokens::default();
 
+        // Phase A — resolve routing sequentially. The Router memoizes by
+        // directory and by namespace, so this is a few dozen probes for the
+        // whole machine, and it must stay single-threaded: it holds the only
+        // `&mut` on the shared routing memo, client pool, and tombstone cache.
+        // Tombstoned sessions are dropped here so the concurrent phase only
+        // sees real work. If the caller didn't pin an explicit --session, each
+        // file gets its own id derived from the filename (namespaced by source
+        // so a Codex uuid cannot land on a Claude session's row).
+        let mut jobs: Vec<IngestJob> = Vec::with_capacity(files.len());
         for session_ref in files {
-            let path = &session_ref.path;
-            let fname = path.file_name().unwrap_or_default().to_string_lossy();
-            // If the caller didn't pin an explicit --session, give each file
-            // its own session id derived from the filename so the Sessions
-            // page shows one row per ingested transcript instead of
-            // collapsing everything into "default".
-            let derived_sid;
-            let effective_session: Option<&str> = match session {
-                Some(s) => Some(s),
-                None => {
-                    // Namespaced by source so a Codex uuid cannot land on a
-                    // Claude session's row. Claude keeps bare ids (see
-                    // SessionRef::namespaced_id).
-                    derived_sid = session_ref.namespaced_id(source_id);
-                    Some(derived_sid.as_str())
-                }
+            let effective_session: Option<String> = match session {
+                Some(s) => Some(s.to_string()),
+                None => Some(session_ref.namespaced_id(source_id)),
             };
-            // Route to the workspace this transcript was recorded in. Every
-            // write below uses `client` (workspace-scoped) rather than the
-            // process-wide one, which is what stops N repos collapsing into
-            // one namespace.
             let routed = router.route(session_ref.cwd.as_deref()).await;
 
             // A deleted session must stay deleted. Its transcript is still on
-            // disk, so without this check the next sync would faithfully
-            // restore exactly what the user asked to remove.
-            if let Some(sid) = effective_session
+            // disk, so without this the next sync would faithfully restore
+            // exactly what the user asked to remove.
+            if let Some(sid) = effective_session.as_deref()
                 && router.is_tombstoned(routed.namespace(), sid).await
             {
+                let fname = session_ref
+                    .path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy();
                 println!("→ {}  (session: {}) — skipped, deleted", fname, sid);
                 skipped_deleted += 1;
                 continue;
             }
 
             let client = router.client_for(routed.namespace(), |ns| clients.build(ns));
-
-            let source_impl = crate::sources::source_by_id(source_id)
-                .expect("source id came from the registry");
-
-            // Incremental skip: if the transcript's fingerprint matches the one
-            // stored on its last ingest, nothing changed — skip the parse and
-            // all the per-turn writes. This is what turns a re-sync from hours
-            // into seconds; most sessions never change between runs. One small
-            // GET decides it, against hundreds of writes avoided.
-            let fingerprint = source_impl.fingerprint(session_ref);
-            if !reingest && !dry_run
-                && let (Some(sid), Some(fp)) = (effective_session, fingerprint.as_deref())
-            {
-                let stored =
-                    crate::ingest::fetch_stored_fingerprint(server, branch, sid, &client).await;
-                if stored.as_deref() == Some(fp) {
-                    proj_skipped += 1;
-                    continue;
-                }
-            }
-
-            println!(
-                "→ {}  (session: {}, workspace: {})",
-                fname,
-                effective_session.unwrap_or("default"),
-                match &routed {
-                    crate::workspace::Routed::Existing(ns) => ns.clone(),
-                    crate::workspace::Routed::Registered(ns) => format!("{ns} (new)"),
-                    crate::workspace::Routed::WouldRegister(ns) => format!("{ns} (would create)"),
-                    crate::workspace::Routed::Fallback => "default".to_string(),
-                }
-            );
-
-            let mut turns = source_impl.parse(session_ref);
-            if !turns.is_empty() {
-                proj_sessions += 1;
-            }
-
-            // Session title (t-016): derive from the FULL session (before the
-            // --since/--last filters below) so it reflects where the session
-            // started, then persist a title node at /sessions/{id}/title.
-            // Fallback: "<project-label> · <date>".
-            let title = crate::ingest::derive_session_title(&turns).unwrap_or_else(|| {
-                let proj = if !label.is_empty() {
-                    label.clone()
-                } else {
-                    std::env::current_dir()
-                        .ok()
-                        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-                        .unwrap_or_else(|| "session".to_string())
-                };
-                let date = turns
-                    .first()
-                    .map(|t| t.timestamp.clone())
-                    .filter(|ts| ts.len() >= 10)
-                    .map(|ts| ts[..10].to_string())
-                    .unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%d").to_string());
-                crate::ingest::truncate_title(&format!("{} · {}", proj, date))
+            jobs.push(IngestJob {
+                session_ref: session_ref.clone(),
+                source_id: source_id.to_string(),
+                effective_session,
+                routed,
+                client,
             });
-            if dry_run {
-                println!(
-                    "  [dry] title: /sessions/{}/title = {:?}",
-                    effective_session.unwrap_or("default"),
-                    title
-                );
-            } else {
-                crate::ingest::store_session_title(
-                    &title,
-                    server,
-                    branch,
-                    effective_session,
-                    &client,
-                )
-                .await;
-            }
+        }
 
-            // Session meta (t-021): source + first/last turn timestamps, so the
-            // Lens can filter by agent type and sort by date. `source_label`
-            // is the agent this transcript came from (Claude Code, Codex,
-            // Gemini, Cursor). Timestamps come from the full (pre-filter) turn
-            // list.
-            let started_at = turns.first().map(|t| t.timestamp.clone()).unwrap_or_default();
-            let updated_at = turns.last().map(|t| t.timestamp.clone()).unwrap_or_default();
-            // Distinct real models across all turns, first-seen order — so a
-            // session that switched models mid-way stays findable by any.
-            // Skip synthetic/placeholder markers (e.g. "<synthetic>" on
-            // system/tool-result turns) and empties.
-            let mut models_used: Vec<String> = Vec::new();
-            for t in &turns {
-                let m = t.model.trim();
-                let real = !m.is_empty() && !m.starts_with('<');
-                if real && !models_used.iter().any(|x| x == m) {
-                    models_used.push(m.to_string());
-                }
-            }
-            if dry_run {
-                println!(
-                    "  [dry] meta: /sessions/{}/meta = {{source: {:?}, started_at: {:?}, updated_at: {:?}, models_used: {:?}}}",
-                    effective_session.unwrap_or("default"),
+        // Phase B — process sessions concurrently. Every job owns its
+        // workspace-scoped client and routing decision, so nothing mutable is
+        // shared: the K in-flight sessions never touch the Router or one
+        // another. The work is network-latency-bound (a handful of small writes
+        // per session), so bounded concurrency collapses a sequential wall of
+        // round-trips into ~K at a time. Each session's output is buffered and
+        // printed on completion so its lines stay together.
+        use futures::stream::StreamExt as _;
+        let outcomes: Vec<SessionOutcome> = futures::stream::iter(jobs)
+            .map(|job| {
+                ingest_one_session(
+                    job,
                     source_label,
-                    started_at,
-                    updated_at,
-                    models_used
-                );
-            } else {
-                crate::ingest::store_session_meta(
-                    source_label,
-                    &started_at,
-                    &updated_at,
-                    &models_used,
-                    fingerprint.as_deref(),
+                    label,
                     server,
                     branch,
-                    effective_session,
-                    &client,
+                    since_ts,
+                    last,
+                    dry_run,
+                    full_turn,
+                    tokens_only,
+                    reingest,
+                    api_key.as_str(),
                 )
-                .await;
-            }
+            })
+            .buffer_unordered(INGEST_CONCURRENCY)
+            .collect()
+            .await;
 
-            // Provenance: every branch this session touched, plus where it
-            // was routed. Built from the FULL turn list, before the
-            // --since/--last filters below, so the rollup describes the
-            // session rather than the slice being re-imported.
-            let provenance = crate::ingest::build_provenance(&turns);
-            if let Some(prov) = &provenance {
-                if dry_run {
-                    println!(
-                        "  [dry] provenance: /sessions/{}/provenance = {}",
-                        effective_session.unwrap_or("default"),
-                        serde_json::to_string(prov).unwrap_or_default()
-                    );
-                } else {
-                    crate::ingest::store_session_provenance(
-                        prov,
-                        routed.namespace(),
-                        routed.namespace(), // project id == namespace for auto-registered repos
-                        &fname,
-                        // Codex files under archived_sessions/ are archived,
-                        // which is a state and not a reason to skip them.
-                        path.to_string_lossy().contains("/archived_sessions/"),
-                        server,
-                        branch,
-                        effective_session,
-                        &client,
-                    )
-                    .await;
-                }
-            }
-
-            // Burn summary: computed from the FULL turn list (same reason as
-            // provenance — it describes the session, not the re-imported
-            // slice). Stored with the session's last-turn timestamp so the
-            // dashboard can tell a current score from a stale one.
-            let burn = crate::burn::compute(&turns);
-            let burn_updated_at = turns.last().map(|t| t.timestamp.clone()).unwrap_or_default();
-            if dry_run {
-                println!(
-                    "  [dry] burn: /sessions/{}/burn = level={} ratio={:?}",
-                    effective_session.unwrap_or("default"),
-                    burn.level,
-                    burn.ratio,
-                );
-            } else {
-                crate::ingest::store_session_burn(
-                    &burn.to_json(&burn_updated_at),
-                    server,
-                    branch,
-                    effective_session,
-                    &client,
-                )
-                .await;
-            }
-
-            // Apply --since filter on timestamp.
-            if !since_ts.is_empty() {
-                turns.retain(|t| t.timestamp.as_str() >= since_ts);
-            }
-
-            // Apply --last filter.
-            if let Some(n) = last {
-                let skip = turns.len().saturating_sub(n);
-                turns = turns.into_iter().skip(skip).collect();
-            }
-
-            let source_file = path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            // One bulk write for all full turns, and one aggregated token
-            // record — instead of two HTTP round-trips + two graph commits per
-            // turn. A 900-turn session was ~1800 commits; it is now two.
-            // Memory extraction stays per-turn (it needs an LLM call per turn)
-            // and is gated on an API key, so it is off during a `--all` sync.
-            let mut session_tokens = crate::ingest::TurnTokens::default();
-            let mut last_model = String::new();
-            for turn in turns.iter() {
-                proj_turns += 1;
-                proj_tokens.add(&turn.tokens);
-                session_tokens.add(&turn.tokens);
-                let m = turn.model.trim();
-                if !m.is_empty() && !m.starts_with('<') {
-                    last_model = m.to_string();
-                }
-            }
-
-            if !session_tokens.is_empty() && !dry_run {
-                // Server-side these counters are summed, so one record with the
-                // session total and its last real model is equivalent to N
-                // per-turn records — same totals, same last_model.
-                crate::ingest::record_turn_tokens(
-                    &session_tokens,
-                    &last_model,
-                    crate::ingest::provider_for_model(&last_model),
-                    server,
-                    effective_session,
-                    &client,
-                )
-                .await;
-            }
-
-            if full_turn && !turns.is_empty() {
-                if dry_run {
-                    println!(
-                        "  [dry] full turns: /sessions/{}/turns ({} turns, 1 bulk write)",
-                        effective_session.unwrap_or("default"),
-                        turns.len(),
-                    );
-                } else {
-                    total_full_turns += crate::ingest::store_turns_bulk(
-                        &turns,
-                        &source_file,
-                        server,
-                        branch,
-                        effective_session,
-                        &client,
-                    )
-                    .await;
-                }
-            }
-
-            // Memory extraction, per turn — only when an API key is set (so
-            // it is skipped during whole-machine sync).
-            if !dry_run && !tokens_only && !api_key.is_empty() {
-                for turn in turns.iter() {
-                    if !turn.is_substantial() {
-                        continue;
-                    }
-                    let memories = crate::ingest::extract_memories(turn, &api_key, &client).await;
-                    for mem in &memories {
-                        crate::ingest::store_memory(mem, server, branch, effective_session, &client)
-                            .await;
-                    }
-                    total_memories += memories.len();
-                }
-            }
-
-            // Derive plan links from the just-stored turns. A whole-session
-            // post-pass, so it sees every commit at once; the server validates
-            // each ref against the plans in this workspace. Best-effort — a
-            // failure here must not fail the ingest.
-            if !dry_run && full_turn && !tokens_only {
-                if let Some(sid) = effective_session {
-                    let url = format!(
-                        "{}/api/sessions/{}/derive_links?ref={}",
-                        server,
-                        urlencoding(sid),
-                        urlencoding(branch),
-                    );
-                    let _ = client.post(url).send().await;
-                }
-            }
+        for o in outcomes {
+            print!("{}", o.log);
+            proj_sessions += o.sessions;
+            proj_turns += o.turns;
+            proj_skipped += o.skipped;
+            proj_tokens.add(&o.tokens);
+            total_full_turns += o.full_turns;
+            total_memories += o.memories;
         }
 
         if all && !label.is_empty() {
