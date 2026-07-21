@@ -3791,8 +3791,15 @@ struct MoveSessionRequest {
 #[derive(Deserialize)]
 struct MovePlanRequest {
     to_namespace: String,
-    #[serde(default = "default_ref")]
+    /// Source ref to read the plan from. `rename = "ref"` so callers send the
+    /// short `ref` key (matching every other endpoint).
+    #[serde(default = "default_ref", rename = "ref")]
     ref_name: String,
+    /// Destination ref in the target namespace. Defaults to the source ref; the
+    /// plan migration passes "main" so plans land on each target workspace's
+    /// trunk regardless of which feature branch they came from in `default`.
+    #[serde(default)]
+    to_ref: Option<String>,
 }
 
 /// `POST /api/plans/{name}/relocate` — move a plan to another workspace.
@@ -3833,10 +3840,14 @@ async fn relocate_plan(
         .get_tree(&req.ref_name, &plan_root)
         .map_err(|_| (StatusCode::NOT_FOUND, format!("no plan {} in {}", name, ns.0)))?;
 
+    // Destination ref — the source ref unless the caller consolidates onto a
+    // different trunk (the migration passes "main").
+    let dst_ref = req.to_ref.clone().unwrap_or_else(|| req.ref_name.clone());
+
     // Idempotency on the plan's own `_meta.created_at` (plans are immutable in
     // identity; created_at is the stable key). If the target already holds a
     // plan by this name, don't overwrite.
-    let dst_has = dst.get_tree(&req.ref_name, &plan_root).is_ok();
+    let dst_has = dst.get_tree(&dst_ref, &plan_root).is_ok();
 
     if !dst_has {
         let opts = CommitOptions::new(
@@ -3845,7 +3856,7 @@ async fn relocate_plan(
             format!("move plan {} to {}", name, req.to_namespace),
         )
         .with_tags(vec![format!("plan:{}", name), "kind:plan-move".to_string()]);
-        dst.set_json(&req.ref_name, &plan_root, &plan_tree, opts)
+        dst.set_json(&dst_ref, &plan_root, &plan_tree, opts)
             .map_err(internal_error)?;
 
         // Carry the cross-plan link sidecars, if any. Absent is fine — most
@@ -3858,7 +3869,7 @@ async fn relocate_plan(
                 format!("move plan links {} to {}", name, req.to_namespace),
             )
             .with_tags(vec![format!("plan:{}", name), "kind:plan-move".to_string()]);
-            dst.set_json(&req.ref_name, &links_root, &links, link_opts)
+            dst.set_json(&dst_ref, &links_root, &links, link_opts)
                 .map_err(internal_error)?;
         }
     }
