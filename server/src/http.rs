@@ -638,6 +638,10 @@ fn router_with_config_inner(
             "/api/sessions/{sid}/provenance",
             axum::routing::put(put_session_provenance),
         )
+        .route(
+            "/api/sessions/{sid}/burn",
+            axum::routing::put(put_session_burn),
+        )
         .route("/api/sessions/{sid}", axum::routing::delete(delete_session))
         .route(
             "/api/sessions/{sid}/move",
@@ -3265,6 +3269,49 @@ fn session_meta_path(sid: &str) -> String {
 
 fn session_provenance_path(sid: &str) -> String {
     format!("/sessions/{}/provenance", sid)
+}
+
+fn session_burn_path(sid: &str) -> String {
+    format!("/sessions/{}/burn", sid)
+}
+
+/// `PUT /api/sessions/{sid}/burn` — store the session's efficiency score.
+///
+/// Written at ingest so the dashboard's burn board reads a number rather than
+/// re-scanning every transcript. Stored verbatim like meta/provenance, so the
+/// CLI can add fields without a lockstep hub rebuild.
+async fn put_session_burn(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+    Path(sid): Path<String>,
+    agent_id: AgentId,
+    Query(q): Query<SessionTurnQuery>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !body.is_object() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "burn body must be a JSON object {level, ratio?, …}".to_string(),
+        ));
+    }
+    let repo = s.repo_for(&ns)?;
+    let path = session_burn_path(&sid);
+    let opts = CommitOptions::new(
+        &agent_id.0,
+        IntentCategory::Custom("Observe".to_string()),
+        format!("session burn {}", sid),
+    )
+    .with_tags(vec![format!("session:{}", sid), "kind:session-burn".to_string()]);
+    let commit_id = repo
+        .set_json(&q.ref_name, &path, &body, opts)
+        .map_err(internal_error)?;
+    s.sessions.mark_all_dirty();
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "ref": q.ref_name,
+        "path": path,
+        "commit_id": format!("{}", commit_id.short()),
+    })))
 }
 
 /// Where a deleted session is remembered as deleted.

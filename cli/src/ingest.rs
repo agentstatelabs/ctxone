@@ -959,6 +959,33 @@ pub async fn store_session_provenance(
     let _ = req.send().await;
 }
 
+/// Persist a session's burn summary at `/sessions/{session}/burn`.
+///
+/// Stored so the dashboard's burn board can rank sessions without
+/// re-downloading and re-scanning every transcript. The body carries the
+/// session's `updated_at`, so a reader can tell a current score from a stale
+/// one and skip the transcript only when they match.
+pub async fn store_session_burn(
+    burn: &serde_json::Value,
+    hub: &str,
+    branch: &str,
+    session: Option<&str>,
+    client: &reqwest::Client,
+) {
+    let sid = session.unwrap_or("default");
+    let url = format!(
+        "{}/api/sessions/{}/burn?ref={}",
+        hub,
+        crate::urlencoding(sid),
+        crate::urlencoding(branch),
+    );
+    let mut req = client.put(url).json(burn);
+    if let Some(s) = session {
+        req = req.header("X-CTXone-Session", s);
+    }
+    let _ = req.send().await;
+}
+
 pub async fn store_memory(
     mem: &ExtractedMemory,
     hub: &str,

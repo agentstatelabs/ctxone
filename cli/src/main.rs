@@ -2,6 +2,7 @@ mod codex;
 mod ingest;
 mod metrics;
 mod onboarding;
+mod burn;
 mod service;
 mod sources;
 mod workspace;
@@ -4587,6 +4588,30 @@ async fn run_ingest_session(
                     )
                     .await;
                 }
+            }
+
+            // Burn summary: computed from the FULL turn list (same reason as
+            // provenance — it describes the session, not the re-imported
+            // slice). Stored with the session's last-turn timestamp so the
+            // dashboard can tell a current score from a stale one.
+            let burn = crate::burn::compute(&turns);
+            let burn_updated_at = turns.last().map(|t| t.timestamp.clone()).unwrap_or_default();
+            if dry_run {
+                println!(
+                    "  [dry] burn: /sessions/{}/burn = level={} ratio={:?}",
+                    effective_session.unwrap_or("default"),
+                    burn.level,
+                    burn.ratio,
+                );
+            } else {
+                crate::ingest::store_session_burn(
+                    &burn.to_json(&burn_updated_at),
+                    server,
+                    branch,
+                    effective_session,
+                    &client,
+                )
+                .await;
             }
 
             // Apply --since filter on timestamp.

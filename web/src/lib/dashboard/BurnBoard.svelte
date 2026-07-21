@@ -248,6 +248,40 @@
 			.map((k) => (tree as Record<string, BurnTurn>)[k]);
 	}
 
+	interface StoredBurn {
+		level: string;
+		ratio?: number;
+		turns?: number;
+		updated_at?: string;
+	}
+
+	/**
+	 * The burn score the CLI stored at ingest, if it is still current.
+	 *
+	 * Current means its `updated_at` matches the session's — a re-ingest that
+	 * added turns bumps both, so a stale stored score is never trusted. When it
+	 * matches, this is the whole win: one small JSON read instead of pulling a
+	 * ~1MB transcript and re-scanning it. Returns null to signal "fall back to
+	 * the transcript scan" for sessions ingested before this existed.
+	 */
+	async function fetchStoredBurn(s: SessionSnapshot): Promise<StoredBurn | null> {
+		try {
+			const r = await hubFetch(
+				`/api/state/${encodeURIComponent(branch)}?path=/sessions/${encodeURIComponent(
+					s.session_id
+				)}/burn`
+			);
+			if (!r.ok) return null;
+			const b = (await r.json()) as StoredBurn;
+			// Stale or shape-less → recompute.
+			if (!b?.level) return null;
+			if (b.updated_at && s.updated_at && b.updated_at !== s.updated_at) return null;
+			return b;
+		} catch {
+			return null;
+		}
+	}
+
 	async function scan() {
 		if (scanning) return;
 		scanning = true;
@@ -268,6 +302,31 @@
 					if (i >= pool.length) return;
 					const s = pool[i];
 					try {
+						// Fast path: a current stored score avoids the transcript
+						// fetch entirely — the ingest-persistence payoff. Most
+						// sessions never change, so most rows cost one small read
+						// instead of a ~1MB scan.
+						const stored = await fetchStoredBurn(s);
+						if (stored) {
+							if (stored.level === 'unknown' || typeof stored.ratio !== 'number') {
+								skipped++;
+							} else {
+								out.push({
+									id: s.session_id,
+									name: label(s),
+									turns: stored.turns ?? 0,
+									ratio: stored.ratio,
+									level: stored.level as Row['level'],
+									// The stored score carries no per-turn timestamps; show
+									// the session's meta span for the range column instead.
+									from: s.started_at ? Date.parse(s.started_at) : null,
+									to: s.updated_at ? Date.parse(s.updated_at) : null
+								});
+							}
+							continue;
+						}
+
+						// Fallback: no current stored score, scan the transcript.
 						const turns = await fetchTurns(s.session_id);
 						if (turns.length === 0) {
 							// No transcript on THIS branch — the session exists in the
