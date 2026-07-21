@@ -784,11 +784,15 @@ pub async fn store_session_title(
 /// Persist a session's meta object `{source, started_at, updated_at}` at
 /// `/sessions/{session}/meta` via the Hub. Idempotent; drives the Lens
 /// agent-type filter and date sort. No-op when all fields are empty.
+#[allow(clippy::too_many_arguments)]
 pub async fn store_session_meta(
     source: &str,
     started_at: &str,
     updated_at: &str,
     models_used: &[String],
+    // The source's change-detector, stored so the next sync can skip an
+    // unchanged transcript without parsing or re-writing it.
+    fingerprint: Option<&str>,
     hub: &str,
     branch: &str,
     session: Option<&str>,
@@ -818,11 +822,41 @@ pub async fn store_session_meta(
     if !models_used.is_empty() {
         meta.insert("models_used".into(), serde_json::json!(models_used));
     }
+    if let Some(fp) = fingerprint {
+        meta.insert("fp".into(), serde_json::json!(fp));
+    }
     let mut req = client.put(url).json(&serde_json::Value::Object(meta));
     if let Some(s) = session {
         req = req.header("X-CTXone-Session", s);
     }
     let _ = req.send().await;
+}
+
+/// Read the fingerprint stored on a session's last ingest, if any.
+///
+/// One small GET (the meta node) that decides whether the whole session can
+/// be skipped — cheap next to the hundreds of writes a full ingest costs.
+/// Any failure (no such session, older hub, unreachable) returns `None`, which
+/// means "not known unchanged" → the session is ingested, never wrongly
+/// skipped.
+pub async fn fetch_stored_fingerprint(
+    hub: &str,
+    branch: &str,
+    session: &str,
+    client: &reqwest::Client,
+) -> Option<String> {
+    let url = format!(
+        "{}/api/state/{}?path=/sessions/{}/meta",
+        hub,
+        crate::urlencoding(branch),
+        crate::urlencoding(session),
+    );
+    let resp = client.get(url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let v: Value = resp.json().await.ok()?;
+    v.get("fp").and_then(|f| f.as_str()).map(str::to_string)
 }
 
 /// Roll a session's turns up into the provenance summary.

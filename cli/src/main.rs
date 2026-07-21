@@ -549,6 +549,15 @@ enum Commands {
         /// hand. Pass this to keep the set of workspaces under manual control.
         #[arg(long)]
         no_auto_register: bool,
+
+        /// Re-ingest every session even if its transcript is unchanged.
+        ///
+        /// By default a session whose fingerprint matches the one stored on
+        /// its last ingest is skipped, so a re-sync only touches what actually
+        /// changed. Pass this to force a full re-ingest (e.g. after a schema
+        /// change in what gets stored per turn).
+        #[arg(long)]
+        reingest: bool,
     },
 
     /// Analyze token usage, cost, and cache metrics for Claude Code sessions.
@@ -1958,6 +1967,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             full_turn,
             no_full_turn,
             no_auto_register,
+            reingest,
         } => {
             // `--full-turn` forces on; `--no-full-turn` forces off; default is on.
             let full_turn_effective = full_turn || !no_full_turn;
@@ -1987,6 +1997,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     namespace.clone()
                 },
+                reingest,
             )
             .await?;
         }
@@ -4303,6 +4314,8 @@ async fn run_ingest_session(
     // `--file`/`--namespace` run it is the caller's namespace, so an explicit
     // target is honoured rather than silently overridden to `default`.
     fallback_namespace: Option<String>,
+    // Force a full re-ingest, ignoring the unchanged-fingerprint skip.
+    reingest: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
     if api_key.is_empty() && !tokens_only {
@@ -4410,6 +4423,7 @@ async fn run_ingest_session(
     let since_ts = since.as_deref().unwrap_or("");
 
     let mut total_sessions = 0usize;
+    let mut total_skipped_unchanged = 0usize;
     // Reported explicitly: a sync that quietly imported fewer sessions than
     // it found would look like data loss.
     let mut skipped_deleted = 0usize;
@@ -4437,6 +4451,7 @@ async fn run_ingest_session(
         }
         let mut proj_sessions = 0usize;
         let mut proj_turns = 0usize;
+        let mut proj_skipped = 0usize;
         let mut proj_tokens = crate::ingest::TurnTokens::default();
 
         for session_ref in files {
@@ -4476,6 +4491,26 @@ async fn run_ingest_session(
 
             let client = router.client_for(routed.namespace(), |ns| clients.build(ns));
 
+            let source_impl = crate::sources::source_by_id(source_id)
+                .expect("source id came from the registry");
+
+            // Incremental skip: if the transcript's fingerprint matches the one
+            // stored on its last ingest, nothing changed — skip the parse and
+            // all the per-turn writes. This is what turns a re-sync from hours
+            // into seconds; most sessions never change between runs. One small
+            // GET decides it, against hundreds of writes avoided.
+            let fingerprint = source_impl.fingerprint(session_ref);
+            if !reingest && !dry_run
+                && let (Some(sid), Some(fp)) = (effective_session, fingerprint.as_deref())
+            {
+                let stored =
+                    crate::ingest::fetch_stored_fingerprint(server, branch, sid, &client).await;
+                if stored.as_deref() == Some(fp) {
+                    proj_skipped += 1;
+                    continue;
+                }
+            }
+
             println!(
                 "→ {}  (session: {}, workspace: {})",
                 fname,
@@ -4488,8 +4523,6 @@ async fn run_ingest_session(
                 }
             );
 
-            let source_impl = crate::sources::source_by_id(source_id)
-                .expect("source id came from the registry");
             let mut turns = source_impl.parse(session_ref);
             if !turns.is_empty() {
                 proj_sessions += 1;
@@ -4567,6 +4600,7 @@ async fn run_ingest_session(
                     &started_at,
                     &updated_at,
                     &models_used,
+                    fingerprint.as_deref(),
                     server,
                     branch,
                     effective_session,
@@ -4738,8 +4772,13 @@ async fn run_ingest_session(
         }
 
         if all && !label.is_empty() {
+            let skip_note = if proj_skipped > 0 {
+                format!(", {proj_skipped} unchanged (skipped)")
+            } else {
+                String::new()
+            };
             println!(
-                "  project {}: {} sessions, {} turns, {} tokens",
+                "  project {}: {} sessions, {} turns, {} tokens{}",
                 label,
                 proj_sessions,
                 proj_turns,
@@ -4747,10 +4786,12 @@ async fn run_ingest_session(
                     + proj_tokens.output
                     + proj_tokens.cache_read
                     + proj_tokens.cache_creation,
+                skip_note,
             );
         }
         total_sessions += proj_sessions;
         total_turns_seen += proj_turns;
+        total_skipped_unchanged += proj_skipped;
         total_tokens.add(&proj_tokens);
     }
 
@@ -4762,6 +4803,13 @@ async fn run_ingest_session(
         "Done. {} sessions, {} turns processed, {} memories stored, {} full turns persisted.",
         total_sessions, total_turns_seen, total_memories, total_full_turns
     );
+    if total_skipped_unchanged > 0 {
+        println!(
+            "Skipped {} unchanged session{} (fingerprint matched — pass --reingest to force).",
+            total_skipped_unchanged,
+            if total_skipped_unchanged == 1 { "" } else { "s" }
+        );
+    }
     if skipped_deleted > 0 {
         println!(
             "Skipped {} deleted session{} (tombstoned; their transcripts are still on disk).",

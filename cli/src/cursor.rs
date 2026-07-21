@@ -34,6 +34,17 @@ pub struct CursorSession {
     pub name: Option<String>,
     /// `createdAt`, epoch ms — used only to order sessions on discovery.
     pub created_at: i64,
+    /// `lastUpdatedAt`, epoch ms — the per-composer change-detector for
+    /// incremental sync (mtime can't work: all composers share one db file).
+    pub last_updated_at: i64,
+}
+
+/// The composer's `lastUpdatedAt` for one session, read cheaply (no bubbles).
+/// The incremental-sync fingerprint for Cursor.
+pub fn last_updated_at(db_path: &Path, composer_id: &str) -> Option<i64> {
+    let conn = open_readonly(db_path).ok()?;
+    let composer = read_kv(&conn, &format!("composerData:{composer_id}"))?;
+    composer.get("lastUpdatedAt").and_then(|v| v.as_i64())
 }
 
 /// List every composer (session) in the db, oldest first. Best-effort: a db
@@ -77,6 +88,7 @@ pub fn list_sessions(db_path: &Path) -> Vec<CursorSession> {
             composer_id: id.to_string(),
             name: v.get("name").and_then(|n| n.as_str()).map(str::to_string),
             created_at: v.get("createdAt").and_then(|c| c.as_i64()).unwrap_or(0),
+            last_updated_at: v.get("lastUpdatedAt").and_then(|c| c.as_i64()).unwrap_or(0),
         });
     }
     out.sort_by_key(|s| s.created_at);

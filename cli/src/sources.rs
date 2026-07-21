@@ -109,6 +109,28 @@ pub trait SessionSource {
     /// unreadable or unparseable input — a bad transcript must not abort a
     /// whole-machine scan.
     fn parse(&self, session: &SessionRef) -> Vec<Turn>;
+
+    /// A cheap change-detector for incremental sync: if this equals the value
+    /// stored on the session's last ingest, the transcript is unchanged and
+    /// the whole session can be skipped without parsing or writing it.
+    ///
+    /// Default is the file's `mtime:size` — no parsing, catches any edit, and
+    /// works for the file-per-session sources. Db-backed sources (Cursor)
+    /// MUST override: every conversation shares one db file, so `mtime:size`
+    /// would be identical across them and skip all but the first.
+    ///
+    /// `None` disables the skip for that session (it re-ingests every time),
+    /// which is the safe default when no fingerprint can be computed.
+    fn fingerprint(&self, session: &SessionRef) -> Option<String> {
+        let m = std::fs::metadata(&session.path).ok()?;
+        let mtime = m
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs();
+        Some(format!("{}:{}", mtime, m.len()))
+    }
 }
 
 // ── Claude Code ───────────────────────────────────────────────────────────────
@@ -601,6 +623,12 @@ impl SessionSource for Cursor {
             return vec![];
         };
         crate::cursor::parse_session(&session.path, id)
+    }
+
+    fn fingerprint(&self, session: &SessionRef) -> Option<String> {
+        // Per-composer, not the shared db file's mtime.
+        let id = session.native_id.as_ref()?;
+        crate::cursor::last_updated_at(&session.path, id).map(|ts| format!("cursor:{ts}"))
     }
 }
 
