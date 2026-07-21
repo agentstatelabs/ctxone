@@ -1453,6 +1453,32 @@ pub struct SetActiveRepoParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct SessionInfoParams {
+    /// The session id to describe (the transcript's id, e.g. a Claude Code
+    /// UUID). Required — a bare MCP client has no ambient session.
+    pub session_id: String,
+    /// Branch to read from (default: "main").
+    #[serde(default = "default_ref", rename = "ref")]
+    pub ref_name: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SessionLinkPlanParams {
+    /// The session id to link (the transcript's id).
+    pub session_id: String,
+    /// Plan name the work belongs to (e.g. "namespaces-ctx").
+    pub plan: String,
+    /// Task id in that plan: "t-NNN" (a bare "t-4" is normalised to "t-004").
+    pub task: String,
+    /// Optional note kept as the link's evidence.
+    #[serde(default)]
+    pub note: Option<String>,
+    /// Branch to write to (default: "main").
+    #[serde(default = "default_ref", rename = "ref")]
+    pub ref_name: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct CodeSearchParams {
     /// Natural-language query scored across symbol name, signature, doc,
     /// file path, and ledger summaries.
@@ -3453,6 +3479,109 @@ impl CtxOneServer {
             "known_repos": known,
         })
         .to_string()
+    }
+
+    #[tool(
+        description = "Describe a session: which workspace (namespace) it lives in, \
+        the git branches it touched, and the plan tasks it worked on. \
+        \
+        CALL THIS to situate a session before acting on it — to confirm it is in the \
+        workspace you expect, or to see what plans it advanced. A session belongs to \
+        the workspace of the repo it ran in; if this reports the wrong one, you are \
+        connected to the wrong namespace (reconnect with ?namespace=<name>, or set \
+        CTX_NAMESPACE for the CLI). Returns provenance (branches with turn counts) \
+        and links (plan/task associations, each with a validated flag) when present; \
+        both are absent for sessions that predate this capture."
+    )]
+    async fn session_info(&self, params: Parameters<SessionInfoParams>) -> String {
+        let p = params.0;
+        let prov = self
+            .repo
+            .get_json(&p.ref_name, &format!("/sessions/{}/provenance", p.session_id))
+            .ok();
+        let links = self
+            .repo
+            .get_json(&p.ref_name, &format!("/session_links/{}", p.session_id))
+            .ok()
+            .and_then(|v| v.get("links").cloned());
+        let exists = self
+            .repo
+            .get(&p.ref_name, &format!("/sessions/{}", p.session_id))
+            .is_ok();
+        serde_json::json!({
+            "session_id": p.session_id,
+            "namespace": self.namespace,
+            "present_in_this_workspace": exists,
+            "provenance": prov,
+            "links": links,
+        })
+        .to_string()
+    }
+
+    #[tool(
+        description = "Associate a session with a plan task it worked on. \
+        \
+        CALL THIS when a session advanced a task that its commit messages did NOT \
+        name — a refactor with no `(plan t-NNN)` trailer, or work discussed but not \
+        committed. Commit-message links are derived automatically; this records the \
+        rest. The task is validated against the plans in this workspace and the link \
+        is stored so every view reads it the same way. `task` accepts `t-4` or \
+        `t-004`. Returns validated=false (but still records the link) when the plan \
+        or task is not found here — usually a sign you are in the wrong workspace."
+    )]
+    async fn session_link_plan(&self, params: Parameters<SessionLinkPlanParams>) -> String {
+        let p = params.0;
+        let Some(task) = crate::http::normalize_task_ref_pub(&p.task) else {
+            return serde_json::json!({ "error": format!("task must look like 't-NNN', got '{}'", p.task) }).to_string();
+        };
+        let plan = p.plan.trim().to_ascii_lowercase();
+
+        let store = crate::plan_tools::make_store(self.repo.clone(), &self.agent_id);
+        let validated = task
+            .strip_prefix("t-")
+            .and_then(|d| d.parse::<u32>().ok())
+            .map(|n| {
+                store
+                    .get_task(&p.ref_name, &plan, &agentstategraph_tasks::TaskId::new(n))
+                    .is_ok()
+            })
+            .unwrap_or(false);
+
+        let path = format!("/session_links/{}", p.session_id);
+        let mut node = self
+            .repo
+            .get_json(&p.ref_name, &path)
+            .unwrap_or_else(|_| serde_json::json!({ "links": [] }));
+        let Some(links) = node.get_mut("links").and_then(|l| l.as_array_mut()) else {
+            return serde_json::json!({ "error": "corrupt links node" }).to_string();
+        };
+        let already = links.iter().any(|l| l["plan"] == plan && l["task"] == task);
+        if !already {
+            links.push(serde_json::json!({
+                "plan": plan, "task": task,
+                "evidence": p.note.clone().unwrap_or_else(|| "manually linked".to_string()),
+                "turn_index": serde_json::Value::Null,
+                "validated": validated, "manual": true,
+            }));
+        }
+        node["generated_at"] = serde_json::json!("");
+        let opts = CommitOptions::new(
+            &self.agent_id,
+            IntentCategory::Custom("Link".to_string()),
+            format!("link session {} to {}/{}", p.session_id, plan, task),
+        )
+        .with_tags(vec![
+            format!("session:{}", p.session_id),
+            "kind:session-links".to_string(),
+        ]);
+        match self.repo.set_json(&p.ref_name, &path, &node, opts) {
+            Ok(_) => serde_json::json!({
+                "status": "ok", "plan": plan, "task": task,
+                "validated": validated, "already_linked": already,
+            })
+            .to_string(),
+            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+        }
     }
 }
 

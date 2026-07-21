@@ -837,6 +837,13 @@ enum Commands {
         #[command(subcommand)]
         action: ProjectAction,
     },
+    /// Inspect workspaces — each repo's isolated namespace of branches,
+    /// plans, memory, and sessions. A workspace is created by registering a
+    /// project (`ctx project add`); this lists what exists.
+    Workspace {
+        #[command(subcommand)]
+        action: WorkspaceAction,
+    },
     /// Install the Hub as a login/boot service (launchd on macOS, systemd
     /// user unit on Linux) so the unified daemon (MCP + REST + Lens) owns
     /// the db before any agent starts — the fix for the reboot race.
@@ -955,6 +962,16 @@ enum ProjectAction {
 }
 
 #[derive(Subcommand, Debug)]
+enum WorkspaceAction {
+    /// List every workspace and how many sessions it holds.
+    List {
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(clap::Subcommand)]
 enum SessionAction {
     /// Show token usage metrics for Claude Code sessions in this project.
     Metrics {
@@ -2722,6 +2739,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let format = cli.format;
             handle_project(action, &server, format, client.clone()).await?;
         }
+        Commands::Workspace { action } => {
+            handle_workspace(action, &cli.server, cli.format, client.clone()).await?;
+        }
         Commands::Service { action } => {
             handle_service(action)?;
         }
@@ -3096,6 +3116,45 @@ fn write_ctxproject(root: &std::path::Path, id: &str) -> std::io::Result<PathBuf
 }
 
 /// Dispatch for `ctx project <subcommand>`.
+async fn handle_workspace(
+    action: WorkspaceAction,
+    server: &str,
+    format: OutputFormat,
+    client: reqwest::Client,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match action {
+        WorkspaceAction::List { json } => {
+            let url = format!("{server}/api/namespaces");
+            let resp = match client.get(&url).send().await {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "workspace list failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            let fmt = if json { OutputFormat::Json } else { format };
+            emit(fmt, &parsed, |v| {
+                let empty = vec![];
+                let ns = v["namespaces"].as_array().unwrap_or(&empty);
+                if ns.is_empty() {
+                    println!("No workspaces.");
+                    return;
+                }
+                println!("{:<28} {}", "WORKSPACE", "SESSIONS");
+                for n in ns {
+                    println!(
+                        "{:<28} {}",
+                        n["namespace"].as_str().unwrap_or("?"),
+                        n["sessions"].as_u64().unwrap_or(0),
+                    );
+                }
+            });
+        }
+    }
+    Ok(())
+}
+
 async fn handle_project(
     action: ProjectAction,
     server: &str,

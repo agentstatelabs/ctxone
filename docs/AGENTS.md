@@ -122,6 +122,33 @@ fact stays in blame history for auditability. Don't use `forget` to
 silence inconvenient memories. Always tell the user what you're
 forgetting and why.
 
+## Workspaces — one per repo
+
+A **workspace** (an ASG namespace) isolates one repo's memory, plans,
+branches, and sessions from every other repo's. Work in the CTXone
+checkout lands in the `ctxone` workspace; work in another repo lands in
+its own. The shared `default` workspace is the fallback for anything
+that couldn't be attributed to a repo.
+
+**How your workspace is chosen.** The CLI detects it from your working
+directory — the registered project whose git remote or path matches. You
+don't set it per command; it's resolved once. Check where you are with
+`ctx workspace list` (every workspace + its session count) or, over MCP,
+`project_status` (the workspace this connection writes to).
+
+**If writes seem to land in the wrong place**, you're almost always in
+the wrong workspace: a `remember` from an unregistered directory falls
+to `default`. Register the repo with `ctx project add <id>` (or commit a
+`.ctxproject` marker) to give it an isolated workspace. Over the HTTP
+API, name the workspace explicitly with the `X-CTXone-Namespace` header
+or `?namespace=<name>` — the server assumes `default` when neither is
+sent, and warns when it has to.
+
+**Sessions belong to the workspace of the repo they ran in.** A session
+that spanned two repos is attributed by its working directory. Use
+`session_info <session-id>` to confirm which workspace a session is in
+and what it touched (its branches and the plan tasks it advanced).
+
 ## Branches — one per significant task
 
 **Create a branch for any work the user might want to inspect later.**
@@ -259,6 +286,23 @@ pending task.
 - **Sequential plans:** when a plan is meant to run in order, or the user
   says "continue in order", use `plan_next --in-order` (first unstarted by
   task order) instead of the default highest-priority pick.
+
+### Linking a session to the tasks it advanced
+
+CTXone joins sessions to plan tasks two ways, so Lens can show which
+session did which work:
+
+- **Automatic** — a commit message with a `(plan t-NNN)` trailer is
+  picked up on ingest. Keep writing that trailer; it is the cheapest
+  link. `(plan t-4)` and `(plan t-004)` are treated the same.
+- **Manual** — for work a commit did not name (a refactor, a task
+  discussed but not committed), call `session_link_plan(session_id,
+  plan, task)`. The task is validated against this workspace's plans;
+  an unfound plan/task still records the link but flags it, which
+  usually means you're in the wrong workspace.
+
+Don't hand-link what a commit trailer already names — that's derived for
+you.
 
 ### Multi-agent orchestration via `assigned_to`
 

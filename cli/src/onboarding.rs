@@ -29,9 +29,11 @@ pub fn ctx_skill_spec() -> SkillSpec {
     .rule("When you make or learn a decision, record it with `ctx remember \"<decision>\"` so the team inherits it.")
     .rule("Track multi-step work as a plan (`ctx plan add`), and mark tasks done as you complete them.")
     .rule("At the end of a work session, run `ctx summarize-session` to capture outcomes for the team.")
+    .rule("Each repo has its own workspace; if memory or plans seem missing, you are likely in the wrong one — check `ctx workspace list` and register the repo with `ctx project add` if it has none.")
     .command("ctx remember", "record a decision or fact into shared memory")
     .command("ctx plan", "create and track a multi-step plan")
     .command("ctx summarize-session", "capture a session's outcomes for the team")
+    .command("ctx workspace list", "show every workspace and its session count")
     .sibling(
         "AgentStateDeveloper",
         "asd",

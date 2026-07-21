@@ -648,6 +648,11 @@ fn router_with_config_inner(
             axum::routing::post(derive_session_links),
         )
         .route(
+            "/api/sessions/{sid}/links",
+            axum::routing::post(add_session_link),
+        )
+        .route("/api/namespaces", get(list_namespaces))
+        .route(
             "/api/session_tombstones",
             get(list_session_tombstones),
         )
@@ -3374,6 +3379,148 @@ async fn delete_session(
 
 fn session_links_path(sid: &str) -> String {
     format!("/session_links/{}", sid)
+}
+
+/// `GET /api/namespaces` — every workspace, with its session count.
+///
+/// Closes a real gap: namespaces could only be listed indirectly via
+/// `/api/projects`, and there was no `ctx workspace` command at all. This is
+/// the direct enumeration agents and the CLI need to answer "which workspaces
+/// exist and how much is in each".
+async fn list_namespaces(State(s): State<HubState>) -> impl IntoResponse {
+    let mut out = Vec::new();
+    match s.repo.list_namespaces() {
+        Ok(names) => {
+            for name in names {
+                let ns = name.as_str().to_string();
+                let count = s
+                    .repo_for(&NamespaceId(ns.clone()))
+                    .map(|r| session_ids_with_nodes(&r).len())
+                    .unwrap_or(0);
+                out.push(serde_json::json!({ "namespace": ns, "sessions": count }));
+            }
+        }
+        Err(e) => return internal_error(e).into_response(),
+    }
+    // `default` is always a workspace even if list_namespaces omits it (it is
+    // the root, not a fork), so a caller always sees it.
+    if !out.iter().any(|n| n["namespace"] == Namespace::DEFAULT) {
+        let count = session_ids_with_nodes(&s.repo).len();
+        out.insert(
+            0,
+            serde_json::json!({ "namespace": Namespace::DEFAULT, "sessions": count }),
+        );
+    }
+    Json(serde_json::json!({ "namespaces": out })).into_response()
+}
+
+#[derive(Deserialize)]
+struct AddSessionLinkRequest {
+    plan: String,
+    task: String,
+    #[serde(default = "default_ref")]
+    ref_name: String,
+    /// Optional note recorded as the link's evidence.
+    #[serde(default)]
+    note: Option<String>,
+}
+
+/// `POST /api/sessions/{sid}/links` — manually associate a session with a task.
+///
+/// Complements `derive_links`: the derivation catches work a commit message
+/// named, this catches work it did not (a refactor with no `(plan t-NNN)`
+/// trailer, a session that discussed a task without committing). The task is
+/// validated against this workspace and the link is merged into the same
+/// `/session_links/{sid}` sidecar, so both sources read the same way.
+async fn add_session_link(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+    Path(sid): Path<String>,
+    agent_id: AgentId,
+    Json(req): Json<AddSessionLinkRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
+
+    // Normalise the task ref the same way the derivation does, so a manual
+    // `t-4` and a derived `t-004` are the same link.
+    let task = normalize_task_ref(&req.task).ok_or((
+        StatusCode::BAD_REQUEST,
+        format!("task must look like 't-NNN', got '{}'", req.task),
+    ))?;
+    let plan = req.plan.trim().to_ascii_lowercase();
+
+    let store = plan_tools::make_store(repo.clone(), &agent_id.0);
+    let validated = task
+        .strip_prefix("t-")
+        .and_then(|d| d.parse::<u32>().ok())
+        .map(|n| {
+            store
+                .get_task(&req.ref_name, &plan, &agentstategraph_tasks::TaskId::new(n))
+                .is_ok()
+        })
+        .unwrap_or(false);
+
+    // Merge into the existing sidecar, deduped on (plan, task).
+    let path = session_links_path(&sid);
+    let mut node = repo
+        .get_json(&req.ref_name, &path)
+        .unwrap_or_else(|_| serde_json::json!({ "links": [] }));
+    let links = node
+        .get_mut("links")
+        .and_then(|l| l.as_array_mut())
+        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "corrupt links node".to_string()))?;
+
+    let already = links
+        .iter()
+        .any(|l| l["plan"] == plan && l["task"] == task);
+    if !already {
+        links.push(serde_json::json!({
+            "plan": plan,
+            "task": task,
+            "evidence": req.note.clone().unwrap_or_else(|| "manually linked".to_string()),
+            "turn_index": serde_json::Value::Null,
+            "validated": validated,
+            "manual": true,
+        }));
+    }
+    node["generated_at"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
+
+    let opts = CommitOptions::new(
+        &agent_id.0,
+        IntentCategory::Custom("Link".to_string()),
+        format!("link session {} to {}/{}", sid, plan, task),
+    )
+    .with_tags(vec![
+        format!("session:{}", sid),
+        "kind:session-links".to_string(),
+    ]);
+    repo.set_json(&req.ref_name, &path, &node, opts)
+        .map_err(internal_error)?;
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "session_id": sid,
+        "plan": plan,
+        "task": task,
+        "validated": validated,
+        "already_linked": already,
+    })))
+}
+
+/// Public wrapper so the MCP tools share one task-ref normaliser with the
+/// HTTP handlers rather than drifting a second copy.
+pub fn normalize_task_ref_pub(raw: &str) -> Option<String> {
+    normalize_task_ref(raw)
+}
+
+/// `t-4` / `T-004` / `t-004` → canonical `t-NNN`, or None if not a task ref.
+fn normalize_task_ref(raw: &str) -> Option<String> {
+    let num = raw
+        .trim()
+        .strip_prefix("t-")
+        .or_else(|| raw.trim().strip_prefix("T-"))?;
+    let n: u32 = num.parse().ok()?;
+    Some(format!("t-{n:03}"))
 }
 
 /// `POST /api/sessions/{sid}/derive_links` — find the plan tasks this session
