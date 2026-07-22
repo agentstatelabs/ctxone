@@ -1916,3 +1916,34 @@ async fn invalid_namespace_name_is_bad_request() {
     let (status, _) = call_raw(router.clone(), get_ns("/api/branches", "bad name!")).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn bulk_turn_write_accepts_multi_megabyte_payload() {
+    // Regression: a whole-session bulk turn write legitimately runs to many MB,
+    // and Axum's 2 MB default body limit silently 413'd it — dropping a large
+    // session's turns while its meta (with fingerprint) still wrote, so a
+    // re-sync then skipped it. The raised DefaultBodyLimit must let it through.
+    let router = test_router();
+    let mut map = serde_json::Map::new();
+    for i in 0..1500 {
+        map.insert(
+            format!("t{i:04}"),
+            json!({ "idx": i, "user": "x".repeat(300), "assistant": "y".repeat(2000) }),
+        );
+    }
+    let raw = serde_json::to_vec(&Value::Object(map)).unwrap();
+    assert!(
+        raw.len() > 2 * 1024 * 1024,
+        "payload should exceed the old 2 MB limit, got {} bytes",
+        raw.len()
+    );
+    let req = Request::builder()
+        .uri("/api/sessions/bigsess/turns?ref=main")
+        .method("PUT")
+        .header("content-type", "application/json")
+        .body(Body::from(raw))
+        .unwrap();
+    let (status, v) = call_json(router, req).await;
+    assert_eq!(status, StatusCode::OK, "large bulk turn write must not 413");
+    assert_eq!(v["turns"], 1500);
+}

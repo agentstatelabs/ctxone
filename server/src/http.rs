@@ -12,7 +12,7 @@ use std::net::SocketAddr;
 
 use axum::{
     Json, Router,
-    extract::{ConnectInfo, Path, Query, State},
+    extract::{ConnectInfo, DefaultBodyLimit, Path, Query, State},
     http::StatusCode,
     middleware::Next,
     response::IntoResponse,
@@ -702,7 +702,15 @@ fn router_with_config_inner(
             .route("/api/code/{repo}/{*path}", get(proxy_asd).post(proxy_asd));
     }
 
-    let mut router = router.layer(trace).layer(cors).with_state(state);
+    // Raise the request-body limit from Axum's 2 MB default: a whole-session
+    // bulk turn write (or an /api/import seed) legitimately runs to many MB, and
+    // the default silently 413'd them before the handler's own 128 MiB cap could
+    // apply. The handler still enforces SESSION_TURNS_BULK_MAX_BYTES.
+    let mut router = router
+        .layer(DefaultBodyLimit::max(SESSION_TURNS_BULK_MAX_BYTES))
+        .layer(trace)
+        .layer(cors)
+        .with_state(state);
 
     // Mount the MCP surface at `/mcp` when enabled. Merged after `with_state`
     // (both are `Router<()>`) so it carries its own `McpHttpState` and sits
