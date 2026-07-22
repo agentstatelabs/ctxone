@@ -4,6 +4,49 @@ All notable changes to CTXone are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 the project's `0.9.x` series (incremented by 0.0.01 per release).
 
+## [v0.9.16] — 2026-07-21
+
+A large release centred on **workspace-scoped sessions**, **more import
+sources**, **ingest performance**, and a **session-efficiency ("burn") board**
+in Lens. Summarised from the commit history.
+
+### Added — sessions & workspaces
+
+- Each transcript is routed to its own **workspace**; existing sessions are
+  migrated out of `default` into their workspaces, and the session list is
+  scoped accordingly.
+- Sessions can be deleted and stay deleted.
+- Per-turn **git provenance** captured and rolled up per session.
+- Plan/task links derived server-side; `--namespace` honoured explicitly.
+- A session's **burn score** is persisted at ingest and read by the dashboard.
+
+### Added — import sources
+
+- **Gemini and Cursor** session ingestion, extending the `SessionSource` seam.
+- `--since` skips whole old sessions; `--scan-dir` imports from custom dirs.
+
+### Added — Lens
+
+- A **burn board** ranking the least-efficient sessions: scans every session,
+  ranks the worst, caches per workspace+branch, with a time-range column and a
+  scrollable list.
+- A "Recently updated" dashboard panel.
+- Independent scrolling for the session list and detail panes; the app shell is
+  pinned so the document no longer scrolls.
+
+### Changed — performance
+
+- SQLite opened in **WAL mode** (`synchronous=NORMAL`); `agentstategraph` bumped
+  to v0.9.4. ~1.75× faster cold import.
+- Ingest: concurrent sessions, bulk turn writes with aggregated token records,
+  index-only Cursor discovery, and skipping unchanged sessions on re-sync.
+
+### Fixed
+
+- `--file` always imports, ignoring a remembered `--since` window.
+- Request body limit raised so large bulk turn writes don't 413.
+- The web unit suite is runnable again and runs in CI; `npm ci` unbroken.
+
 ## [v0.9.15] — 2026-07-19
 
 Two themes: the first step of **multi-agent session import** (Claude Code is no
