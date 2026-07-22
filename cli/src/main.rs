@@ -259,6 +259,15 @@ struct CtxConfig {
     branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     format: Option<OutputFormat>,
+    /// Remembered `--since` cutoff for session import (RFC3339 date/datetime).
+    /// Set when `--since` is passed, reused on later syncs so a user who chose
+    /// "only import the last 3 months" keeps that window without re-specifying.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    import_since: Option<String>,
+    /// Extra directories to scan for transcripts, on top of the built-in
+    /// per-tool locations. Set by `--scan-dir`, reused on later syncs.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    scan_dirs: Vec<String>,
 }
 
 impl CtxConfig {
@@ -314,9 +323,19 @@ impl CtxConfig {
                 };
                 self.format = Some(f);
             }
+            "import_since" => self.import_since = Some(value.to_string()),
+            // Comma-separated list, so `config set scan_dirs a,b` works from the
+            // one-value config CLI. `--scan-dir` appends individually.
+            "scan_dirs" => {
+                self.scan_dirs = value
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+            }
             _ => {
                 return Err(format!(
-                    "unknown key: {} (expected server|branch|format)",
+                    "unknown key: {} (expected server|branch|format|import_since|scan_dirs)",
                     key
                 ));
             }
@@ -337,8 +356,10 @@ impl CtxConfig {
                 })
                 .unwrap_or("")
                 .to_string()),
+            "import_since" => Ok(self.import_since.clone().unwrap_or_default()),
+            "scan_dirs" => Ok(self.scan_dirs.join(",")),
             _ => Err(format!(
-                "unknown key: {} (expected server|branch|format)",
+                "unknown key: {} (expected server|branch|format|import_since|scan_dirs)",
                 key
             )),
         }
@@ -349,9 +370,11 @@ impl CtxConfig {
             "server" => self.server = None,
             "branch" => self.branch = None,
             "format" => self.format = None,
+            "import_since" => self.import_since = None,
+            "scan_dirs" => self.scan_dirs.clear(),
             _ => {
                 return Err(format!(
-                    "unknown key: {} (expected server|branch|format)",
+                    "unknown key: {} (expected server|branch|format|import_since|scan_dirs)",
                     key
                 ));
             }
@@ -535,9 +558,19 @@ enum Commands {
         #[arg(long)]
         all: bool,
 
-        /// Only import sessions modified after this date (YYYY-MM-DD)
+        /// Only import sessions last active on/after this date (YYYY-MM-DD, or
+        /// an RFC3339 datetime). Whole sessions older than this are skipped
+        /// without being parsed. Remembered in config and reused on later syncs
+        /// (pass `--since ''` — or `ctx config unset import_since` — to clear).
         #[arg(long)]
         since: Option<String>,
+
+        /// Extra directory to scan for transcripts, on top of the built-in
+        /// per-tool locations. Repeatable. Each dir is probed against every
+        /// source format (a Claude projects dir, a folder of Codex rollouts, a
+        /// Gemini tmp dir, or a Cursor state.vscdb). Remembered in config.
+        #[arg(long = "scan-dir")]
+        scan_dir: Vec<String>,
 
         /// Process only the last N turns (default: all)
         #[arg(long)]
@@ -1978,6 +2011,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             source,
             all,
             since,
+            scan_dir,
             last,
             tokens_only,
             dry_run,
@@ -1988,6 +2022,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             // `--full-turn` forces on; `--no-full-turn` forces off; default is on.
             let full_turn_effective = full_turn || !no_full_turn;
+
+            // `--since` and `--scan-dir` are remembered: an explicit value is
+            // saved to config and an omitted one falls back to the saved value,
+            // so a user who chose an import window or extra dir keeps it on the
+            // next sync. `--since ''` clears the remembered cutoff.
+            let mut cfg = CtxConfig::load();
+            let mut cfg_dirty = false;
+            let effective_since: Option<String> = match since {
+                Some(ref s) if s.trim().is_empty() => {
+                    if cfg.import_since.take().is_some() {
+                        cfg_dirty = true;
+                    }
+                    None
+                }
+                Some(s) => {
+                    if cfg.import_since.as_deref() != Some(s.as_str()) {
+                        cfg.import_since = Some(s.clone());
+                        cfg_dirty = true;
+                    }
+                    Some(s)
+                }
+                None => cfg.import_since.clone(),
+            };
+            let effective_scan_dirs: Vec<String> = if scan_dir.is_empty() {
+                cfg.scan_dirs.clone()
+            } else {
+                let mut merged = cfg.scan_dirs.clone();
+                for d in scan_dir {
+                    if !merged.contains(&d) {
+                        merged.push(d);
+                    }
+                }
+                if merged != cfg.scan_dirs {
+                    cfg.scan_dirs = merged.clone();
+                    cfg_dirty = true;
+                }
+                merged
+            };
+            if cfg_dirty {
+                let _ = cfg.save();
+            }
+            if let Some(s) = &effective_since {
+                eprintln!("Importing sessions last active on/after {s} (remembered in config).");
+            }
+
             run_ingest_session(
                 &cli.server,
                 &cli.branch,
@@ -1995,7 +2074,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 file,
                 &source,
                 all,
-                since,
+                effective_since,
+                effective_scan_dirs,
                 last,
                 tokens_only,
                 dry_run,
@@ -4635,6 +4715,23 @@ async fn ingest_one_session(
     out
 }
 
+/// Parse a `--since` value into epoch seconds. Accepts `YYYY-MM-DD` (midnight
+/// UTC) or any RFC3339 datetime. `None` on empty or unparseable input, which the
+/// caller treats as "no cutoff" rather than "everything is too old".
+fn parse_since_epoch(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Some(dt.timestamp());
+    }
+    if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        return d.and_hms_opt(0, 0, 0).map(|ndt| ndt.and_utc().timestamp());
+    }
+    None
+}
+
 async fn run_ingest_session(
     server: &str,
     branch: &str,
@@ -4643,6 +4740,8 @@ async fn run_ingest_session(
     source: &str,
     all: bool,
     since: Option<String>,
+    // Extra directories to scan on top of each source's built-in locations.
+    scan_dirs: Vec<String>,
     last: Option<usize>,
     tokens_only: bool,
     dry_run: bool,
@@ -4732,10 +4831,18 @@ async fn run_ingest_session(
         let cwd = if all { None } else { Some(std::env::current_dir()?) };
         let mut out = vec![];
         for src in &selected {
-            let refs = match &cwd {
+            let mut refs = match &cwd {
                 Some(dir) => src.discover_for_project(dir),
                 None => src.discover_all(),
             };
+            // User-specified extra directories, probed against this source's
+            // format. A dir that isn't this source's shape yields nothing.
+            for extra in &scan_dirs {
+                refs.extend(src.discover_in(std::path::Path::new(extra)));
+            }
+            // Keep same-label refs adjacent so the grouping below stays tidy
+            // even after mixing built-in and --scan-dir discovery.
+            refs.sort_by(|a, b| a.label.cmp(&b.label));
             // Re-group by project label so per-project counts still print.
             let mut by_label: Vec<(String, Vec<SessionRef>)> = vec![];
             for r in refs {
@@ -4764,8 +4871,18 @@ async fn run_ingest_session(
         return Ok(());
     }
 
-    // Parse since date filter.
-    let since_ts = since.as_deref().unwrap_or("");
+    // `--since` is a whole-session cutoff (not a turn filter): a session whose
+    // last activity is before it is skipped without being parsed. The turn-level
+    // filter is therefore disabled — matching sessions import in full.
+    let since_epoch: Option<i64> = since.as_deref().and_then(parse_since_epoch);
+    if since.as_deref().is_some_and(|s| !s.trim().is_empty()) && since_epoch.is_none() {
+        eprintln!(
+            "warn: could not parse --since '{}' (expected YYYY-MM-DD or RFC3339); importing everything",
+            since.as_deref().unwrap_or("")
+        );
+    }
+    let since_ts = "";
+    let mut total_skipped_since = 0usize;
 
     let mut total_sessions = 0usize;
     let mut total_skipped_unchanged = 0usize;
@@ -4807,8 +4924,23 @@ async fn run_ingest_session(
         // sees real work. If the caller didn't pin an explicit --session, each
         // file gets its own id derived from the filename (namespaced by source
         // so a Codex uuid cannot land on a Claude session's row).
+        let src_impl = crate::sources::source_by_id(source_id);
         let mut jobs: Vec<IngestJob> = Vec::with_capacity(files.len());
         for session_ref in files {
+            // `--since`: skip a whole session whose last activity predates the
+            // cutoff, before parsing it. Only skip when the activity time is
+            // known and definitively older — an unknown time imports rather
+            // than risk dropping a session.
+            if let Some(cutoff) = since_epoch
+                && src_impl
+                    .as_ref()
+                    .and_then(|s| s.last_activity(session_ref))
+                    .is_some_and(|a| a < cutoff)
+            {
+                total_skipped_since += 1;
+                continue;
+            }
+
             let effective_session: Option<String> = match session {
                 Some(s) => Some(s.to_string()),
                 None => Some(session_ref.namespaced_id(source_id)),
@@ -4924,6 +5056,13 @@ async fn run_ingest_session(
             "Skipped {} deleted session{} (tombstoned; their transcripts are still on disk).",
             skipped_deleted,
             if skipped_deleted == 1 { "" } else { "s" }
+        );
+    }
+    if total_skipped_since > 0 {
+        println!(
+            "Skipped {} session{} last active before the --since cutoff.",
+            total_skipped_since,
+            if total_skipped_since == 1 { "" } else { "s" }
         );
     }
     println!(

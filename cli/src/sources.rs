@@ -92,6 +92,37 @@ impl SessionRef {
     }
 }
 
+/// Files under `dir` and its immediate subdirectories whose file name matches
+/// `pred`. Bounded to two levels so a `--scan-dir` can't kick off a deep
+/// filesystem walk — it covers both "a folder of transcripts" and "a projects
+/// root with one subdirectory per project".
+fn scan_files(dir: &Path, pred: impl Fn(&str) -> bool) -> Vec<PathBuf> {
+    let mut out = vec![];
+    let mut collect = |d: &Path| {
+        if let Ok(rd) = std::fs::read_dir(d) {
+            for entry in rd.flatten() {
+                let p = entry.path();
+                if p.is_file()
+                    && let Some(name) = p.file_name().and_then(|n| n.to_str())
+                    && pred(name)
+                {
+                    out.push(p.clone());
+                }
+            }
+        }
+    };
+    collect(dir);
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                collect(&p);
+            }
+        }
+    }
+    out
+}
+
 /// An agent whose sessions we can import.
 pub trait SessionSource {
     /// Stable machine id used by `--source` and stored on the session.
@@ -142,6 +173,34 @@ pub trait SessionSource {
             .ok()?
             .as_secs();
         Some(format!("{}:{}", mtime, m.len()))
+    }
+
+    /// Approximate epoch-seconds of the session's last activity, computed
+    /// WITHOUT parsing — used by `--since` to skip whole old sessions cheaply.
+    ///
+    /// Default is the transcript file's mtime. `None` means "unknown", and the
+    /// caller then imports the session rather than risk skipping it. Db-backed
+    /// sources (Cursor) MUST override — every conversation shares one file, so
+    /// its mtime says nothing about an individual chat.
+    fn last_activity(&self, session: &SessionRef) -> Option<i64> {
+        let m = std::fs::metadata(&session.path).ok()?;
+        let secs = m
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs();
+        Some(secs as i64)
+    }
+
+    /// Discover sessions under a user-specified directory (from `--scan-dir`),
+    /// probing it against this source's on-disk shape. A directory that is not
+    /// this source's format yields an empty vec, so every source can be asked
+    /// about every extra dir and only the matching one responds.
+    ///
+    /// Default is empty (the source has no notion of a relocatable store).
+    fn discover_in(&self, _dir: &Path) -> Vec<SessionRef> {
+        Vec::new()
     }
 }
 
@@ -283,6 +342,31 @@ impl SessionSource for ClaudeCode {
                 precomputed_fp: None,
             })
             .collect()
+    }
+
+    /// A `--scan-dir` of Claude transcripts: `*.jsonl` files that are not
+    /// Codex rollouts (those are the Codex source's to claim). The cwd is read
+    /// from each transcript; the label is the containing directory's name.
+    fn discover_in(&self, dir: &Path) -> Vec<SessionRef> {
+        scan_files(dir, |n| {
+            n.ends_with(".jsonl") && !n.starts_with("rollout-")
+        })
+        .into_iter()
+        .map(|path| {
+            let label = path
+                .parent()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "scan".to_string());
+            SessionRef {
+                cwd: Self::read_cwd(&path),
+                label,
+                path,
+                native_id: None,
+                precomputed_fp: None,
+            }
+        })
+        .collect()
     }
 
     fn parse(&self, session: &SessionRef) -> Vec<Turn> {
@@ -434,6 +518,32 @@ impl SessionSource for Codex {
             .collect()
     }
 
+    /// A `--scan-dir` of Codex rollouts: `rollout-*.jsonl` files, each mapped
+    /// through the same `read_meta` path as the built-in scan.
+    fn discover_in(&self, dir: &Path) -> Vec<SessionRef> {
+        let mut refs: Vec<SessionRef> = scan_files(dir, |n| {
+            n.starts_with("rollout-") && n.ends_with(".jsonl")
+        })
+        .into_iter()
+        .map(|path| {
+            let (id, cwd) = Self::read_meta(&path).unwrap_or_default();
+            SessionRef {
+                label: if cwd.is_empty() {
+                    "unknown".to_string()
+                } else {
+                    Self::label_for_cwd(&cwd)
+                },
+                cwd: (!cwd.is_empty()).then_some(cwd),
+                native_id: (!id.is_empty()).then_some(id),
+                path,
+                precomputed_fp: None,
+            }
+        })
+        .collect();
+        refs.sort_by(|a, b| a.label.cmp(&b.label));
+        refs
+    }
+
     fn parse(&self, session: &SessionRef) -> Vec<Turn> {
         crate::codex::parse_rollout(&session.path)
     }
@@ -566,6 +676,33 @@ impl SessionSource for Gemini {
             .collect()
     }
 
+    /// A `--scan-dir` of Gemini transcripts: `session-*.json` files. The cwd is
+    /// not recorded in the file, so these route to the default workspace unless
+    /// the dir sits under a normal Gemini layout (best-effort label only).
+    fn discover_in(&self, dir: &Path) -> Vec<SessionRef> {
+        let mut refs: Vec<SessionRef> = scan_files(dir, |n| {
+            n.starts_with("session-") && n.ends_with(".json")
+        })
+        .into_iter()
+        .map(|path| {
+            let label = path
+                .parent()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "gemini".to_string());
+            SessionRef {
+                native_id: Self::read_session_id(&path),
+                label,
+                cwd: None,
+                path,
+                precomputed_fp: None,
+            }
+        })
+        .collect();
+        refs.sort_by(|a, b| a.label.cmp(&b.label));
+        refs
+    }
+
     fn parse(&self, session: &SessionRef) -> Vec<Turn> {
         let mut turns = crate::gemini::parse_session(&session.path);
         // Stamp the resolved cwd onto every turn so provenance and workspace
@@ -599,6 +736,23 @@ impl Cursor {
             .unwrap_or_else(|| PathBuf::from("~"))
             .join("Library/Application Support/Cursor/User/globalStorage/state.vscdb")
     }
+
+    /// Map every composer in a `state.vscdb` to a [`SessionRef`]. Shared by the
+    /// built-in scan and `--scan-dir`. `list_sessions` reads `lastUpdatedAt` in
+    /// its one index-only pass, so the incremental-skip fingerprint is captured
+    /// here for free rather than re-opening the multi-GB store per conversation.
+    fn sessions_in_db(db: &Path) -> Vec<SessionRef> {
+        crate::cursor::list_sessions(db)
+            .into_iter()
+            .map(|s| SessionRef {
+                label: s.name.clone().unwrap_or_else(|| "Cursor".to_string()),
+                cwd: None, // not in the global db
+                native_id: Some(s.composer_id),
+                path: db.to_path_buf(),
+                precomputed_fp: Some(format!("cursor:{}", s.last_updated_at)),
+            })
+            .collect()
+    }
 }
 
 impl SessionSource for Cursor {
@@ -615,28 +769,28 @@ impl SessionSource for Cursor {
     }
 
     fn discover_all(&self) -> Vec<SessionRef> {
-        let db = Self::global_db();
-        crate::cursor::list_sessions(&db)
-            .into_iter()
-            .map(|s| SessionRef {
-                // Cursor names its chats; use that as the label when present.
-                label: s.name.clone().unwrap_or_else(|| "Cursor".to_string()),
-                cwd: None, // not in the global db
-                native_id: Some(s.composer_id),
-                path: db.clone(),
-                // `list_sessions` already read `lastUpdatedAt` in its single
-                // scan, so the incremental-skip fingerprint is free here.
-                // Without this, `fingerprint` would re-open the multi-GB store
-                // once per conversation.
-                precomputed_fp: Some(format!("cursor:{}", s.last_updated_at)),
-            })
-            .collect()
+        Self::sessions_in_db(&Self::global_db())
     }
 
     fn discover_for_project(&self, _project_dir: &Path) -> Vec<SessionRef> {
         // No per-project cwd mapping yet, so a project-scoped scan can't tell
         // which Cursor sessions belong to it. Return none rather than guess.
         vec![]
+    }
+
+    /// A `--scan-dir` pointing at a `state.vscdb` file, or a directory holding
+    /// one, is scanned like the global store. Anything else yields nothing.
+    fn discover_in(&self, dir: &Path) -> Vec<SessionRef> {
+        let db = if dir.is_file() {
+            dir.to_path_buf()
+        } else {
+            dir.join("state.vscdb")
+        };
+        if db.is_file() {
+            Self::sessions_in_db(&db)
+        } else {
+            vec![]
+        }
     }
 
     fn parse(&self, session: &SessionRef) -> Vec<Turn> {
@@ -649,6 +803,20 @@ impl SessionSource for Cursor {
     // No `fingerprint` override: `discover_all` captured `lastUpdatedAt` per
     // composer in its single scan and stored it in `precomputed_fp`, so the
     // trait default returns it without re-opening the database.
+
+    /// Cursor's per-chat `lastUpdatedAt`, carried on `precomputed_fp` from the
+    /// discovery scan (`cursor:<epoch-ms>`). A missing or zero timestamp is
+    /// `None`, so `--since` imports rather than wrongly skips it. The db file's
+    /// own mtime is useless here — every chat shares it.
+    fn last_activity(&self, session: &SessionRef) -> Option<i64> {
+        let ms: i64 = session
+            .precomputed_fp
+            .as_ref()?
+            .strip_prefix("cursor:")?
+            .parse()
+            .ok()?;
+        (ms > 0).then_some(ms / 1000)
+    }
 }
 
 // ── Registry ──────────────────────────────────────────────────────────────────
