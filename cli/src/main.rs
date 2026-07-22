@@ -546,9 +546,13 @@ enum Commands {
         #[arg(long)]
         file: Option<String>,
 
-        /// Which agent's transcripts to import: claude, codex, or all.
-        /// Defaults to claude. `--source all` scans every agent installed on
-        /// this machine.
+        // The listed sources must track `sources::all_sources()`, the real
+        // source of truth; an unknown value is rejected at runtime with the
+        // registry's live list. This is a static doc comment, so it can drift
+        // — hence the reminder.
+        /// Which agent's transcripts to import: claude, codex, gemini,
+        /// cursor, or all. Defaults to claude. `--source all` scans every
+        /// agent installed on this machine.
         #[arg(long, default_value = "claude")]
         source: String,
 
