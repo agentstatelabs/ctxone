@@ -2063,6 +2063,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if cfg_dirty {
                 let _ = cfg.save();
             }
+            // An explicit `--file` names one transcript to import; the
+            // remembered import window must not silently skip it. `--scan-dir`
+            // is likewise irrelevant to a single named file.
+            let effective_since = if file.is_some() { None } else { effective_since };
             if let Some(s) = &effective_since {
                 eprintln!("Importing sessions last active on/after {s} (remembered in config).");
             }
