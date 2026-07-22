@@ -93,13 +93,22 @@
 
 	// Branch / namespace switches invalidate everything (plan names and
 	// task ids are ref-scoped) — reset selection and reload.
+	//
+	// `plans` MUST be cleared too, not just the selection: the auto-select
+	// effect below runs the moment `selectedName` becomes null, and if the old
+	// workspace's `plans` were still present it would pick one of those and
+	// `getPlan(oldPlan, newRef)` would 404. Clearing `plans` makes auto-select
+	// wait for `loadPlans()` to bring in the new workspace's list, then land on
+	// the first plan that actually exists there.
 	$effect(() => {
 		void branchStore.current;
 		void namespaceStore.current;
 		selectedName = null;
 		selectedPlan = null;
+		plans = [];
 		panelTaskId = null;
 		panelIntent = null;
+		error = null;
 		loadPlans();
 	});
 
