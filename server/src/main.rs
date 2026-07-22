@@ -509,26 +509,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 info!(parent = %parent.display(), "created db parent directory");
             }
             info!(storage = "sqlite", path = %db_path, init = init_flag, "Storage: sqlite");
-            // Put the db in WAL mode before the storage layer opens it. The
-            // stock rollback-journal default (`journal_mode=DELETE`) fsyncs a
-            // journal file on *every* commit; ingest does thousands of commits,
-            // so a cold whole-machine import spent most of its wall-clock there.
-            // WAL appends to one log and checkpoints in bulk — measured ~1.75x
-            // faster on a full import (7.5 min → 4.3 min). `journal_mode` is a
-            // *persistent* db property, so setting it once on this throwaway
-            // connection sticks for the storage layer's own connection. The
-            // storage crate takes only a path, so this is how the hub gets to
-            // choose the mode without patching it. Best-effort: a failure just
-            // leaves the slower default.
-            match rusqlite::Connection::open(&db_path) {
-                Ok(conn) => {
-                    match conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get::<_, String>(0)) {
-                        Ok(mode) => info!(journal_mode = %mode, "sqlite WAL enabled"),
-                        Err(e) => warn!(error = %e, "could not set WAL journal mode"),
-                    }
-                }
-                Err(e) => warn!(error = %e, "could not open db to set WAL journal mode"),
-            }
+            // Durability tuning (WAL + synchronous=NORMAL) now lives in
+            // SqliteStorage::open itself (agentstategraph-storage >= v0.9.4), so
+            // every consumer of the crate gets the faster write path.
             let storage = SqliteStorage::open(&db_path)?;
             Arc::new(Repository::new(Box::new(storage)))
         }
