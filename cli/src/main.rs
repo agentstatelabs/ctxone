@@ -389,8 +389,8 @@ enum BranchAction {
     Create {
         /// Name of the new branch
         name: String,
-        /// Ref to branch from (default: main)
-        #[arg(long, default_value = "main")]
+        /// Branch, tag, full commit ID, or unique commit prefix (default: main)
+        #[arg(long, default_value = "main", value_name = "REF")]
         from: String,
     },
     /// List all branches
@@ -399,6 +399,17 @@ enum BranchAction {
     Rm {
         /// Name of the branch to delete
         name: String,
+    },
+    /// Reset a branch to point at another ref, backing up the old target
+    Reset {
+        /// Branch to reset (its ref is moved)
+        name: String,
+        /// Branch, tag, full commit ID, or unique commit prefix to reset to
+        #[arg(long, value_name = "REF")]
+        to: String,
+        /// Retain the old target as a timestamped recovery ref before resetting
+        #[arg(long)]
+        backup: bool,
     },
 }
 
@@ -698,6 +709,15 @@ enum Commands {
         /// Commit message describing the merge
         #[arg(short = 'm', long)]
         message: Option<String>,
+        /// Preview the merge without changing the target branch
+        #[arg(long)]
+        dry_run: bool,
+        /// Allow the merge to remove whole plans/memory entries
+        #[arg(long)]
+        allow_deletions: bool,
+        /// Allow the merge to move a completed task back to a non-terminal state
+        #[arg(long)]
+        allow_regressions: bool,
     },
     /// Forget (delete) a memory at a specific path
     Forget {
@@ -2362,10 +2382,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             source,
             into,
             message,
+            dry_run,
+            allow_deletions,
+            allow_regressions,
         } => {
             let mut body = serde_json::json!({
                 "source": source,
                 "target": into,
+                "dry_run": dry_run,
+                "allow_deletions": allow_deletions,
+                "allow_regressions": allow_regressions,
             });
             if let Some(m) = message {
                 body["description"] = serde_json::json!(m);
@@ -2382,23 +2408,67 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => unreachable_exit(&cli.server, e),
             };
 
-            // Conflicts come back as 409 with a JSON body, not an opaque error
+            // Conflicts and the data-loss guard both come back as 409 with a
+            // JSON body, not an opaque error.
             if resp.status() == reqwest::StatusCode::CONFLICT {
                 let text = resp.text().await?;
                 if let Ok(parsed) = serde_json::from_str::<Value>(&text) {
+                    let status = parsed.get("status").and_then(|x| x.as_str());
                     emit(cli.format, &parsed, |v| {
-                        let empty_vec = vec![];
-                        let conflicts = v
-                            .get("conflicts")
-                            .and_then(|x| x.as_array())
-                            .unwrap_or(&empty_vec);
-                        eprintln!(
-                            "Merge conflict: {} conflict{}",
-                            conflicts.len(),
-                            if conflicts.len() == 1 { "" } else { "s" }
-                        );
-                        for c in conflicts {
-                            eprintln!("  {}", serde_json::to_string_pretty(c).unwrap_or_default());
+                        if status == Some("would_delete") {
+                            let empty_vec = vec![];
+                            let removed = v
+                                .get("removed")
+                                .and_then(|x| x.as_array())
+                                .unwrap_or(&empty_vec);
+                            let names: Vec<&str> =
+                                removed.iter().filter_map(|x| x.as_str()).collect();
+                            eprintln!(
+                                "Refusing merge: would remove {} — {}",
+                                names.join(", "),
+                                "re-run with --allow-deletions to proceed"
+                            );
+                        } else if status == Some("regression") {
+                            let empty_vec = vec![];
+                            let regs = v
+                                .get("regressions")
+                                .and_then(|x| x.as_array())
+                                .unwrap_or(&empty_vec);
+                            eprintln!(
+                                "Refusing merge: would regress {} completed task{}:",
+                                regs.len(),
+                                if regs.len() == 1 { "" } else { "s" }
+                            );
+                            for r in regs {
+                                let plan = r.get("plan").and_then(|x| x.as_str()).unwrap_or("?");
+                                let task = r.get("task").and_then(|x| x.as_str()).unwrap_or("?");
+                                let from = r
+                                    .get("target_status")
+                                    .and_then(|x| x.as_str())
+                                    .unwrap_or("?");
+                                let to = r
+                                    .get("source_status")
+                                    .and_then(|x| x.as_str())
+                                    .unwrap_or("?");
+                                eprintln!("  {plan}/{task}: {from} → {to}");
+                            }
+                        } else {
+                            let empty_vec = vec![];
+                            let conflicts = v
+                                .get("conflicts")
+                                .and_then(|x| x.as_array())
+                                .unwrap_or(&empty_vec);
+                            eprintln!(
+                                "Merge conflict: {} conflict{}",
+                                conflicts.len(),
+                                if conflicts.len() == 1 { "" } else { "s" }
+                            );
+                            for c in conflicts {
+                                eprintln!(
+                                    "  {}",
+                                    serde_json::to_string_pretty(c).unwrap_or_default()
+                                );
+                            }
                         }
                     });
                 } else {
@@ -2413,8 +2483,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let parsed: Value = resp.json().await?;
             emit(cli.format, &parsed, |v| {
-                let commit = v.get("commit_id").and_then(|x| x.as_str()).unwrap_or("");
-                println!("Merged '{}' into '{}' at {}", source, into, commit);
+                if v.get("status").and_then(|x| x.as_str()) == Some("dry_run") {
+                    let fmt = |key: &str| -> String {
+                        v.get(key)
+                            .and_then(|x| x.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|x| x.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            })
+                            .unwrap_or_default()
+                    };
+                    let ff = v
+                        .get("fast_forward")
+                        .and_then(|x| x.as_bool())
+                        .unwrap_or(false);
+                    println!(
+                        "Dry run: merge '{}' into '{}'{}",
+                        source,
+                        into,
+                        if ff { " (fast-forward)" } else { "" }
+                    );
+                    println!("  added:   [{}]", fmt("added"));
+                    println!("  changed: [{}]", fmt("changed"));
+                    println!("  removed: [{}]", fmt("removed"));
+                    if v.get("would_delete").and_then(|x| x.as_bool()).unwrap_or(false) {
+                        println!("  ⚠ would remove entries — merge needs --allow-deletions");
+                    }
+                    if let Some(regs) = v.get("regressions").and_then(|x| x.as_array()) {
+                        if !regs.is_empty() {
+                            println!(
+                                "  ⚠ would regress {} completed task(s) — merge needs --allow-regressions",
+                                regs.len()
+                            );
+                        }
+                    }
+                    let conflicts = v.get("conflicts").and_then(|x| x.as_array());
+                    if let Some(c) = conflicts {
+                        if !c.is_empty() {
+                            println!("  conflicts: {}", c.len());
+                        }
+                    }
+                } else {
+                    let commit = v.get("commit_id").and_then(|x| x.as_str()).unwrap_or("");
+                    println!("Merged '{}' into '{}' at {}", source, into, commit);
+                }
             });
         }
         Commands::Forget { path, reason } => {
@@ -2738,6 +2852,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("Branch '{}' deleted", name);
                     } else {
                         println!("Branch '{}' did not exist", name);
+                    }
+                });
+            }
+            BranchAction::Reset { name, to, backup } => {
+                let body = serde_json::json!({ "name": name, "to": to, "backup": backup });
+                let resp = match client
+                    .clone()
+                    .post(format!("{}/api/branches/reset", cli.server))
+                    .json(&body)
+                    .send()
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => unreachable_exit(&cli.server, e),
+                };
+                if !resp.status().is_success() {
+                    http_error_exit(resp, "branch reset failed").await;
+                }
+                let parsed: Value = resp.json().await?;
+                emit(cli.format, &parsed, |v| {
+                    let commit = v.get("commit_id").and_then(|x| x.as_str()).unwrap_or("");
+                    println!("Branch '{}' reset to '{}' at {}", name, to, commit);
+                    if let Some(b) = v.get("backup_ref").and_then(|x| x.as_str()) {
+                        println!("  old target backed up as '{}'", b);
                     }
                 });
             }

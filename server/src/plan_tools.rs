@@ -175,6 +175,104 @@ pub fn priority_label(p: Priority) -> &'static str {
     }
 }
 
+/// A task whose terminal state on `target` would be regressed to a
+/// non-terminal state by merging `source`. Reported by
+/// [`detect_plan_regressions`].
+#[derive(Debug, Clone, Serialize)]
+pub struct PlanRegression {
+    pub plan: String,
+    pub task: String,
+    /// Terminal status the task currently holds on the target branch.
+    pub target_status: &'static str,
+    /// Non-terminal status the source branch would pull it back to.
+    pub source_status: &'static str,
+}
+
+/// Detect `done`→`pending`-style regressions between two branches.
+///
+/// A task that is terminal (`done`/`abandoned`) on `target` but non-terminal
+/// (`pending`/`in_progress`) on `source` would, if merged, un-settle a
+/// completed task and drop its proof. Merges that would do this are refused —
+/// terminal task states are preserved. Only tasks present on BOTH branches
+/// under the same plan/id are considered; genuinely new source tasks are fine.
+pub fn detect_plan_regressions(store: &TaskStore, source: &str, target: &str) -> Vec<PlanRegression> {
+    let mut out = Vec::new();
+    let target_plans = match store.list_plans(target) {
+        Ok(p) => p,
+        Err(_) => return out,
+    };
+    for plan in target_plans {
+        // Skip plans the source doesn't have — nothing to pull back.
+        let source_tasks = match store.list_tasks(source, &plan.name) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let source_by_id: std::collections::HashMap<&TaskId, TaskStatus> =
+            source_tasks.iter().map(|t| (&t.id, t.status)).collect();
+        let target_tasks = store.list_tasks(target, &plan.name).unwrap_or_default();
+        for t in &target_tasks {
+            if !t.status.is_terminal() {
+                continue;
+            }
+            if let Some(&src_status) = source_by_id.get(&t.id) {
+                if !src_status.is_terminal() && src_status != t.status {
+                    out.push(PlanRegression {
+                        plan: plan.name.clone(),
+                        task: t.id.to_string(),
+                        target_status: task_status_label(t.status),
+                        source_status: task_status_label(src_status),
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// After a merge, promote any plan whose tasks are now all terminal from
+/// `active` to `completed`. The substrate only performs this rollup during a
+/// task transition (`complete`/`abandon`); a merge that brings in the final
+/// terminal task from another branch leaves `_meta.status` lagging at `active`.
+/// This restores the invariant "a plan is completed iff every task is
+/// terminal". `archived` plans are left untouched (an explicit user state).
+///
+/// Returns the names of the plans it promoted.
+pub fn promote_completed_plans(
+    store: &TaskStore,
+    repo: &Repository,
+    target: &str,
+    agent: &str,
+) -> Vec<String> {
+    let mut promoted = Vec::new();
+    let plans = match store.list_plans(target) {
+        Ok(p) => p,
+        Err(_) => return promoted,
+    };
+    for plan in plans {
+        if plan.status != PlanStatus::Active {
+            continue;
+        }
+        let tasks = store.list_tasks(target, &plan.name).unwrap_or_default();
+        if tasks.is_empty() || !tasks.iter().all(|t| t.status.is_terminal()) {
+            continue;
+        }
+        // Flip the status leaf under the plan's _meta object.
+        let path = format!("{}/{}/{}/status", PLANS_PREFIX, plan.name, paths::META_KEY);
+        let opts = CommitOptions::new(
+            agent,
+            IntentCategory::Merge,
+            format!("promote plan '{}' to completed after merge", plan.name),
+        );
+        if repo
+            .set_json(target, &path, &serde_json::json!("completed"), opts)
+            .is_ok()
+        {
+            promoted.push(plan.name);
+        }
+    }
+    promoted
+}
+
 pub fn task_status_label(s: TaskStatus) -> &'static str {
     match s {
         TaskStatus::Pending => "pending",
@@ -1694,6 +1792,74 @@ mod tests {
         store
             .complete_task("main", plan, &task.id, Proof::commit("deadbeef"))
             .unwrap();
+    }
+
+    fn complete_on(store: &TaskStore, ref_name: &str, plan: &str, id: &TaskId) {
+        store.start_task(ref_name, plan, id).unwrap();
+        store
+            .complete_task(ref_name, plan, id, Proof::commit("deadbeef"))
+            .unwrap();
+    }
+
+    #[test]
+    fn detect_regression_done_to_pending() {
+        let (repo, store) = fresh_store();
+        create_plan(&store, "main", "p", None).unwrap();
+        let t1 = add_task(&store, "main", "p", "a", None, None, None, None, vec![]).unwrap();
+        // source branches while t1 is still pending; target then completes it.
+        repo.branch("source", "main").unwrap();
+        complete_on(&store, "main", "p", &t1.id);
+
+        let regs = detect_plan_regressions(&store, "source", "main");
+        assert_eq!(regs.len(), 1, "expected one regression, got {regs:?}");
+        assert_eq!(regs[0].task, t1.id.to_string());
+        assert_eq!(regs[0].target_status, "done");
+        assert_eq!(regs[0].source_status, "pending");
+    }
+
+    #[test]
+    fn no_regression_when_source_also_terminal() {
+        let (repo, store) = fresh_store();
+        create_plan(&store, "main", "p", None).unwrap();
+        let t1 = add_task(&store, "main", "p", "a", None, None, None, None, vec![]).unwrap();
+        // completed before branching, so source inherits the terminal state.
+        complete_on(&store, "main", "p", &t1.id);
+        repo.branch("source", "main").unwrap();
+        assert!(detect_plan_regressions(&store, "source", "main").is_empty());
+    }
+
+    #[test]
+    fn promote_after_merge_completes_plan_and_keeps_proofs() {
+        let (repo, store) = fresh_store();
+        create_plan(&store, "main", "p", None).unwrap();
+        let t1 = add_task(&store, "main", "p", "a", None, None, None, None, vec![]).unwrap();
+        let t2 = add_task(&store, "main", "p", "b", None, None, None, None, vec![]).unwrap();
+        repo.branch("source", "main").unwrap();
+        // Each branch completes one task; neither alone finishes the plan.
+        complete_on(&store, "main", "p", &t1.id);
+        complete_on(&store, "source", "p", &t2.id);
+        assert_eq!(store.get_plan("main", "p").unwrap().status, PlanStatus::Active);
+
+        repo.merge(
+            "source",
+            "main",
+            CommitOptions::new("test-agent", IntentCategory::Merge, "merge"),
+        )
+        .unwrap();
+
+        // All tasks terminal after the merge, but _meta still lags at active.
+        let tasks = store.list_tasks("main", "p").unwrap();
+        assert!(tasks.iter().all(|t| t.status.is_terminal()));
+        assert_eq!(store.get_plan("main", "p").unwrap().status, PlanStatus::Active);
+
+        let promoted = promote_completed_plans(&store, &repo, "main", "test-agent");
+        assert_eq!(promoted, vec!["p".to_string()]);
+        assert_eq!(store.get_plan("main", "p").unwrap().status, PlanStatus::Completed);
+
+        // Proofs from both branches survive the merge.
+        for t in store.list_tasks("main", "p").unwrap() {
+            assert!(t.proof.is_some(), "proof must survive merge for {}", t.id);
+        }
     }
 
     #[test]

@@ -558,6 +558,7 @@ fn router_with_config_inner(
         .route("/api/diff", get(diff_refs))
         .route("/api/merge", post(merge_refs))
         .route("/api/branches", get(list_branches).post(create_branch))
+        .route("/api/branches/reset", post(reset_branch))
         .route(
             "/api/branches/{name}",
             axum::routing::delete(delete_branch),
@@ -909,10 +910,13 @@ fn internal_error(e: agentstategraph::RepoError) -> (StatusCode, String) {
         | RepoError::Tree(TreeError::ObjectNotFound(_))
         | RepoError::RefNotFound(_)
         | RepoError::BranchNotFound(_)
+        | RepoError::CommitNotFound(_)
         | RepoError::NamespaceNotFound(_)
         | RepoError::Storage(agentstategraph_storage::StorageError::NamespaceNotFound(_)) => {
             StatusCode::NOT_FOUND
         }
+        // Ambiguous prefix is a client input problem, not "not found".
+        RepoError::AmbiguousCommitPrefix { .. } => StatusCode::BAD_REQUEST,
         RepoError::CrossNamespaceAccessDenied => StatusCode::FORBIDDEN,
         _ => {
             warn!(error = %msg, "request returned 500");
@@ -1658,6 +1662,57 @@ async fn delete_branch(
 }
 
 #[derive(Deserialize)]
+struct ResetBranchRequest {
+    /// Branch whose ref is moved.
+    name: String,
+    /// Ref-spec to reset to (branch, tag, full commit id, or unique prefix).
+    to: String,
+    /// Retain the current target as a timestamped recovery ref first.
+    #[serde(default)]
+    backup: bool,
+}
+
+/// `POST /api/branches/reset` — move a branch ref to another ref, optionally
+/// retaining the old target as a timestamped recovery ref so the reset is
+/// auditable and reversible without direct storage surgery.
+async fn reset_branch(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+    Json(req): Json<ResetBranchRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
+
+    // Resolve the destination first (accepts commit ids/prefixes via head()).
+    let to_commit = repo.head(&req.to).map_err(internal_error)?;
+
+    // Back up the current target before moving it.
+    let mut backup_ref = None;
+    if req.backup {
+        // Only if the target currently exists.
+        if let Ok(_old) = repo.head(&req.name) {
+            let ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+            let name = format!("{}-recovery-{}", req.name, ts);
+            repo.branch(&name, &req.name).map_err(internal_error)?;
+            backup_ref = Some(name);
+        }
+    }
+
+    repo.set_ref(&req.name, to_commit).map_err(internal_error)?;
+    s.sessions.mark_all_dirty();
+
+    let mut out = serde_json::json!({
+        "status": "ok",
+        "name": req.name,
+        "to": req.to,
+        "commit_id": format!("{}", to_commit.short()),
+    });
+    if let Some(b) = backup_ref {
+        out["backup_ref"] = serde_json::json!(b);
+    }
+    Ok(Json(out))
+}
+
+#[derive(Deserialize)]
 struct DiffQuery {
     /// First ref (usually the older / base).
     ref_a: String,
@@ -1692,6 +1747,17 @@ struct MergeRequest {
     description: String,
     /// Optional reasoning for the merge.
     reasoning: Option<String>,
+    /// Preview the merge without advancing the target ref.
+    #[serde(default)]
+    dry_run: bool,
+    /// Permit the merge to remove top-level entries (e.g. an entire /plans or
+    /// /memory map). Without this, such a merge is refused.
+    #[serde(default)]
+    allow_deletions: bool,
+    /// Permit the merge to move a completed (terminal) task back to a
+    /// non-terminal state. Without this, such a regression is refused.
+    #[serde(default)]
+    allow_regressions: bool,
 }
 
 fn default_merge_description() -> String {
@@ -1711,8 +1777,52 @@ async fn merge_refs(
         opts = opts.with_reasoning(r);
     }
 
-    match repo.merge(&req.source, &req.target, opts) {
+    // Plans-domain guard: a task that is terminal on the target must not be
+    // pulled back to a non-terminal state by the source.
+    let store = plan_tools::make_store(repo.clone(), &agent_id.0);
+    let regressions = plan_tools::detect_plan_regressions(&store, &req.source, &req.target);
+
+    // Dry-run: report what the merge would do without touching the target ref.
+    if req.dry_run {
+        return match repo.preview_merge(&req.source, &req.target) {
+            Ok(preview) => Ok(Json(serde_json::json!({
+                "status": "dry_run",
+                "source": req.source,
+                "target": req.target,
+                "fast_forward": preview.fast_forward,
+                "added": preview.added,
+                "changed": preview.changed,
+                "removed": preview.removed,
+                "would_delete": preview.has_deletions(),
+                "regressions": serde_json::to_value(&regressions).unwrap_or_default(),
+                "conflicts": serde_json::to_value(&preview.conflicts).unwrap_or_default(),
+            }))),
+            Err(e) => Err(internal_error(e)),
+        };
+    }
+
+    // Terminal-state regressions are refused by default — un-settling a
+    // completed task and dropping its proof is rarely intended — but the
+    // caller can opt in with allow_regressions when it genuinely is.
+    if !regressions.is_empty() && !req.allow_regressions {
+        return Err((
+            StatusCode::CONFLICT,
+            serde_json::json!({
+                "status": "regression",
+                "source": req.source,
+                "target": req.target,
+                "regressions": serde_json::to_value(&regressions).unwrap_or_default(),
+                "hint": "source would move a completed task back to a non-terminal state",
+            })
+            .to_string(),
+        ));
+    }
+
+    match repo.merge_checked(&req.source, &req.target, opts, req.allow_deletions) {
         Ok(commit_id) => {
+            // Restore the "plan completed iff all tasks terminal" invariant for
+            // plans whose final task arrived via this merge.
+            let promoted = plan_tools::promote_completed_plans(&store, &repo, &req.target, &agent_id.0);
             // Graph size may have changed — invalidate every session's cache.
             s.sessions.mark_all_dirty();
             Ok(Json(serde_json::json!({
@@ -1720,6 +1830,7 @@ async fn merge_refs(
                 "source": req.source,
                 "target": req.target,
                 "commit_id": format!("{}", commit_id.short()),
+                "promoted_plans": promoted,
             })))
         }
         Err(agentstategraph::RepoError::MergeConflicts(conflicts)) => {
@@ -1732,6 +1843,21 @@ async fn merge_refs(
                     "source": req.source,
                     "target": req.target,
                     "conflicts": conflict_json,
+                })
+                .to_string(),
+            ))
+        }
+        Err(agentstategraph::RepoError::MergeWouldDelete(removed)) => {
+            // Data-loss guard tripped. 409 with the entries that would vanish so
+            // the caller can re-run with allow_deletions if intended.
+            Err((
+                StatusCode::CONFLICT,
+                serde_json::json!({
+                    "status": "would_delete",
+                    "source": req.source,
+                    "target": req.target,
+                    "removed": removed,
+                    "hint": "re-run with allow_deletions=true to proceed",
                 })
                 .to_string(),
             ))

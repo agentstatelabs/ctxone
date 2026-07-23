@@ -1538,7 +1538,9 @@ pub struct BranchListParams {}
 pub struct BranchCreateParams {
     /// New branch name.
     pub name: String,
-    /// Source ref to branch from (default: "main").
+    /// Ref to branch from: a branch name, a full commit id (with or without the
+    /// `sg_` prefix), or a unique commit-id prefix — including historical
+    /// commits whose branch was deleted (default: "main").
     #[serde(default = "default_ref")]
     pub from: String,
 }
@@ -1555,6 +1557,16 @@ pub struct MergeParams {
     pub description: String,
     /// Optional reasoning for the merge.
     pub reasoning: Option<String>,
+    /// Preview the merge without advancing the target ref.
+    #[serde(default)]
+    pub dry_run: bool,
+    /// Permit removing whole top-level entries (plans/memory). Off by default.
+    #[serde(default)]
+    pub allow_deletions: bool,
+    /// Permit moving a completed (terminal) task back to a non-terminal state.
+    /// Off by default — such regressions are refused.
+    #[serde(default)]
+    pub allow_regressions: bool,
 }
 
 fn default_merge_description_param() -> String {
@@ -2746,14 +2758,59 @@ impl CtxOneServer {
         if let Some(r) = p.reasoning {
             opts = opts.with_reasoning(r);
         }
-        match self.repo.merge(&p.source, &p.target, opts) {
+
+        let store = crate::plan_tools::make_store(self.repo.clone(), &self.agent_id);
+        let regressions =
+            crate::plan_tools::detect_plan_regressions(&store, &p.source, &p.target);
+
+        if p.dry_run {
+            return match self.repo.preview_merge(&p.source, &p.target) {
+                Ok(preview) => serde_json::json!({
+                    "status": "dry_run",
+                    "source": p.source,
+                    "target": p.target,
+                    "fast_forward": preview.fast_forward,
+                    "added": preview.added,
+                    "changed": preview.changed,
+                    "removed": preview.removed,
+                    "would_delete": preview.has_deletions(),
+                    "regressions": serde_json::to_value(&regressions).unwrap_or_default(),
+                    "conflicts": serde_json::to_value(&preview.conflicts).unwrap_or_default(),
+                })
+                .to_string(),
+                Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+            };
+        }
+
+        if !regressions.is_empty() && !p.allow_regressions {
+            return serde_json::json!({
+                "status": "regression",
+                "source": p.source,
+                "target": p.target,
+                "regressions": serde_json::to_value(&regressions).unwrap_or_default(),
+                "hint": "source would move a completed task back to a non-terminal state",
+            })
+            .to_string();
+        }
+
+        match self
+            .repo
+            .merge_checked(&p.source, &p.target, opts, p.allow_deletions)
+        {
             Ok(commit_id) => {
+                let promoted = crate::plan_tools::promote_completed_plans(
+                    &store,
+                    &self.repo,
+                    &p.target,
+                    &self.agent_id,
+                );
                 self.session.mark_dirty();
                 serde_json::json!({
                     "status": "ok",
                     "source": p.source,
                     "target": p.target,
                     "commit_id": format!("{}", commit_id.short()),
+                    "promoted_plans": promoted,
                 })
                 .to_string()
             }
@@ -2767,6 +2824,14 @@ impl CtxOneServer {
                 })
                 .to_string()
             }
+            Err(agentstategraph::RepoError::MergeWouldDelete(removed)) => serde_json::json!({
+                "status": "would_delete",
+                "source": p.source,
+                "target": p.target,
+                "removed": removed,
+                "hint": "set allow_deletions=true to proceed",
+            })
+            .to_string(),
             Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
         }
     }

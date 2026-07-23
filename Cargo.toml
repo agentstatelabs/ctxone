@@ -14,13 +14,13 @@ repository = "https://git.internal.example/agentstategroup/ctxone"
 
 [workspace.dependencies]
 # ASG engine crates — git deps pinned to an ASG release tag (was a GitHub submodule)
-agentstategraph = { git = "https://git.internal.example/agentstategroup/agentstategraph.git", tag = "v0.9.4" }
-agentstategraph-core = { git = "https://git.internal.example/agentstategroup/agentstategraph.git", tag = "v0.9.4" }
-agentstategraph-storage = { git = "https://git.internal.example/agentstategroup/agentstategraph.git", tag = "v0.9.4", features = ["postgres", "memory"] }
-agentstategraph-tasks = { git = "https://git.internal.example/agentstategroup/agentstategraph.git", tag = "v0.9.4" }
-agentstategraph-migrate = { git = "https://git.internal.example/agentstategroup/agentstategraph.git", tag = "v0.9.4" }
-agentstategraph-taint = { git = "https://git.internal.example/agentstategroup/agentstategraph.git", tag = "v0.9.4" }
-agentstategraph-reminders = { git = "https://git.internal.example/agentstategroup/agentstategraph.git", tag = "v0.9.4" }
+agentstategraph = { git = "https://git.internal.example/agentstategroup/agentstategraph.git", tag = "v0.9.5" }
+agentstategraph-core = { git = "https://git.internal.example/agentstategroup/agentstategraph.git", tag = "v0.9.5" }
+agentstategraph-storage = { git = "https://git.internal.example/agentstategroup/agentstategraph.git", tag = "v0.9.5", features = ["postgres", "memory"] }
+agentstategraph-tasks = { git = "https://git.internal.example/agentstategroup/agentstategraph.git", tag = "v0.9.5" }
+agentstategraph-migrate = { git = "https://git.internal.example/agentstategroup/agentstategraph.git", tag = "v0.9.5" }
+agentstategraph-taint = { git = "https://git.internal.example/agentstategroup/agentstategraph.git", tag = "v0.9.5" }
+agentstategraph-reminders = { git = "https://git.internal.example/agentstategroup/agentstategraph.git", tag = "v0.9.5" }
 
 # Engine's workspace deps (required because engine crates inherit from workspace)
 blake3 = "1"
