@@ -842,10 +842,15 @@ enum Commands {
         /// Show what would be written without writing
         #[arg(long)]
         dry_run: bool,
-        /// Skip the interactive prompt to install AGENTS.md guidance.
-        /// Useful in scripts that want only the MCP config step.
+        /// Skip priming the AGENTS.md guidance. Useful in scripts that want
+        /// only the MCP config step. (AGENTS.md is primed by default.)
         #[arg(long)]
         no_agents: bool,
+        /// Skip writing the MCP server config. Useful when the MCP entry is
+        /// already configured and you only want to (re)prime AGENTS.md. Pair
+        /// with `--no-agents` and init does nothing.
+        #[arg(long)]
+        no_mcp: bool,
         /// MCP transport to configure. `http` (default, recommended) points
         /// the tool at a shared daemon's `/mcp` URL — run one
         /// `ctxone-hub --http --lens` (or `ctx service install`, see
@@ -2920,6 +2925,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             config_path,
             dry_run,
             no_agents,
+            no_mcp,
             transport,
             mcp_url,
             auth_token,
@@ -2932,46 +2938,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let server = cli.server.clone();
             let branch = cli.branch.clone();
             let format = cli.format;
-            // Preflight: for http configs, check the daemon is actually up so we
-            // don't hand tools a URL config pointing at a hub that isn't running.
-            // Skipped in --dry-run (nothing is written anyway).
-            if transport == McpTransport::Http
-                && !dry_run
-                && let Some(health) = hub_health_url(&mcp_url)
-            {
-                let reachable = client
-                    .get(&health)
-                    .timeout(std::time::Duration::from_millis(1500))
-                    .send()
-                    .await
-                    .map(|r| r.status().is_success())
-                    .unwrap_or(false);
-                if !reachable {
-                    eprintln!(
-                        "  \u{26A0} hub not reachable at {health} — the configs below will \
-                         point at a hub that isn't running yet. Start it with \
-                         `ctxone-hub --http --lens` or `ctx service install`."
-                    );
+            if no_mcp {
+                println!("MCP config step skipped (--no-mcp).");
+            } else {
+                // Preflight: for http configs, check the daemon is actually up so we
+                // don't hand tools a URL config pointing at a hub that isn't running.
+                // Skipped in --dry-run (nothing is written anyway).
+                if transport == McpTransport::Http
+                    && !dry_run
+                    && let Some(health) = hub_health_url(&mcp_url)
+                {
+                    let reachable = client
+                        .get(&health)
+                        .timeout(std::time::Duration::from_millis(1500))
+                        .send()
+                        .await
+                        .map(|r| r.status().is_success())
+                        .unwrap_or(false);
+                    if !reachable {
+                        eprintln!(
+                            "  \u{26A0} hub not reachable at {health} — the configs below will \
+                             point at a hub that isn't running yet. Start it with \
+                             `ctxone-hub --http --lens` or `ctx service install`."
+                        );
+                    }
                 }
+                // `namespace` (resolved above for --transport http) is baked into
+                // the `/mcp?namespace=<ns>` URL so the shared daemon scopes writes
+                // the way a per-project stdio hub would.
+                init_mcp(
+                    global,
+                    tool,
+                    config_path,
+                    dry_run,
+                    transport,
+                    &mcp_url,
+                    namespace.clone(),
+                    auth_token.as_deref(),
+                    auth_token_env.as_deref(),
+                )?;
             }
-            // `namespace` (resolved above for --transport http) is baked into
-            // the `/mcp?namespace=<ns>` URL so the shared daemon scopes writes
-            // the way a per-project stdio hub would.
-            init_mcp(
-                global,
-                tool,
-                config_path,
-                dry_run,
-                transport,
-                &mcp_url,
-                namespace.clone(),
-                auth_token.as_deref(),
-                auth_token_env.as_deref(),
-            )?;
-            // After MCP configs are written, optionally prime the
-            // AGENTS.md guidance into the Hub. Skipped in --dry-run
-            // (we don't want a dry run to actually write to the
-            // graph) and when the user passed --no-agents.
+            // After MCP configs are written, prime the AGENTS.md guidance into
+            // the Hub by default. Skipped in --dry-run (we don't want a dry run
+            // to actually write to the graph) and when --no-agents is passed.
             if !dry_run && !no_agents {
                 println!();
                 if let Err(e) =
@@ -2979,6 +2988,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 {
                     eprintln!("  \u{2717} agents: {}", e);
                 }
+            }
+            if no_mcp && no_agents {
+                println!("Nothing to do: both --no-mcp and --no-agents were passed.");
             }
         }
         Commands::Agents { action } => {
