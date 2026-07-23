@@ -876,8 +876,9 @@ enum Commands {
     },
     /// Manage the AGENTS.md guidance file — a short, pinned document
     /// that teaches AI tools how to use CTXone effectively. See
-    /// `ctx agents show` for the full text. Nothing is installed
-    /// automatically; `install` always prompts unless `--yes` is passed.
+    /// `ctx agents show` for the full text. `install` primes it
+    /// non-interactively; `ctx init` primes it too unless `--no-agents`
+    /// is passed. Remove it any time with `ctx agents remove`.
     Agents {
         #[command(subcommand)]
         action: AgentsAction,
@@ -1457,16 +1458,16 @@ enum PlanAction {
 #[derive(Subcommand)]
 enum AgentsAction {
     /// Write AGENTS.md to disk (if not present) and prime it as
-    /// pinned memory in the Hub. Shows the full content first and
-    /// asks for confirmation, unless `--yes` is passed.
+    /// pinned memory in the Hub. Primes non-interactively (no prompt).
+    /// Use `--show` to preview the content without priming.
     Install {
         /// Use a custom AGENTS.md file instead of the embedded default.
         /// Useful when you've already edited your copy and want to
         /// re-prime after changes.
         #[arg(long)]
         file: Option<String>,
-        /// Skip the confirmation prompt. Required for non-interactive
-        /// scripts.
+        /// Deprecated no-op: priming is now non-interactive by default.
+        /// Accepted for backward compatibility with existing scripts.
         #[arg(long)]
         yes: bool,
         /// Show the file content and exit without priming.
@@ -2924,7 +2925,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             auth_token,
             auth_token_env,
         } => {
-            // Grab the fields agents_install_prompt needs BEFORE the
+            // Grab the fields agents_install_after_init needs BEFORE the
             // match consumes `cli.command` via destructuring. We only
             // need server + branch + format for the Agents handlers,
             // and the other arms don't touch them.
@@ -2974,7 +2975,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if !dry_run && !no_agents {
                 println!();
                 if let Err(e) =
-                    agents_install_prompt(&server, &branch, format, client.clone()).await
+                    agents_install_after_init(&server, &branch, format, client.clone()).await
                 {
                     eprintln!("  \u{2717} agents: {}", e);
                 }
@@ -3743,9 +3744,11 @@ async fn agents_remove(
     Ok(())
 }
 
-/// The interactive install flow. Writes the file to disk (if absent),
-/// shows the content unless `--yes`, prompts for confirmation, and
-/// primes the sections via the Hub's prime endpoint.
+/// The AGENTS.md install flow. Writes the file to disk (if absent) and
+/// primes its sections via the Hub's prime endpoint. Non-interactive: it
+/// primes by default with no prompt (`--show` previews instead; the `yes`
+/// param is a retained no-op). Callers gate whether it runs at all
+/// (`ctx init` skips it under `--no-agents`).
 async fn agents_install(
     file: Option<String>,
     yes: bool,
@@ -3773,50 +3776,22 @@ async fn agents_install(
     let disk_path = write_agents_md_if_absent(&content)
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
-    if !yes {
-        println!("CTXone ships a short guidance file that teaches AI tools how");
-        println!("to use the Hub effectively. It will be pinned to your memory");
-        println!("graph so every recall response includes it.");
-        println!();
-        println!("  File:          {}", disk_path.display());
-        println!("  Primed under:  /memory/pinned/{}", AGENTS_SOURCE);
-        println!("  Branch:        {}", branch);
-        println!("  Visible in:    ctx ls /memory/pinned/{}", AGENTS_SOURCE);
-        println!("                 ctx blame <path>");
-        println!("                 CTXone Lens browse view");
-        println!("  Removable:     ctx agents remove");
-        println!();
-        print!("Prime AGENTS.md now? [Y/n/show] ");
-        use std::io::Write;
-        std::io::stdout().flush().ok();
-
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input)?;
-        let answer = input.trim().to_lowercase();
-        match answer.as_str() {
-            "" | "y" | "yes" => {}
-            "show" => {
-                println!();
-                println!("--- AGENTS.md ---");
-                println!("{}", content);
-                println!("--- end ---");
-                println!();
-                print!("Prime AGENTS.md now? [Y/n] ");
-                std::io::stdout().flush().ok();
-                let mut again = String::new();
-                std::io::stdin().read_line(&mut again)?;
-                let a = again.trim().to_lowercase();
-                if !(a.is_empty() || a == "y" || a == "yes") {
-                    println!("Skipped. Run `ctx agents install` later to prime.");
-                    return Ok(());
-                }
-            }
-            _ => {
-                println!("Skipped. Run `ctx agents install` later to prime.");
-                return Ok(());
-            }
-        }
-    }
+    // Priming is non-interactive and on by default — no prompt. This mirrors
+    // asd's `onboard` (silent default-on, one `--no-*` opt-out). `ctx init`
+    // skips this step entirely with `--no-agents`; standalone `ctx agents
+    // install` always primes. The legacy `--yes` flag is accepted but is now a
+    // no-op (priming no longer prompts). Use `--show` to preview without priming.
+    let _ = yes;
+    println!("CTXone ships a short guidance file that teaches AI tools how");
+    println!("to use the Hub effectively. It is pinned to your memory graph");
+    println!("so every recall response includes it.");
+    println!();
+    println!("  File:          {}", disk_path.display());
+    println!("  Primed under:  /memory/pinned/{}", AGENTS_SOURCE);
+    println!("  Branch:        {}", branch);
+    println!("  Visible in:    ctx ls /memory/pinned/{}", AGENTS_SOURCE);
+    println!("  Removable:     ctx agents remove");
+    println!();
 
     // Parse into sections and prime.
     let sections = parse_markdown_sections(&content);
@@ -3860,10 +3835,11 @@ async fn agents_install(
     Ok(())
 }
 
-/// Called from the end of `ctx init` to optionally prime AGENTS.md.
-/// Wraps `agents_install` in a brief summary header so the user knows
-/// why the prompt is showing up after the MCP config step.
-async fn agents_install_prompt(
+/// Called from the end of `ctx init` to prime AGENTS.md non-interactively.
+/// Prints a short header so the user knows why the guidance is being pinned
+/// right after the MCP config step. Skipped entirely when `ctx init` is run
+/// with `--no-agents`.
+async fn agents_install_after_init(
     server: &str,
     branch: &str,
     _format: OutputFormat,
@@ -3871,7 +3847,7 @@ async fn agents_install_prompt(
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("---");
     println!();
-    agents_install(None, false, false, server, branch, client).await
+    agents_install(None, true, false, server, branch, client).await
 }
 
 pub(crate) fn urlencoding(s: &str) -> String {
