@@ -10,17 +10,17 @@ version = "0.9.16"
 edition = "2024"
 authors = ["Craig Brown"]
 license = "BSL-1.1"
-repository = "https://git.internal.example/agentstategroup/ctxone"
+repository = "https://github.com/agentstatelabs/ctxone"
 
 [workspace.dependencies]
 # ASG engine crates — git deps pinned to an ASG release tag (was a GitHub submodule)
-agentstategraph = { git = "https://git.internal.example/agentstategroup/agentstategraph.git", tag = "v0.9.6" }
-agentstategraph-core = { git = "https://git.internal.example/agentstategroup/agentstategraph.git", tag = "v0.9.6" }
-agentstategraph-storage = { git = "https://git.internal.example/agentstategroup/agentstategraph.git", tag = "v0.9.6", features = ["postgres", "memory"] }
-agentstategraph-tasks = { git = "https://git.internal.example/agentstategroup/agentstategraph.git", tag = "v0.9.6" }
-agentstategraph-migrate = { git = "https://git.internal.example/agentstategroup/agentstategraph.git", tag = "v0.9.6" }
-agentstategraph-taint = { git = "https://git.internal.example/agentstategroup/agentstategraph.git", tag = "v0.9.6" }
-agentstategraph-reminders = { git = "https://git.internal.example/agentstategroup/agentstategraph.git", tag = "v0.9.6" }
+agentstategraph = { git = "https://github.com/agentstatelabs/agentstategraph.git", tag = "v0.9.6" }
+agentstategraph-core = { git = "https://github.com/agentstatelabs/agentstategraph.git", tag = "v0.9.6" }
+agentstategraph-storage = { git = "https://github.com/agentstatelabs/agentstategraph.git", tag = "v0.9.6", features = ["postgres", "memory"] }
+agentstategraph-tasks = { git = "https://github.com/agentstatelabs/agentstategraph.git", tag = "v0.9.6" }
+agentstategraph-migrate = { git = "https://github.com/agentstatelabs/agentstategraph.git", tag = "v0.9.6" }
+agentstategraph-taint = { git = "https://github.com/agentstatelabs/agentstategraph.git", tag = "v0.9.6" }
+agentstategraph-reminders = { git = "https://github.com/agentstatelabs/agentstategraph.git", tag = "v0.9.6" }
 
 # Engine's workspace deps (required because engine crates inherit from workspace)
 blake3 = "1"
