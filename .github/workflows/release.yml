@@ -20,9 +20,9 @@
 # artifacts are public.
 #
 # Required secrets on agentstatelabs/ctxone:
-#   GITLAB_TOKEN         — read_repository scope on agentstategraph (CTXone
-#                          fetches the ASG cargo dep from private GitLab).
 #   RELEASES_REPO_TOKEN  — write access to agentstatelabs/ctxone-releases.
+# (The agentstategraph / agent-skillgen cargo deps are public on GitHub now,
+#  so cargo resolves them anonymously — no GITLAB_TOKEN needed.)
 #
 # Windows: `windows-latest` runs Git Bash by default, so the `shell: bash`
 # stage step works as-is. Binaries get a `.exe` suffix via matrix.ext.
@@ -33,6 +33,7 @@ on:
   push:
     tags:
       - "v*.*.*"
+  workflow_dispatch: {}   # manual TEST build — builds all platforms, no publish
 
 env:
   RELEASES_REPO: agentstatelabs/ctxone-releases
@@ -100,19 +101,10 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
 
-      - name: configure git.internal.example auth
-        shell: bash
-        env:
-          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
-        run: |
-          if [ -z "${GITLAB_TOKEN}" ]; then
-            echo "::error::GITLAB_TOKEN secret is unset — cargo will fail to fetch the agentstategraph git dep from private GitLab."
-            exit 1
-          fi
-          git config --global \
-            url."https://oauth2:${GITLAB_TOKEN}@git.internal.example/".insteadOf \
-            "https://git.internal.example/"
-          echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "$GITHUB_ENV"
+      # The agentstategraph and agent-skillgen cargo deps are now public on
+      # GitHub, so cargo resolves them anonymously — no auth step needed. (This
+      # replaced a GITLAB_TOKEN + insteadOf step that authed against the private
+      # GitLab host, which GitHub runners couldn't reach anyway.)
 
       - name: build ctx
         run: cargo build --release --locked --target ${{ matrix.target }} -p ctx
@@ -162,6 +154,9 @@ jobs:
     name: publish to ctxone-releases
     needs: build
     runs-on: ubuntu-22.04
+    # Only publish on a real tag push. A workflow_dispatch run builds every
+    # platform to prove the release works, but never publishes.
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
     steps:
       - name: download all artifacts
         uses: actions/download-artifact@v4
