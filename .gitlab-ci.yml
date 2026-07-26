@@ -5,6 +5,7 @@ stages:
   - frontend
   - check
   - test
+  - publish
 
 # --- Frontend: build the SvelteKit static app -> web/build/ (artifact) -------
 frontend:
@@ -70,3 +71,23 @@ test:
   stage: test
   script:
     - cargo test --workspace --locked
+
+# publish-github: mirror main + release tags to the PUBLIC GitHub repo, gated on
+# scripts/leak-scan.sh (fail closed). Replaces GitLab push mirroring, which
+# exposes ALL branches (claude/*, worktree-agent-*); this pushes ONLY main and
+# matching release tags. Set CI variables GITHUB_REPO=agentstatelabs/ctxone and
+# GITHUB_TOKEN (repo scope, masked + protected). Gated on GITHUB_REPO so it
+# no-ops until configured.
+publish-github:
+  stage: publish
+  image: debian:bookworm-slim
+  variables:
+    GIT_DEPTH: 0   # full history for leak-scan + fast-forward-only push
+  cache: {}
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" && $GITHUB_REPO'
+    - if: '$CI_COMMIT_TAG && $GITHUB_REPO'
+  script:
+    - bash scripts/publish-to-github.sh
