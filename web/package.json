@@ -14,7 +14,7 @@
 		"test:unit:watch": "vitest"
 	},
 	"dependencies": {
-		"@agentstate/lens-core": "git+https://git.internal.example/agentstategroup/lens-core.git#v0.6.0",
+		"@agentstate/lens-core": "git+https://github.com/agentstatelabs/lens-core.git#v0.6.0",
 		"@types/dompurify": "^3.0.5",
 		"dompurify": "^3.4.12",
 		"marked": "^18.0.6"
