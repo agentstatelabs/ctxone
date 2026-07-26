@@ -2,6 +2,12 @@
 
 Thank you for your interest in CtxOne! This project is building a persistent memory layer for AI agents — the thing that eliminates context anxiety and makes every session start smart. Contributions are welcome.
 
+## How this project is developed
+
+CtxOne is developed on a private GitLab instance and **mirrored, read-only, to GitHub**. GitHub is the public home — it's where you file issues and open pull requests, and it always reflects the current `main` and release tags — but the canonical history lives on GitLab.
+
+One consequence matters for contributors: **GitHub's `main` is force-advanced from GitLab on every change, so pull requests are never merged with the GitHub "Merge" button** (that would be overwritten on the next sync). Instead, accepted changes are applied on the GitLab side by the project owner and then re-published to GitHub. Your commits and authorship are preserved, and the PR is closed with a link to the landed commit. If your merge doesn't come from the GitHub button, that's the mirror model working — not a rejection.
+
 ## Getting Started
 
 1. **Fork and clone** the repository (with submodules)
@@ -70,7 +76,9 @@ Look for issues labeled `good-first-issue`:
 5. Run clippy: `cargo clippy --workspace`
 6. For web changes: `cd web && npm run check && npm run build`
 7. Commit with a clear message describing what and why
-8. Open a pull request
+8. Open a focused, single-purpose pull request against `main` on GitHub
+
+**Review and merge.** A maintainer reviews the PR. All changes are merged by the **project owner**, who applies the change on GitLab; the mirror then brings it to GitHub and the PR is closed as landed — the merge won't come from the GitHub button.
 
 ## Code Style
 
