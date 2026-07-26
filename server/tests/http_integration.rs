@@ -1522,7 +1522,7 @@ async fn project_register_creates_namespace_and_round_trips() {
                 "id": "exampleproj",
                 "remote_url": "https://gitlab.example.com/g/exampleproj.git",
                 "display_name": "ExampleProj",
-                "local_path": "/home/user/exampleproj"
+                "local_path": "/home/user/example-repo"
             }),
         ),
     )
@@ -1542,7 +1542,7 @@ async fn project_register_creates_namespace_and_round_trips() {
     // GET single + list both see it.
     let (status, body) = call_json(router.clone(), get("/api/projects/exampleproj")).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["local_paths"], json!(["/home/user/exampleproj"]));
+    assert_eq!(body["local_paths"], json!(["/home/user/example-repo"]));
 
     let (status, body) = call_json(router.clone(), get("/api/projects")).await;
     assert_eq!(status, StatusCode::OK);
