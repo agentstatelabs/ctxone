@@ -296,7 +296,10 @@ mod tests {
         ]);
         let turns = parse_rollout(f.path());
         assert_eq!(turns[0].tokens.input, 21461);
-        assert_eq!(turns[0].tokens.output, 258, "reasoning must not inflate output");
+        assert_eq!(
+            turns[0].tokens.output, 258,
+            "reasoning must not inflate output"
+        );
         assert_eq!(turns[0].tokens.cache_read, 14592);
         assert_eq!(
             turns[0].tokens.extra.get("reasoning_output_tokens"),
@@ -314,7 +317,10 @@ mod tests {
         let turns = parse_rollout(f.path());
         assert_eq!(turns[0].tokens.input, 150);
         assert_eq!(turns[0].tokens.output, 15);
-        assert_eq!(turns[0].tokens.extra.get("reasoning_output_tokens"), Some(&3));
+        assert_eq!(
+            turns[0].tokens.extra.get("reasoning_output_tokens"),
+            Some(&3)
+        );
     }
 
     #[test]
@@ -371,12 +377,22 @@ mod real_data_probe {
                 turns += 1;
                 input += t.tokens.input;
                 output += t.tokens.output;
-                reasoning += t.tokens.extra.get("reasoning_output_tokens").copied().unwrap_or(0);
+                reasoning += t
+                    .tokens
+                    .extra
+                    .get("reasoning_output_tokens")
+                    .copied()
+                    .unwrap_or(0);
             }
         }
         eprintln!(
             "sessions={} turns={} input={} output={} reasoning={} files_with_no_turns={}",
-            refs.len(), turns, input, output, reasoning, empty_files
+            refs.len(),
+            turns,
+            input,
+            output,
+            reasoning,
+            empty_files
         );
         // Only assert when there is actually data — ~/.codex can exist with
         // no rollouts, and this probe must not fail for that reason.

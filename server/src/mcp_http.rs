@@ -21,10 +21,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use axum::Router;
 use axum::extract::{Request, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
-use axum::Router;
 use tokio::sync::RwLock;
 
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
@@ -189,5 +189,7 @@ async fn mcp_handler(State(state): State<McpHttpState>, req: Request) -> Respons
 /// it carries its own `McpHttpState` and bypasses the REST rate limiter (MCP
 /// sessions are long-lived and chatty; per-IP RPM caps would throttle them).
 pub fn mcp_router(state: McpHttpState) -> Router {
-    Router::new().route("/mcp", any(mcp_handler)).with_state(state)
+    Router::new()
+        .route("/mcp", any(mcp_handler))
+        .with_state(state)
 }

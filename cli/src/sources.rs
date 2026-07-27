@@ -348,25 +348,23 @@ impl SessionSource for ClaudeCode {
     /// Codex rollouts (those are the Codex source's to claim). The cwd is read
     /// from each transcript; the label is the containing directory's name.
     fn discover_in(&self, dir: &Path) -> Vec<SessionRef> {
-        scan_files(dir, |n| {
-            n.ends_with(".jsonl") && !n.starts_with("rollout-")
-        })
-        .into_iter()
-        .map(|path| {
-            let label = path
-                .parent()
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "scan".to_string());
-            SessionRef {
-                cwd: Self::read_cwd(&path),
-                label,
-                path,
-                native_id: None,
-                precomputed_fp: None,
-            }
-        })
-        .collect()
+        scan_files(dir, |n| n.ends_with(".jsonl") && !n.starts_with("rollout-"))
+            .into_iter()
+            .map(|path| {
+                let label = path
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "scan".to_string());
+                SessionRef {
+                    cwd: Self::read_cwd(&path),
+                    label,
+                    path,
+                    native_id: None,
+                    precomputed_fp: None,
+                }
+            })
+            .collect()
     }
 
     fn parse(&self, session: &SessionRef) -> Vec<Turn> {
@@ -442,8 +440,16 @@ impl Codex {
                 continue;
             }
             let p = v.get("payload")?;
-            let id = p.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
-            let cwd = p.get("cwd").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let id = p
+                .get("id")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            let cwd = p
+                .get("cwd")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
             return Some((id, cwd));
         }
         None
@@ -452,7 +458,11 @@ impl Codex {
     /// `/Users/user/Apps/Thing` -> `Apps/Thing`, matching how the Claude Code
     /// source labels projects so mixed listings read consistently.
     fn label_for_cwd(cwd: &str) -> String {
-        let parts: Vec<&str> = cwd.trim_end_matches('/').split('/').filter(|s| !s.is_empty()).collect();
+        let parts: Vec<&str> = cwd
+            .trim_end_matches('/')
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .collect();
         match parts.len() {
             0 => "unknown".to_string(),
             1 => parts[0].to_string(),
@@ -521,25 +531,24 @@ impl SessionSource for Codex {
     /// A `--scan-dir` of Codex rollouts: `rollout-*.jsonl` files, each mapped
     /// through the same `read_meta` path as the built-in scan.
     fn discover_in(&self, dir: &Path) -> Vec<SessionRef> {
-        let mut refs: Vec<SessionRef> = scan_files(dir, |n| {
-            n.starts_with("rollout-") && n.ends_with(".jsonl")
-        })
-        .into_iter()
-        .map(|path| {
-            let (id, cwd) = Self::read_meta(&path).unwrap_or_default();
-            SessionRef {
-                label: if cwd.is_empty() {
-                    "unknown".to_string()
-                } else {
-                    Self::label_for_cwd(&cwd)
-                },
-                cwd: (!cwd.is_empty()).then_some(cwd),
-                native_id: (!id.is_empty()).then_some(id),
-                path,
-                precomputed_fp: None,
-            }
-        })
-        .collect();
+        let mut refs: Vec<SessionRef> =
+            scan_files(dir, |n| n.starts_with("rollout-") && n.ends_with(".jsonl"))
+                .into_iter()
+                .map(|path| {
+                    let (id, cwd) = Self::read_meta(&path).unwrap_or_default();
+                    SessionRef {
+                        label: if cwd.is_empty() {
+                            "unknown".to_string()
+                        } else {
+                            Self::label_for_cwd(&cwd)
+                        },
+                        cwd: (!cwd.is_empty()).then_some(cwd),
+                        native_id: (!id.is_empty()).then_some(id),
+                        path,
+                        precomputed_fp: None,
+                    }
+                })
+                .collect();
         refs.sort_by(|a, b| a.label.cmp(&b.label));
         refs
     }
@@ -610,8 +619,12 @@ impl Gemini {
                 }
             }
         }
-        out.sort_by(|a, b| a.1.metadata().and_then(|m| m.modified()).ok()
-            .cmp(&b.1.metadata().and_then(|m| m.modified()).ok()));
+        out.sort_by(|a, b| {
+            a.1.metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .cmp(&b.1.metadata().and_then(|m| m.modified()).ok())
+        });
         out
     }
 
@@ -669,10 +682,18 @@ impl SessionSource for Gemini {
     }
 
     fn discover_for_project(&self, project_dir: &Path) -> Vec<SessionRef> {
-        let want = project_dir.to_string_lossy().trim_end_matches('/').to_string();
+        let want = project_dir
+            .to_string_lossy()
+            .trim_end_matches('/')
+            .to_string();
         self.discover_all()
             .into_iter()
-            .filter(|r| r.cwd.as_deref().map(|c| c.trim_end_matches('/') == want).unwrap_or(false))
+            .filter(|r| {
+                r.cwd
+                    .as_deref()
+                    .map(|c| c.trim_end_matches('/') == want)
+                    .unwrap_or(false)
+            })
             .collect()
     }
 
@@ -680,25 +701,24 @@ impl SessionSource for Gemini {
     /// not recorded in the file, so these route to the default workspace unless
     /// the dir sits under a normal Gemini layout (best-effort label only).
     fn discover_in(&self, dir: &Path) -> Vec<SessionRef> {
-        let mut refs: Vec<SessionRef> = scan_files(dir, |n| {
-            n.starts_with("session-") && n.ends_with(".json")
-        })
-        .into_iter()
-        .map(|path| {
-            let label = path
-                .parent()
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "gemini".to_string());
-            SessionRef {
-                native_id: Self::read_session_id(&path),
-                label,
-                cwd: None,
-                path,
-                precomputed_fp: None,
-            }
-        })
-        .collect();
+        let mut refs: Vec<SessionRef> =
+            scan_files(dir, |n| n.starts_with("session-") && n.ends_with(".json"))
+                .into_iter()
+                .map(|path| {
+                    let label = path
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "gemini".to_string());
+                    SessionRef {
+                        native_id: Self::read_session_id(&path),
+                        label,
+                        cwd: None,
+                        path,
+                        precomputed_fp: None,
+                    }
+                })
+                .collect();
         refs.sort_by(|a, b| a.label.cmp(&b.label));
         refs
     }

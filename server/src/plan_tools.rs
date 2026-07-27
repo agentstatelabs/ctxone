@@ -413,7 +413,11 @@ pub fn active_task_warning(
     Some(format!(
         "{} already in progress in plan '{}': {} — parallel work is allowed, \
          but close or finish {} if this wasn't intentional",
-        if others.len() == 1 { "another task is" } else { "other tasks are" },
+        if others.len() == 1 {
+            "another task is"
+        } else {
+            "other tasks are"
+        },
         plan,
         others.join(", "),
         if others.len() == 1 { "it" } else { "them" },
@@ -518,11 +522,7 @@ pub fn add_satisfies(
 /// In-progress tasks in active plans whose `started_at` (fallback `created_at`)
 /// is older than `days` — the stale-drift surface, most-stale first. Shared by
 /// the HTTP `/plans/stale` route and the MCP tool.
-pub fn stale_in_progress(
-    store: &TaskStore,
-    ref_name: &str,
-    days: i64,
-) -> Vec<serde_json::Value> {
+pub fn stale_in_progress(store: &TaskStore, ref_name: &str, days: i64) -> Vec<serde_json::Value> {
     let now = chrono::Utc::now();
     let cutoff = now - chrono::Duration::days(days.max(0));
     let mut out = Vec::new();

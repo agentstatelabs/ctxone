@@ -316,9 +316,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 eprintln!("  --lens                Serve Lens web UI at / (requires --http)");
                 eprintln!();
-                eprintln!(
-                    "  With --http, one process serves MCP + REST + Lens. Point agents at"
-                );
+                eprintln!("  With --http, one process serves MCP + REST + Lens. Point agents at");
                 eprintln!(
                     "  http://<host>:<port>/mcp?namespace=<ns> (see `ctx init --transport http`)."
                 );
@@ -651,7 +649,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // token the REST API + /mcp are reachable from the network unauthenticated.
         // Loopback peers are always exempt; a token only gates non-loopback.
         if auth_token.is_some() {
-            info!("Bearer auth enabled: non-loopback requests require Authorization: Bearer <token> (loopback exempt)");
+            info!(
+                "Bearer auth enabled: non-loopback requests require Authorization: Bearer <token> (loopback exempt)"
+            );
             if lens_mode {
                 info!(
                     "Lens UI is served, but a remote browser can't send a bearer token — \

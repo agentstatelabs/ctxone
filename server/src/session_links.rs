@@ -86,13 +86,12 @@ fn parse_ref(inner: &str) -> Option<(String, String)> {
     if !chars.next()?.is_ascii_alphabetic() {
         return None;
     }
-    if !plan
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-')
-    {
+    if !plan.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return None;
     }
-    let num = task.strip_prefix("t-").or_else(|| task.strip_prefix("T-"))?;
+    let num = task
+        .strip_prefix("t-")
+        .or_else(|| task.strip_prefix("T-"))?;
     if num.is_empty() || !num.chars().all(|c| c.is_ascii_digit()) {
         return None;
     }
@@ -213,7 +212,10 @@ mod tests {
     #[test]
     fn handles_single_quotes_and_skips_dry_runs() {
         // Single-quoted body: the client regex missed these.
-        let a = derive(&[cand(0, "git commit -m 'fix: thing (plan t-012)'")], |_, _| true);
+        let a = derive(
+            &[cand(0, "git commit -m 'fix: thing (plan t-012)'")],
+            |_, _| true,
+        );
         assert_eq!(a.len(), 1);
         assert_eq!(a[0].task, "t-012");
 
@@ -225,7 +227,10 @@ mod tests {
         assert!(b.is_empty());
 
         // Merely mentioning the phrase is not a commit.
-        let c = derive(&[cand(0, r#"echo "run git commit -m foo (plan t-001)""#)], |_, _| true);
+        let c = derive(
+            &[cand(0, r#"echo "run git commit -m foo (plan t-001)""#)],
+            |_, _| true,
+        );
         assert!(c.is_empty());
     }
 
@@ -271,7 +276,10 @@ mod tests {
     fn ignores_garbage_in_parens() {
         // Not a ref: too many tokens, or no task.
         let links = derive(
-            &[cand(0, r#"git commit -m "wip (see the other thing) and (t-1 extra bad)""#)],
+            &[cand(
+                0,
+                r#"git commit -m "wip (see the other thing) and (t-1 extra bad)""#,
+            )],
             |_, _| true,
         );
         assert!(links.is_empty());

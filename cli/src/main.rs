@@ -1,10 +1,10 @@
+mod burn;
 mod codex;
+mod cursor;
+mod gemini;
 mod ingest;
 mod metrics;
 mod onboarding;
-mod burn;
-mod cursor;
-mod gemini;
 mod service;
 mod sources;
 mod workspace;
@@ -195,13 +195,13 @@ impl Cli {
         {
             headers.insert("X-CTXone-Session", val);
         }
-        if let Ok(val) = reqwest::header::HeaderValue::from_str(Self::effective_namespace(namespace))
+        if let Ok(val) =
+            reqwest::header::HeaderValue::from_str(Self::effective_namespace(namespace))
         {
             headers.insert("X-CTXone-Namespace", val);
         }
         if let Some(ref token) = self.token
-            && let Ok(mut val) =
-                reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+            && let Ok(mut val) = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
         {
             val.set_sensitive(true);
             headers.insert(reqwest::header::AUTHORIZATION, val);
@@ -236,8 +236,7 @@ impl ClientFactory {
             headers.insert("X-CTXone-Namespace", val);
         }
         if let Some(ref token) = self.token
-            && let Ok(mut val) =
-                reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+            && let Ok(mut val) = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
         {
             val.set_sensitive(true);
             headers.insert(reqwest::header::AUTHORIZATION, val);
@@ -1865,7 +1864,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Status => {
             let health_url = format!("{}/api/health", cli.server);
-            let reachable = client.get(&health_url).send()
+            let reachable = client
+                .get(&health_url)
+                .send()
                 .await
                 .map(|r| r.status().is_success())
                 .unwrap_or(false);
@@ -1888,11 +1889,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "namespace": namespace.as_deref().unwrap_or("default"),
             });
             if let Some(ns) = &namespace
-                && let Ok(r) = client.get(format!("{}/api/projects/detect?cwd={}",
-                    cli.server,
-                    std::env::current_dir()
-                        .map(|d| d.to_string_lossy().into_owned())
-                        .unwrap_or_default())).send()
+                && let Ok(r) = client
+                    .get(format!(
+                        "{}/api/projects/detect?cwd={}",
+                        cli.server,
+                        std::env::current_dir()
+                            .map(|d| d.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    ))
+                    .send()
                     .await
                 && let Ok(det) = r.json::<Value>().await
                 && det["status"] == "found"
@@ -1901,7 +1906,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 out["project"] = det["project_id"].clone();
                 out["project_via"] = det["via"].clone();
             }
-            if let Ok(r) = client.get(format!("{}/api/stats/tokens", cli.server)).send().await
+            if let Ok(r) = client
+                .get(format!("{}/api/stats/tokens", cli.server))
+                .send()
+                .await
                 && let Ok(parsed) = r.json::<Value>().await
             {
                 out["tokens"] = parsed;
@@ -1941,7 +1949,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         }
         Commands::Stats => {
-            let resp = match client.get(format!("{}/api/stats/tokens", cli.server)).send().await {
+            let resp = match client
+                .get(format!("{}/api/stats/tokens", cli.server))
+                .send()
+                .await
+            {
                 Ok(r) => r,
                 Err(e) => unreachable_exit(&cli.server, e),
             };
@@ -2070,7 +2082,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // An explicit `--file` names one transcript to import; the
             // remembered import window must not silently skip it. `--scan-dir`
             // is likewise irrelevant to a single named file.
-            let effective_since = if file.is_some() { None } else { effective_since };
+            let effective_since = if file.is_some() {
+                None
+            } else {
+                effective_since
+            };
             if let Some(s) = &effective_since {
                 eprintln!("Importing sessions last active on/after {s} (remembered in config).");
             }
@@ -2097,11 +2113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // `--all` scatters across repos, so unroutable ones go to
                 // `default`; a targeted run honours the caller's `--namespace`
                 // (or detected project) instead of silently forcing `default`.
-                if all {
-                    None
-                } else {
-                    namespace.clone()
-                },
+                if all { None } else { namespace.clone() },
                 reingest,
             )
             .await?;
@@ -2131,7 +2143,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
         }
         Commands::Pinned => {
-            let resp = match client.get(format!("{}/api/memory/pinned", cli.server)).send().await {
+            let resp = match client
+                .get(format!("{}/api/memory/pinned", cli.server))
+                .send()
+                .await
+            {
                 Ok(r) => r,
                 Err(e) => unreachable_exit(&cli.server, e),
             };
@@ -2722,7 +2738,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             BranchAction::Rm { name } => {
                 let resp = match client
-                    .delete(format!("{}/api/branches/{}", cli.server, urlencoding(&name)))
+                    .delete(format!(
+                        "{}/api/branches/{}",
+                        cli.server,
+                        urlencoding(&name)
+                    ))
                     .send()
                     .await
                 {
@@ -2967,8 +2987,11 @@ async fn handle_reminder(
                 }
 
                 // Gate 2: allowlist. Every command must be pre-approved.
-                let disallowed: Vec<String> =
-                    cmds.iter().filter(|c| !allow.contains(*c)).cloned().collect();
+                let disallowed: Vec<String> = cmds
+                    .iter()
+                    .filter(|c| !allow.contains(*c))
+                    .cloned()
+                    .collect();
                 if !disallowed.is_empty() {
                     deferred += 1;
                     let note = format!(
@@ -2977,11 +3000,9 @@ async fn handle_reminder(
                     );
                     results.push(json!({"reminder": title, "action": "deferred", "detail": note}));
                     if !dry_run {
-                        let _ =
-                            reminder_record(&client, server, &id, "deferred", vec![note]).await;
-                        let until = (chrono::Utc::now()
-                            + chrono::Duration::hours(defer_hours))
-                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                        let _ = reminder_record(&client, server, &id, "deferred", vec![note]).await;
+                        let until = (chrono::Utc::now() + chrono::Duration::hours(defer_hours))
+                            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
                         let _ = client
                             .post(format!("{server}/api/reminders/{id}/snooze"))
                             .json(&json!({"id": id, "until": until}))
@@ -2993,7 +3014,8 @@ async fn handle_reminder(
 
                 if dry_run {
                     acted += 1;
-                    results.push(json!({"reminder": title, "action": "would-run", "commands": cmds}));
+                    results
+                        .push(json!({"reminder": title, "action": "would-run", "commands": cmds}));
                     continue;
                 }
 
@@ -3006,7 +3028,11 @@ async fn handle_reminder(
                 let mut ok = true;
                 let mut outs: Vec<String> = Vec::new();
                 for c in &cmds {
-                    match std::process::Command::new("bash").arg("-lc").arg(c).output() {
+                    match std::process::Command::new("bash")
+                        .arg("-lc")
+                        .arg(c)
+                        .output()
+                    {
                         Ok(out) => {
                             let code = out.status.code().unwrap_or(-1);
                             let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -4110,7 +4136,9 @@ async fn run_doctor(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Check 3: Hub HTTP reachable
-    let hub_reachable = client.get(format!("{}/api/health", cli.server)).send()
+    let hub_reachable = client
+        .get(format!("{}/api/health", cli.server))
+        .send()
         .await
         .map(|r| r.status().is_success())
         .unwrap_or(false);
@@ -4128,7 +4156,9 @@ async fn run_doctor(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // Check 4: memory branch exists
     let main_exists = if hub_reachable {
-        client.get(format!("{}/api/stats/main", cli.server)).send()
+        client
+            .get(format!("{}/api/stats/main", cli.server))
+            .send()
             .await
             .map(|r| r.status().is_success())
             .unwrap_or(false)
@@ -4466,8 +4496,8 @@ async fn ingest_one_session(
     let effective_session = job.effective_session.as_deref();
     let client = &job.client;
     let routed = &job.routed;
-    let source_impl = crate::sources::source_by_id(&job.source_id)
-        .expect("source id came from the registry");
+    let source_impl =
+        crate::sources::source_by_id(&job.source_id).expect("source id came from the registry");
 
     // Incremental skip: if the transcript's fingerprint matches the one stored
     // on its last ingest, nothing changed — skip the parse and all the writes.
@@ -4538,8 +4568,14 @@ async fn ingest_one_session(
     // Session meta (t-021): source + first/last turn timestamps + models used,
     // from the full (pre-filter) turn list. Skip synthetic/placeholder model
     // markers (e.g. "<synthetic>") and empties.
-    let started_at = turns.first().map(|t| t.timestamp.clone()).unwrap_or_default();
-    let updated_at = turns.last().map(|t| t.timestamp.clone()).unwrap_or_default();
+    let started_at = turns
+        .first()
+        .map(|t| t.timestamp.clone())
+        .unwrap_or_default();
+    let updated_at = turns
+        .last()
+        .map(|t| t.timestamp.clone())
+        .unwrap_or_default();
     let mut models_used: Vec<String> = Vec::new();
     for t in &turns {
         let m = t.model.trim();
@@ -4605,7 +4641,10 @@ async fn ingest_one_session(
     // Burn summary: from the FULL turn list, stored with the session's last-turn
     // timestamp so the dashboard can tell a current score from a stale one.
     let burn = crate::burn::compute(&turns);
-    let burn_updated_at = turns.last().map(|t| t.timestamp.clone()).unwrap_or_default();
+    let burn_updated_at = turns
+        .last()
+        .map(|t| t.timestamp.clone())
+        .unwrap_or_default();
     if dry_run {
         let _ = writeln!(
             out.log,
@@ -4836,7 +4875,11 @@ async fn run_ingest_session(
             }],
         )]
     } else {
-        let cwd = if all { None } else { Some(std::env::current_dir()?) };
+        let cwd = if all {
+            None
+        } else {
+            Some(std::env::current_dir()?)
+        };
         let mut out = vec![];
         for src in &selected {
             let mut refs = match &cwd {
@@ -4871,7 +4914,10 @@ async fn run_ingest_session(
             println!("No session transcripts found for source '{}'.", source);
             // Still emit the machine-readable summary so the hub's session-sync
             // parser always finds a final JSON line (zeros = clean no-op).
-            println!("{}", serde_json::json!({ "sessions": 0, "turns": 0, "tokens": 0 }));
+            println!(
+                "{}",
+                serde_json::json!({ "sessions": 0, "turns": 0, "tokens": 0 })
+            );
         } else {
             println!("No session files found for this project.");
             println!("Pass --file <path> to specify a .jsonl file directly.");
@@ -5044,8 +5090,10 @@ async fn run_ingest_session(
         total_tokens.add(&proj_tokens);
     }
 
-    let grand_tokens =
-        total_tokens.input + total_tokens.output + total_tokens.cache_read + total_tokens.cache_creation;
+    let grand_tokens = total_tokens.input
+        + total_tokens.output
+        + total_tokens.cache_read
+        + total_tokens.cache_creation;
 
     println!();
     println!(
@@ -5056,7 +5104,11 @@ async fn run_ingest_session(
         println!(
             "Skipped {} unchanged session{} (fingerprint matched — pass --reingest to force).",
             total_skipped_unchanged,
-            if total_skipped_unchanged == 1 { "" } else { "s" }
+            if total_skipped_unchanged == 1 {
+                ""
+            } else {
+                "s"
+            }
         );
     }
     if skipped_deleted > 0 {
@@ -5718,13 +5770,15 @@ async fn run_demo(server: &str, client: reqwest::Client) -> Result<(), Box<dyn s
     ];
 
     for (topic, budget) in queries {
-        let resp = client.get(format!(
-            "{}/api/memory/recall?topic={}&budget={}",
-            server,
-            urlencoding(topic),
-            budget
-        )).send()
-        .await?;
+        let resp = client
+            .get(format!(
+                "{}/api/memory/recall?topic={}&budget={}",
+                server,
+                urlencoding(topic),
+                budget
+            ))
+            .send()
+            .await?;
 
         if let Ok(parsed) = resp.json::<serde_json::Value>().await {
             let matches = parsed
@@ -5752,7 +5806,10 @@ async fn run_demo(server: &str, client: reqwest::Client) -> Result<(), Box<dyn s
     }
 
     // Final cumulative stats
-    if let Ok(resp) = client.get(format!("{}/api/stats/tokens", server)).send().await
+    if let Ok(resp) = client
+        .get(format!("{}/api/stats/tokens", server))
+        .send()
+        .await
         && let Ok(parsed) = resp.json::<serde_json::Value>().await
     {
         let used = parsed
@@ -6598,7 +6655,11 @@ async fn handle_plan(
         PlanAction::Relocate { name, to } => {
             let body = serde_json::json!({ "to_namespace": to, "ref": branch });
             let resp = match client
-                .post(format!("{}/api/plans/{}/relocate", server, urlencoding(&name)))
+                .post(format!(
+                    "{}/api/plans/{}/relocate",
+                    server,
+                    urlencoding(&name)
+                ))
                 .header("X-CTXone-Agent", &agent_id)
                 .json(&body)
                 .send()
@@ -6620,11 +6681,7 @@ async fn handle_plan(
                         v["from"].as_str().unwrap_or("?"),
                     );
                 } else {
-                    println!(
-                        "Moved {} → {}",
-                        name,
-                        v["to"].as_str().unwrap_or(&to)
-                    );
+                    println!("Moved {} → {}", name, v["to"].as_str().unwrap_or(&to));
                 }
             });
         }
@@ -6993,12 +7050,7 @@ async fn handle_plan(
                     .as_array()
                     .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
                     .unwrap_or_default();
-                println!(
-                    "{} {} now satisfies: {}",
-                    plan_id,
-                    task_id,
-                    sat.join(", ")
-                );
+                println!("{} {} now satisfies: {}", plan_id, task_id, sat.join(", "));
             });
         }
         PlanAction::Stale {
@@ -7467,12 +7519,14 @@ async fn handle_db(
             let snapshot: Value = serde_json::from_str(&content)
                 .map_err(|e| format!("{file} is not valid JSON: {e}"))?;
             // Accept either a full export ({paths:{…}}) or a bare {path:value} map.
-            let paths = snapshot
-                .get("paths")
-                .cloned()
-                .unwrap_or(snapshot);
+            let paths = snapshot.get("paths").cloned().unwrap_or(snapshot);
             let body = serde_json::json!({ "ref": branch, "paths": paths });
-            let resp = match client.post(format!("{server}/api/import")).json(&body).send().await {
+            let resp = match client
+                .post(format!("{server}/api/import"))
+                .json(&body)
+                .send()
+                .await
+            {
                 Ok(r) => r,
                 Err(e) => unreachable_exit(server, e),
             };
@@ -7608,12 +7662,21 @@ async fn handle_docs(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let print_entry = |d: &Value| {
         let status = d["status"].as_str().unwrap_or("?");
-        let scope = d["scope"].as_str().map(|s| format!(" — {s}")).unwrap_or_default();
+        let scope = d["scope"]
+            .as_str()
+            .map(|s| format!(" — {s}"))
+            .unwrap_or_default();
         let answers = d["answers"]
             .as_str()
             .map(|s| format!("\n      answers: {s}"))
             .unwrap_or_default();
-        println!("  {} [{}]{}{}", d["path"].as_str().unwrap_or(""), status, scope, answers);
+        println!(
+            "  {} [{}]{}{}",
+            d["path"].as_str().unwrap_or(""),
+            status,
+            scope,
+            answers
+        );
     };
     match action {
         DocsAction::Add {
@@ -7630,7 +7693,12 @@ async fn handle_docs(
                 "owner": owner, "answers": answers, "supersedes": supersedes,
                 "last_verified_commit": verified_commit,
             });
-            let resp = match client.post(format!("{server}/api/docs")).json(&body).send().await {
+            let resp = match client
+                .post(format!("{server}/api/docs"))
+                .json(&body)
+                .send()
+                .await
+            {
                 Ok(r) => r,
                 Err(e) => unreachable_exit(server, e),
             };
@@ -7639,7 +7707,11 @@ async fn handle_docs(
             }
             let parsed: Value = resp.json().await?;
             emit(format, &parsed, |v| {
-                println!("Registered {} [{}]", v["path"].as_str().unwrap_or(""), v["status"].as_str().unwrap_or(""));
+                println!(
+                    "Registered {} [{}]",
+                    v["path"].as_str().unwrap_or(""),
+                    v["status"].as_str().unwrap_or("")
+                );
             });
         }
         DocsAction::List => {
@@ -7688,7 +7760,10 @@ async fn handle_docs(
                     a.iter()
                         .filter(|d| {
                             ["path", "scope", "answers", "owner"].iter().any(|k| {
-                                d[*k].as_str().map(|s| s.to_lowercase().contains(&q)).unwrap_or(false)
+                                d[*k]
+                                    .as_str()
+                                    .map(|s| s.to_lowercase().contains(&q))
+                                    .unwrap_or(false)
                             })
                         })
                         .cloned()
@@ -7724,7 +7799,10 @@ mod tests {
         // a choice was made.
         assert_eq!(Cli::effective_namespace(Some("ctxone")), "ctxone");
         assert_eq!(Cli::effective_namespace(None), DEFAULT_NAMESPACE);
-        assert_eq!(DEFAULT_NAMESPACE, "default", "must match Namespace::DEFAULT on the hub");
+        assert_eq!(
+            DEFAULT_NAMESPACE, "default",
+            "must match Namespace::DEFAULT on the hub"
+        );
     }
 
     #[test]
@@ -8078,9 +8156,14 @@ command = "figma-mcp"
 command = "/old/path/ctxone-hub"
 args = ["--path", "/old/db"]
 "#;
-        let out =
-            merge_codex_ctxone_toml(existing, "/new/path/ctxone-hub", "/new/db", "codex", "proj-x")
-                .expect("merge should succeed");
+        let out = merge_codex_ctxone_toml(
+            existing,
+            "/new/path/ctxone-hub",
+            "/new/db",
+            "codex",
+            "proj-x",
+        )
+        .expect("merge should succeed");
         assert!(out.contains("/new/path/ctxone-hub"));
         assert!(out.contains("/new/db"));
         assert!(!out.contains("/old/path/ctxone-hub"));
@@ -8255,7 +8338,10 @@ args = ["--path", "/old/db"]
             None,
         );
         // Claude Desktop can't read {type:http,url}; must get the mcp-remote bridge.
-        assert!(entry.get("type").is_none(), "bridge is a stdio command, not type:http");
+        assert!(
+            entry.get("type").is_none(),
+            "bridge is a stdio command, not type:http"
+        );
         assert_eq!(entry.get("command").and_then(|v| v.as_str()), Some("npx"));
         let args: Vec<&str> = entry
             .get("args")

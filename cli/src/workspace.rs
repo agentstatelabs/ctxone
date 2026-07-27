@@ -234,10 +234,7 @@ impl Router {
         build: impl FnOnce(Option<&str>) -> reqwest::Client,
     ) -> reqwest::Client {
         let key = ns.map(str::to_string);
-        self.clients
-            .entry(key)
-            .or_insert_with(|| build(ns))
-            .clone()
+        self.clients.entry(key).or_insert_with(|| build(ns)).clone()
     }
 
     /// cwd → namespace decisions made this run, for the summary line.
@@ -300,10 +297,7 @@ pub fn project_id_for(root: &std::path::Path, remote: Option<&str>) -> Option<St
             .find(|s| !s.is_empty())
             .map(str::to_string)
     });
-    let raw = from_remote.or_else(|| {
-        root.file_name()
-            .map(|n| n.to_string_lossy().to_string())
-    })?;
+    let raw = from_remote.or_else(|| root.file_name().map(|n| n.to_string_lossy().to_string()))?;
     let id = kebab(&raw);
     (!id.is_empty()).then_some(id)
 }

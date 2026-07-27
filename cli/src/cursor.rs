@@ -235,8 +235,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.vscdb");
         let conn = Connection::open(&path).unwrap();
-        conn.execute("CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value BLOB)", [])
-            .unwrap();
+        conn.execute(
+            "CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value BLOB)",
+            [],
+        )
+        .unwrap();
         let put = |k: &str, v: Value| {
             conn.execute(
                 "INSERT INTO cursorDiskKV (key, value) VALUES (?1, ?2)",
@@ -255,11 +258,20 @@ mod tests {
                 ]
             }),
         );
-        put("bubbleId:c1:b1", serde_json::json!({ "type": 1, "text": "hello",
-            "tokenCount": { "inputTokens": 10, "outputTokens": 0 } }));
-        put("bubbleId:c1:b2", serde_json::json!({ "type": 2, "text": "hi there",
-            "tokenCount": { "inputTokens": 0, "outputTokens": 5 } }));
-        put("bubbleId:c1:b3", serde_json::json!({ "type": 1, "text": "thanks" }));
+        put(
+            "bubbleId:c1:b1",
+            serde_json::json!({ "type": 1, "text": "hello",
+            "tokenCount": { "inputTokens": 10, "outputTokens": 0 } }),
+        );
+        put(
+            "bubbleId:c1:b2",
+            serde_json::json!({ "type": 2, "text": "hi there",
+            "tokenCount": { "inputTokens": 0, "outputTokens": 5 } }),
+        );
+        put(
+            "bubbleId:c1:b3",
+            serde_json::json!({ "type": 1, "text": "thanks" }),
+        );
         (dir, path)
     }
 

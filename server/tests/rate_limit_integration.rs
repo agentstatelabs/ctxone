@@ -153,10 +153,16 @@ async fn rate_limited_response_has_retry_after_header() {
     for _ in 0..30 {
         let (status, has_rl) = call_from(&app, "203.0.113.9:40000").await;
         if status == StatusCode::TOO_MANY_REQUESTS {
-            assert!(has_rl, "429 response missing rate-limit / retry-after headers");
+            assert!(
+                has_rl,
+                "429 response missing rate-limit / retry-after headers"
+            );
             saw_429 = true;
             break;
         }
     }
-    assert!(saw_429, "never hit rate limit within 30 rapid remote requests");
+    assert!(
+        saw_429,
+        "never hit rate limit within 30 rapid remote requests"
+    );
 }

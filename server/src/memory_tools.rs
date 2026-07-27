@@ -1759,7 +1759,6 @@ fn timestamp_id() -> String {
     format!("{:x}", now.as_nanos())
 }
 
-
 /// Access to the ref/branch field of a params struct whose serde default
 /// is the [`default_ref`] sentinel. Lets [`CtxOneServer::apply_default_ref`]
 /// fill in the session default ("main", or the mirrored git branch) when
@@ -2479,10 +2478,18 @@ impl CtxOneServer {
         if !p.target.contains('/') {
             return serde_json::json!({ "error": "target must be 'plan/task' (e.g. other-plan/t-002)" }).to_string();
         }
-        match pt::add_satisfies(&self.repo, &p.ref_name, &self.agent_id, &p.plan_id, &p.task_id, &p.target) {
+        match pt::add_satisfies(
+            &self.repo,
+            &p.ref_name,
+            &self.agent_id,
+            &p.plan_id,
+            &p.task_id,
+            &p.target,
+        ) {
             Ok(links) => {
                 self.session.mark_dirty();
-                serde_json::json!({ "plan": p.plan_id, "task": p.task_id, "satisfies": links }).to_string()
+                serde_json::json!({ "plan": p.plan_id, "task": p.task_id, "satisfies": links })
+                    .to_string()
             }
             Err(e) => serde_json::json!({ "error": e }).to_string(),
         }
@@ -3317,11 +3324,13 @@ impl CtxOneServer {
 
     // ---- Code intelligence tools (proxy to ASD) ----
 
-    #[tool(description = "List every ASD code repo registered with this hub, as [{name, url}]. \
+    #[tool(
+        description = "List every ASD code repo registered with this hub, as [{name, url}]. \
         CALL THIS FIRST when you're about to use any code-intelligence tool (code_search, \
         code_read, callers_of, callees_of, code_impact) and don't yet know the repo names — \
         the `name` here is exactly what you pass as their `repo` param. You can skip it when \
-        only one repo is registered: the code tools default to it automatically.")]
+        only one repo is registered: the code tools default to it automatically."
+    )]
     async fn code_repos(&self, _params: Parameters<CodeReposParams>) -> String {
         crate::code_tools::list_repos_json(&self.asd_repos)
     }
@@ -3497,7 +3506,10 @@ impl CtxOneServer {
         let p = params.0;
         let prov = self
             .repo
-            .get_json(&p.ref_name, &format!("/sessions/{}/provenance", p.session_id))
+            .get_json(
+                &p.ref_name,
+                &format!("/sessions/{}/provenance", p.session_id),
+            )
             .ok();
         let links = self
             .repo
@@ -3518,8 +3530,7 @@ impl CtxOneServer {
         .to_string()
     }
 
-    #[tool(
-        description = "Associate a session with a plan task it worked on. \
+    #[tool(description = "Associate a session with a plan task it worked on. \
         \
         CALL THIS when a session advanced a task that its commit messages did NOT \
         name — a refactor with no `(plan t-NNN)` trailer, or work discussed but not \
@@ -3527,8 +3538,7 @@ impl CtxOneServer {
         rest. The task is validated against the plans in this workspace and the link \
         is stored so every view reads it the same way. `task` accepts `t-4` or \
         `t-004`. Returns validated=false (but still records the link) when the plan \
-        or task is not found here — usually a sign you are in the wrong workspace."
-    )]
+        or task is not found here — usually a sign you are in the wrong workspace.")]
     async fn session_link_plan(&self, params: Parameters<SessionLinkPlanParams>) -> String {
         let p = params.0;
         let Some(task) = crate::http::normalize_task_ref_pub(&p.task) else {

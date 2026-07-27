@@ -247,7 +247,11 @@ async fn next_task_priority_vs_in_order_and_in_progress() {
     for (title, pri) in [("low first", "low"), ("high second", "high")] {
         let _ = call_json(
             router.clone(),
-            post_json_with_agent("/api/plans/p1/tasks", "a", json!({"title": title, "priority": pri})),
+            post_json_with_agent(
+                "/api/plans/p1/tasks",
+                "a",
+                json!({"title": title, "priority": pri}),
+            ),
         )
         .await;
     }
@@ -292,22 +296,36 @@ async fn start_task_warns_when_another_is_in_progress() {
     // First start: nothing else in progress → no warning.
     let (status, body) = call_json(
         router.clone(),
-        post_json_with_agent(&format!("/api/plans/p1/tasks/{}/start", ids[0]), "alice", json!({})),
+        post_json_with_agent(
+            &format!("/api/plans/p1/tasks/{}/start", ids[0]),
+            "alice",
+            json!({}),
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(body.get("warning").is_none(), "no warning for the only active task");
+    assert!(
+        body.get("warning").is_none(),
+        "no warning for the only active task"
+    );
 
     // Second start: first is in progress → non-blocking warning naming it.
     let (status, body) = call_json(
         router,
-        post_json_with_agent(&format!("/api/plans/p1/tasks/{}/start", ids[1]), "alice", json!({})),
+        post_json_with_agent(
+            &format!("/api/plans/p1/tasks/{}/start", ids[1]),
+            "alice",
+            json!({}),
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "start is non-blocking");
     assert_eq!(body["status"], "in_progress");
     let warning = body["warning"].as_str().expect("warning field present");
-    assert!(warning.contains(&ids[0]), "warning names the other in-progress task");
+    assert!(
+        warning.contains(&ids[0]),
+        "warning names the other in-progress task"
+    );
 }
 
 #[tokio::test]
