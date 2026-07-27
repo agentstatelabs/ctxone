@@ -32,9 +32,9 @@ use crate::memory_tools::{
     ensure_flat_size, run_prime, run_recall,
 };
 use crate::plan_tools;
-use crate::session_links;
 use crate::rate_limit;
 use crate::reminder_tools;
+use crate::session_links;
 
 /// Hub-wide HTTP configuration.
 ///
@@ -363,8 +363,7 @@ fn origin_is_allowed(origin: &str, host: Option<&str>, allow: &[String]) -> bool
                 return true; // same-origin
             }
             allow.iter().any(|a| {
-                a.eq_ignore_ascii_case(origin)
-                    || origin_authority(a).is_some_and(|aa| aa == auth)
+                a.eq_ignore_ascii_case(origin) || origin_authority(a).is_some_and(|aa| aa == auth)
             })
         }
     }
@@ -558,10 +557,7 @@ fn router_with_config_inner(
         .route("/api/diff", get(diff_refs))
         .route("/api/merge", post(merge_refs))
         .route("/api/branches", get(list_branches).post(create_branch))
-        .route(
-            "/api/branches/{name}",
-            axum::routing::delete(delete_branch),
-        )
+        .route("/api/branches/{name}", axum::routing::delete(delete_branch))
         // Memory endpoints (high-level)
         .route("/api/memory/remember", post(remember))
         .route("/api/memory/forget", post(forget))
@@ -664,10 +660,7 @@ fn router_with_config_inner(
             axum::routing::post(add_session_link),
         )
         .route("/api/namespaces", get(list_namespaces))
-        .route(
-            "/api/session_tombstones",
-            get(list_session_tombstones),
-        )
+        .route("/api/session_tombstones", get(list_session_tombstones))
         // Session sync (t-019): re-ingest local Claude Code transcripts by
         // spawning the co-located `ctx ingest-session --all` CLI.
         .route("/api/sessions/sync", post(sync_sessions))
@@ -1188,8 +1181,7 @@ async fn get_state(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
     let path = q.path.unwrap_or_else(|| "/".to_string());
-    repo
-        .get_json(&ref_name, &path)
+    repo.get_json(&ref_name, &path)
         .map(Json)
         .map_err(internal_error)
 }
@@ -1208,8 +1200,7 @@ async fn list_paths(
 ) -> Result<Json<Vec<String>>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
     let prefix = q.prefix.unwrap_or_else(|| "/".to_string());
-    repo
-        .list_paths(&ref_name, &prefix, q.max_depth)
+    repo.list_paths(&ref_name, &prefix, q.max_depth)
         .map(Json)
         .map_err(internal_error)
 }
@@ -1284,7 +1275,9 @@ async fn import_graph(
         imported += 1;
     }
     s.sessions.mark_all_dirty();
-    Ok(Json(serde_json::json!({ "ref": req.ref_name, "imported": imported })))
+    Ok(Json(
+        serde_json::json!({ "ref": req.ref_name, "imported": imported }),
+    ))
 }
 
 /// Slug for a doc registry entry: the path lowercased with runs of non
@@ -1970,14 +1963,13 @@ async fn summarize_session(
     .with_confidence(0.9);
 
     let summary_val = serde_json::Value::String(summary);
-    repo
-        .set_json(
-            "main",
-            &format!("/sessions/{}/summary", req.session_id),
-            &summary_val,
-            summary_opts,
-        )
-        .map_err(internal_error)?;
+    repo.set_json(
+        "main",
+        &format!("/sessions/{}/summary", req.session_id),
+        &summary_val,
+        summary_opts,
+    )
+    .map_err(internal_error)?;
 
     if !req.decisions.is_empty() {
         let decisions_val = serde_json::json!(req.decisions);
@@ -1988,14 +1980,13 @@ async fn summarize_session(
         )
         .with_confidence(0.95);
 
-        repo
-            .set_json(
-                "main",
-                &format!("/sessions/{}/decisions", req.session_id),
-                &decisions_val,
-                decisions_opts,
-            )
-            .map_err(internal_error)?;
+        repo.set_json(
+            "main",
+            &format!("/sessions/{}/decisions", req.session_id),
+            &decisions_val,
+            decisions_opts,
+        )
+        .map_err(internal_error)?;
     }
 
     Ok(Json(serde_json::json!({
@@ -2332,16 +2323,17 @@ async fn stale_plan_tasks(
     for ns_name in namespaces {
         let repo = s.repo_for(&NamespaceId(ns_name.clone()))?;
         let store = plan_tools::make_store(repo, DEFAULT_AGENT_ID);
-        let plans = match store.list_plans_by_status(
-            &q.ref_name,
-            Some(agentstategraph_tasks::PlanStatus::Active),
-        ) {
+        let plans = match store
+            .list_plans_by_status(&q.ref_name, Some(agentstategraph_tasks::PlanStatus::Active))
+        {
             Ok(p) => p,
             Err(_) if q.all_namespaces => continue,
             Err(e) => return Err(substrate_error_to_response(e)),
         };
         for plan in plans {
-            let tasks = store.list_tasks(&q.ref_name, &plan.name).unwrap_or_default();
+            let tasks = store
+                .list_tasks(&q.ref_name, &plan.name)
+                .unwrap_or_default();
             for t in tasks {
                 if t.status != TaskStatus::InProgress {
                     continue;
@@ -2419,7 +2411,9 @@ async fn list_plans(
             Err(e) => return Err(substrate_error_to_response(e)),
         };
         for plan in plans {
-            let tasks = store.list_tasks(&q.ref_name, &plan.name).unwrap_or_default();
+            let tasks = store
+                .list_tasks(&q.ref_name, &plan.name)
+                .unwrap_or_default();
             let mut pj = plan_tools::plan_to_json(&plan, &tasks, false);
             if q.all_namespaces
                 && let Some(obj) = pj.as_object_mut()
@@ -2716,8 +2710,14 @@ async fn next_plan_task(
     let include_unassigned = q.include_unassigned && !q.assigned_only;
     // `order` = first unstarted by id (sequential); default `priority`.
     let task = if q.mode.as_deref() == Some("order") {
-        plan_tools::next_task_ordered(&store, &q.ref_name, &name, assignee.as_deref(), include_unassigned)
-            .map_err(substrate_error_to_response)?
+        plan_tools::next_task_ordered(
+            &store,
+            &q.ref_name,
+            &name,
+            assignee.as_deref(),
+            include_unassigned,
+        )
+        .map_err(substrate_error_to_response)?
     } else {
         store
             .next_task_for(&q.ref_name, &name, assignee.as_deref(), include_unassigned)
@@ -2727,7 +2727,9 @@ async fn next_plan_task(
     let in_progress = plan_tools::in_progress_tasks(&store, &q.ref_name, &name);
     let body = match task {
         None => serde_json::json!({ "task": null, "in_progress": in_progress }),
-        Some(t) => serde_json::json!({ "task": plan_tools::task_to_json(&t), "in_progress": in_progress }),
+        Some(t) => {
+            serde_json::json!({ "task": plan_tools::task_to_json(&t), "in_progress": in_progress })
+        }
     };
     Ok(Json(body))
 }
@@ -3189,7 +3191,10 @@ async fn put_session_turns_bulk(
         IntentCategory::Custom("Observe".to_string()),
         format!("capture session {} ({} turns)", sid, count),
     )
-    .with_tags(vec![format!("session:{}", sid), "kind:full-turn".to_string()]);
+    .with_tags(vec![
+        format!("session:{}", sid),
+        "kind:full-turn".to_string(),
+    ]);
     let commit_id = repo
         .set_json(&q.ref_name, &path, &body, opts)
         .map_err(internal_error)?;
@@ -3257,8 +3262,7 @@ async fn get_session_turn(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
     let path = session_turn_path(&sid, idx);
-    repo
-        .get_json(&q.ref_name, &path)
+    repo.get_json(&q.ref_name, &path)
         .map(Json)
         .map_err(internal_error)
 }
@@ -3349,7 +3353,10 @@ async fn put_session_title(
         IntentCategory::Custom("Observe".to_string()),
         &intent,
     )
-    .with_tags(vec![format!("session:{}", sid), "kind:session-title".to_string()]);
+    .with_tags(vec![
+        format!("session:{}", sid),
+        "kind:session-title".to_string(),
+    ]);
     let commit_id = repo
         .set_json(&q.ref_name, &path, &serde_json::json!(title), opts)
         .map_err(internal_error)?;
@@ -3420,7 +3427,10 @@ async fn put_session_burn(
         IntentCategory::Custom("Observe".to_string()),
         format!("session burn {}", sid),
     )
-    .with_tags(vec![format!("session:{}", sid), "kind:session-burn".to_string()]);
+    .with_tags(vec![
+        format!("session:{}", sid),
+        "kind:session-burn".to_string(),
+    ]);
     let commit_id = repo
         .set_json(&q.ref_name, &path, &body, opts)
         .map_err(internal_error)?;
@@ -3494,7 +3504,10 @@ async fn delete_session(
         IntentCategory::Rollback,
         format!("delete session {}", sid),
     )
-    .with_tags(vec![format!("session:{}", sid), "kind:session-delete".to_string()]);
+    .with_tags(vec![
+        format!("session:{}", sid),
+        "kind:session-delete".to_string(),
+    ]);
 
     // A session with no nodes is not an error: the registry may still hold
     // stats for it, and the tombstone is still worth writing.
@@ -3634,11 +3647,12 @@ async fn add_session_link(
     let links = node
         .get_mut("links")
         .and_then(|l| l.as_array_mut())
-        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "corrupt links node".to_string()))?;
+        .ok_or((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "corrupt links node".to_string(),
+        ))?;
 
-    let already = links
-        .iter()
-        .any(|l| l["plan"] == plan && l["task"] == task);
+    let already = links.iter().any(|l| l["plan"] == plan && l["task"] == task);
     if !already {
         links.push(serde_json::json!({
             "plan": plan,
@@ -3709,7 +3723,12 @@ async fn derive_session_links(
     // The turns subtree: `/sessions/{sid}/turns` = { tNNNN: {tool_calls_raw…} }.
     let turns = repo
         .get_json(&q.ref_name, &format!("/sessions/{}/turns", sid))
-        .map_err(|_| (StatusCode::NOT_FOUND, format!("no turns for session {}", sid)))?;
+        .map_err(|_| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("no turns for session {}", sid),
+            )
+        })?;
 
     // Flatten to (turn_index, command) candidates. A turn's index is parsed
     // from its `tNNNN` key so a link points back at the right turn.
@@ -3749,10 +3768,7 @@ async fn derive_session_links(
     let ref_name = q.ref_name.clone();
     let links = session_links::derive(&candidates, |plan, task| {
         // `task` is normalized `t-NNN`; the store keys on the numeric id.
-        let Some(n) = task
-            .strip_prefix("t-")
-            .and_then(|d| d.parse::<u32>().ok())
-        else {
+        let Some(n) = task.strip_prefix("t-").and_then(|d| d.parse::<u32>().ok()) else {
             return false;
         };
         store
@@ -3844,9 +3860,12 @@ async fn relocate_plan(
 
     // The plan subtree. Absent = 404: moving a plan that isn't here is a
     // caller error, not a silent success.
-    let plan_tree = src
-        .get_tree(&req.ref_name, &plan_root)
-        .map_err(|_| (StatusCode::NOT_FOUND, format!("no plan {} in {}", name, ns.0)))?;
+    let plan_tree = src.get_tree(&req.ref_name, &plan_root).map_err(|_| {
+        (
+            StatusCode::NOT_FOUND,
+            format!("no plan {} in {}", name, ns.0),
+        )
+    })?;
 
     // Destination ref — the source ref unless the caller consolidates onto a
     // different trunk (the migration passes "main").
@@ -3889,7 +3908,10 @@ async fn relocate_plan(
         IntentCategory::Rollback,
         format!("remove plan {} after move to {}", name, req.to_namespace),
     )
-    .with_tags(vec![format!("plan:{}", name), "kind:plan-move-cleanup".to_string()]);
+    .with_tags(vec![
+        format!("plan:{}", name),
+        "kind:plan-move-cleanup".to_string(),
+    ]);
     src.delete(&req.ref_name, &plan_root, del_opts)
         .map_err(internal_error)?;
     let links_root = format!("/plan_links/{}", name);
@@ -3899,7 +3921,10 @@ async fn relocate_plan(
             IntentCategory::Rollback,
             format!("remove plan links {} after move", name),
         )
-        .with_tags(vec![format!("plan:{}", name), "kind:plan-move-cleanup".to_string()]);
+        .with_tags(vec![
+            format!("plan:{}", name),
+            "kind:plan-move-cleanup".to_string(),
+        ]);
         let _ = src.delete(&req.ref_name, &links_root, del_links);
     }
 
@@ -3943,9 +3968,12 @@ async fn move_session(
 
     // The subtree to move. A session with no nodes here is a 404 — moving
     // nothing is a caller error worth surfacing, not a silent success.
-    let subtree = src
-        .get_tree(&req.ref_name, &root)
-        .map_err(|_| (StatusCode::NOT_FOUND, format!("no session {} in {}", sid, ns.0)))?;
+    let subtree = src.get_tree(&req.ref_name, &root).map_err(|_| {
+        (
+            StatusCode::NOT_FOUND,
+            format!("no session {} in {}", sid, ns.0),
+        )
+    })?;
 
     // Skip the write when the target already has an equal-or-newer copy, so a
     // re-run does not overwrite a session that was updated in its new home.
@@ -4150,7 +4178,10 @@ async fn put_session_meta(
         IntentCategory::Custom("Observe".to_string()),
         format!("session meta {}", sid),
     )
-    .with_tags(vec![format!("session:{}", sid), "kind:session-meta".to_string()]);
+    .with_tags(vec![
+        format!("session:{}", sid),
+        "kind:session-meta".to_string(),
+    ]);
     let commit_id = repo
         .set_json(&q.ref_name, &path, &body, opts)
         .map_err(internal_error)?;
@@ -4195,10 +4226,7 @@ async fn sync_sessions(
     // validates the header and the handler signature documents the choice.
     _ns: NamespaceId,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let ctx_bin = s
-        .ctx_binary
-        .clone()
-        .unwrap_or_else(|| "ctx".to_string());
+    let ctx_bin = s.ctx_binary.clone().unwrap_or_else(|| "ctx".to_string());
     // Fall back to the conventional default port if the binary wasn't built
     // with a self URL (library/test callers). The Hub binary always sets this.
     let base_url = s
@@ -4602,8 +4630,8 @@ async fn register_project_handler(
     // (ASCII alnum/-/_, 1..=64 bytes), and init() creates the namespace row
     // plus an initialized `main` branch so ref operations work immediately.
     // Both are idempotent on re-register.
-    let ns = Namespace::new(namespace.as_str())
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let ns =
+        Namespace::new(namespace.as_str()).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     s.repo.fork_namespace(ns).init().map_err(internal_error)?;
 
     let remote = req
@@ -4779,11 +4807,17 @@ mod tests {
 
     #[tokio::test]
     async fn namespace_falls_back_to_header_then_default() {
-        assert_eq!(extract_ns("/api/state/main", Some("ctxone")).await, "ctxone");
+        assert_eq!(
+            extract_ns("/api/state/main", Some("ctxone")).await,
+            "ctxone"
+        );
         assert_eq!(extract_ns("/api/state/main", None).await, "default");
         // An empty value is not a namespace; it must not become one.
         assert_eq!(extract_ns("/api/state/main", Some("   ")).await, "default");
-        assert_eq!(extract_ns("/api/state/main?namespace=", Some("ctxone")).await, "ctxone");
+        assert_eq!(
+            extract_ns("/api/state/main?namespace=", Some("ctxone")).await,
+            "ctxone"
+        );
     }
 
     #[test]
@@ -4810,10 +4844,9 @@ mod tests {
 
     #[test]
     fn llm_usage_accepts_native_cache_create_name() {
-        let req: LlmUsageRequest = serde_json::from_str(
-            r#"{"input_tokens":1,"output_tokens":2,"cache_create_tokens":7}"#,
-        )
-        .expect("deserialize with cache_create_tokens");
+        let req: LlmUsageRequest =
+            serde_json::from_str(r#"{"input_tokens":1,"output_tokens":2,"cache_create_tokens":7}"#)
+                .expect("deserialize with cache_create_tokens");
         assert_eq!(req.cache_create_tokens, 7);
     }
 

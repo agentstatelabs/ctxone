@@ -726,7 +726,10 @@ pub async fn store_turns_bulk(
     let sid = session.unwrap_or("default");
     let mut map = serde_json::Map::with_capacity(turns.len());
     for (idx, turn) in turns.iter().enumerate() {
-        map.insert(format!("t{idx:04}"), turn_snapshot(turn, idx, sid, source_file));
+        map.insert(
+            format!("t{idx:04}"),
+            turn_snapshot(turn, idx, sid, source_file),
+        );
     }
     let url = format!(
         "{}/api/sessions/{}/turns?ref={}",

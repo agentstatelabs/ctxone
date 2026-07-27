@@ -199,8 +199,9 @@ fn load_project_by_remote_url(conn: &Connection, remote_url: &str) -> SqlResult<
 }
 
 fn local_paths_for(conn: &Connection, project_id: &str) -> SqlResult<Vec<String>> {
-    let mut stmt =
-        conn.prepare("SELECT local_path FROM project_paths WHERE project_id = ?1 ORDER BY local_path")?;
+    let mut stmt = conn.prepare(
+        "SELECT local_path FROM project_paths WHERE project_id = ?1 ORDER BY local_path",
+    )?;
     let paths: Vec<String> = stmt
         .query_map(params![project_id], |row| row.get::<_, String>(0))?
         .collect::<SqlResult<_>>()?;
@@ -319,9 +320,7 @@ pub fn detect_project(cwd: &Path, db_path: Option<&str>) -> DetectResult {
 fn resolve_by_local_path(db_path: &str, cwd: &Path) -> SqlResult<Option<(Project, String)>> {
     let conn = rusqlite::Connection::open(db_path)?;
     let mut stmt = conn.prepare("SELECT project_id, local_path FROM project_paths")?;
-    let rows = stmt.query_map([], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-    })?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
 
     let mut best: Option<(String, String, usize)> = None;
     for row in rows {
@@ -406,10 +405,7 @@ pub fn read_git_remote(dir: &Path) -> Option<String> {
 /// user-supplied remote URLs the same way detection normalizes git's.
 pub fn normalize_remote_url(url: &str) -> String {
     let trimmed = url.trim_end_matches('/');
-    trimmed
-        .strip_suffix(".git")
-        .unwrap_or(trimmed)
-        .to_string()
+    trimmed.strip_suffix(".git").unwrap_or(trimmed).to_string()
 }
 
 /// Detect the current git branch name from the working directory.
@@ -523,18 +519,39 @@ mod tests {
     #[test]
     fn register_and_resolve_by_id() {
         let (_dir, db) = tmp_db();
-        register_project(&db, "proj-1", Some("https://github.com/user/repo"), "user-repo", None, Some("/home/user/repo")).unwrap();
+        register_project(
+            &db,
+            "proj-1",
+            Some("https://github.com/user/repo"),
+            "user-repo",
+            None,
+            Some("/home/user/repo"),
+        )
+        .unwrap();
         let p = resolve_by_id(&db, "proj-1").unwrap().unwrap();
         assert_eq!(p.namespace_id, "user-repo");
-        assert_eq!(p.remote_url.as_deref(), Some("https://github.com/user/repo"));
+        assert_eq!(
+            p.remote_url.as_deref(),
+            Some("https://github.com/user/repo")
+        );
         assert_eq!(p.local_paths, vec!["/home/user/repo"]);
     }
 
     #[test]
     fn register_and_resolve_by_remote_url() {
         let (_dir, db) = tmp_db();
-        register_project(&db, "proj-2", Some("https://github.com/user/repo2"), "user-repo2", Some("My Repo"), Some("/home/user/repo2")).unwrap();
-        let p = resolve_by_remote_url(&db, "https://github.com/user/repo2").unwrap().unwrap();
+        register_project(
+            &db,
+            "proj-2",
+            Some("https://github.com/user/repo2"),
+            "user-repo2",
+            Some("My Repo"),
+            Some("/home/user/repo2"),
+        )
+        .unwrap();
+        let p = resolve_by_remote_url(&db, "https://github.com/user/repo2")
+            .unwrap()
+            .unwrap();
         assert_eq!(p.id, "proj-2");
         assert_eq!(p.display_name, Some("My Repo".to_string()));
     }
@@ -542,16 +559,47 @@ mod tests {
     #[test]
     fn duplicate_remote_url_is_rejected() {
         let (_dir, db) = tmp_db();
-        register_project(&db, "p1", Some("https://example.com/repo"), "ns1", None, Some("/a")).unwrap();
-        let err = register_project(&db, "p2", Some("https://example.com/repo"), "ns2", None, Some("/b"));
+        register_project(
+            &db,
+            "p1",
+            Some("https://example.com/repo"),
+            "ns1",
+            None,
+            Some("/a"),
+        )
+        .unwrap();
+        let err = register_project(
+            &db,
+            "p2",
+            Some("https://example.com/repo"),
+            "ns2",
+            None,
+            Some("/b"),
+        );
         assert!(err.is_err(), "duplicate remote_url should fail");
     }
 
     #[test]
     fn list_projects_returns_all() {
         let (_dir, db) = tmp_db();
-        register_project(&db, "p1", Some("https://github.com/u/r1"), "ns1", None, Some("/r1")).unwrap();
-        register_project(&db, "p2", Some("https://github.com/u/r2"), "ns2", None, Some("/r2")).unwrap();
+        register_project(
+            &db,
+            "p1",
+            Some("https://github.com/u/r1"),
+            "ns1",
+            None,
+            Some("/r1"),
+        )
+        .unwrap();
+        register_project(
+            &db,
+            "p2",
+            Some("https://github.com/u/r2"),
+            "ns2",
+            None,
+            Some("/r2"),
+        )
+        .unwrap();
         let projects = list_projects(&db).unwrap();
         assert_eq!(projects.len(), 2);
     }
@@ -559,7 +607,15 @@ mod tests {
     #[test]
     fn add_local_path_is_idempotent() {
         let (_dir, db) = tmp_db();
-        register_project(&db, "p1", Some("https://github.com/u/r"), "ns1", None, Some("/r")).unwrap();
+        register_project(
+            &db,
+            "p1",
+            Some("https://github.com/u/r"),
+            "ns1",
+            None,
+            Some("/r"),
+        )
+        .unwrap();
         add_local_path(&db, "p1", "/r").unwrap(); // duplicate
         add_local_path(&db, "p1", "/r2").unwrap();
         let p = resolve_by_id(&db, "p1").unwrap().unwrap();
@@ -579,7 +635,10 @@ mod tests {
     #[test]
     fn sanitize_branch_name_handles_common_patterns() {
         assert_eq!(sanitize_branch_name("main"), "main");
-        assert_eq!(sanitize_branch_name("feature/my-feature"), "feature-my-feature");
+        assert_eq!(
+            sanitize_branch_name("feature/my-feature"),
+            "feature-my-feature"
+        );
         assert_eq!(sanitize_branch_name("refs/heads/fix/bug-42"), "fix-bug-42");
         assert_eq!(sanitize_branch_name("user@branch"), "user-branch");
         assert_eq!(sanitize_branch_name("---"), "work"); // all dashes → fallback
@@ -616,7 +675,15 @@ mod tests {
     fn detect_project_finds_by_ctxproject_file() {
         let dir = tempdir().unwrap();
         let (_dbdir, db) = tmp_db();
-        register_project(&db, "test-proj", Some("https://github.com/u/r"), "test-ns", None, Some(dir.path().to_str().unwrap())).unwrap();
+        register_project(
+            &db,
+            "test-proj",
+            Some("https://github.com/u/r"),
+            "test-ns",
+            None,
+            Some(dir.path().to_str().unwrap()),
+        )
+        .unwrap();
         write_ctxproject_file(dir.path(), "test-proj").unwrap();
         let result = detect_project(dir.path(), Some(&db));
         assert!(

@@ -93,7 +93,13 @@ impl ServiceSpec {
         let args = self
             .program_args()
             .iter()
-            .map(|a| if a.contains(' ') { format!("\"{a}\"") } else { a.clone() })
+            .map(|a| {
+                if a.contains(' ') {
+                    format!("\"{a}\"")
+                } else {
+                    a.clone()
+                }
+            })
             .collect::<Vec<_>>()
             .join(" ");
         format!(
@@ -148,8 +154,10 @@ fn xml_escape(s: &str) -> String {
 /// platforms (e.g. Windows — no boot-service back-end here yet).
 pub fn service_file_path() -> Option<PathBuf> {
     if cfg!(target_os = "macos") {
-        dirs::home_dir()
-            .map(|h| h.join("Library/LaunchAgents").join(format!("{SERVICE_LABEL}.plist")))
+        dirs::home_dir().map(|h| {
+            h.join("Library/LaunchAgents")
+                .join(format!("{SERVICE_LABEL}.plist"))
+        })
     } else if cfg!(target_os = "linux") {
         dirs::config_dir().map(|c| c.join("systemd/user").join(SYSTEMD_UNIT))
     } else if cfg!(target_os = "windows") {
@@ -179,10 +187,12 @@ fn render(spec: &ServiceSpec) -> Result<String, Box<dyn std::error::Error>> {
     } else if cfg!(target_os = "windows") {
         Ok(spec.windows_task_xml())
     } else {
-        Err("`ctx service` supports macOS (launchd), Linux (systemd), and Windows \
+        Err(
+            "`ctx service` supports macOS (launchd), Linux (systemd), and Windows \
              (Task Scheduler). Run `ctxone-hub --http --lens` under your own \
              supervisor instead."
-            .into())
+                .into(),
+        )
     }
 }
 
@@ -314,10 +324,18 @@ fn register_commands(path: &std::path::Path) -> Vec<(String, Vec<String>)> {
         )]
     } else {
         vec![
-            ("systemctl".into(), vec!["--user".into(), "daemon-reload".into()]),
             (
                 "systemctl".into(),
-                vec!["--user".into(), "enable".into(), "--now".into(), SYSTEMD_UNIT.into()],
+                vec!["--user".into(), "daemon-reload".into()],
+            ),
+            (
+                "systemctl".into(),
+                vec![
+                    "--user".into(),
+                    "enable".into(),
+                    "--now".into(),
+                    SYSTEMD_UNIT.into(),
+                ],
             ),
         ]
     }
@@ -330,19 +348,32 @@ fn deregister_commands(path: &std::path::Path) -> Vec<(String, Vec<String>)> {
     } else if cfg!(target_os = "windows") {
         vec![(
             "schtasks".into(),
-            vec!["/delete".into(), "/tn".into(), WINDOWS_TASK.into(), "/f".into()],
+            vec![
+                "/delete".into(),
+                "/tn".into(),
+                WINDOWS_TASK.into(),
+                "/f".into(),
+            ],
         )]
     } else {
         vec![(
             "systemctl".into(),
-            vec!["--user".into(), "disable".into(), "--now".into(), SYSTEMD_UNIT.into()],
+            vec![
+                "--user".into(),
+                "disable".into(),
+                "--now".into(),
+                SYSTEMD_UNIT.into(),
+            ],
         )]
     }
 }
 
 fn status_command() -> (String, Vec<String>) {
     if cfg!(target_os = "macos") {
-        ("launchctl".into(), vec!["list".into(), SERVICE_LABEL.into()])
+        (
+            "launchctl".into(),
+            vec!["list".into(), SERVICE_LABEL.into()],
+        )
     } else if cfg!(target_os = "windows") {
         (
             "schtasks".into(),
@@ -491,7 +522,13 @@ impl TickSpec {
         let args = self
             .program_args()
             .iter()
-            .map(|a| if a.contains(' ') { format!("\"{a}\"") } else { a.clone() })
+            .map(|a| {
+                if a.contains(' ') {
+                    format!("\"{a}\"")
+                } else {
+                    a.clone()
+                }
+            })
             .collect::<Vec<_>>()
             .join(" ");
         format!(
@@ -539,7 +576,9 @@ fn tick_files(spec: &TickSpec) -> Result<Vec<(PathBuf, String)>, Box<dyn std::er
             .join(format!("{TICK_LABEL}.plist"));
         Ok(vec![(p, spec.macos_plist())])
     } else if cfg!(target_os = "linux") {
-        let dir = dirs::config_dir().ok_or("no config dir")?.join("systemd/user");
+        let dir = dirs::config_dir()
+            .ok_or("no config dir")?
+            .join("systemd/user");
         Ok(vec![
             (dir.join(TICK_SYSTEMD_SERVICE), spec.linux_service()),
             (dir.join(TICK_SYSTEMD_TIMER), spec.linux_timer()),
@@ -566,14 +605,29 @@ fn tick_register_commands(files: &[(PathBuf, String)]) -> Vec<(String, Vec<Strin
         let p = files[0].0.to_string_lossy().into_owned();
         vec![(
             "schtasks".into(),
-            vec!["/create".into(), "/tn".into(), TICK_WINDOWS_TASK.into(), "/xml".into(), p, "/f".into()],
+            vec![
+                "/create".into(),
+                "/tn".into(),
+                TICK_WINDOWS_TASK.into(),
+                "/xml".into(),
+                p,
+                "/f".into(),
+            ],
         )]
     } else {
         vec![
-            ("systemctl".into(), vec!["--user".into(), "daemon-reload".into()]),
             (
                 "systemctl".into(),
-                vec!["--user".into(), "enable".into(), "--now".into(), TICK_SYSTEMD_TIMER.into()],
+                vec!["--user".into(), "daemon-reload".into()],
+            ),
+            (
+                "systemctl".into(),
+                vec![
+                    "--user".into(),
+                    "enable".into(),
+                    "--now".into(),
+                    TICK_SYSTEMD_TIMER.into(),
+                ],
             ),
         ]
     }
@@ -582,19 +636,32 @@ fn tick_register_commands(files: &[(PathBuf, String)]) -> Vec<(String, Vec<Strin
 fn tick_deregister_commands() -> Vec<(String, Vec<String>)> {
     if cfg!(target_os = "macos") {
         let p = dirs::home_dir()
-            .map(|h| h.join("Library/LaunchAgents").join(format!("{TICK_LABEL}.plist")))
+            .map(|h| {
+                h.join("Library/LaunchAgents")
+                    .join(format!("{TICK_LABEL}.plist"))
+            })
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
         vec![("launchctl".into(), vec!["unload".into(), p])]
     } else if cfg!(target_os = "windows") {
         vec![(
             "schtasks".into(),
-            vec!["/delete".into(), "/tn".into(), TICK_WINDOWS_TASK.into(), "/f".into()],
+            vec![
+                "/delete".into(),
+                "/tn".into(),
+                TICK_WINDOWS_TASK.into(),
+                "/f".into(),
+            ],
         )]
     } else {
         vec![(
             "systemctl".into(),
-            vec!["--user".into(), "disable".into(), "--now".into(), TICK_SYSTEMD_TIMER.into()],
+            vec![
+                "--user".into(),
+                "disable".into(),
+                "--now".into(),
+                TICK_SYSTEMD_TIMER.into(),
+            ],
         )]
     }
 }
@@ -684,11 +751,20 @@ pub fn tick_uninstall(dry_run: bool) -> CmdResult {
 /// Show tick-timer registration status.
 pub fn tick_status() -> CmdResult {
     let (bin, args) = if cfg!(target_os = "macos") {
-        ("launchctl".to_string(), vec!["list".to_string(), TICK_LABEL.to_string()])
+        (
+            "launchctl".to_string(),
+            vec!["list".to_string(), TICK_LABEL.to_string()],
+        )
     } else if cfg!(target_os = "windows") {
-        ("schtasks".to_string(), vec!["/query".into(), "/tn".into(), TICK_WINDOWS_TASK.into()])
+        (
+            "schtasks".to_string(),
+            vec!["/query".into(), "/tn".into(), TICK_WINDOWS_TASK.into()],
+        )
     } else {
-        ("systemctl".to_string(), vec!["--user".into(), "status".into(), TICK_SYSTEMD_TIMER.into()])
+        (
+            "systemctl".to_string(),
+            vec!["--user".into(), "status".into(), TICK_SYSTEMD_TIMER.into()],
+        )
     };
     println!("$ {bin} {}", args.join(" "));
     let _ = std::process::Command::new(&bin).args(&args).status();
@@ -701,7 +777,11 @@ pub fn tick_status() -> CmdResult {
         log_path: String::new(),
     }) {
         for (p, _) in &files {
-            println!("unit file: {} ({})", p.display(), if p.exists() { "present" } else { "absent" });
+            println!(
+                "unit file: {} ({})",
+                p.display(),
+                if p.exists() { "present" } else { "absent" }
+            );
         }
     }
     Ok(())
