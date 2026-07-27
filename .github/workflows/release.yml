@@ -1,7 +1,7 @@
 # Release workflow for CtxOne — Plan N t-001 / Windows distribution
 #
-# Mirrors the ASD pipeline (git.internal.example origin → private
-# GitHub mirror at agentstatelabs/ctxone → release tag → this workflow).
+# Mirrors the ASD pipeline (private GitLab origin → GitHub mirror at
+# agentstatelabs/ctxone → release tag → this workflow).
 #
 # Builds `ctx` and `ctxone-hub` for five targets (mac arm64/x86_64,
 # linux x86_64/arm64, windows x86_64) and publishes both layouts:
@@ -22,7 +22,7 @@
 # Required secrets on agentstatelabs/ctxone:
 #   RELEASES_REPO_TOKEN  — write access to agentstatelabs/ctxone-releases.
 # (The agentstategraph / agent-skillgen cargo deps are public on GitHub now,
-#  so cargo resolves them anonymously — no GITLAB_TOKEN needed.)
+#  so cargo resolves them anonymously.)
 #
 # Windows: `windows-latest` runs Git Bash by default, so the `shell: bash`
 # stage step works as-is. Binaries get a `.exe` suffix via matrix.ext.
@@ -102,9 +102,7 @@ jobs:
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
 
       # The agentstategraph and agent-skillgen cargo deps are now public on
-      # GitHub, so cargo resolves them anonymously — no auth step needed. (This
-      # replaced a GITLAB_TOKEN + insteadOf step that authed against the private
-      # GitLab host, which GitHub runners couldn't reach anyway.)
+      # GitHub, so cargo resolves them anonymously — no auth step needed.
 
       - name: build ctx
         run: cargo build --release --locked --target ${{ matrix.target }} -p ctx
