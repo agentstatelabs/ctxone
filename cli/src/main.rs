@@ -1724,7 +1724,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cli.server,
                 urlencoding(&topic),
                 budget,
-                urlencoding(&cli.branch),
+                encode_ref(&cli.branch),
             );
             let resp = match client.get(&url).send().await {
                 Ok(r) => r,
@@ -1751,7 +1751,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let flat_url = format!(
                     "{}/api/state/{}?path=/",
                     cli.server,
-                    urlencoding(&cli.branch)
+                    encode_ref(&cli.branch)
                 );
                 let exact_flat = match client.get(&flat_url).send().await {
                     Ok(r) if r.status().is_success() => {
@@ -1858,7 +1858,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "{}/api/memory/context/{}?ref={}",
                 cli.server,
                 urlencoding(&project),
-                urlencoding(&cli.branch),
+                encode_ref(&cli.branch),
             );
             let resp = match client.get(&url).send().await {
                 Ok(r) => r,
@@ -2603,7 +2603,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let url = format!(
                 "{}/api/state/{}/search?query={}&max_results={}",
                 cli.server,
-                urlencoding(&cli.branch),
+                encode_ref(&cli.branch),
                 urlencoding(&query),
                 max,
             );
@@ -2638,7 +2638,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let url = format!(
                 "{}/api/state/{}/paths?prefix={}&max_depth={}",
                 cli.server,
-                urlencoding(&cli.branch),
+                encode_ref(&cli.branch),
                 urlencoding(&prefix),
                 max_depth,
             );
@@ -2666,7 +2666,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let url = format!(
                 "{}/api/state/{}?path={}",
                 cli.server,
-                urlencoding(&cli.branch),
+                encode_ref(&cli.branch),
                 urlencoding(&path),
             );
             let resp = match client.get(&url).send().await {
@@ -2685,7 +2685,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let url = format!(
                 "{}/api/log/{}?limit={}",
                 cli.server,
-                urlencoding(&cli.branch),
+                encode_ref(&cli.branch),
                 limit,
             );
             let resp = match client.get(&url).send().await {
@@ -2703,7 +2703,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let url = format!(
                 "{}/api/blame/{}?path={}",
                 cli.server,
-                urlencoding(&cli.branch),
+                encode_ref(&cli.branch),
                 urlencoding(&path),
             );
             let resp = match client.get(&url).send().await {
@@ -3534,7 +3534,7 @@ async fn agents_status(
 
     let url = format!(
         "{}/api/state/{}/paths?prefix=/memory/pinned/{}",
-        server, branch, AGENTS_SOURCE
+        server, encode_ref(branch), AGENTS_SOURCE
     );
     let resp = match client.get(&url).send().await {
         Ok(r) => r,
@@ -3593,7 +3593,7 @@ async fn agents_remove(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let paths_url = format!(
         "{}/api/state/{}/paths?prefix=/memory/pinned/{}",
-        server, branch, AGENTS_SOURCE
+        server, encode_ref(branch), AGENTS_SOURCE
     );
     let paths_resp = match client.get(&paths_url).send().await {
         Ok(r) => r,
@@ -3780,6 +3780,27 @@ pub(crate) fn urlencoding(s: &str) -> String {
     s.replace(' ', "%20")
         .replace('&', "%26")
         .replace('?', "%3F")
+}
+
+/// Percent-encode a git-style ref for a URL. Unlike [`urlencoding`], this also
+/// encodes `/` as `%2F` (full RFC 3986 path-segment encoding), so a ref that
+/// contains slashes — e.g. `codex/drift-pad-navigation` — stays within a single
+/// path segment and routes correctly instead of 404ing. Safe for query params
+/// too (the hub URL-decodes `%2F` back to `/`).
+pub(crate) fn encode_ref(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => out.push(c),
+            _ => {
+                let mut buf = [0u8; 4];
+                for b in c.encode_utf8(&mut buf).as_bytes() {
+                    out.push_str(&format!("%{b:02X}"));
+                }
+            }
+        }
+    }
+    out
 }
 
 fn find_hub_binary() -> String {
@@ -4063,7 +4084,7 @@ async fn run_tail(
     let mut first = true;
 
     loop {
-        let url = format!("{}/api/log/{}?limit=20", server, urlencoding(branch),);
+        let url = format!("{}/api/log/{}?limit=20", server, encode_ref(branch),);
         match client.get(&url).send().await {
             Ok(resp) if resp.status().is_success() => {
                 if let Ok(commits) = resp.json::<Vec<serde_json::Value>>().await {
@@ -4767,7 +4788,7 @@ async fn ingest_one_session(
                 "{}/api/sessions/{}/derive_links?ref={}",
                 server,
                 urlencoding(sid),
-                urlencoding(branch),
+                encode_ref(branch),
             );
             let _ = client.post(url).send().await;
         }
@@ -6913,7 +6934,7 @@ async fn handle_plan(
             assigned_only,
             in_order,
         } => {
-            let mut parts = vec![format!("ref={}", urlencoding(branch))];
+            let mut parts = vec![format!("ref={}", encode_ref(branch))];
             let assignee = if me {
                 Some(agent_id.clone())
             } else {
@@ -6985,7 +7006,7 @@ async fn handle_plan(
             status,
             all_namespaces,
         } => {
-            let mut url = format!("{}/api/plans?ref={}", server, urlencoding(branch));
+            let mut url = format!("{}/api/plans?ref={}", server, encode_ref(branch));
             if let Some(s) = status {
                 url.push_str(&format!("&status={}", urlencoding(&s)));
             }
@@ -7074,7 +7095,7 @@ async fn handle_plan(
             let mut url = format!(
                 "{}/api/plans/stale?ref={}&days={}",
                 server,
-                urlencoding(branch),
+                encode_ref(branch),
                 days
             );
             if all_namespaces {
@@ -7117,7 +7138,7 @@ async fn handle_plan(
                 "{}/api/plans/{}?ref={}",
                 server,
                 urlencoding(&plan_id),
-                urlencoding(branch)
+                encode_ref(branch)
             );
             let resp = match client
                 .get(&url)
@@ -7192,7 +7213,7 @@ async fn handle_plan(
                 "{}/api/plans/{}/tasks?ref={}",
                 server,
                 urlencoding(&plan_id),
-                urlencoding(branch)
+                encode_ref(branch)
             );
             let resp = match client
                 .get(&url)
@@ -7509,7 +7530,7 @@ async fn handle_db(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match action {
         DbAction::Export { out } => {
-            let url = format!("{}/api/export?ref={}", server, urlencoding(branch));
+            let url = format!("{}/api/export?ref={}", server, encode_ref(branch));
             let resp = match client.get(&url).send().await {
                 Ok(r) => r,
                 Err(e) => unreachable_exit(server, e),
@@ -7795,7 +7816,7 @@ async fn handle_docs(
         }
         DocsAction::List => {
             let resp = match client
-                .get(format!("{server}/api/docs?ref={}", urlencoding(branch)))
+                .get(format!("{server}/api/docs?ref={}", encode_ref(branch)))
                 .send()
                 .await
             {
@@ -7821,7 +7842,7 @@ async fn handle_docs(
         }
         DocsAction::Find { query } => {
             let resp = match client
-                .get(format!("{server}/api/docs?ref={}", urlencoding(branch)))
+                .get(format!("{server}/api/docs?ref={}", encode_ref(branch)))
                 .send()
                 .await
             {
