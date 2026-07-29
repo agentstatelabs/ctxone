@@ -459,14 +459,19 @@ pub fn next_task_ordered(
 
 /// The `(id, title)` of every task currently `in_progress` in a plan — so
 /// `plan next` can show active work separately from the next unstarted task.
-pub fn in_progress_tasks(store: &TaskStore, ref_name: &str, plan: &str) -> Vec<serde_json::Value> {
-    store
-        .list_tasks(ref_name, plan)
-        .unwrap_or_default()
+pub fn in_progress_tasks(
+    store: &TaskStore,
+    ref_name: &str,
+    plan: &str,
+) -> Result<Vec<serde_json::Value>, TaskStoreError> {
+    // Propagate errors (incl. repository-integrity failures) instead of masking
+    // a corrupt tree as "no in-progress tasks".
+    Ok(store
+        .list_tasks(ref_name, plan)?
         .into_iter()
         .filter(|t| t.status == TaskStatus::InProgress)
         .map(|t| serde_json::json!({ "id": t.id.as_str(), "title": t.title }))
-        .collect()
+        .collect())
 }
 
 // -- Cross-plan links (shared by the HTTP `/link` route and the MCP tool) --
@@ -522,15 +527,19 @@ pub fn add_satisfies(
 /// In-progress tasks in active plans whose `started_at` (fallback `created_at`)
 /// is older than `days` — the stale-drift surface, most-stale first. Shared by
 /// the HTTP `/plans/stale` route and the MCP tool.
-pub fn stale_in_progress(store: &TaskStore, ref_name: &str, days: i64) -> Vec<serde_json::Value> {
+pub fn stale_in_progress(
+    store: &TaskStore,
+    ref_name: &str,
+    days: i64,
+) -> Result<Vec<serde_json::Value>, TaskStoreError> {
     let now = chrono::Utc::now();
     let cutoff = now - chrono::Duration::days(days.max(0));
     let mut out = Vec::new();
-    let plans = store
-        .list_plans_by_status(ref_name, Some(PlanStatus::Active))
-        .unwrap_or_default();
+    // Propagate errors instead of silently reporting "nothing stale" over a
+    // corrupt plans/tasks tree.
+    let plans = store.list_plans_by_status(ref_name, Some(PlanStatus::Active))?;
     for plan in plans {
-        for t in store.list_tasks(ref_name, &plan.name).unwrap_or_default() {
+        for t in store.list_tasks(ref_name, &plan.name)? {
             if t.status != TaskStatus::InProgress {
                 continue;
             }
@@ -552,13 +561,18 @@ pub fn stale_in_progress(store: &TaskStore, ref_name: &str, days: i64) -> Vec<se
             .unwrap_or(0)
             .cmp(&a["age_days"].as_i64().unwrap_or(0))
     });
-    out
+    Ok(out)
 }
 
 /// Read every registered doc entry (reassembled from its tree leaves under
 /// `/docs/<slug>`). Shared by the HTTP `/docs` route and the MCP tool.
-pub fn list_registered_docs(repo: &Repository, ref_name: &str) -> Vec<serde_json::Value> {
-    let leaves = repo.list_paths(ref_name, "/docs", None).unwrap_or_default();
+pub fn list_registered_docs(
+    repo: &Repository,
+    ref_name: &str,
+) -> Result<Vec<serde_json::Value>, TaskStoreError> {
+    // Propagate errors (incl. missing-object corruption) instead of masking a
+    // broken /docs tree as an empty registry.
+    let leaves = repo.list_paths(ref_name, "/docs", None)?;
     let mut slugs = std::collections::BTreeSet::new();
     for p in leaves {
         if let Some(rest) = p.strip_prefix("/docs/")
@@ -574,7 +588,7 @@ pub fn list_registered_docs(repo: &Repository, ref_name: &str) -> Vec<serde_json
             out.push(v);
         }
     }
-    out
+    Ok(out)
 }
 
 /// `task_to_json` plus an optional non-blocking `warning` field.

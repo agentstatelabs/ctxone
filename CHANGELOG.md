@@ -4,7 +4,16 @@ All notable changes to CTXone are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 the project's `0.9.x` series (incremented by 0.0.01 per release).
 
-## [v0.9.16] — 2026-07-21
+## [0.9.19] — 2026-07-29
+
+### Added
+- `ctx db upgrade [--check]` — run pending schema migrations behind a snapshot and a post-upgrade `fsck` integrity check.
+
+### Changed
+- Plan/task/doc read helpers (`plan next` in-progress, `plan stale`, `docs find`) now surface repository-integrity errors instead of masking a corrupt tree as an empty result.
+- CHANGELOG version headers no longer carry a `v` prefix, matching AgentStateGraph and AgentStateDeveloper.
+
+## [0.9.16] — 2026-07-21
 
 A large release centred on **workspace-scoped sessions**, **more import
 sources**, **ingest performance**, and a **session-efficiency ("burn") board**
@@ -47,7 +56,7 @@ in Lens. Summarised from the commit history.
 - Request body limit raised so large bulk turn writes don't 413.
 - The web unit suite is runnable again and runs in CI; `npm ci` unbroken.
 
-## [v0.9.15] — 2026-07-19
+## [0.9.15] — 2026-07-19
 
 Two themes: the first step of **multi-agent session import** (Claude Code is no
 longer the only source), and a round of **Lens fixes** for figures that were
@@ -111,7 +120,7 @@ quietly misleading.
 - The heatmap intensity ramp is linear against the maximum, so one very busy day
   flattens the rest of the range.
 
-## [v0.9.14] — 2026-07-18
+## [0.9.14] — 2026-07-18
 
 The headline work since v0.9.13: project **namespaces** and the **unified
 MCP-over-HTTP daemon** that makes one process serve MCP, the REST API, and the

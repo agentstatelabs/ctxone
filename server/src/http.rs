@@ -572,6 +572,7 @@ fn router_with_config_inner(
         .route("/api/export", get(export_graph))
         .route("/api/import", post(import_graph))
         .route("/api/fsck", post(fsck))
+        .route("/api/db/upgrade", post(db_upgrade))
         .route("/api/docs", get(list_docs).post(register_doc))
         .route("/api/plans", get(list_plans).post(create_plan))
         // Static path registered before `/api/plans/{name}` so it wins the match.
@@ -1335,6 +1336,49 @@ async fn fsck(
         "healthy": checked - problems.len(),
         "problems": problems,
         "repair": req.repair,
+    })))
+}
+
+#[derive(Deserialize, Default)]
+struct DbUpgradeRequest {
+    /// Report the current vs target schema version without applying anything.
+    #[serde(default)]
+    check: bool,
+}
+
+/// `POST /api/db/upgrade` — run any pending CTXone schema migrations up to the
+/// version this hub binary expects. With `check: true`, only report the version
+/// gap. Migrations also run automatically on hub startup; this is the explicit,
+/// snapshot-and-fsck-wrapped path the CLI drives. Refuses (409) if the graph is
+/// from a NEWER hub than this binary — never downgrades a schema.
+async fn db_upgrade(
+    State(s): State<HubState>,
+    Json(req): Json<DbUpgradeRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let current = crate::migrations::current_schema_version(&s.repo);
+    let target = crate::migrations::CTXONE_SCHEMA_VERSION;
+
+    if req.check {
+        return Ok(Json(serde_json::json!({
+            "current_version": current,
+            "target_version": target,
+            "pending": current < target,
+            "migrated": false,
+        })));
+    }
+
+    if current < target {
+        crate::migrations::run_migrations(&s.repo)
+            // NewerGraph / migration failure → 409 Conflict, ref/data untouched.
+            .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
+    }
+
+    let now = crate::migrations::current_schema_version(&s.repo);
+    Ok(Json(serde_json::json!({
+        "current_version": now,
+        "target_version": target,
+        "was_version": current,
+        "migrated": current < target,
     })))
 }
 
@@ -2820,7 +2864,8 @@ async fn next_plan_task(
             .map_err(substrate_error_to_response)?
     };
     // Surface active work separately from the next unstarted task.
-    let in_progress = plan_tools::in_progress_tasks(&store, &q.ref_name, &name);
+    let in_progress = plan_tools::in_progress_tasks(&store, &q.ref_name, &name)
+        .map_err(substrate_error_to_response)?;
     let body = match task {
         None => serde_json::json!({ "task": null, "in_progress": in_progress }),
         Some(t) => {

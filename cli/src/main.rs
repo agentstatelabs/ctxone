@@ -1201,6 +1201,16 @@ enum DbAction {
         #[arg(long)]
         yes: bool,
     },
+    /// Upgrade the database schema to the version this `ctx` expects, running
+    /// any pending migrations. Snapshots first and verifies integrity (fsck)
+    /// afterward. Migrations also run automatically when the hub starts; this
+    /// is the explicit, snapshot-protected path.
+    Upgrade {
+        /// Report the current vs target schema version without changing
+        /// anything (no snapshot, no migration).
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -7760,6 +7770,104 @@ async fn handle_db(
             if !problems.is_empty() && !repair {
                 std::process::exit(1);
             }
+        }
+        DbAction::Upgrade { check } => {
+            // Read the version gap first (works for both --check and real runs).
+            let probe = match client
+                .post(format!("{server}/api/db/upgrade"))
+                .json(&serde_json::json!({ "check": true }))
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !probe.status().is_success() {
+                http_error_exit(probe, "db upgrade check failed").await;
+            }
+            let status: Value = probe.json().await?;
+            let cur = status["current_version"].as_u64().unwrap_or(0);
+            let target = status["target_version"].as_u64().unwrap_or(0);
+            let pending = status["pending"].as_bool().unwrap_or(false);
+
+            if check {
+                emit(format, &status, |_| {
+                    if pending {
+                        println!(
+                            "schema: at v{cur}, target v{target} — {} migration(s) pending",
+                            target - cur
+                        );
+                        println!("run `ctx db upgrade` to apply (snapshots first).");
+                    } else {
+                        println!("schema: at v{cur} — up to date ✓");
+                    }
+                });
+                return Ok(());
+            }
+
+            if !pending {
+                emit(format, &status, |_| {
+                    println!("schema: at v{cur} — already up to date, nothing to do ✓");
+                });
+                return Ok(());
+            }
+
+            // Snapshot before mutating the schema.
+            let backup = match client
+                .post(format!("{server}/api/admin/backup"))
+                .json(&serde_json::json!({}))
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if backup.status().is_success() {
+                if let Ok(b) = backup.json::<Value>().await
+                    && let Some(path) = b["path"].as_str()
+                {
+                    eprintln!("snapshot: {path}");
+                }
+            } else {
+                eprintln!("warning: snapshot failed; continuing (migrations are version-guarded)");
+            }
+
+            // Apply migrations.
+            let resp = match client
+                .post(format!("{server}/api/db/upgrade"))
+                .json(&serde_json::json!({ "check": false }))
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "db upgrade failed").await;
+            }
+            let done: Value = resp.json().await?;
+            let now = done["current_version"].as_u64().unwrap_or(cur);
+
+            // Verify integrity after migrating.
+            let mut problems = 0usize;
+            if let Ok(r) = client
+                .post(format!("{server}/api/fsck"))
+                .json(&serde_json::json!({ "repair": false }))
+                .send()
+                .await
+                && let Ok(v) = r.json::<Value>().await
+            {
+                problems = v["problems"].as_array().map(|a| a.len()).unwrap_or(0);
+            }
+
+            emit(format, &done, |_| {
+                println!("schema: upgraded v{cur} → v{now} ✓");
+                if problems == 0 {
+                    println!("integrity: fsck clean ✓");
+                } else {
+                    println!("integrity: fsck found {problems} problem(s) — run `ctx db fsck`");
+                }
+            });
         }
     }
     Ok(())

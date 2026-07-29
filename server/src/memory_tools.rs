@@ -2507,8 +2507,11 @@ impl CtxOneServer {
         use crate::plan_tools as pt;
         let p = params.0;
         let store = pt::make_store(self.repo.clone(), &self.agent_id);
-        serde_json::to_string(&pt::stale_in_progress(&store, &p.ref_name, p.days))
-            .unwrap_or_else(|_| "[]".into())
+        match pt::stale_in_progress(&store, &p.ref_name, p.days) {
+            Ok(v) => serde_json::to_string(&v).unwrap_or_else(|_| "[]".into()),
+            // Surface repository-integrity failures rather than an empty list.
+            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+        }
     }
 
     #[tool(
@@ -2522,7 +2525,11 @@ impl CtxOneServer {
     async fn docs_find(&self, params: Parameters<crate::plan_tools::DocsFindParams>) -> String {
         use crate::plan_tools as pt;
         let p = params.0;
-        let all = pt::list_registered_docs(&self.repo, &p.ref_name);
+        let all = match pt::list_registered_docs(&self.repo, &p.ref_name) {
+            Ok(v) => v,
+            // Surface repository-integrity failures rather than an empty result.
+            Err(e) => return serde_json::json!({ "error": e.to_string() }).to_string(),
+        };
         let q = p.query.to_lowercase();
         let matched: Vec<_> = if q.is_empty() {
             all

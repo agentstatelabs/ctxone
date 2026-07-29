@@ -83,6 +83,23 @@ fail()  { printf '\033[31m  ✗ %s\033[0m\n' "$*" >&2; exit 1; }
 # ---------------------------------------------------------------------------
 cd "$REPO_ROOT"
 
+# Guard: never release from a stale local main. Releases have been cut from a
+# local main that was many commits behind origin/main — that either fails on a
+# non-fast-forward push or quietly reverts upstream commits. Fetch and refuse
+# if behind. Override with SKIP_SYNC_CHECK=1 for a deliberate offline build.
+if [[ "${SKIP_SYNC_CHECK:-0}" != "1" ]]; then
+  step "verify local branch is in sync with origin/main"
+  if git fetch --quiet origin main 2>/dev/null; then
+    behind="$(git rev-list --count HEAD..origin/main 2>/dev/null || echo 0)"
+    if [[ "$behind" != "0" ]]; then
+      fail "local branch is $behind commit(s) behind origin/main — run 'git pull --ff-only origin main' first (or SKIP_SYNC_CHECK=1 to override)"
+    fi
+    ok "in sync with origin/main"
+  else
+    warn "could not fetch origin (offline?) — skipping sync check"
+  fi
+fi
+
 if [[ "${SKIP_TAG:-0}" != "1" ]]; then
   step "bump workspace version + tag $VERSION"
   if [[ -n "$(git status --porcelain Cargo.toml Cargo.lock 2>/dev/null)" ]]; then
