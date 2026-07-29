@@ -571,6 +571,7 @@ fn router_with_config_inner(
         // Plan endpoints
         .route("/api/export", get(export_graph))
         .route("/api/import", post(import_graph))
+        .route("/api/fsck", post(fsck))
         .route("/api/docs", get(list_docs).post(register_doc))
         .route("/api/plans", get(list_plans).post(create_plan))
         // Static path registered before `/api/plans/{name}` so it wins the match.
@@ -1239,6 +1240,101 @@ async fn export_graph(
         "namespace": ns.0,
         "count": map.len(),
         "paths": serde_json::Value::Object(map),
+    })))
+}
+
+#[derive(Deserialize, Default)]
+struct FsckRequest {
+    /// When true, rewind every damaged ref to its nearest fully-readable
+    /// ancestor commit. Destructive (abandons the dangling commit); the CLI
+    /// gates it behind an explicit `--repair` + confirmation.
+    #[serde(default)]
+    repair: bool,
+}
+
+/// `POST /api/fsck` — verify repository integrity across every namespace and
+/// branch: walk each branch head's state tree and report any object that is
+/// referenced but missing from the store (the "dangling interior node" class
+/// of corruption). With `repair: true`, rewind each damaged ref to its nearest
+/// fully-readable ancestor. Because no GC ever deletes objects, that ancestor's
+/// tree is guaranteed intact and the completed work below the break survives.
+async fn fsck(
+    State(s): State<HubState>,
+    Json(req): Json<FsckRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // Every namespace, plus `default` (which list_namespaces omits — it is the
+    // root, not a fork).
+    let mut namespaces = s.repo.list_namespaces().map_err(internal_error)?;
+    if !namespaces.iter().any(|n| n.as_str() == Namespace::DEFAULT) {
+        namespaces.push(
+            Namespace::new(Namespace::DEFAULT)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+        );
+    }
+
+    let mut checked = 0usize;
+    let mut problems = Vec::new();
+
+    for ns in namespaces {
+        let ns_name = ns.as_str().to_string();
+        let repo = s.repo_for(&NamespaceId(ns_name.clone()))?;
+        let branches = repo.list_branches(None).map_err(internal_error)?;
+        for (branch, head) in branches {
+            checked += 1;
+            // A branch is damaged if its head commit is missing, or any object
+            // reachable from the commit's state tree is missing.
+            let missing: String = match repo.first_missing_object(&head) {
+                Ok(None) => continue, // healthy
+                Ok(Some(id)) => id.to_hex(),
+                // A missing head commit (or any read error) is itself a defect.
+                Err(e) => e.to_string(),
+            };
+
+            let ancestor = repo.nearest_readable_ancestor(&head).ok().flatten();
+            let mut repaired = false;
+            let mut repaired_to = serde_json::Value::Null;
+            if req.repair {
+                if let Some(anc) = ancestor {
+                    match repo.set_ref(&branch, anc) {
+                        Ok(()) => {
+                            repaired = true;
+                            repaired_to = serde_json::Value::String(anc.to_hex());
+                        }
+                        Err(e) => {
+                            problems.push(serde_json::json!({
+                                "namespace": ns_name,
+                                "branch": branch,
+                                "head": head.to_hex(),
+                                "missing_object": missing.clone(),
+                                "nearest_readable_ancestor": anc.to_hex(),
+                                "repaired": false,
+                                "repair_error": e.to_string(),
+                            }));
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            problems.push(serde_json::json!({
+                "namespace": ns_name,
+                "branch": branch,
+                "head": head.to_hex(),
+                "missing_object": missing,
+                "nearest_readable_ancestor":
+                    ancestor.map(|a| a.to_hex()).map(serde_json::Value::String)
+                        .unwrap_or(serde_json::Value::Null),
+                "repaired": repaired,
+                "repaired_to": repaired_to,
+            }));
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "checked": checked,
+        "healthy": checked - problems.len(),
+        "problems": problems,
+        "repair": req.repair,
     })))
 }
 

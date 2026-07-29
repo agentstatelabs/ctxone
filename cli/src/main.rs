@@ -1187,6 +1187,20 @@ enum DbAction {
         /// Path to the snapshot JSON file.
         file: String,
     },
+    /// Check repository integrity across every namespace and branch: report any
+    /// branch whose state tree references an object missing from the store
+    /// (dangling/corrupt tree). Read-only unless `--repair` is given.
+    Fsck {
+        /// Rewind each damaged ref to its nearest fully-readable ancestor
+        /// commit. Destructive (abandons the dangling commit) but safe — the
+        /// completed work below the break survives, since objects are never
+        /// garbage-collected. Prompts for confirmation unless `--yes`.
+        #[arg(long)]
+        repair: bool,
+        /// Skip the confirmation prompt for `--repair`.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -7647,6 +7661,71 @@ async fn handle_db(
                 println!("  previous db preserved at {}", preserved);
                 println!("  start the hub when ready");
             });
+        }
+        DbAction::Fsck { repair, yes } => {
+            if repair && !yes {
+                eprintln!(
+                    "About to REPAIR: every damaged branch will be rewound to its nearest\n\
+                     fully-readable ancestor commit (the dangling commit is abandoned).\n\
+                     Take a snapshot first: `ctx db backup`.\nProceed? [y/N] "
+                );
+                use std::io::BufRead;
+                let mut line = String::new();
+                std::io::stdin().lock().read_line(&mut line)?;
+                if !matches!(line.trim().to_lowercase().as_str(), "y" | "yes") {
+                    eprintln!("aborted");
+                    std::process::exit(0);
+                }
+            }
+
+            let body = serde_json::json!({ "repair": repair });
+            let resp = match client.post(format!("{server}/api/fsck")).json(&body).send().await {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "db fsck failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            let problems = parsed["problems"].as_array().cloned().unwrap_or_default();
+            emit(format, &parsed, |v| {
+                let checked = v["checked"].as_u64().unwrap_or(0);
+                let healthy = v["healthy"].as_u64().unwrap_or(0);
+                if problems.is_empty() {
+                    println!("fsck: {checked} branch(es) checked, all healthy ✓");
+                    return;
+                }
+                println!(
+                    "fsck: {checked} checked, {healthy} healthy, {} PROBLEM(S):",
+                    problems.len()
+                );
+                for p in &problems {
+                    let ns = p["namespace"].as_str().unwrap_or("?");
+                    let br = p["branch"].as_str().unwrap_or("?");
+                    let missing = p["missing_object"].as_str().unwrap_or("?");
+                    let anc = p["nearest_readable_ancestor"].as_str();
+                    println!("  ✗ {ns}/{br}");
+                    println!("      missing object: {missing}");
+                    match anc {
+                        Some(a) => println!("      nearest readable ancestor: {a}"),
+                        None => println!("      nearest readable ancestor: NONE (corruption at root)"),
+                    }
+                    if p["repaired"].as_bool().unwrap_or(false) {
+                        println!(
+                            "      REPAIRED → rewound to {}",
+                            p["repaired_to"].as_str().unwrap_or("?")
+                        );
+                    } else if let Some(err) = p["repair_error"].as_str() {
+                        println!("      repair FAILED: {err}");
+                    }
+                }
+                if !repair {
+                    println!("\nRun `ctx db fsck --repair` to rewind damaged refs (snapshot first).");
+                }
+            });
+            if !problems.is_empty() && !repair {
+                std::process::exit(1);
+            }
         }
     }
     Ok(())
