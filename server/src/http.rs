@@ -569,6 +569,10 @@ fn router_with_config_inner(
         .route("/api/memory/summarize_session", post(summarize_session))
         .route("/api/memory/what_changed_since", get(what_changed_since))
         .route("/api/memory/why_did_we", get(why_did_we))
+        // On-demand instruction disclosure (t-005). Docs are compiled in, so
+        // these need no repo/session — they describe the running binary.
+        .route("/api/help", get(help_lookup))
+        .route("/api/help/manifest", get(help_manifest))
         // Plan endpoints
         .route("/api/export", get(export_graph))
         .route("/api/import", post(import_graph))
@@ -1172,6 +1176,24 @@ async fn stats(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
     repo.stats(&ref_name).map(Json).map_err(internal_error)
+}
+
+#[derive(Deserialize)]
+struct HelpQuery {
+    /// Feature name or phrase; absent -> full catalog.
+    topic: Option<String>,
+}
+
+/// `GET /api/help?topic=<feature|phrase>` — on-demand instruction disclosure.
+/// No repo/session: the docs are compiled into this binary (t-005).
+async fn help_lookup(Query(q): Query<HelpQuery>) -> Json<serde_json::Value> {
+    Json(crate::help::respond(q.topic.as_deref()))
+}
+
+/// `GET /api/help/manifest` — this binary's lightweight feature index, published
+/// so a unified `help` can route across the separate ctx/asd binaries.
+async fn help_manifest() -> Json<serde_json::Value> {
+    Json(crate::help::manifest())
 }
 
 #[derive(Deserialize)]

@@ -61,6 +61,10 @@ pub enum OutputFormat {
 
 #[derive(Parser)]
 #[command(name = "ctx", about = "CtxOne — AI agent memory CLI", version)]
+// We ship our own `help` subcommand (on-demand ctx/asd feature docs), so the
+// auto-generated clap `help` subcommand must be disabled to avoid a name clash.
+// `-h`/`--help` flags still work everywhere.
+#[command(disable_help_subcommand = true)]
 struct RawCli {
     /// Hub server URL (env: CTX_SERVER, config: server)
     #[arg(long, env = "CTX_SERVER", global = true)]
@@ -509,6 +513,16 @@ enum Commands {
         /// Text to tokenize. Use "-" or omit to read from stdin.
         #[arg(default_value = "-")]
         text: String,
+    },
+    /// Get exact syntax, examples, and gotchas for a ctx/asd feature on demand.
+    /// Omit the topic to list the full catalog; pass `--manifest` to print this
+    /// binary's feature index (for the shared cross-tool help handshake).
+    Help {
+        /// Feature name (e.g. "remember") or a phrase (e.g. "save a memory").
+        topic: Option<String>,
+        /// Print the JSON manifest this binary publishes, instead of docs.
+        #[arg(long)]
+        manifest: bool,
     },
     /// Load the full stored context for a named project (everything under that
     /// project's context path), unranked and unbudgeted. Use when you want the
@@ -1539,6 +1553,112 @@ fn extract_id(v: &Value) -> Option<&str> {
 /// Render a Value according to the chosen output format.
 /// For `Text`, calls the supplied closure with the parsed value; for `Json`,
 /// prints pretty JSON; for `Id`, extracts sensible identifier fields.
+/// Render a `/api/help` response as readable text (catalog, a single feature,
+/// or a not-found suggestion). JSON/manifest output goes through `emit`'s JSON
+/// branch untouched.
+fn render_help(v: &Value) {
+    // Catalog (no topic): grouped feature list.
+    if let Some(groups) = v.get("groups").and_then(|g| g.as_object()) {
+        println!(
+            "ctx help — {} features (v{}). Call `ctx help <feature>` for details.\n",
+            v.get("feature_count").and_then(|c| c.as_u64()).unwrap_or(0),
+            v.get("version").and_then(|s| s.as_str()).unwrap_or("?"),
+        );
+        for (group, feats) in groups {
+            println!("{}:", group);
+            if let Some(arr) = feats.as_array() {
+                for f in arr {
+                    println!(
+                        "  {:<22} {}",
+                        f.get("feature").and_then(|s| s.as_str()).unwrap_or(""),
+                        f.get("synopsis").and_then(|s| s.as_str()).unwrap_or(""),
+                    );
+                }
+            }
+            println!();
+        }
+        return;
+    }
+
+    // Weak match: disambiguation candidates.
+    if let Some(matches) = v.get("matches").and_then(|m| m.as_array()) {
+        println!(
+            "No exact match for '{}'. Did you mean:",
+            v.get("query").and_then(|s| s.as_str()).unwrap_or(""),
+        );
+        for m in matches {
+            println!(
+                "  {:<22} {}",
+                m.get("feature").and_then(|s| s.as_str()).unwrap_or(""),
+                m.get("synopsis").and_then(|s| s.as_str()).unwrap_or(""),
+            );
+        }
+        return;
+    }
+
+    // Not found: suggestions.
+    if let Some(nf) = v.get("not_found").and_then(|s| s.as_str()) {
+        println!("No ctx feature matched '{}'.", nf);
+        if let Some(hint) = v.get("hint").and_then(|s| s.as_str()) {
+            println!("{}", hint);
+        }
+        if let Some(arr) = v.get("did_you_mean").and_then(|d| d.as_array()) {
+            let names: Vec<&str> = arr.iter().filter_map(|x| x.as_str()).collect();
+            println!("Available: {}", names.join(", "));
+        }
+        return;
+    }
+
+    // Single feature.
+    let get = |k: &str| v.get(k).and_then(|s| s.as_str()).unwrap_or("");
+    println!("{} — {}", get("feature"), get("synopsis"));
+    println!("  syntax: {}", get("syntax"));
+    if let Some(params) = v.get("params").and_then(|p| p.as_array())
+        && !params.is_empty()
+    {
+        println!("  params:");
+        for p in params {
+            let req = if p.get("required").and_then(|b| b.as_bool()).unwrap_or(false) {
+                "(required)"
+            } else {
+                "(optional)"
+            };
+            println!(
+                "    {:<16} {} {}",
+                p.get("name").and_then(|s| s.as_str()).unwrap_or(""),
+                req,
+                p.get("desc").and_then(|s| s.as_str()).unwrap_or(""),
+            );
+        }
+    }
+    let list = |label: &str, key: &str| {
+        if let Some(arr) = v.get(key).and_then(|a| a.as_array())
+            && !arr.is_empty()
+        {
+            println!("  {}:", label);
+            for item in arr {
+                if let Some(s) = item.as_str() {
+                    println!("    - {}", s);
+                }
+            }
+        }
+    };
+    list("examples", "examples");
+    list("gotchas", "gotchas");
+    list("related", "related");
+    if let Some(also) = v.get("also").and_then(|a| a.as_array())
+        && !also.is_empty()
+    {
+        let names: Vec<&str> = also.iter().filter_map(|x| x.as_str()).collect();
+        println!("  see also: {}", names.join(", "));
+    }
+    println!(
+        "  (~{} tokens, v{})",
+        v.get("help_tokens").and_then(|t| t.as_u64()).unwrap_or(0),
+        get("version"),
+    );
+}
+
 fn emit<F: FnOnce(&Value)>(format: OutputFormat, value: &Value, text_fn: F) {
     match format {
         OutputFormat::Json => {
@@ -1754,6 +1874,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("  commit: {}", id);
                 }
             });
+        }
+        Commands::Help { topic, manifest } => {
+            let url = if manifest {
+                format!("{}/api/help/manifest", cli.server)
+            } else {
+                match &topic {
+                    Some(t) => format!("{}/api/help?topic={}", cli.server, urlencoding(t)),
+                    None => format!("{}/api/help", cli.server),
+                }
+            };
+            let resp = match client.get(&url).send().await {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(&cli.server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "help failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(cli.format, &parsed, |v| render_help(v));
         }
         Commands::Recall {
             topic,

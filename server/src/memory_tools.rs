@@ -1311,6 +1311,14 @@ pub struct ContextParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct HelpParams {
+    /// Feature name (e.g. "remember") or a phrase (e.g. "save a memory") to
+    /// fuzzy-match. Omit to get the full grouped catalog of every feature.
+    #[serde(default)]
+    pub topic: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct SummarizeSessionParams {
     /// Session identifier.
     pub session_id: String,
@@ -2116,6 +2124,17 @@ impl CtxOneServer {
             }
             Err(e) => format!("No context found for '{}': {}", p.project, e),
         }
+    }
+
+    #[tool(
+        description = "Get exact syntax, examples, and gotchas for a ctx/asd feature ON DEMAND, instead of carrying every tool's full docs in context every turn. \
+        \
+        CALL THIS BEFORE using a ctx/asd feature whose exact syntax you're unsure of — it costs ~150-250 tokens and returns synopsis, syntax, params, worked examples, gotchas, and related features. Pass a `topic` (a feature name like 'remember', or a phrase like 'save a memory' — it fuzzy-matches). Omit `topic` to get the full grouped catalog of every available feature; browse it to discover capabilities you'd otherwise miss. Docs are compiled into the running binary, so they always match the code. If nothing matches here it may be an `asd` feature — the response will say so."
+    )]
+    async fn help(&self, params: Parameters<HelpParams>) -> String {
+        let p = params.0;
+        let result = crate::help::respond(p.topic.as_deref());
+        serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string())
     }
 
     #[tool(
