@@ -2297,6 +2297,24 @@ struct RefQuery {
     ref_name: String,
 }
 
+/// Like `RefQuery` but the branch is optional, so the handler can tell
+/// "caller omitted `?ref=`" from "caller asked for `main`" and fall back
+/// to another source (e.g. a JSON body) before defaulting.
+#[derive(Deserialize)]
+struct OptionalRefQuery {
+    #[serde(default, rename = "ref")]
+    ref_name: Option<String>,
+}
+
+/// Optional JSON body for `archive_plan`. Older CLIs sent the branch here
+/// (`{"ref": "..."}`) instead of as `?ref=`; accepting it as a fallback
+/// keeps those clients working rather than silently archiving on `main`.
+#[derive(Deserialize, Default)]
+struct ArchiveBody {
+    #[serde(default, rename = "ref")]
+    ref_name: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct PlanListQuery {
     #[serde(default = "default_ref", rename = "ref")]
@@ -2875,18 +2893,28 @@ async fn next_plan_task(
     Ok(Json(body))
 }
 
-#[instrument(skip_all, fields(name = %name, ref_name = %q.ref_name, agent = %agent_id.0))]
+#[instrument(skip_all, fields(name = %name, agent = %agent_id.0))]
 async fn archive_plan(
     State(s): State<HubState>,
     ns: NamespaceId,
     agent_id: AgentId,
     Path(name): Path<String>,
-    Query(q): Query<RefQuery>,
+    Query(q): Query<OptionalRefQuery>,
+    body: Option<Json<ArchiveBody>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // Branch resolution precedence: explicit `?ref=` wins; then the JSON
+    // body's `ref` (legacy CLIs); then the default branch. Resolving the
+    // branch exactly like show/list/complete is the whole fix — reading it
+    // only from the query with a silent "main" default made archives on any
+    // other branch 404.
+    let ref_name = q
+        .ref_name
+        .or_else(|| body.and_then(|Json(b)| b.ref_name))
+        .unwrap_or_else(default_ref);
     let repo = s.repo_for(&ns)?;
     let store = plan_tools::make_store(repo.clone(), &agent_id.0);
     let plan = store
-        .archive_plan(&q.ref_name, &name)
+        .archive_plan(&ref_name, &name)
         .map_err(substrate_error_to_response)?;
     s.sessions.mark_all_dirty();
     Ok(Json(plan_tools::plan_to_json(&plan, &[], false)))

@@ -728,3 +728,244 @@ async fn completing_last_task_promotes_plan_to_completed() {
     let (_, body) = call_json(router, get("/api/plans/p1")).await;
     assert_eq!(body["status"], "completed");
 }
+
+// ---------------------------------------------------------------------------
+// Archive branch-resolution regression tests.
+//
+// Bug: `POST /api/plans/{name}/archive` read the branch only from `?ref=`,
+// defaulting to "main". The CLI sent the branch in the JSON body, so archives
+// on any non-default branch resolved "main", missed the plan, and returned a
+// misleading 404 — even though show/list/complete resolved it fine. Fix:
+// resolve the branch like every other plan command (query `?ref=` first, then
+// the JSON body as a legacy fallback), and archive any status (soft archival).
+// ---------------------------------------------------------------------------
+
+/// Ensure a branch exists so plans can be created on it.
+async fn make_branch(router: axum::Router, name: &str) {
+    let (status, _) = call_json(
+        router,
+        post_json_with_agent(
+            "/api/branches",
+            "test",
+            json!({ "name": name, "from": "main", "if_missing": true }),
+        ),
+    )
+    .await;
+    assert!(status.is_success(), "branch create failed: {status}");
+}
+
+#[tokio::test]
+async fn archive_active_plan_on_non_default_branch() {
+    let router = test_router();
+    make_branch(router.clone(), "feature").await;
+    let _ = call_json(
+        router.clone(),
+        post_json_with_agent(
+            "/api/plans",
+            "test",
+            json!({"name": "p1", "ref": "feature"}),
+        ),
+    )
+    .await;
+
+    // Archive resolving the branch via `?ref=` must succeed (previously 404).
+    let (status, body) = call_json(
+        router.clone(),
+        post_json_with_agent("/api/plans/p1/archive?ref=feature", "test", json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "archive on branch must succeed");
+    assert_eq!(body["status"], "archived");
+
+    // Still readable on the branch, and listable under status=archived.
+    let (_, got) = call_json(router.clone(), get("/api/plans/p1?ref=feature")).await;
+    assert_eq!(got["status"], "archived");
+    let (_, listed) = call_json(router, get("/api/plans?ref=feature&status=archived")).await;
+    assert_eq!(listed.as_array().unwrap()[0]["name"], "p1");
+}
+
+#[tokio::test]
+async fn archive_completed_plan_on_branch() {
+    let router = test_router();
+    make_branch(router.clone(), "feature").await;
+    let _ = call_json(
+        router.clone(),
+        post_json_with_agent(
+            "/api/plans",
+            "test",
+            json!({"name": "p1", "ref": "feature"}),
+        ),
+    )
+    .await;
+    // Task endpoints read `ref` from the JSON body, not the query string.
+    let (_, t) = call_json(
+        router.clone(),
+        post_json_with_agent(
+            "/api/plans/p1/tasks",
+            "test",
+            json!({"title": "only one", "ref": "feature"}),
+        ),
+    )
+    .await;
+    let id = t["id"].as_str().unwrap().to_string();
+    let _ = call_json(
+        router.clone(),
+        post_json_with_agent(
+            &format!("/api/plans/p1/tasks/{}/start", id),
+            "test",
+            json!({"ref": "feature"}),
+        ),
+    )
+    .await;
+    let _ = call_json(
+        router.clone(),
+        post_json_with_agent(
+            &format!("/api/plans/p1/tasks/{}/complete", id),
+            "test",
+            json!({"proof": {"kind": "text", "value": "done"}, "ref": "feature"}),
+        ),
+    )
+    .await;
+
+    // Completed plans must archive too (this failed under the old bug).
+    let (status, body) = call_json(
+        router,
+        post_json_with_agent("/api/plans/p1/archive?ref=feature", "test", json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "archived");
+}
+
+#[tokio::test]
+async fn archive_empty_plan_on_branch() {
+    let router = test_router();
+    make_branch(router.clone(), "feature").await;
+    let _ = call_json(
+        router.clone(),
+        post_json_with_agent(
+            "/api/plans",
+            "test",
+            json!({"name": "empty", "ref": "feature"}),
+        ),
+    )
+    .await;
+
+    let (status, body) = call_json(
+        router,
+        post_json_with_agent("/api/plans/empty/archive?ref=feature", "test", json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "empty plan must archive");
+    assert_eq!(body["status"], "archived");
+}
+
+#[tokio::test]
+async fn archive_resolves_branch_from_json_body_fallback() {
+    // Legacy clients sent the branch only in the JSON body (no `?ref=`).
+    // The server must honour that rather than silently archiving "main".
+    let router = test_router();
+    make_branch(router.clone(), "feature").await;
+    let _ = call_json(
+        router.clone(),
+        post_json_with_agent(
+            "/api/plans",
+            "test",
+            json!({"name": "p1", "ref": "feature"}),
+        ),
+    )
+    .await;
+
+    let (status, body) = call_json(
+        router,
+        post_json_with_agent("/api/plans/p1/archive", "test", json!({"ref": "feature"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body ref must resolve the branch");
+    assert_eq!(body["status"], "archived");
+}
+
+#[tokio::test]
+async fn archive_without_ref_defaults_to_main_and_404s_branch_only_plan() {
+    // No `?ref=` and no body ref → default "main". A plan that lives only on
+    // a branch is genuinely absent from main, so 404 is correct here — the
+    // bug was that this path was taken even when the caller specified a branch.
+    let router = test_router();
+    make_branch(router.clone(), "feature").await;
+    let _ = call_json(
+        router.clone(),
+        post_json_with_agent(
+            "/api/plans",
+            "test",
+            json!({"name": "p1", "ref": "feature"}),
+        ),
+    )
+    .await;
+
+    let resp = router
+        .oneshot(post_json_with_agent(
+            "/api/plans/p1/archive",
+            "test",
+            json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn archive_same_plan_id_different_status_on_two_branches() {
+    // The same plan id exists on `main` (active) and `feature`. Archiving on
+    // `feature` must not touch the `main` copy — branch isolation.
+    let router = test_router();
+    make_branch(router.clone(), "feature").await;
+    let _ = call_json(
+        router.clone(),
+        post_json_with_agent("/api/plans", "test", json!({"name": "dup"})),
+    )
+    .await;
+    let _ = call_json(
+        router.clone(),
+        post_json_with_agent(
+            "/api/plans",
+            "test",
+            json!({"name": "dup", "ref": "feature"}),
+        ),
+    )
+    .await;
+
+    let (status, body) = call_json(
+        router.clone(),
+        post_json_with_agent("/api/plans/dup/archive?ref=feature", "test", json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "archived");
+
+    // The main copy is untouched.
+    let (_, main_copy) = call_json(router, get("/api/plans/dup")).await;
+    assert_eq!(main_copy["status"], "active");
+}
+
+#[tokio::test]
+async fn archive_absent_on_branch_present_on_main_404s() {
+    // Plan exists on main only; archiving on `feature` must 404, not fall
+    // through to the main copy.
+    let router = test_router();
+    make_branch(router.clone(), "feature").await;
+    let _ = call_json(
+        router.clone(),
+        post_json_with_agent("/api/plans", "test", json!({"name": "p1"})),
+    )
+    .await;
+
+    let resp = router
+        .oneshot(post_json_with_agent(
+            "/api/plans/p1/archive?ref=feature",
+            "test",
+            json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
