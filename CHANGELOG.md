@@ -4,6 +4,19 @@ All notable changes to CTXone are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 the project's `0.9.x` series (incremented by 0.0.01 per release).
 
+## [v0.9.20] — 2026-07-29
+
+### Added
+- `ctx branch reset <name> --to <ref> [--backup]` and `POST /api/branches/reset` — reset a branch to a ref, optionally snapshotting a timestamped recovery ref first.
+- `ctx merge --dry-run` / `--allow-deletions` across CLI, HTTP, and MCP — preview a merge and gate merges that would delete nodes.
+- `ctx init --no-mcp` — skip the MCP config step during init; AGENTS.md is primed non-interactively (no Y/n prompt).
+
+### Changed
+- Merge now enforces a plans-domain policy: rejects done→pending task regressions, promotes active→completed plans post-merge, and preserves task proofs.
+
+### Fixed
+- `archive_plan` resolves the branch from the query string then the JSON body, fixing spurious 404s when archiving plans on non-default branches.
+
 ## [v0.9.19] — 2026-07-29
 
 ### Added
