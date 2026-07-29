@@ -1430,7 +1430,12 @@ enum PlanAction {
     /// List the tasks of a plan (flat — no plan envelope). Use `show`
     /// when you also want plan metadata.
     Tasks { plan_id: String },
-    /// Archive a plan (soft — task data preserved)
+    /// Archive a plan: a soft, reversible transition valid for any
+    /// status (active, completed, or empty). All tasks, proofs, and
+    /// abandonment reasons are preserved; the plan simply leaves the
+    /// active set. Resolves the plan on the active --branch. Prefer
+    /// this over `complete` when you want to shelve a plan without
+    /// marking its open tasks abandoned.
     Archive { plan_id: String },
     /// Force-complete a plan: abandon every still-open task with a fixed
     /// reason and let the engine promote the plan to `completed`.
@@ -7270,7 +7275,18 @@ async fn handle_plan(
             });
         }
         PlanAction::Archive { plan_id } => {
-            let url = format!("{}/api/plans/{}/archive", server, urlencoding(&plan_id),);
+            // The branch MUST travel as the `?ref=` query param — that is
+            // what the server's archive handler reads (like show/list/
+            // complete). Sending it only in the JSON body left the server
+            // falling back to the default branch ("main"), so archives on
+            // any other branch 404'd. We still include the body ref as a
+            // belt-and-suspenders fallback for older servers.
+            let url = format!(
+                "{}/api/plans/{}/archive?ref={}",
+                server,
+                urlencoding(&plan_id),
+                urlencoding(&branch),
+            );
             let resp = match client
                 .post(&url)
                 .header("X-CTXone-Agent", &agent_id)
