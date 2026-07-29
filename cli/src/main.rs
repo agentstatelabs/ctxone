@@ -3534,7 +3534,9 @@ async fn agents_status(
 
     let url = format!(
         "{}/api/state/{}/paths?prefix=/memory/pinned/{}",
-        server, encode_ref(branch), AGENTS_SOURCE
+        server,
+        encode_ref(branch),
+        AGENTS_SOURCE
     );
     let resp = match client.get(&url).send().await {
         Ok(r) => r,
@@ -3593,7 +3595,9 @@ async fn agents_remove(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let paths_url = format!(
         "{}/api/state/{}/paths?prefix=/memory/pinned/{}",
-        server, encode_ref(branch), AGENTS_SOURCE
+        server,
+        encode_ref(branch),
+        AGENTS_SOURCE
     );
     let paths_resp = match client.get(&paths_url).send().await {
         Ok(r) => r,
@@ -7700,7 +7704,12 @@ async fn handle_db(
             }
 
             let body = serde_json::json!({ "repair": repair });
-            let resp = match client.post(format!("{server}/api/fsck")).json(&body).send().await {
+            let resp = match client
+                .post(format!("{server}/api/fsck"))
+                .json(&body)
+                .send()
+                .await
+            {
                 Ok(r) => r,
                 Err(e) => unreachable_exit(server, e),
             };
@@ -7729,7 +7738,9 @@ async fn handle_db(
                     println!("      missing object: {missing}");
                     match anc {
                         Some(a) => println!("      nearest readable ancestor: {a}"),
-                        None => println!("      nearest readable ancestor: NONE (corruption at root)"),
+                        None => {
+                            println!("      nearest readable ancestor: NONE (corruption at root)")
+                        }
                     }
                     if p["repaired"].as_bool().unwrap_or(false) {
                         println!(
@@ -7741,7 +7752,9 @@ async fn handle_db(
                     }
                 }
                 if !repair {
-                    println!("\nRun `ctx db fsck --repair` to rewind damaged refs (snapshot first).");
+                    println!(
+                        "\nRun `ctx db fsck --repair` to rewind damaged refs (snapshot first)."
+                    );
                 }
             });
             if !problems.is_empty() && !repair {
