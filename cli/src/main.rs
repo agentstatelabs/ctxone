@@ -388,8 +388,8 @@ enum BranchAction {
     Create {
         /// Name of the new branch
         name: String,
-        /// Ref to branch from (default: main)
-        #[arg(long, default_value = "main")]
+        /// Branch, tag, full commit ID, or unique commit prefix (default: main)
+        #[arg(long, default_value = "main", value_name = "REF")]
         from: String,
     },
     /// List all branches
@@ -398,6 +398,17 @@ enum BranchAction {
     Rm {
         /// Name of the branch to delete
         name: String,
+    },
+    /// Reset a branch to point at another ref, backing up the old target
+    Reset {
+        /// Branch to reset (its ref is moved)
+        name: String,
+        /// Branch, tag, full commit ID, or unique commit prefix to reset to
+        #[arg(long, value_name = "REF")]
+        to: String,
+        /// Retain the old target as a timestamped recovery ref before resetting
+        #[arg(long)]
+        backup: bool,
     },
 }
 
@@ -697,6 +708,15 @@ enum Commands {
         /// Commit message describing the merge
         #[arg(short = 'm', long)]
         message: Option<String>,
+        /// Preview the merge without changing the target branch
+        #[arg(long)]
+        dry_run: bool,
+        /// Allow the merge to remove whole plans/memory entries
+        #[arg(long)]
+        allow_deletions: bool,
+        /// Allow the merge to move a completed task back to a non-terminal state
+        #[arg(long)]
+        allow_regressions: bool,
     },
     /// Forget (delete) a memory at a specific path
     Forget {
@@ -821,10 +841,15 @@ enum Commands {
         /// Show what would be written without writing
         #[arg(long)]
         dry_run: bool,
-        /// Skip the interactive prompt to install AGENTS.md guidance.
-        /// Useful in scripts that want only the MCP config step.
+        /// Skip priming the AGENTS.md guidance. Useful in scripts that want
+        /// only the MCP config step. (AGENTS.md is primed by default.)
         #[arg(long)]
         no_agents: bool,
+        /// Skip writing the MCP server config. Useful when the MCP entry is
+        /// already configured and you only want to (re)prime AGENTS.md. Pair
+        /// with `--no-agents` and init does nothing.
+        #[arg(long)]
+        no_mcp: bool,
         /// MCP transport to configure. `http` (default, recommended) points
         /// the tool at a shared daemon's `/mcp` URL — run one
         /// `ctxone-hub --http --lens` (or `ctx service install`, see
@@ -855,8 +880,9 @@ enum Commands {
     },
     /// Manage the AGENTS.md guidance file — a short, pinned document
     /// that teaches AI tools how to use CTXone effectively. See
-    /// `ctx agents show` for the full text. Nothing is installed
-    /// automatically; `install` always prompts unless `--yes` is passed.
+    /// `ctx agents show` for the full text. `install` primes it
+    /// non-interactively; `ctx init` primes it too unless `--no-agents`
+    /// is passed. Remove it any time with `ctx agents remove`.
     Agents {
         #[command(subcommand)]
         action: AgentsAction,
@@ -1465,16 +1491,16 @@ enum PlanAction {
 #[derive(Subcommand)]
 enum AgentsAction {
     /// Write AGENTS.md to disk (if not present) and prime it as
-    /// pinned memory in the Hub. Shows the full content first and
-    /// asks for confirmation, unless `--yes` is passed.
+    /// pinned memory in the Hub. Primes non-interactively (no prompt).
+    /// Use `--show` to preview the content without priming.
     Install {
         /// Use a custom AGENTS.md file instead of the embedded default.
         /// Useful when you've already edited your copy and want to
         /// re-prime after changes.
         #[arg(long)]
         file: Option<String>,
-        /// Skip the confirmation prompt. Required for non-interactive
-        /// scripts.
+        /// Deprecated no-op: priming is now non-interactive by default.
+        /// Accepted for backward compatibility with existing scripts.
         #[arg(long)]
         yes: bool,
         /// Show the file content and exit without priming.
@@ -2407,10 +2433,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             source,
             into,
             message,
+            dry_run,
+            allow_deletions,
+            allow_regressions,
         } => {
             let mut body = serde_json::json!({
                 "source": source,
                 "target": into,
+                "dry_run": dry_run,
+                "allow_deletions": allow_deletions,
+                "allow_regressions": allow_regressions,
             });
             if let Some(m) = message {
                 body["description"] = serde_json::json!(m);
@@ -2427,23 +2459,67 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => unreachable_exit(&cli.server, e),
             };
 
-            // Conflicts come back as 409 with a JSON body, not an opaque error
+            // Conflicts and the data-loss guard both come back as 409 with a
+            // JSON body, not an opaque error.
             if resp.status() == reqwest::StatusCode::CONFLICT {
                 let text = resp.text().await?;
                 if let Ok(parsed) = serde_json::from_str::<Value>(&text) {
+                    let status = parsed.get("status").and_then(|x| x.as_str());
                     emit(cli.format, &parsed, |v| {
-                        let empty_vec = vec![];
-                        let conflicts = v
-                            .get("conflicts")
-                            .and_then(|x| x.as_array())
-                            .unwrap_or(&empty_vec);
-                        eprintln!(
-                            "Merge conflict: {} conflict{}",
-                            conflicts.len(),
-                            if conflicts.len() == 1 { "" } else { "s" }
-                        );
-                        for c in conflicts {
-                            eprintln!("  {}", serde_json::to_string_pretty(c).unwrap_or_default());
+                        if status == Some("would_delete") {
+                            let empty_vec = vec![];
+                            let removed = v
+                                .get("removed")
+                                .and_then(|x| x.as_array())
+                                .unwrap_or(&empty_vec);
+                            let names: Vec<&str> =
+                                removed.iter().filter_map(|x| x.as_str()).collect();
+                            eprintln!(
+                                "Refusing merge: would remove {} — {}",
+                                names.join(", "),
+                                "re-run with --allow-deletions to proceed"
+                            );
+                        } else if status == Some("regression") {
+                            let empty_vec = vec![];
+                            let regs = v
+                                .get("regressions")
+                                .and_then(|x| x.as_array())
+                                .unwrap_or(&empty_vec);
+                            eprintln!(
+                                "Refusing merge: would regress {} completed task{}:",
+                                regs.len(),
+                                if regs.len() == 1 { "" } else { "s" }
+                            );
+                            for r in regs {
+                                let plan = r.get("plan").and_then(|x| x.as_str()).unwrap_or("?");
+                                let task = r.get("task").and_then(|x| x.as_str()).unwrap_or("?");
+                                let from = r
+                                    .get("target_status")
+                                    .and_then(|x| x.as_str())
+                                    .unwrap_or("?");
+                                let to = r
+                                    .get("source_status")
+                                    .and_then(|x| x.as_str())
+                                    .unwrap_or("?");
+                                eprintln!("  {plan}/{task}: {from} → {to}");
+                            }
+                        } else {
+                            let empty_vec = vec![];
+                            let conflicts = v
+                                .get("conflicts")
+                                .and_then(|x| x.as_array())
+                                .unwrap_or(&empty_vec);
+                            eprintln!(
+                                "Merge conflict: {} conflict{}",
+                                conflicts.len(),
+                                if conflicts.len() == 1 { "" } else { "s" }
+                            );
+                            for c in conflicts {
+                                eprintln!(
+                                    "  {}",
+                                    serde_json::to_string_pretty(c).unwrap_or_default()
+                                );
+                            }
                         }
                     });
                 } else {
@@ -2458,8 +2534,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let parsed: Value = resp.json().await?;
             emit(cli.format, &parsed, |v| {
-                let commit = v.get("commit_id").and_then(|x| x.as_str()).unwrap_or("");
-                println!("Merged '{}' into '{}' at {}", source, into, commit);
+                if v.get("status").and_then(|x| x.as_str()) == Some("dry_run") {
+                    let fmt = |key: &str| -> String {
+                        v.get(key)
+                            .and_then(|x| x.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|x| x.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            })
+                            .unwrap_or_default()
+                    };
+                    let ff = v
+                        .get("fast_forward")
+                        .and_then(|x| x.as_bool())
+                        .unwrap_or(false);
+                    println!(
+                        "Dry run: merge '{}' into '{}'{}",
+                        source,
+                        into,
+                        if ff { " (fast-forward)" } else { "" }
+                    );
+                    println!("  added:   [{}]", fmt("added"));
+                    println!("  changed: [{}]", fmt("changed"));
+                    println!("  removed: [{}]", fmt("removed"));
+                    if v.get("would_delete").and_then(|x| x.as_bool()).unwrap_or(false) {
+                        println!("  ⚠ would remove entries — merge needs --allow-deletions");
+                    }
+                    if let Some(regs) = v.get("regressions").and_then(|x| x.as_array()) {
+                        if !regs.is_empty() {
+                            println!(
+                                "  ⚠ would regress {} completed task(s) — merge needs --allow-regressions",
+                                regs.len()
+                            );
+                        }
+                    }
+                    let conflicts = v.get("conflicts").and_then(|x| x.as_array());
+                    if let Some(c) = conflicts {
+                        if !c.is_empty() {
+                            println!("  conflicts: {}", c.len());
+                        }
+                    }
+                } else {
+                    let commit = v.get("commit_id").and_then(|x| x.as_str()).unwrap_or("");
+                    println!("Merged '{}' into '{}' at {}", source, into, commit);
+                }
             });
         }
         Commands::Forget { path, reason } => {
@@ -2790,6 +2910,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 });
             }
+            BranchAction::Reset { name, to, backup } => {
+                let body = serde_json::json!({ "name": name, "to": to, "backup": backup });
+                let resp = match client
+                    .clone()
+                    .post(format!("{}/api/branches/reset", cli.server))
+                    .json(&body)
+                    .send()
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => unreachable_exit(&cli.server, e),
+                };
+                if !resp.status().is_success() {
+                    http_error_exit(resp, "branch reset failed").await;
+                }
+                let parsed: Value = resp.json().await?;
+                emit(cli.format, &parsed, |v| {
+                    let commit = v.get("commit_id").and_then(|x| x.as_str()).unwrap_or("");
+                    println!("Branch '{}' reset to '{}' at {}", name, to, commit);
+                    if let Some(b) = v.get("backup_ref").and_then(|x| x.as_str()) {
+                        println!("  old target backed up as '{}'", b);
+                    }
+                });
+            }
         },
         Commands::Config { action } => {
             handle_config(action, cli.format)?;
@@ -2830,65 +2974,72 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             config_path,
             dry_run,
             no_agents,
+            no_mcp,
             transport,
             mcp_url,
             auth_token,
             auth_token_env,
         } => {
-            // Grab the fields agents_install_prompt needs BEFORE the
+            // Grab the fields agents_install_after_init needs BEFORE the
             // match consumes `cli.command` via destructuring. We only
             // need server + branch + format for the Agents handlers,
             // and the other arms don't touch them.
             let server = cli.server.clone();
             let branch = cli.branch.clone();
             let format = cli.format;
-            // Preflight: for http configs, check the daemon is actually up so we
-            // don't hand tools a URL config pointing at a hub that isn't running.
-            // Skipped in --dry-run (nothing is written anyway).
-            if transport == McpTransport::Http
-                && !dry_run
-                && let Some(health) = hub_health_url(&mcp_url)
-            {
-                let reachable = client
-                    .get(&health)
-                    .timeout(std::time::Duration::from_millis(1500))
-                    .send()
-                    .await
-                    .map(|r| r.status().is_success())
-                    .unwrap_or(false);
-                if !reachable {
-                    eprintln!(
-                        "  \u{26A0} hub not reachable at {health} — the configs below will \
-                         point at a hub that isn't running yet. Start it with \
-                         `ctxone-hub --http --lens` or `ctx service install`."
-                    );
+            if no_mcp {
+                println!("MCP config step skipped (--no-mcp).");
+            } else {
+                // Preflight: for http configs, check the daemon is actually up so we
+                // don't hand tools a URL config pointing at a hub that isn't running.
+                // Skipped in --dry-run (nothing is written anyway).
+                if transport == McpTransport::Http
+                    && !dry_run
+                    && let Some(health) = hub_health_url(&mcp_url)
+                {
+                    let reachable = client
+                        .get(&health)
+                        .timeout(std::time::Duration::from_millis(1500))
+                        .send()
+                        .await
+                        .map(|r| r.status().is_success())
+                        .unwrap_or(false);
+                    if !reachable {
+                        eprintln!(
+                            "  \u{26A0} hub not reachable at {health} — the configs below will \
+                             point at a hub that isn't running yet. Start it with \
+                             `ctxone-hub --http --lens` or `ctx service install`."
+                        );
+                    }
                 }
+                // `namespace` (resolved above for --transport http) is baked into
+                // the `/mcp?namespace=<ns>` URL so the shared daemon scopes writes
+                // the way a per-project stdio hub would.
+                init_mcp(
+                    global,
+                    tool,
+                    config_path,
+                    dry_run,
+                    transport,
+                    &mcp_url,
+                    namespace.clone(),
+                    auth_token.as_deref(),
+                    auth_token_env.as_deref(),
+                )?;
             }
-            // `namespace` (resolved above for --transport http) is baked into
-            // the `/mcp?namespace=<ns>` URL so the shared daemon scopes writes
-            // the way a per-project stdio hub would.
-            init_mcp(
-                global,
-                tool,
-                config_path,
-                dry_run,
-                transport,
-                &mcp_url,
-                namespace.clone(),
-                auth_token.as_deref(),
-                auth_token_env.as_deref(),
-            )?;
-            // After MCP configs are written, optionally prime the
-            // AGENTS.md guidance into the Hub. Skipped in --dry-run
-            // (we don't want a dry run to actually write to the
-            // graph) and when the user passed --no-agents.
+            // After MCP configs are written, prime the AGENTS.md guidance into
+            // the Hub by default. Skipped in --dry-run (we don't want a dry run
+            // to actually write to the graph) and when --no-agents is passed.
             if !dry_run && !no_agents {
                 println!();
                 if let Err(e) =
-                    agents_install_prompt(&server, &branch, format, client.clone()).await
+                    agents_install_after_init(&server, &branch, format, client.clone()).await
                 {
                     eprintln!("  \u{2717} agents: {}", e);
                 }
+            }
+            if no_mcp && no_agents {
+                println!("Nothing to do: both --no-mcp and --no-agents were passed.");
             }
         }
         Commands::Agents { action } => {
@@ -3664,9 +3815,11 @@ async fn agents_remove(
     Ok(())
 }
 
-/// The interactive install flow. Writes the file to disk (if absent),
-/// shows the content unless `--yes`, prompts for confirmation, and
-/// primes the sections via the Hub's prime endpoint.
+/// The AGENTS.md install flow. Writes the file to disk (if absent) and
+/// primes its sections via the Hub's prime endpoint. Non-interactive: it
+/// primes by default with no prompt (`--show` previews instead; the `yes`
+/// param is a retained no-op). Callers gate whether it runs at all
+/// (`ctx init` skips it under `--no-agents`).
 async fn agents_install(
     file: Option<String>,
     yes: bool,
@@ -3694,50 +3847,22 @@ async fn agents_install(
     let disk_path = write_agents_md_if_absent(&content)
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
-    if !yes {
-        println!("CTXone ships a short guidance file that teaches AI tools how");
-        println!("to use the Hub effectively. It will be pinned to your memory");
-        println!("graph so every recall response includes it.");
-        println!();
-        println!("  File:          {}", disk_path.display());
-        println!("  Primed under:  /memory/pinned/{}", AGENTS_SOURCE);
-        println!("  Branch:        {}", branch);
-        println!("  Visible in:    ctx ls /memory/pinned/{}", AGENTS_SOURCE);
-        println!("                 ctx blame <path>");
-        println!("                 CTXone Lens browse view");
-        println!("  Removable:     ctx agents remove");
-        println!();
-        print!("Prime AGENTS.md now? [Y/n/show] ");
-        use std::io::Write;
-        std::io::stdout().flush().ok();
-
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input)?;
-        let answer = input.trim().to_lowercase();
-        match answer.as_str() {
-            "" | "y" | "yes" => {}
-            "show" => {
-                println!();
-                println!("--- AGENTS.md ---");
-                println!("{}", content);
-                println!("--- end ---");
-                println!();
-                print!("Prime AGENTS.md now? [Y/n] ");
-                std::io::stdout().flush().ok();
-                let mut again = String::new();
-                std::io::stdin().read_line(&mut again)?;
-                let a = again.trim().to_lowercase();
-                if !(a.is_empty() || a == "y" || a == "yes") {
-                    println!("Skipped. Run `ctx agents install` later to prime.");
-                    return Ok(());
-                }
-            }
-            _ => {
-                println!("Skipped. Run `ctx agents install` later to prime.");
-                return Ok(());
-            }
-        }
-    }
+    // Priming is non-interactive and on by default — no prompt. This mirrors
+    // asd's `onboard` (silent default-on, one `--no-*` opt-out). `ctx init`
+    // skips this step entirely with `--no-agents`; standalone `ctx agents
+    // install` always primes. The legacy `--yes` flag is accepted but is now a
+    // no-op (priming no longer prompts). Use `--show` to preview without priming.
+    let _ = yes;
+    println!("CTXone ships a short guidance file that teaches AI tools how");
+    println!("to use the Hub effectively. It is pinned to your memory graph");
+    println!("so every recall response includes it.");
+    println!();
+    println!("  File:          {}", disk_path.display());
+    println!("  Primed under:  /memory/pinned/{}", AGENTS_SOURCE);
+    println!("  Branch:        {}", branch);
+    println!("  Visible in:    ctx ls /memory/pinned/{}", AGENTS_SOURCE);
+    println!("  Removable:     ctx agents remove");
+    println!();
 
     // Parse into sections and prime.
     let sections = parse_markdown_sections(&content);
@@ -3781,10 +3906,11 @@ async fn agents_install(
     Ok(())
 }
 
-/// Called from the end of `ctx init` to optionally prime AGENTS.md.
-/// Wraps `agents_install` in a brief summary header so the user knows
-/// why the prompt is showing up after the MCP config step.
-async fn agents_install_prompt(
+/// Called from the end of `ctx init` to prime AGENTS.md non-interactively.
+/// Prints a short header so the user knows why the guidance is being pinned
+/// right after the MCP config step. Skipped entirely when `ctx init` is run
+/// with `--no-agents`.
+async fn agents_install_after_init(
     server: &str,
     branch: &str,
     _format: OutputFormat,
@@ -3792,7 +3918,7 @@ async fn agents_install_prompt(
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("---");
     println!();
-    agents_install(None, false, false, server, branch, client).await
+    agents_install(None, true, false, server, branch, client).await
 }
 
 pub(crate) fn urlencoding(s: &str) -> String {
