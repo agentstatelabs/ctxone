@@ -57,7 +57,14 @@ echo ">> leak-scan clean"
 # relationship; --force-with-lease is still deliberately NOT used, so only a
 # genuine divergence (neither ref an ancestor of the other) is fatal.
 HEAD_SHA="$(git rev-parse HEAD)"
-if [ -z "$GH_MAIN" ]; then
+if [ -n "${FORCE_MIRROR:-}" ]; then
+  # One-time override for the security history-rewrite: GitHub's old history has
+  # diverged (every SHA changed), so the normal push below would refuse. Set the
+  # FORCE_MIRROR CI variable ONLY for the scrub push, then remove it afterward.
+  echo ">> FORCE_MIRROR set — force-pushing rewritten main + tags to github (one-time)"
+  git push --force github "HEAD:refs/heads/main"
+  git push --force --tags github
+elif [ -z "$GH_MAIN" ]; then
   echo ">> pushing main -> github (first publish)"
   git push github "HEAD:refs/heads/main"
 elif [ "$GH_MAIN" = "$HEAD_SHA" ]; then
