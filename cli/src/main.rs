@@ -2559,7 +2559,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("  added:   [{}]", fmt("added"));
                     println!("  changed: [{}]", fmt("changed"));
                     println!("  removed: [{}]", fmt("removed"));
-                    if v.get("would_delete").and_then(|x| x.as_bool()).unwrap_or(false) {
+                    if v.get("would_delete")
+                        .and_then(|x| x.as_bool())
+                        .unwrap_or(false)
+                    {
                         println!("  ⚠ would remove entries — merge needs --allow-deletions");
                     }
                     if let Some(regs) = v.get("regressions").and_then(|x| x.as_array()) {

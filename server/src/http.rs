@@ -1955,7 +1955,8 @@ async fn merge_refs(
         Ok(commit_id) => {
             // Restore the "plan completed iff all tasks terminal" invariant for
             // plans whose final task arrived via this merge.
-            let promoted = plan_tools::promote_completed_plans(&store, &repo, &req.target, &agent_id.0);
+            let promoted =
+                plan_tools::promote_completed_plans(&store, &repo, &req.target, &agent_id.0);
             // Graph size may have changed — invalidate every session's cache.
             s.sessions.mark_all_dirty();
             Ok(Json(serde_json::json!({

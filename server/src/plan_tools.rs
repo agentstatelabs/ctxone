@@ -195,7 +195,11 @@ pub struct PlanRegression {
 /// completed task and drop its proof. Merges that would do this are refused —
 /// terminal task states are preserved. Only tasks present on BOTH branches
 /// under the same plan/id are considered; genuinely new source tasks are fine.
-pub fn detect_plan_regressions(store: &TaskStore, source: &str, target: &str) -> Vec<PlanRegression> {
+pub fn detect_plan_regressions(
+    store: &TaskStore,
+    source: &str,
+    target: &str,
+) -> Vec<PlanRegression> {
     let mut out = Vec::new();
     let target_plans = match store.list_plans(target) {
         Ok(p) => p,
@@ -1852,7 +1856,10 @@ mod tests {
         // Each branch completes one task; neither alone finishes the plan.
         complete_on(&store, "main", "p", &t1.id);
         complete_on(&store, "source", "p", &t2.id);
-        assert_eq!(store.get_plan("main", "p").unwrap().status, PlanStatus::Active);
+        assert_eq!(
+            store.get_plan("main", "p").unwrap().status,
+            PlanStatus::Active
+        );
 
         repo.merge(
             "source",
@@ -1864,11 +1871,17 @@ mod tests {
         // All tasks terminal after the merge, but _meta still lags at active.
         let tasks = store.list_tasks("main", "p").unwrap();
         assert!(tasks.iter().all(|t| t.status.is_terminal()));
-        assert_eq!(store.get_plan("main", "p").unwrap().status, PlanStatus::Active);
+        assert_eq!(
+            store.get_plan("main", "p").unwrap().status,
+            PlanStatus::Active
+        );
 
         let promoted = promote_completed_plans(&store, &repo, "main", "test-agent");
         assert_eq!(promoted, vec!["p".to_string()]);
-        assert_eq!(store.get_plan("main", "p").unwrap().status, PlanStatus::Completed);
+        assert_eq!(
+            store.get_plan("main", "p").unwrap().status,
+            PlanStatus::Completed
+        );
 
         // Proofs from both branches survive the merge.
         for t in store.list_tasks("main", "p").unwrap() {

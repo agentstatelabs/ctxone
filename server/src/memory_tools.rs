@@ -2774,8 +2774,7 @@ impl CtxOneServer {
         }
 
         let store = crate::plan_tools::make_store(self.repo.clone(), &self.agent_id);
-        let regressions =
-            crate::plan_tools::detect_plan_regressions(&store, &p.source, &p.target);
+        let regressions = crate::plan_tools::detect_plan_regressions(&store, &p.source, &p.target);
 
         if p.dry_run {
             return match self.repo.preview_merge(&p.source, &p.target) {
