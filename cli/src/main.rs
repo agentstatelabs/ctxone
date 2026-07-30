@@ -523,6 +523,11 @@ enum Commands {
         /// Print the JSON manifest this binary publishes, instead of docs.
         #[arg(long)]
         manifest: bool,
+        /// Publish this binary's manifest into the shared cross-tool help index
+        /// (~/.config/agentstate/help-index.json, or $AGENTSTATE_HELP_INDEX),
+        /// merging alongside any other tool's entry. Prints the path written.
+        #[arg(long)]
+        publish: bool,
     },
     /// Load the full stored context for a named project (everything under that
     /// project's context path), unranked and unbudgeted. Use when you want the
@@ -1553,6 +1558,65 @@ fn extract_id(v: &Value) -> Option<&str> {
 /// Render a Value according to the chosen output format.
 /// For `Text`, calls the supplied closure with the parsed value; for `Json`,
 /// prints pretty JSON; for `Id`, extracts sensible identifier fields.
+/// Resolve the shared cross-tool help index path: `$AGENTSTATE_HELP_INDEX` if
+/// set, else `$HOME/.config/agentstate/help-index.json` — a sibling to asd's
+/// `~/.config/asd/repos.toml` handshake, using the same literal `$HOME/.config`
+/// convention (not the platform config dir).
+fn help_index_path() -> Option<std::path::PathBuf> {
+    if let Some(p) = std::env::var_os("AGENTSTATE_HELP_INDEX") {
+        return Some(std::path::PathBuf::from(p));
+    }
+    std::env::var_os("HOME")
+        .map(|h| std::path::PathBuf::from(h).join(".config/agentstate/help-index.json"))
+}
+
+/// Fetch this binary's manifest from the hub and merge it into the shared help
+/// index, preserving any other tool's entry. Returns the path written.
+///
+/// The index is keyed by tool name so `ctx` and `asd` each own their slice; a
+/// unified `help` reads the union. Merge (not overwrite) is what lets the two
+/// independently-versioned binaries publish without a compile-time handshake.
+async fn publish_help_index(
+    server: &str,
+    client: &reqwest::Client,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let url = format!("{}/api/help/manifest", server);
+    let resp = client.get(&url).send().await?;
+    if !resp.status().is_success() {
+        return Err(format!("hub returned {} for {}", resp.status(), url).into());
+    }
+    let manifest: Value = resp.json().await?;
+    let tool = manifest
+        .get("tool")
+        .and_then(|t| t.as_str())
+        .ok_or("manifest missing `tool`")?
+        .to_string();
+
+    let path = help_index_path().ok_or("cannot resolve HOME")?;
+
+    // Read + merge; tolerate a missing or malformed file by starting fresh so a
+    // corrupt index never blocks publishing.
+    let mut index = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .filter(|v| v.is_object())
+        .unwrap_or_else(|| serde_json::json!({ "schema": 1, "tools": {} }));
+    if !index.get("tools").map(|t| t.is_object()).unwrap_or(false) {
+        index["tools"] = serde_json::json!({});
+    }
+    index["schema"] = serde_json::json!(1);
+    index["tools"][&tool] = serde_json::json!({
+        "version": manifest.get("version").cloned().unwrap_or(Value::Null),
+        "features": manifest.get("features").cloned().unwrap_or_else(|| serde_json::json!([])),
+    });
+
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&path, format!("{}\n", serde_json::to_string_pretty(&index)?))?;
+    Ok(path)
+}
+
 /// Render a `/api/help` response as readable text (catalog, a single feature,
 /// or a not-found suggestion). JSON/manifest output goes through `emit`'s JSON
 /// branch untouched.
@@ -1875,7 +1939,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             });
         }
-        Commands::Help { topic, manifest } => {
+        Commands::Help { topic, manifest, publish } => {
+            if publish {
+                let path = publish_help_index(&cli.server, &client).await?;
+                println!("Published ctx help manifest to {}", path.display());
+                return Ok(());
+            }
             let url = if manifest {
                 format!("{}/api/help/manifest", cli.server)
             } else {
@@ -3182,6 +3251,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if no_mcp && no_agents {
                 println!("Nothing to do: both --no-mcp and --no-agents were passed.");
+            }
+            // Publish this binary's feature manifest into the shared help index
+            // so a unified `help` can discover ctx's features across binaries.
+            // Best-effort: a missing/unreachable hub must not fail init.
+            if !dry_run {
+                match publish_help_index(&server, &client).await {
+                    Ok(path) => println!("  \u{2713} help index: {}", path.display()),
+                    Err(e) => eprintln!("  \u{26A0} help index skipped: {}", e),
+                }
             }
         }
         Commands::Agents { action } => {
