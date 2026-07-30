@@ -2133,7 +2133,9 @@ impl CtxOneServer {
     )]
     async fn help(&self, params: Parameters<HelpParams>) -> String {
         let p = params.0;
-        let result = crate::help::respond(p.topic.as_deref());
+        // allow_proxy=true: an unknown topic falls through to `asd help` so the
+        // agent sees one seamless manual across both binaries.
+        let result = crate::help::resolve(p.topic.as_deref(), true);
         serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string())
     }
 

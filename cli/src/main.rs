@@ -528,6 +528,10 @@ enum Commands {
         /// merging alongside any other tool's entry. Prints the path written.
         #[arg(long)]
         publish: bool,
+        /// Resolve locally only — do not proxy an unknown topic to the other
+        /// tool. Used internally to break the proxy chain (single-hop guard).
+        #[arg(long, hide = true)]
+        no_proxy: bool,
     },
     /// Load the full stored context for a named project (everything under that
     /// project's context path), unranked and unbudgeted. Use when you want the
@@ -1613,7 +1617,10 @@ async fn publish_help_index(
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(&path, format!("{}\n", serde_json::to_string_pretty(&index)?))?;
+    std::fs::write(
+        &path,
+        format!("{}\n", serde_json::to_string_pretty(&index)?),
+    )?;
     Ok(path)
 }
 
@@ -1675,6 +1682,9 @@ fn render_help(v: &Value) {
 
     // Single feature.
     let get = |k: &str| v.get(k).and_then(|s| s.as_str()).unwrap_or("");
+    if let Some(from) = v.get("proxied_from").and_then(|s| s.as_str()) {
+        println!("(via {from})");
+    }
     println!("{} — {}", get("feature"), get("synopsis"));
     println!("  syntax: {}", get("syntax"));
     if let Some(params) = v.get("params").and_then(|p| p.as_array())
@@ -1939,17 +1949,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             });
         }
-        Commands::Help { topic, manifest, publish } => {
+        Commands::Help {
+            topic,
+            manifest,
+            publish,
+            no_proxy,
+        } => {
             if publish {
                 let path = publish_help_index(&cli.server, &client).await?;
                 println!("Published ctx help manifest to {}", path.display());
                 return Ok(());
             }
+            let np = if no_proxy { "&no_proxy=true" } else { "" };
             let url = if manifest {
                 format!("{}/api/help/manifest", cli.server)
             } else {
                 match &topic {
-                    Some(t) => format!("{}/api/help?topic={}", cli.server, urlencoding(t)),
+                    Some(t) => {
+                        format!("{}/api/help?topic={}{}", cli.server, urlencoding(t), np)
+                    }
                     None => format!("{}/api/help", cli.server),
                 }
             };

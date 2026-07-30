@@ -1182,12 +1182,17 @@ async fn stats(
 struct HelpQuery {
     /// Feature name or phrase; absent -> full catalog.
     topic: Option<String>,
+    /// When true, resolve locally only — do not proxy an unknown topic to the
+    /// other tool. Set by the proxied child call to break the chain.
+    #[serde(default)]
+    no_proxy: bool,
 }
 
-/// `GET /api/help?topic=<feature|phrase>` — on-demand instruction disclosure.
-/// No repo/session: the docs are compiled into this binary (t-005).
+/// `GET /api/help?topic=<feature|phrase>[&no_proxy=true]` — on-demand
+/// instruction disclosure. No repo/session: the docs are compiled into this
+/// binary (t-005). On a local miss it proxies to the owning binary (e.g. asd).
 async fn help_lookup(Query(q): Query<HelpQuery>) -> Json<serde_json::Value> {
-    Json(crate::help::respond(q.topic.as_deref()))
+    Json(crate::help::resolve(q.topic.as_deref(), !q.no_proxy))
 }
 
 /// `GET /api/help/manifest` — this binary's lightweight feature index, published

@@ -471,6 +471,88 @@ pub fn respond(topic: Option<&str>) -> Value {
     }
 }
 
+/// Local resolve with a cross-binary proxy fallback: if `topic` doesn't match
+/// any local feature, consult the shared index for other tools and ask the
+/// owning binary directly (e.g. ctx proxies an unknown topic to `asd help`).
+///
+/// `allow_proxy` is false for the proxied child call (via `--no-proxy` / the
+/// `no_proxy` query param), collapsing this to a pure local `respond` — the
+/// single-hop loop guard. A successful proxy annotates `proxied_from`.
+pub fn resolve(topic: Option<&str>, allow_proxy: bool) -> Value {
+    let local = respond(topic);
+    if !allow_proxy || local.get("not_found").is_none() {
+        return local;
+    }
+    let Some(t) = topic.map(str::trim).filter(|t| !t.is_empty()) else {
+        return local;
+    };
+    let Some(index) = read_index() else {
+        return local;
+    };
+    let Some(tools) = index.get("tools").and_then(|v| v.as_object()) else {
+        return local;
+    };
+    for tool in tools.keys().filter(|k| k.as_str() != OWNER) {
+        let Some((bin, args)) = json_invocation(tool, t) else {
+            continue;
+        };
+        let Ok(out) = std::process::Command::new(bin).args(&args).output() else {
+            continue;
+        };
+        if !out.status.success() {
+            continue;
+        }
+        if let Ok(mut v) = serde_json::from_slice::<Value>(&out.stdout)
+            && v.get("feature").is_some()
+            && let Some(obj) = v.as_object_mut()
+        {
+            obj.insert("proxied_from".into(), json!(tool));
+            return v;
+        }
+    }
+    local
+}
+
+/// Read the shared cross-tool help index, if present.
+fn read_index() -> Option<Value> {
+    let path = if let Some(p) = std::env::var_os("AGENTSTATE_HELP_INDEX") {
+        std::path::PathBuf::from(p)
+    } else {
+        std::path::PathBuf::from(std::env::var_os("HOME")?)
+            .join(".config/agentstate/help-index.json")
+    };
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+}
+
+/// How to invoke a given tool's `help` for JSON output, with proxy disabled so
+/// the child never bounces back (single-hop guard).
+fn json_invocation(tool: &str, topic: &str) -> Option<(&'static str, Vec<String>)> {
+    match tool {
+        "ctx" => Some((
+            "ctx",
+            vec![
+                "help".into(),
+                topic.into(),
+                "--format".into(),
+                "json".into(),
+                "--no-proxy".into(),
+            ],
+        )),
+        "asd" => Some((
+            "asd",
+            vec![
+                "help".into(),
+                topic.into(),
+                "--agent".into(),
+                "--no-proxy".into(),
+            ],
+        )),
+        _ => None,
+    }
+}
+
 /// The lightweight manifest this binary publishes to the shared help index so a
 /// unified `help` can route across binaries without compile-time coupling.
 pub fn manifest() -> Value {
