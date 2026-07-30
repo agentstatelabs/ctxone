@@ -94,5 +94,17 @@ if [ -n "${CI_COMMIT_TAG:-}" ]; then
   esac
 fi
 
+# --- enforce policy: only main + release tags are public --------------------
+# Internal branches (claude/*, feature/*, github-archive/*) must NEVER be public.
+# If any exist on GitHub — e.g. left over from an older push-mirror — delete them.
+# This runs on the main mirror pass (or any FORCE_MIRROR run).
+if [ "${CI_COMMIT_BRANCH:-}" = "main" ] || [ -n "${FORCE_MIRROR:-}" ]; then
+  git ls-remote --heads github 2>/dev/null | sed 's#.*refs/heads/##' | grep -vx main | while IFS= read -r b; do
+    [ -z "$b" ] && continue
+    echo ">> pruning non-canonical github branch: $b"
+    git push github --delete "refs/heads/$b" || true
+  done
+fi
+
 git remote remove github 2>/dev/null || true
 echo ">> publish complete"
