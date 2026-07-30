@@ -1530,7 +1530,10 @@ async fn project_register_creates_namespace_and_round_trips() {
     assert_eq!(status, StatusCode::OK, "register failed: {body}");
     assert_eq!(body["namespace"], "exampleproj"); // defaults to id
     // remote_url is normalized (.git stripped)
-    assert_eq!(body["remote_url"], "https://gitlab.example.com/g/exampleproj");
+    assert_eq!(
+        body["remote_url"],
+        "https://gitlab.example.com/g/exampleproj"
+    );
 
     // The ASG namespace exists now.
     let namespaces = repo.list_namespaces().expect("list namespaces");
