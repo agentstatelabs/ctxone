@@ -110,11 +110,16 @@ if [[ "${SKIP_TAG:-0}" != "1" ]]; then
   if [[ "$CUR" != "$VER_NUM" ]]; then
     sed -i.bak -E "s/^version = \"$CUR\"/version = \"$VER_NUM\"/" Cargo.toml
     rm Cargo.toml.bak
+    # Keep the sibling component versions in lockstep with the product version
+    # (pure-Python client + private frontends — enforced by version-guard in CI).
+    perl -i -pe 'if(!$d && s/^version = "[^"]*"/version = "'"$VER_NUM"'"/){$d=1}' bindings/python/pyproject.toml
+    perl -i -pe 'if(!$d && s/("version":\s*)"[^"]*"/${1}"'"$VER_NUM"'"/){$d=1}' web/package.json
+    perl -i -pe 'if(!$d && s/("version":\s*)"[^"]*"/${1}"'"$VER_NUM"'"/){$d=1}' website/package.json
     cargo check --workspace --release >/dev/null 2>&1 || \
       cargo check --workspace --release   # surface the real error if it fails
-    git add Cargo.toml Cargo.lock
+    git add Cargo.toml Cargo.lock bindings/python/pyproject.toml web/package.json website/package.json
     git commit -m "release: $VERSION" >/dev/null
-    ok "bumped Cargo.toml $CUR → $VER_NUM and committed"
+    ok "bumped Cargo.toml + pyproject + web/website $CUR → $VER_NUM and committed"
   else
     ok "Cargo.toml already at $VER_NUM"
   fi
