@@ -544,6 +544,7 @@ fn router_with_config_inner(
         .route("/api/stats/tokens/{session_id}", get(session_token_stats))
         .route("/api/stats/sessions", get(list_sessions))
         .route("/api/stats/llm_usage", post(record_llm_usage))
+        .route("/api/stats/plan/{plan}/cost", get(plan_cost))
         .route("/api/stats/{ref_name}", get(stats))
         // Read endpoints (for Lens)
         .route("/api/state/{ref_name}", get(get_state))
@@ -1199,6 +1200,91 @@ async fn help_lookup(Query(q): Query<HelpQuery>) -> Json<serde_json::Value> {
 /// so a unified `help` can route across the separate ctx/asd binaries.
 async fn help_manifest() -> Json<serde_json::Value> {
     Json(crate::help::manifest())
+}
+
+/// The plans a session is linked to (from its `/session_links/<sid>` sidecar).
+fn plans_linked_to_session(repo: &Repository, ref_name: &str, sid: &str) -> Vec<String> {
+    repo.get_json(ref_name, &format!("/session_links/{sid}"))
+        .ok()
+        .and_then(|v| v.get("links").and_then(|l| l.as_array()).cloned())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.get("plan").and_then(|p| p.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Pure rollup: sum LLM usage across the sessions linked to `plan` (t-002,
+/// cost-per-feature — a feature IS a plan). Returns per-session usage + the
+/// model, so Lens prices it read-time via pricing.ts (no pricing table in the
+/// server). `plans_of` maps session_id -> the plans it's linked to.
+fn plan_cost_rollup(
+    plan: &str,
+    snaps: &[SessionSnapshot],
+    plans_of: &std::collections::HashMap<String, Vec<String>>,
+) -> serde_json::Value {
+    let mut sessions = Vec::new();
+    let (mut ti, mut to, mut tcr, mut tcc, mut saved) = (0u64, 0u64, 0u64, 0u64, 0u64);
+    for snap in snaps {
+        let linked = plans_of
+            .get(&snap.session_id)
+            .is_some_and(|ps| ps.iter().any(|p| p == plan));
+        if !linked {
+            continue;
+        }
+        ti += snap.llm_input_tokens;
+        to += snap.llm_output_tokens;
+        tcr += snap.llm_cache_read_tokens;
+        tcc += snap.llm_cache_create_tokens;
+        saved += snap.session_tokens_saved;
+        sessions.push(serde_json::json!({
+            "session_id": snap.session_id,
+            "name": snap.name,
+            "llm_input_tokens": snap.llm_input_tokens,
+            "llm_output_tokens": snap.llm_output_tokens,
+            "llm_cache_read_tokens": snap.llm_cache_read_tokens,
+            "llm_cache_create_tokens": snap.llm_cache_create_tokens,
+            "last_model": snap.last_model,
+            "models_used": snap.models_used,
+            "cumulative_ratio": snap.cumulative_ratio,
+        }));
+    }
+    serde_json::json!({
+        "plan": plan,
+        "session_count": sessions.len(),
+        "sessions": sessions,
+        "totals": {
+            "llm_input_tokens": ti,
+            "llm_output_tokens": to,
+            "llm_cache_read_tokens": tcr,
+            "llm_cache_create_tokens": tcc,
+            "ctx_tokens_saved": saved,
+        },
+    })
+}
+
+/// `GET /api/stats/plan/{plan}/cost` — cost-per-feature (t-002). A feature is a
+/// plan; the metric sums the LLM usage of every session linked to that plan
+/// (via `/session_links`), returning per-session usage + model for read-time
+/// pricing in Lens. Limitation: attribution is per-session, so a session that
+/// worked multiple plans counts toward each — accurate in the plan=worktree
+/// model where one session works one plan.
+async fn plan_cost(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+    Path(plan): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
+    let snaps = s.sessions.snapshot_all();
+    let mut plans_of = std::collections::HashMap::new();
+    for snap in &snaps {
+        let ps = plans_linked_to_session(&repo, "main", &snap.session_id);
+        if !ps.is_empty() {
+            plans_of.insert(snap.session_id.clone(), ps);
+        }
+    }
+    Ok(Json(plan_cost_rollup(&plan, &snaps, &plans_of)))
 }
 
 #[derive(Deserialize)]
@@ -5102,6 +5188,51 @@ async fn detect_project_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plan_cost_rollup_sums_only_linked_sessions() {
+        let snap = |id: &str, input: u64, output: u64, saved: u64, model: &str| SessionSnapshot {
+            session_id: id.to_string(),
+            llm_input_tokens: input,
+            llm_output_tokens: output,
+            session_tokens_saved: saved,
+            last_model: Some(model.to_string()),
+            ..Default::default()
+        };
+        let snaps = vec![
+            snap("s1", 100, 40, 1000, "claude-opus-4-8"),
+            snap("s2", 200, 60, 3000, "claude-opus-4-8"),
+            snap("s3", 999, 999, 999, "other"), // not linked to the plan
+        ];
+        let mut plans_of = std::collections::HashMap::new();
+        plans_of.insert("s1".to_string(), vec!["feat-x".to_string()]);
+        plans_of.insert(
+            "s2".to_string(),
+            vec!["feat-x".to_string(), "feat-y".to_string()],
+        );
+        plans_of.insert("s3".to_string(), vec!["feat-y".to_string()]);
+
+        let out = plan_cost_rollup("feat-x", &snaps, &plans_of);
+        assert_eq!(out["session_count"], 2);
+        assert_eq!(out["totals"]["llm_input_tokens"], 300);
+        assert_eq!(out["totals"]["llm_output_tokens"], 100);
+        assert_eq!(out["totals"]["ctx_tokens_saved"], 4000);
+        // s3 (only linked to feat-y) is excluded.
+        let sessions = out["sessions"].as_array().unwrap();
+        assert!(sessions.iter().all(|s| s["session_id"] != "s3"));
+    }
+
+    #[test]
+    fn plan_cost_rollup_empty_when_no_links() {
+        let snaps = vec![SessionSnapshot {
+            session_id: "s1".to_string(),
+            llm_input_tokens: 100,
+            ..Default::default()
+        }];
+        let out = plan_cost_rollup("nope", &snaps, &std::collections::HashMap::new());
+        assert_eq!(out["session_count"], 0);
+        assert_eq!(out["totals"]["llm_input_tokens"], 0);
+    }
 
     /// Resolve a namespace the way a real request would.
     async fn extract_ns(uri: &str, header: Option<&str>) -> String {

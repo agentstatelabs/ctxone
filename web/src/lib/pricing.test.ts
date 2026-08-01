@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest';
 import {
 	PRICING,
 	estimateCost,
+	estimateCostForPlan,
 	estimateWithoutCtxone,
 	formatUsd,
-	pricingFor
+	pricingFor,
+	type PlanCostSession
 } from './pricing';
 
 describe('pricingFor', () => {
@@ -159,5 +161,53 @@ describe('formatUsd', () => {
 	it('shows 2 decimals above $1', () => {
 		expect(formatUsd(1.2345)).toBe('$1.23');
 		expect(formatUsd(100)).toBe('$100.00');
+	});
+});
+
+describe('estimateCostForPlan', () => {
+	const session = (
+		input: number,
+		output: number,
+		model: string | null,
+		ratio = 1
+	): PlanCostSession => ({
+		llm_input_tokens: input,
+		llm_output_tokens: output,
+		llm_cache_read_tokens: 0,
+		llm_cache_create_tokens: 0,
+		last_model: model,
+		cumulative_ratio: ratio
+	});
+
+	it('sums cost across tracked sessions and counts untracked ones', () => {
+		const out = estimateCostForPlan([
+			session(1_000_000, 100_000, 'claude-sonnet-4.5'),
+			session(500_000, 50_000, 'claude-sonnet-4.5'),
+			session(999, 999, 'gpt-9000') // untracked model
+		]);
+		expect(out.trackedSessions).toBe(2);
+		expect(out.untrackedSessions).toBe(1);
+		expect(out.cost).toBeGreaterThan(0);
+		// Two tracked sessions cost more than one alone.
+		const single = estimateCostForPlan([session(1_000_000, 100_000, 'claude-sonnet-4.5')]);
+		expect(out.cost).toBeGreaterThan(single.cost);
+	});
+
+	it('reports cost avoided from the savings ratio (>= 0)', () => {
+		const out = estimateCostForPlan([session(1_000_000, 100_000, 'claude-sonnet-4.5', 5)]);
+		expect(out.costWithoutCtxone).toBeGreaterThan(out.cost);
+		expect(out.costAvoided).toBeGreaterThan(0);
+		expect(out.costAvoided).toBeCloseTo(out.costWithoutCtxone - out.cost, 10);
+	});
+
+	it('is all-zero for an empty plan', () => {
+		const out = estimateCostForPlan([]);
+		expect(out).toEqual({
+			cost: 0,
+			costWithoutCtxone: 0,
+			costAvoided: 0,
+			trackedSessions: 0,
+			untrackedSessions: 0
+		});
 	});
 });

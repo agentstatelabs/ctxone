@@ -371,7 +371,7 @@ impl SessionStats {
 /// `#[serde(default)]` so snapshots produced by older Hub versions
 /// (before LLM usage capture) deserialize cleanly here — missing
 /// fields default to `0` / `None`.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct SessionSnapshot {
     pub session_id: String,
     pub session_tokens_used: u64,

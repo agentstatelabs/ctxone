@@ -161,6 +161,67 @@ export function estimateWithoutCtxone(
 }
 
 /**
+ * One session's usage as returned by `GET /api/stats/plan/{plan}/cost`
+ * (t-002, cost-per-feature). Priced read-time here rather than in the
+ * server, so the per-model rate table lives in exactly one place.
+ */
+export interface PlanCostSession {
+	llm_input_tokens: number;
+	llm_output_tokens: number;
+	llm_cache_read_tokens: number;
+	llm_cache_create_tokens: number;
+	last_model: string | null;
+	cumulative_ratio: number;
+}
+
+export interface PlanCostSummary {
+	/** Actual USD across sessions whose model is priced. */
+	cost: number;
+	/** Counterfactual USD without CTXone's budgeted recall. */
+	costWithoutCtxone: number;
+	/** costWithoutCtxone − cost: what CTXone saved on this feature. */
+	costAvoided: number;
+	trackedSessions: number;
+	/** Sessions whose model isn't in the price table (excluded from cost). */
+	untrackedSessions: number;
+}
+
+/**
+ * Cost-per-feature: price every session linked to a plan by its own model
+ * and sum. Sessions on an untracked model are counted, not guessed at, so
+ * the UI can show "N sessions not priced" rather than an understated total.
+ */
+export function estimateCostForPlan(sessions: PlanCostSession[]): PlanCostSummary {
+	let cost = 0;
+	let without = 0;
+	let tracked = 0;
+	let untracked = 0;
+	for (const s of sessions) {
+		const tokens: TokenBreakdown = {
+			input: s.llm_input_tokens,
+			output: s.llm_output_tokens,
+			cache_read: s.llm_cache_read_tokens,
+			cache_create: s.llm_cache_create_tokens
+		};
+		const c = estimateCost(s.last_model, tokens);
+		if (c === null) {
+			untracked++;
+			continue;
+		}
+		tracked++;
+		cost += c;
+		without += estimateWithoutCtxone(s.last_model, tokens, s.cumulative_ratio) ?? c;
+	}
+	return {
+		cost,
+		costWithoutCtxone: without,
+		costAvoided: Math.max(0, without - cost),
+		trackedSessions: tracked,
+		untrackedSessions: untracked
+	};
+}
+
+/**
  * Format a USD amount for display. Uses 4 decimals below $0.1,
  * 3 decimals below $1, 2 decimals otherwise. Keeps small numbers
  * useful to read while keeping big numbers tidy.
