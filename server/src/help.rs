@@ -221,9 +221,9 @@ pub const REGISTRY: &[HelpDoc] = &[
         feature: "plan_new",
         group: "plans",
         synopsis: "Create a plan to track multi-step work across sessions.",
-        syntax: "ctx plan-new <name> [--description <text>]",
+        syntax: "ctx plan new <name> [--description <text>]",
         params: &[p!("name", true, "kebab-case plan name, used in paths.")],
-        examples: &["ctx plan-new website-v2"],
+        examples: &["ctx plan new website-v2"],
         gotchas: &["Fails if a plan with that name already exists on the branch."],
         related: &["plan_add", "plan_start", "plan_next"],
     },
@@ -231,13 +231,13 @@ pub const REGISTRY: &[HelpDoc] = &[
         feature: "plan_add",
         group: "plans",
         synopsis: "Add a task to a plan; optionally assign it to a specific agent.",
-        syntax: "ctx plan-add <plan> <title> [--priority ...] [--assigned-to <agent>] [--blocked-by <ids>]",
+        syntax: "ctx plan add <plan> <title> [--priority ...] [--assigned-to <agent>] [--blocked-by <ids>]",
         params: &[
             p!("plan_id", true, "Plan to add the task to."),
             p!("title", true, "Imperative one-line task title."),
             p!("--priority", false, "critical|high|medium|low."),
         ],
-        examples: &["ctx plan-add website-v2 \"Wire the nav\" --priority high"],
+        examples: &["ctx plan add website-v2 \"Wire the nav\" --priority high"],
         gotchas: &[
             "Blockers must already exist in the plan; a plan may auto-lock past a done ratio (use --force).",
         ],
@@ -247,12 +247,12 @@ pub const REGISTRY: &[HelpDoc] = &[
         feature: "plan_start",
         group: "plans",
         synopsis: "Move a task from pending to in_progress; refuses if blockers aren't done.",
-        syntax: "ctx plan-start <plan> <task_id>",
+        syntax: "ctx plan start <plan> <task_id>",
         params: &[
             p!("plan_id", true, "Plan holding the task."),
             p!("task_id", true, "Task to start (e.g. t-003)."),
         ],
-        examples: &["ctx plan-start ctx-context-paradigm t-005"],
+        examples: &["ctx plan start ctx-context-paradigm t-005"],
         gotchas: &[
             "Warns (doesn't block) if other tasks are already in_progress — finish or abandon stale ones.",
         ],
@@ -261,32 +261,34 @@ pub const REGISTRY: &[HelpDoc] = &[
     HelpDoc {
         feature: "plan_complete",
         group: "plans",
-        synopsis: "Mark a task done WITH PROOF (commit SHA strongest, then file path, then test name).",
-        syntax: "ctx plan-complete <plan> <task_id> --proof <proof>",
+        synopsis: "Force-complete a WHOLE plan: abandon every still-open task with a reason, then promote the plan to completed.",
+        syntax: "plan_complete {plan_id, [reason]}  (MCP tool)",
         params: &[
-            p!("plan_id", true, "Plan holding the task."),
-            p!("task_id", true, "Task to complete."),
+            p!("plan_id", true, "Plan to force-complete."),
             p!(
-                "--proof",
-                true,
-                "Evidence of completion; prefer a commit SHA."
+                "reason",
+                false,
+                "Reason stamped on each auto-abandoned task."
             ),
         ],
-        examples: &["ctx plan-complete ctx-context-paradigm t-005 --proof <sha>"],
-        gotchas: &["Never use text-only proof when a SHA, file, or test name is available."],
-        related: &["plan_start", "plan_abandon"],
+        examples: &["plan_complete {plan_id: \"website-v2\", reason: \"scope cut\"}"],
+        gotchas: &[
+            "To complete a single TASK with proof use `plan_done`, not this — this closes the whole plan.",
+            "Idempotent on already-completed plans; refuses on archived or empty plans.",
+        ],
+        related: &["plan_done", "plan_archive", "plan_abandon"],
     },
     HelpDoc {
         feature: "plan_next",
         group: "plans",
         synopsis: "Get the highest-priority pending task whose blockers are done; supports assigned_to='me'.",
-        syntax: "ctx plan-next [--plan <name>] [--assigned-to me]",
+        syntax: "ctx plan next [--plan <name>] [--assigned-to me]",
         params: &[p!(
             "--assigned-to",
             false,
             "'me' maps to the caller's agent id for multi-agent orchestration."
         )],
-        examples: &["ctx plan-next --plan ctx-context-paradigm"],
+        examples: &["ctx plan next --plan ctx-context-paradigm"],
         gotchas: &[
             "The plan IS the orchestration layer — agents coordinate through shared task state.",
         ],
@@ -296,9 +298,9 @@ pub const REGISTRY: &[HelpDoc] = &[
         feature: "plan_list",
         group: "plans",
         synopsis: "List active plans and their task counts — call at session start to see what's in flight.",
-        syntax: "ctx plan-list",
+        syntax: "ctx plan list",
         params: &[],
-        examples: &["ctx plan-list"],
+        examples: &["ctx plan list"],
         gotchas: &["For the full task tree of one plan use `plan_show`, not list + N calls."],
         related: &["plan_show", "plan_next"],
     },
@@ -333,6 +335,754 @@ pub const REGISTRY: &[HelpDoc] = &[
             "Docs are version-pinned to the running binary, so they can't drift from the code.",
         ],
         related: &["recall"],
+    },
+    // ===== memory =====
+    HelpDoc {
+        feature: "get",
+        group: "memory",
+        synopsis: "Read the raw JSON value stored at a known path (string, object, list) — not keyword-ranked.",
+        syntax: "ctx get <path>",
+        params: &[p!(
+            "path",
+            true,
+            "Exact memory path (from `ls` or `search`)."
+        )],
+        examples: &["ctx get /memory/facts/abc123"],
+        gotchas: &["For free-text recall use `recall`; `get` needs the exact path."],
+        related: &["ls", "search", "recall"],
+    },
+    HelpDoc {
+        feature: "ls",
+        group: "memory",
+        synopsis: "List every path under a prefix on a branch — cheap discovery of what's actually stored.",
+        syntax: "ctx ls [prefix=/] [--max-depth <n=50>]",
+        params: &[
+            p!(
+                "prefix",
+                false,
+                "Subtree to walk (e.g. /memory/primed, /plans, /sessions)."
+            ),
+            p!(
+                "--max-depth",
+                false,
+                "Limit walk depth from the prefix; default 50."
+            ),
+        ],
+        examples: &["ctx ls /memory/primed", "ctx ls /plans --max-depth 2"],
+        gotchas: &["Returns leaf paths — enumerate before guessing path names."],
+        related: &["get", "search", "blame"],
+    },
+    HelpDoc {
+        feature: "blame",
+        group: "memory",
+        synopsis: "Full provenance chain for a path: every commit that touched it, who wrote it, intent + confidence.",
+        syntax: "ctx blame <path>",
+        params: &[p!(
+            "path",
+            true,
+            "Memory path to trace (from `ls`/`search`)."
+        )],
+        examples: &["ctx blame /memory/facts/licensing"],
+        gotchas: &[
+            "Call BEFORE trusting a stored value on high-stakes topics (security, licensing, deploy).",
+            "Use `why_did_we` when you have a decision phrase, not a path.",
+        ],
+        related: &["why_did_we", "log", "get"],
+    },
+    HelpDoc {
+        feature: "docs_find",
+        group: "memory",
+        synopsis: "Search the canonical-doc registry (path/scope/answers/owner); returns POINTERS to .md docs, not content.",
+        syntax: "ctx docs find [query]",
+        params: &[p!(
+            "query",
+            false,
+            "Substring over path/scope/answers/owner; omit to list all."
+        )],
+        examples: &["ctx docs find licensing", "ctx docs find"],
+        gotchas: &[
+            "Distinct from `prime`, which imports a doc's CONTENT into recall; this returns a pointer to the file.",
+        ],
+        related: &["prime", "recall", "docs"],
+    },
+    // ===== plans =====
+    HelpDoc {
+        feature: "plan_done",
+        group: "plans",
+        synopsis: "Transition a task to `done` with a required proof (commit>file>test>text); auto-completes the plan if last open.",
+        syntax: "ctx plan done <plan> <task_id> --proof <kind:value[:note]> [--reason <text>]",
+        params: &[
+            p!("plan_id", true, "Plan holding the task."),
+            p!("task_id", true, "Task to complete (e.g. t-003)."),
+            p!(
+                "--proof",
+                true,
+                "kind:value[:note] where kind is commit|file|test|text."
+            ),
+        ],
+        examples: &["ctx plan done ctx-context-paradigm t-005 --proof commit:abc1234"],
+        gotchas: &["Proof is stored but NOT verified at call time; prefer a commit SHA."],
+        related: &["plan_start", "plan_abandon", "plan_complete"],
+    },
+    HelpDoc {
+        feature: "plan_abandon",
+        group: "plans",
+        synopsis: "Mark a task `abandoned` with a required reason — a first-class outcome recorded in blame, not deletion.",
+        syntax: "ctx plan abandon <plan> <task_id> --reason <text>",
+        params: &[
+            p!("plan_id", true, "Plan holding the task."),
+            p!("task_id", true, "Task to abandon."),
+            p!("--reason", true, "Why it's abandoned; recorded in blame."),
+        ],
+        examples: &["ctx plan abandon website-v2 t-004 --reason \"superseded by t-009\""],
+        gotchas: &[
+            "Legal from pending or in_progress; abandoning the last open task auto-completes the plan.",
+        ],
+        related: &["plan_done", "plan_complete", "plan_start"],
+    },
+    HelpDoc {
+        feature: "plan_show",
+        group: "plans",
+        synopsis: "Fetch one plan with full task list, statuses, proofs, and per-task assignment.",
+        syntax: "ctx plan show <plan>",
+        params: &[p!("plan_id", true, "Plan to display.")],
+        examples: &["ctx plan show ctx-context-paradigm"],
+        gotchas: &[
+            "Cheaper than `plan_list` + N `plan_tasks` calls; use `plan_tasks` for the flat list only.",
+        ],
+        related: &["plan_tasks", "plan_list", "plan_next"],
+    },
+    HelpDoc {
+        feature: "plan_tasks",
+        group: "plans",
+        synopsis: "List every task in a plan (flat, with assigned_to) — no plan-envelope metadata.",
+        syntax: "ctx plan tasks <plan>",
+        params: &[p!("plan_id", true, "Plan whose tasks to list.")],
+        examples: &["ctx plan tasks website-v2"],
+        gotchas: &[
+            "`plan_show` returns the same tasks plus the plan envelope if you also need that.",
+        ],
+        related: &["plan_show", "plan_list"],
+    },
+    HelpDoc {
+        feature: "plan_link",
+        group: "plans",
+        synopsis: "Advisory cross-plan dependency: mark that a task, when done, satisfies a task in ANOTHER plan.",
+        syntax: "ctx plan link <plan> <task_id> <target>",
+        params: &[
+            p!("plan_id", true, "Plan holding the satisfying task."),
+            p!("task_id", true, "Task doing the satisfying (e.g. t-003)."),
+            p!(
+                "target",
+                true,
+                "Target it satisfies, as `plan/task` (e.g. other-plan/t-002)."
+            ),
+        ],
+        examples: &["ctx plan link routing t-003 foundation/t-002"],
+        gotchas: &[
+            "Advisory only — does not auto-close the target; completing this task surfaces a reminder.",
+        ],
+        related: &["plan_done", "plan_show"],
+    },
+    HelpDoc {
+        feature: "plan_stale",
+        group: "plans",
+        synopsis: "List in-progress tasks with no progress in N days (default 7), most-stale first, across active plans.",
+        syntax: "ctx plan stale [--days <n=7>] [--all-namespaces]",
+        params: &[p!(
+            "--days",
+            false,
+            "Staleness threshold in days (default 7)."
+        )],
+        examples: &["ctx plan stale --days 14"],
+        gotchas: &[
+            "Complements `plan_next`, which only shows the next PENDING task and never what's in-progress.",
+        ],
+        related: &["plan_next", "plan_show"],
+    },
+    HelpDoc {
+        feature: "plan_archive",
+        group: "plans",
+        synopsis: "Soft, reversible archive of a plan — sets status `archived`, stamps archived_at, preserves task data.",
+        syntax: "ctx plan archive <plan>",
+        params: &[p!("plan_id", true, "Plan to archive.")],
+        examples: &["ctx plan archive website-v1"],
+        gotchas: &[
+            "Reversible and keeps history browsable; use `plan_complete` to close open tasks instead.",
+        ],
+        related: &["plan_complete", "plan_move", "plan_list"],
+    },
+    HelpDoc {
+        feature: "plan_move",
+        group: "plans",
+        synopsis: "Move a plan (with its tasks and links) to another workspace/namespace — for plans created in the wrong one.",
+        syntax: "ctx plan relocate <plan> --to <workspace> [--namespace <src>]",
+        params: &[
+            p!("plan_id", true, "Plan to relocate."),
+            p!("--to", true, "Destination workspace/namespace."),
+            p!(
+                "--namespace",
+                false,
+                "Source namespace if the plan isn't in the resolved one."
+            ),
+        ],
+        examples: &["ctx plan relocate website-v2 --to ctxone"],
+        gotchas: &[
+            "Fixes plans that landed in `default` before per-workspace routing; reads from the current namespace.",
+        ],
+        related: &["plan_show", "plan_list", "project_status"],
+    },
+    // ===== branches =====
+    HelpDoc {
+        feature: "branches",
+        group: "branches",
+        synopsis: "List every branch in the graph with its current head commit id.",
+        syntax: "ctx branches",
+        params: &[],
+        examples: &["ctx branches"],
+        gotchas: &["Branch names are free-form — check before assuming `feature/x` exists."],
+        related: &["branch", "log", "diff"],
+    },
+    HelpDoc {
+        feature: "branch",
+        group: "branches",
+        synopsis: "Create a new branch starting from `from` (default main) — cheap; prefer a branch over racing writes on main.",
+        syntax: "ctx branch create <name> [--from <ref=main>]",
+        params: &[
+            p!("name", true, "Name of the new branch."),
+            p!(
+                "--from",
+                false,
+                "Branch/tag/commit to start from (default main)."
+            ),
+        ],
+        examples: &["ctx branch create feat/idea --from main"],
+        gotchas: &[
+            "Use a branch to stage memory writes that shouldn't land on main yet, then `merge`.",
+        ],
+        related: &["branches", "merge", "diff"],
+    },
+    HelpDoc {
+        feature: "merge",
+        group: "branches",
+        synopsis: "Merge a source branch into a target (default main); returns the new commit or a structured conflict list.",
+        syntax: "ctx merge <source> [--into <target=main>] [-m <msg>] [--dry-run] [--allow-deletions] [--allow-regressions]",
+        params: &[
+            p!("source", true, "Branch with new changes."),
+            p!(
+                "--into",
+                false,
+                "Target branch to merge into (default main)."
+            ),
+            p!(
+                "--dry-run",
+                false,
+                "Preview added/changed/removed + conflicts without writing."
+            ),
+            p!(
+                "--allow-regressions",
+                false,
+                "Permit moving a completed task back to non-terminal."
+            ),
+        ],
+        examples: &[
+            "ctx merge feat/idea --dry-run",
+            "ctx merge feat/idea -m \"land idea\"",
+        ],
+        gotchas: &[
+            "Blocks by default if the merge would delete entries (--allow-deletions) or regress a plan task.",
+            "Resolve conflicts by writing the desired value on the target, then re-run.",
+        ],
+        related: &["diff", "branch", "branches"],
+    },
+    HelpDoc {
+        feature: "diff",
+        group: "branches",
+        synopsis: "Structural diff between two refs — the set/delete ops to turn ref_a into ref_b (not a textual diff).",
+        syntax: "ctx diff <ref_a> <ref_b>",
+        params: &[
+            p!("ref_a", true, "First ref (usually older/base)."),
+            p!("ref_b", true, "Second ref (usually newer/target)."),
+        ],
+        examples: &["ctx diff main feat/idea"],
+        gotchas: &["Pair with `branches` to find ref names; inspect before merging."],
+        related: &["merge", "branches", "log"],
+    },
+    HelpDoc {
+        feature: "log",
+        group: "branches",
+        synopsis: "Last N commits on a branch (newest first): agent id, intent category, description, confidence, tags.",
+        syntax: "ctx log [-n <limit=20>]",
+        params: &[p!("-n", false, "Max commits to show (default 20).")],
+        examples: &["ctx log -n 50"],
+        gotchas: &[
+            "Broader than `blame` (per-path) and cheaper than `what_changed_since` for an absolute count.",
+        ],
+        related: &["blame", "what_changed_since", "branches"],
+    },
+    // ===== code (proxy to ASD; MCP-first, no dedicated `ctx` subcommand) =====
+    HelpDoc {
+        feature: "code_repos",
+        group: "code",
+        synopsis: "List every ASD code repo registered with this hub as [{name, url}] — the names feed every code tool's `repo` param.",
+        syntax: "code_repos {}  (MCP tool — no CLI subcommand)",
+        params: &[],
+        examples: &["code_repos {}"],
+        gotchas: &[
+            "Call first when you don't know repo names; skippable when only one repo is registered (code tools default to it).",
+        ],
+        related: &["code_search", "code_read", "code_impact"],
+    },
+    HelpDoc {
+        feature: "code_search",
+        group: "code",
+        synopsis: "Rank CODE symbols by concept/keyword across name, signature, doc, path, and ledger in an ASD-indexed repo.",
+        syntax: "code_search {query, [repo], [kind], [language], [limit]}  (MCP tool)",
+        params: &[
+            p!(
+                "query",
+                true,
+                "Concept or keyword to search source symbols for."
+            ),
+            p!(
+                "repo",
+                false,
+                "Repo name from `code_repos`; optional when only one is registered."
+            ),
+            p!(
+                "kind",
+                false,
+                "Narrow by symbol kind (e.g. function, struct)."
+            ),
+        ],
+        examples: &["code_search {query: \"merge conflict\"}"],
+        gotchas: &[
+            "Searches SOURCE CODE — distinct from `search` (memory substrings) and `recall` (memory facts).",
+        ],
+        related: &["code_read", "callers_of", "callees_of", "code_repos"],
+    },
+    HelpDoc {
+        feature: "code_read",
+        group: "code",
+        synopsis: "Read one CODE symbol by qname, returning {symbol, effects, ledger}: signature, doc, effects, decisions.",
+        syntax: "code_read {qname, [repo]}  (MCP tool)",
+        params: &[
+            p!(
+                "qname",
+                true,
+                "Fully-qualified symbol name (from code_search/callers_of/callees_of)."
+            ),
+            p!(
+                "repo",
+                false,
+                "Repo name; optional when only one is registered."
+            ),
+        ],
+        examples: &["code_read {qname: \"server::merge\"}"],
+        gotchas: &["Reads SOURCE CODE, not memory — to fetch a value at a memory path use `get`."],
+        related: &["code_search", "callers_of", "callees_of"],
+    },
+    HelpDoc {
+        feature: "callers_of",
+        group: "code",
+        synopsis: "List the symbols that call a given symbol (inbound edges) in an ASD-indexed repo — its in-repo blast radius.",
+        syntax: "callers_of {qname, [repo]}  (MCP tool)",
+        params: &[
+            p!("qname", true, "Symbol whose callers to list."),
+            p!(
+                "repo",
+                false,
+                "Repo name; optional when only one is registered."
+            ),
+        ],
+        examples: &["callers_of {qname: \"server::merge\"}"],
+        gotchas: &[
+            "In-repo only; for cross-repo consumers use `code_impact`. Inverse is `callees_of`.",
+        ],
+        related: &["callees_of", "code_impact", "code_read"],
+    },
+    HelpDoc {
+        feature: "callees_of",
+        group: "code",
+        synopsis: "List the symbols a given symbol calls (outbound edges) in an ASD-indexed repo — how it's implemented.",
+        syntax: "callees_of {qname, [repo]}  (MCP tool)",
+        params: &[
+            p!("qname", true, "Symbol whose callees to list."),
+            p!(
+                "repo",
+                false,
+                "Repo name; optional when only one is registered."
+            ),
+        ],
+        examples: &["callees_of {qname: \"server::merge\"}"],
+        gotchas: &["The inverse of `callers_of`."],
+        related: &["callers_of", "code_read", "code_search"],
+    },
+    HelpDoc {
+        feature: "code_impact",
+        group: "code",
+        synopsis: "Decision-aware federated impact: downstream consumers of an endpoint in OTHER repos + invariants they carry.",
+        syntax: "code_impact {target}  (MCP tool)",
+        params: &[p!(
+            "target",
+            true,
+            "Route-handler qname (e.g. get_orders) or contract (http:GET /api/orders/{})."
+        )],
+        examples: &["code_impact {target: \"http:GET /api/orders/{}\"}"],
+        gotchas: &[
+            "Answers \"what breaks if I change this, and what did those callers promise?\" Index consumer repos first.",
+        ],
+        related: &["code_cross_repo_edges", "callers_of", "code_repos"],
+    },
+    HelpDoc {
+        feature: "code_cross_repo_edges",
+        group: "code",
+        synopsis: "Map ALL cross-repo service edges: a client call in one registered repo matched to the route serving it in another.",
+        syntax: "code_cross_repo_edges {}  (MCP tool)",
+        params: &[],
+        examples: &["code_cross_repo_edges {}"],
+        gotchas: &[
+            "Returns every edge (federated view); for one endpoint's blast radius use `code_impact`. Index repos first.",
+        ],
+        related: &["code_impact", "code_repos"],
+    },
+    // ===== reminders (MCP-first; CLI only exposes `ctx reminder tick`) =====
+    HelpDoc {
+        feature: "reminder_create",
+        group: "reminders",
+        synopsis: "Schedule a pull-based reminder; retrieve later via `remind_me`. Defaults to needing approval before it acts.",
+        syntax: "reminder_create {text, due_at, [autonomous], [schedule], [priority]}  (MCP tool)",
+        params: &[
+            p!("text", true, "What to be reminded about."),
+            p!(
+                "autonomous",
+                false,
+                "false (default) => awaiting_permission until `reminder_approve`; true runs unattended."
+            ),
+            p!(
+                "schedule",
+                false,
+                "kind: interval|daily|weekly to re-fire; omit for one-shot."
+            ),
+        ],
+        examples: &[
+            "reminder_create {text: \"weekly metrics review\", schedule: {kind: \"weekly\"}}",
+        ],
+        gotchas: &[
+            "Fail-closed: non-autonomous reminders must be approved before anything acts on them.",
+        ],
+        related: &["remind_me", "reminder_approve", "reminder_list"],
+    },
+    HelpDoc {
+        feature: "remind_me",
+        group: "reminders",
+        synopsis: "Return all currently-actionable reminders (due or awaiting_permission), priority-ordered; lazily promotes overdue ones.",
+        syntax: "remind_me {}  (MCP tool)",
+        params: &[],
+        examples: &["remind_me {}"],
+        gotchas: &[
+            "Primary reminder surface — call at session start; awaiting_permission items need `reminder_approve` first.",
+        ],
+        related: &["reminder_create", "reminder_approve", "reminder_list"],
+    },
+    HelpDoc {
+        feature: "reminder_list",
+        group: "reminders",
+        synopsis: "Browse reminders with optional filters (status/priority/tag/ref), ordered by priority then due_at.",
+        syntax: "reminder_list {[status], [priority], [tag], [ref]}  (MCP tool)",
+        params: &[p!("status", false, "Filter by reminder status.")],
+        examples: &["reminder_list {status: \"pending\"}"],
+        gotchas: &[
+            "For actionable items prefer `remind_me` — it handles lazy promotion automatically.",
+        ],
+        related: &["remind_me", "reminder_get", "reminder_create"],
+    },
+    HelpDoc {
+        feature: "reminder_get",
+        group: "reminders",
+        synopsis: "Fetch a single reminder by id with its full execution history (schedule, status, autonomy, past attempts).",
+        syntax: "reminder_get {id}  (MCP tool)",
+        params: &[p!(
+            "id",
+            true,
+            "Reminder id (from remind_me/reminder_list/reminder_create)."
+        )],
+        examples: &["reminder_get {id: \"rem-abc123\"}"],
+        gotchas: &[
+            "To discover actionable reminders use `remind_me`; to browse by status/tag use `reminder_list`.",
+        ],
+        related: &["reminder_list", "remind_me"],
+    },
+    HelpDoc {
+        feature: "reminder_approve",
+        group: "reminders",
+        synopsis: "Approve a non-autonomous reminder for execution: awaiting_permission => due.",
+        syntax: "reminder_approve {id, [approved_by]}  (MCP tool)",
+        params: &[
+            p!("id", true, "Reminder to approve."),
+            p!(
+                "approved_by",
+                false,
+                "Approver id; defaults to the session agent."
+            ),
+        ],
+        examples: &["reminder_approve {id: \"rem-abc123\"}"],
+        gotchas: &[
+            "Only after the user explicitly okays it; then call `remind_me` or `reminder_start`.",
+        ],
+        related: &["remind_me", "reminder_start", "reminder_create"],
+    },
+    HelpDoc {
+        feature: "reminder_snooze",
+        group: "reminders",
+        synopsis: "Snooze a reminder until a later time; it returns to `due` and reappears on the next `remind_me`.",
+        syntax: "reminder_snooze {id, until}  (MCP tool)",
+        params: &[
+            p!("id", true, "Reminder to snooze."),
+            p!("until", true, "Datetime to snooze until (RFC3339)."),
+        ],
+        examples: &["reminder_snooze {id: \"rem-abc123\", until: \"2026-08-01T09:00:00Z\"}"],
+        gotchas: &["Defers rather than cancels — use when waiting on a PR/deploy/the user."],
+        related: &["reminder_cancel", "remind_me"],
+    },
+    HelpDoc {
+        feature: "reminder_cancel",
+        group: "reminders",
+        synopsis: "Cancel a reminder permanently so it never fires again.",
+        syntax: "reminder_cancel {id}  (MCP tool)",
+        params: &[p!("id", true, "Reminder to cancel.")],
+        examples: &["reminder_cancel {id: \"rem-abc123\"}"],
+        gotchas: &["Permanent — use `reminder_snooze` to defer instead."],
+        related: &["reminder_snooze", "reminder_list"],
+    },
+    HelpDoc {
+        feature: "reminder_start",
+        group: "reminders",
+        synopsis: "Mark a due reminder in-progress, opening a partial execution record (stamps start time + agent).",
+        syntax: "reminder_start {id, [agent_id]}  (MCP tool)",
+        params: &[
+            p!("id", true, "Reminder to start."),
+            p!(
+                "agent_id",
+                false,
+                "Executing agent; defaults to the session agent."
+            ),
+        ],
+        examples: &["reminder_start {id: \"rem-abc123\"}"],
+        gotchas: &["Follow with `reminder_record` when you finish — that closes the record."],
+        related: &["reminder_record", "remind_me", "reminder_approve"],
+    },
+    HelpDoc {
+        feature: "reminder_record",
+        group: "reminders",
+        synopsis: "Record the outcome of a reminder execution, closing the record opened by `reminder_start`.",
+        syntax: "reminder_record {id, result}  (MCP tool)",
+        params: &[
+            p!("id", true, "Reminder being recorded."),
+            p!("result", true, "success|failed|deferred|snoozed|cancelled."),
+        ],
+        examples: &["reminder_record {id: \"rem-abc123\", result: \"success\"}"],
+        gotchas: &[
+            "Call after EVERY attempt — the history is the audit trail.",
+            "On success a repeating reminder resets to pending; failed/deferred returns it to due.",
+        ],
+        related: &["reminder_start", "remind_me"],
+    },
+    // ===== taint =====
+    HelpDoc {
+        feature: "taint_list",
+        group: "taint",
+        synopsis: "List active taints/quarantines/watches; filter by path prefix, kind, or include resolved history.",
+        syntax: "ctx taint list [--path-prefix <p>] [--kind taint|quarantine|watch] [--include-resolved]",
+        params: &[
+            p!(
+                "--path-prefix",
+                false,
+                "Scope to taints whose path starts with this prefix."
+            ),
+            p!("--kind", false, "taint|quarantine|watch."),
+            p!(
+                "--include-resolved",
+                false,
+                "Also show resolved (untainted) entries."
+            ),
+        ],
+        examples: &["ctx taint list --kind quarantine"],
+        gotchas: &[
+            "Inspect before writing into a sensitive subtree; use the returned id with `taint_remove`.",
+        ],
+        related: &["taint_check", "taint_apply", "taint_remove"],
+    },
+    HelpDoc {
+        feature: "taint_check",
+        group: "taint",
+        synopsis: "Read-only: can `agent_id` write to `path` at `confidence` given active taints? Returns can_write + blocking effect.",
+        syntax: "ctx taint check <path> [--as <agent>] [--confidence <f=1.0>]",
+        params: &[
+            p!("path", true, "Path to test a hypothetical write against."),
+            p!(
+                "--as",
+                false,
+                "Agent attempting the write; defaults to session agent."
+            ),
+            p!(
+                "--confidence",
+                false,
+                "Confidence of the proposed write (default 1.0)."
+            ),
+        ],
+        examples: &["ctx taint check /memory/secrets --confidence 0.5"],
+        gotchas: &["Cheaper than failing the write and parsing the error; does not modify state."],
+        related: &["taint_list", "taint_apply", "taint_remove"],
+    },
+    HelpDoc {
+        feature: "taint_apply",
+        group: "taint",
+        synopsis: "Apply a taint, quarantine, or watch to a path — guard writes into bad/untrusted/review-needed subtrees.",
+        syntax: "ctx taint apply <path> --name <n> [--kind taint|quarantine|watch] [--effect ...] [--severity ...] --reason <r> [--authorized a,b]",
+        params: &[
+            p!(
+                "path",
+                true,
+                "Path to guard (prefix-matched by later write checks)."
+            ),
+            p!("--name", true, "Human-readable name for this taint."),
+            p!(
+                "--effect",
+                false,
+                "taint kind only: warn|block|review|isolate|advisory (required for kind=taint)."
+            ),
+            p!(
+                "--reason",
+                true,
+                "Why it's being tainted (recorded for audit)."
+            ),
+        ],
+        examples: &[
+            "ctx taint apply /memory/imported --name untrusted --effect block --reason \"unvetted source\"",
+        ],
+        gotchas: &[
+            "block/review stop writes; warn/advisory log; isolate/quarantine confine to authorized agents.",
+        ],
+        related: &["taint_remove", "taint_check", "taint_list"],
+    },
+    HelpDoc {
+        feature: "taint_remove",
+        group: "taint",
+        synopsis: "Resolve (lift) an active taint/quarantine/watch by id — marked resolved with a reason, not deleted.",
+        syntax: "ctx taint remove <taint_id> --reason <text>",
+        params: &[
+            p!(
+                "taint_id",
+                true,
+                "Taint id to resolve (find via `taint list`)."
+            ),
+            p!(
+                "--reason",
+                true,
+                "Why it's being resolved (recorded for audit)."
+            ),
+        ],
+        examples: &["ctx taint remove tnt-abc123 --reason \"source vetted\""],
+        gotchas: &["The taint is retained as resolved for audit; get the id from `taint_list`."],
+        related: &["taint_list", "taint_apply", "taint_check"],
+    },
+    // ===== project (session/repo context; MCP-first) =====
+    HelpDoc {
+        feature: "project_status",
+        group: "project",
+        synopsis: "Show which namespace this session's writes land in, plus the agent id stamped on commits.",
+        syntax: "project_status {}  (MCP tool)",
+        params: &[],
+        examples: &["project_status {}"],
+        gotchas: &[
+            "Use to prove where a write went, or debug missing memories (usually a different namespace).",
+        ],
+        related: &["session_info", "get_active_repo"],
+    },
+    HelpDoc {
+        feature: "get_active_repo",
+        group: "project",
+        synopsis: "Return the active ASD repo for this session (or null) plus the list of registered repo names.",
+        syntax: "get_active_repo {}  (MCP tool)",
+        params: &[],
+        examples: &["get_active_repo {}"],
+        gotchas: &["The active repo is what code tools default to when `repo` is omitted."],
+        related: &["set_active_repo", "code_repos"],
+    },
+    HelpDoc {
+        feature: "set_active_repo",
+        group: "project",
+        synopsis: "Set the session's active ASD repo so code tools default to it when `repo` is omitted; empty string clears.",
+        syntax: "set_active_repo {repo}  (MCP tool)",
+        params: &[p!(
+            "repo",
+            true,
+            "Registered repo name; empty string clears the active repo."
+        )],
+        examples: &["set_active_repo {repo: \"ctxone\"}"],
+        gotchas: &[
+            "Errors if the repo isn't registered — list names with `code_repos`/`get_active_repo`.",
+        ],
+        related: &["get_active_repo", "code_repos", "code_search"],
+    },
+    HelpDoc {
+        feature: "session_info",
+        group: "project",
+        synopsis: "Describe a session: its workspace/namespace, branches it touched (turn counts), and plan tasks it worked on.",
+        syntax: "session_info {session_id}  (MCP tool)",
+        params: &[p!("session_id", true, "Session to describe.")],
+        examples: &["session_info {session_id: \"sess-abc123\"}"],
+        gotchas: &[
+            "If it reports the wrong workspace you're on the wrong namespace (reconnect ?namespace=, or set CTX_NAMESPACE).",
+        ],
+        related: &["session_link_plan", "project_status"],
+    },
+    HelpDoc {
+        feature: "session_link_plan",
+        group: "project",
+        synopsis: "Associate a session with a plan task it advanced but didn't name in commit messages; validated against local plans.",
+        syntax: "session_link_plan {session_id, plan, task}  (MCP tool)",
+        params: &[
+            p!("session_id", true, "Session to link."),
+            p!("plan", true, "Plan name the task belongs to."),
+            p!("task", true, "Task ref, `t-4` or `t-004`."),
+        ],
+        examples: &[
+            "session_link_plan {session_id: \"sess-abc\", plan: \"website-v2\", task: \"t-004\"}",
+        ],
+        gotchas: &[
+            "Commit-message links are derived automatically; this records the rest. validated=false often means wrong workspace.",
+        ],
+        related: &["session_info", "plan_show"],
+    },
+    // ===== stats =====
+    HelpDoc {
+        feature: "record_llm_usage",
+        group: "stats",
+        synopsis: "Report real LLM token usage (from the model's `usage` field) for ground-truth cost/cache metrics in Lens.",
+        syntax: "ctx record-usage --input <n> --output <n> [--cache-read <n>] [--cache-create <n>] [--model <id>] [--provider <id>]",
+        params: &[
+            p!("--input", true, "Input/prompt tokens consumed."),
+            p!("--output", true, "Output/completion tokens generated."),
+            p!(
+                "--cache-read",
+                false,
+                "Cache-hit (read) tokens (default 0)."
+            ),
+            p!(
+                "--cache-create",
+                false,
+                "Cache-creation tokens (default 0)."
+            ),
+        ],
+        examples: &[
+            "ctx record-usage --input 5200 --output 830 --cache-read 4000 --model claude-opus-4-8",
+        ],
+        gotchas: &[
+            "Call after any significant LLM turn; without it Lens shows only the CTXone-side view, not real consumption.",
+        ],
+        related: &["stats", "tokens"],
     },
 ];
 
