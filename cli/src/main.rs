@@ -1136,6 +1136,16 @@ enum SessionAction {
         #[arg(long)]
         auto_register: bool,
     },
+
+    /// Split a session into topic arcs (contiguous stretches on one branch/dir).
+    /// The basis for curated summaries — segment, then keep/drop whole arcs.
+    Segments {
+        /// Session id (transcript id) to segment.
+        session_id: String,
+        /// Idle-gap minutes that start a new arc (0 disables).
+        #[arg(long, default_value_t = 30)]
+        gap: i64,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -5619,6 +5629,34 @@ async fn run_session_action(
             auto_register,
         } => {
             run_reattribute(server, &clients, dry_run, auto_register).await?;
+        }
+        SessionAction::Segments { session_id, gap } => {
+            let client = clients.build(None);
+            let url = format!("{server}/api/sessions/{session_id}/segments?gap={gap}");
+            let resp = client.get(&url).send().await?;
+            if !resp.status().is_success() {
+                return Err(format!("segments failed: {}", resp.status()).into());
+            }
+            let v: Value = resp.json().await?;
+            let segs = v
+                .get("segments")
+                .and_then(|s| s.as_array())
+                .cloned()
+                .unwrap_or_default();
+            println!("session {session_id} — {} topic arc(s)", segs.len());
+            for s in &segs {
+                let u = |k: &str| s.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+                let st = |k: &str| s.get(k).and_then(|x| x.as_str()).unwrap_or("");
+                println!(
+                    "  [{:>3}-{:<3}] {:>3}t {:>8}tok  {:<18} (start:{})",
+                    u("start"),
+                    u("end"),
+                    u("turn_count"),
+                    u("tokens"),
+                    st("label"),
+                    st("reason"),
+                );
+            }
         }
     }
     Ok(())

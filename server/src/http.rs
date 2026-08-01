@@ -637,6 +637,8 @@ fn router_with_config_inner(
             "/api/sessions/{sid}/turns/{idx}",
             post(put_session_turn).get(get_session_turn),
         )
+        // Topic-arc segmentation of a session (t-003).
+        .route("/api/sessions/{sid}/segments", get(session_segments))
         // Session title (t-016): human-readable name for a session id.
         .route(
             "/api/sessions/{sid}/title",
@@ -3701,6 +3703,41 @@ async fn list_session_turns(
         }
     }
     Ok(Json(roots.into_iter().collect()))
+}
+
+#[derive(Deserialize)]
+struct SegmentsQuery {
+    #[serde(default = "default_ref", rename = "ref")]
+    ref_name: String,
+    /// Idle-gap threshold in minutes that starts a new arc (0 disables).
+    #[serde(default = "default_gap_minutes")]
+    gap: i64,
+}
+
+fn default_gap_minutes() -> i64 {
+    30
+}
+
+/// `GET /api/sessions/{sid}/segments?gap=<min>&ref=<b>` — split a session into
+/// topic arcs (t-003). No LLM: arcs break on branch/cwd change or an idle gap.
+/// The foundation for curated summaries — segment, then draft per arc.
+async fn session_segments(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+    Path(sid): Path<String>,
+    Query(q): Query<SegmentsQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
+    let tree = repo
+        .get_tree(&q.ref_name, &format!("/sessions/{sid}/turns"))
+        .unwrap_or(serde_json::Value::Null);
+    let segments = crate::segments::segments_from_tree(&tree, q.gap);
+    Ok(Json(serde_json::json!({
+        "session": sid,
+        "gap_minutes": q.gap,
+        "segment_count": segments.len(),
+        "segments": segments,
+    })))
 }
 
 // -- Session title (t-016) ----------------------------------------------

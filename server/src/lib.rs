@@ -19,4 +19,5 @@ pub mod plan_tools;
 pub mod project;
 pub mod rate_limit;
 pub mod reminder_tools;
+pub mod segments;
 pub mod session_links;

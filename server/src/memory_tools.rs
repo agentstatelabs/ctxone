@@ -1461,6 +1461,22 @@ pub struct SetActiveRepoParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct SessionSegmentsParams {
+    /// Session id to segment into topic arcs.
+    pub session_id: String,
+    /// Idle-gap minutes that start a new arc (0 disables the gap rule).
+    #[serde(default = "default_gap_minutes")]
+    pub gap: i64,
+    /// Branch to read from (default: "main").
+    #[serde(default = "default_ref", rename = "ref")]
+    pub ref_name: String,
+}
+
+fn default_gap_minutes() -> i64 {
+    30
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct SessionInfoParams {
     /// The session id to describe (the transcript's id, e.g. a Claude Code
     /// UUID). Required — a bare MCP client has no ambient session.
@@ -3578,6 +3594,25 @@ impl CtxOneServer {
         serde_json::json!({
             "active_repo": active,
             "known_repos": known,
+        })
+        .to_string()
+    }
+
+    #[tool(
+        description = "Split a session into topic ARCS — contiguous stretches of turns on one git branch and working dir — so you can summarize or curate it piece by piece instead of as one blob. NO LLM: arcs break on a branch change, a working-dir change, or an idle gap (default 30 min; pass gap=0 to disable). Returns each arc's turn range, branch, cwd, token cost, and a label. CALL THIS BEFORE drafting durable memories from a session: a session is rarely one topic, so segment it, then keep the arcs that matter and drop whole tangents. (t-003)"
+    )]
+    async fn session_segments(&self, params: Parameters<SessionSegmentsParams>) -> String {
+        let p = params.0;
+        let tree = self
+            .repo
+            .get_tree(&p.ref_name, &format!("/sessions/{}/turns", p.session_id))
+            .unwrap_or(serde_json::Value::Null);
+        let segments = crate::segments::segments_from_tree(&tree, p.gap);
+        serde_json::json!({
+            "session_id": p.session_id,
+            "gap_minutes": p.gap,
+            "segment_count": segments.len(),
+            "segments": segments,
         })
         .to_string()
     }
