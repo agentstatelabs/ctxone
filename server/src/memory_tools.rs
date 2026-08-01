@@ -1477,6 +1477,63 @@ fn default_gap_minutes() -> i64 {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct DraftStageParams {
+    /// Session the candidate was distilled from.
+    pub session_id: String,
+    /// The candidate memory text (a decision, gotcha, or open thread).
+    pub content: String,
+    /// Kind: "decision" | "gotcha" | "open_thread" | "fact".
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Source turn range [start, end] this was distilled from (provenance).
+    #[serde(default)]
+    pub turns: Option<Vec<usize>>,
+    /// Human label of the arc it came from.
+    #[serde(default)]
+    pub arc: Option<String>,
+    /// Suggested memory context/namespace to use on promote.
+    #[serde(default)]
+    pub context: Option<String>,
+    /// Suggest pinning on promote (always-included in recall).
+    #[serde(default)]
+    pub pin: bool,
+    #[serde(default = "default_ref", rename = "ref")]
+    pub ref_name: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct DraftsListParams {
+    pub session_id: String,
+    #[serde(default = "default_ref", rename = "ref")]
+    pub ref_name: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct DraftPromoteParams {
+    pub session_id: String,
+    pub draft_id: String,
+    /// Override the draft's suggested memory context.
+    #[serde(default)]
+    pub context: Option<String>,
+    /// Importance -> confidence: high (0.95), medium (0.7, default), low (0.4).
+    #[serde(default)]
+    pub importance: Option<String>,
+    #[serde(default = "default_ref", rename = "ref")]
+    pub ref_name: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct DraftDiscardParams {
+    pub session_id: String,
+    pub draft_id: String,
+    /// Reason recorded in blame (the rollback commit).
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default = "default_ref", rename = "ref")]
+    pub ref_name: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct SessionInfoParams {
     /// The session id to describe (the transcript's id, e.g. a Claude Code
     /// UUID). Required — a bare MCP client has no ambient session.
@@ -3618,6 +3675,138 @@ impl CtxOneServer {
     }
 
     #[tool(
+        description = "Stage a CANDIDATE memory drafted from a session arc — NOT yet durable. This is the curation flow (t-003): after `session_segments`, read an arc's turns, distill the decisions/gotchas/open-threads worth keeping, and `draft_stage` each. Drafts land in /drafts/<session> for the user to review (keep/drop/edit) before anything reaches durable memory. Pass `turns` = [start, end] the draft was distilled from — that source range is the provenance carried onto the promoted memory. The USER decides what's important; you surface candidates."
+    )]
+    async fn draft_stage(&self, params: Parameters<DraftStageParams>) -> String {
+        let p = params.0;
+        let id = timestamp_id();
+        let now = chrono::Utc::now().to_rfc3339();
+        let value = serde_json::json!({
+            "content": p.content,
+            "kind": p.kind.as_deref().unwrap_or("fact"),
+            "turns": p.turns,
+            "arc": p.arc,
+            "context": p.context,
+            "pin": p.pin,
+            "created_at": now,
+        });
+        let opts = CommitOptions::new(
+            &self.agent_id,
+            IntentCategory::Custom("Observe".to_string()),
+            format!("Draft candidate for session {}", p.session_id),
+        );
+        let path = format!("/drafts/{}/{}", p.session_id, id);
+        match self.repo.set_json(&p.ref_name, &path, &value, opts) {
+            Ok(_) => {
+                serde_json::json!({ "draft_id": id, "path": path, "status": "staged" }).to_string()
+            }
+            Err(e) => serde_json::json!({ "error": format!("{e}") }).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "List the staged draft candidates for a session (from /drafts/<session>) so the user can review them before promotion. Each draft carries its content, kind, source turn range, and suggested context/pin. Use with `draft_promote` (keep) and `draft_discard` (drop)."
+    )]
+    async fn drafts_list(&self, params: Parameters<DraftsListParams>) -> String {
+        let p = params.0;
+        let tree = self
+            .repo
+            .get_tree(&p.ref_name, &format!("/drafts/{}", p.session_id))
+            .unwrap_or(serde_json::Value::Null);
+        serde_json::json!({ "session_id": p.session_id, "drafts": tree }).to_string()
+    }
+
+    #[tool(
+        description = "Promote a staged draft to DURABLE memory — the 'keep' half of curation (t-003). Writes the draft's content to /memory (or /memory/pinned if pinned), stamping the commit with its provenance (source session + turn range), then removes the draft. This is how curated pieces get ELEVATED from the cold session archive into the hot, recallable working set. Only the user (or an agent acting on the user's explicit pick) should promote."
+    )]
+    async fn draft_promote(&self, params: Parameters<DraftPromoteParams>) -> String {
+        let p = params.0;
+        let draft_path = format!("/drafts/{}/{}", p.session_id, p.draft_id);
+        let draft = match self.repo.get_json(&p.ref_name, &draft_path) {
+            Ok(v) => v,
+            Err(e) => {
+                return serde_json::json!({ "error": format!("draft not found: {e}") }).to_string();
+            }
+        };
+        let content = draft.get("content").and_then(|v| v.as_str()).unwrap_or("");
+        if content.is_empty() {
+            return serde_json::json!({ "error": "draft has no content" }).to_string();
+        }
+        let context = p
+            .context
+            .as_deref()
+            .or_else(|| draft.get("context").and_then(|v| v.as_str()))
+            .filter(|c| !c.is_empty());
+        let pin = draft.get("pin").and_then(|v| v.as_bool()).unwrap_or(false);
+        let turns = draft
+            .get("turns")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let confidence = match p.importance.as_deref() {
+            Some("high") => 0.95,
+            Some("low") => 0.4,
+            _ => 0.7,
+        };
+
+        let id = timestamp_id();
+        let mem_path = if pin {
+            format!("/memory/pinned/curated/{id}")
+        } else {
+            format!("/memory/{}/{}", context.unwrap_or("facts"), id)
+        };
+        // Provenance rides the commit message (the event-log way), so the
+        // memory value stays a plain string and recall is unaffected.
+        let turns_str = match turns.as_array() {
+            Some(a) if a.len() == 2 => format!(" turns {}-{}", a[0], a[1]),
+            _ => String::new(),
+        };
+        let opts = CommitOptions::new(
+            &self.agent_id,
+            IntentCategory::Custom("Observe".to_string()),
+            format!("Promoted from session {}{}", p.session_id, turns_str),
+        )
+        .with_confidence(confidence);
+        let value = serde_json::Value::String(content.to_string());
+        if let Err(e) = self.repo.set_json(&p.ref_name, &mem_path, &value, opts) {
+            return serde_json::json!({ "error": format!("write failed: {e}") }).to_string();
+        }
+        // Remove the draft now that it's durable.
+        let del_opts = CommitOptions::new(
+            &self.agent_id,
+            IntentCategory::Rollback,
+            format!("Draft {} promoted", p.draft_id),
+        );
+        let _ = self.repo.delete(&p.ref_name, &draft_path, del_opts);
+        self.session.mark_dirty();
+        serde_json::json!({
+            "status": "promoted",
+            "path": mem_path,
+            "pinned": pin,
+            "source": { "session": p.session_id, "turns": turns },
+        })
+        .to_string()
+    }
+
+    #[tool(
+        description = "Discard a staged draft candidate — the 'drop' half of curation (t-003). Removes it from /drafts/<session> without ever writing durable memory. The underlying session turns stay in the cold archive (nothing is lost); the candidate just isn't elevated. Use to drop whole tangent arcs the user doesn't want preserved."
+    )]
+    async fn draft_discard(&self, params: Parameters<DraftDiscardParams>) -> String {
+        let p = params.0;
+        let path = format!("/drafts/{}/{}", p.session_id, p.draft_id);
+        let opts = CommitOptions::new(
+            &self.agent_id,
+            IntentCategory::Rollback,
+            p.reason.clone().unwrap_or_else(|| "Draft discarded".into()),
+        );
+        match self.repo.delete(&p.ref_name, &path, opts) {
+            Ok(_) => {
+                serde_json::json!({ "status": "discarded", "draft_id": p.draft_id }).to_string()
+            }
+            Err(e) => serde_json::json!({ "error": format!("{e}") }).to_string(),
+        }
+    }
+
+    #[tool(
         description = "Describe a session: which workspace (namespace) it lives in, \
         the git branches it touched, and the plan tasks it worked on. \
         \
@@ -4767,6 +4956,110 @@ mod tests {
         let tags: Vec<String> = (0..MAX_TAGS).map(|_| "y".repeat(MAX_TAG_LEN)).collect();
         let p = remember_params(Some(ctx), Some(tags));
         assert!(validate_remember_params(&p).is_ok());
+    }
+
+    #[tokio::test]
+    async fn draft_flow_stage_promote_discard() {
+        let repo = Arc::new(Repository::new(Box::new(
+            agentstategraph_storage::SqliteStorage::in_memory().expect("in-memory sqlite"),
+        )));
+        repo.init().unwrap();
+        let server = CtxOneServer::new(repo.clone());
+
+        let mk_stage = |content: &str, ctx: Option<&str>, pin: bool| DraftStageParams {
+            session_id: "s1".into(),
+            content: content.into(),
+            kind: Some("decision".into()),
+            turns: Some(vec![2, 5]),
+            arc: Some("auth".into()),
+            context: ctx.map(str::to_string),
+            pin,
+            ref_name: "main".into(),
+        };
+
+        // Stage two candidates: one to keep, one to drop.
+        let keep: serde_json::Value = serde_json::from_str(
+            &server
+                .draft_stage(Parameters(mk_stage(
+                    "chose JWT over sessions",
+                    Some("auth"),
+                    false,
+                )))
+                .await,
+        )
+        .unwrap();
+        let drop: serde_json::Value = serde_json::from_str(
+            &server
+                .draft_stage(Parameters(mk_stage("tangent about CSS", None, false)))
+                .await,
+        )
+        .unwrap();
+        let keep_id = keep["draft_id"].as_str().unwrap().to_string();
+        let drop_id = drop["draft_id"].as_str().unwrap().to_string();
+
+        // Both show up in the list.
+        let listed: serde_json::Value = serde_json::from_str(
+            &server
+                .drafts_list(Parameters(DraftsListParams {
+                    session_id: "s1".into(),
+                    ref_name: "main".into(),
+                }))
+                .await,
+        )
+        .unwrap();
+        assert_eq!(listed["drafts"].as_object().unwrap().len(), 2);
+
+        // Promote the keeper -> durable memory under /memory/auth, draft removed.
+        let promoted: serde_json::Value = serde_json::from_str(
+            &server
+                .draft_promote(Parameters(DraftPromoteParams {
+                    session_id: "s1".into(),
+                    draft_id: keep_id.clone(),
+                    context: None,
+                    importance: Some("high".into()),
+                    ref_name: "main".into(),
+                }))
+                .await,
+        )
+        .unwrap();
+        assert_eq!(promoted["status"], "promoted");
+        let mem_path = promoted["path"].as_str().unwrap();
+        assert!(mem_path.starts_with("/memory/auth/"));
+        // The memory exists as a plain string (recall-compatible).
+        let stored = repo.get_json("main", mem_path).unwrap();
+        assert_eq!(stored.as_str().unwrap(), "chose JWT over sessions");
+        // Provenance survives in the source echo.
+        assert_eq!(promoted["source"]["session"], "s1");
+
+        // Discard the other -> gone, never durable.
+        let discarded: serde_json::Value = serde_json::from_str(
+            &server
+                .draft_discard(Parameters(DraftDiscardParams {
+                    session_id: "s1".into(),
+                    draft_id: drop_id.clone(),
+                    reason: Some("tangent".into()),
+                    ref_name: "main".into(),
+                }))
+                .await,
+        )
+        .unwrap();
+        assert_eq!(discarded["status"], "discarded");
+
+        // Both drafts are now gone from staging.
+        let after: serde_json::Value = serde_json::from_str(
+            &server
+                .drafts_list(Parameters(DraftsListParams {
+                    session_id: "s1".into(),
+                    ref_name: "main".into(),
+                }))
+                .await,
+        )
+        .unwrap();
+        let remaining = after["drafts"].as_object().map(|o| o.len()).unwrap_or(0);
+        assert_eq!(
+            remaining, 0,
+            "no drafts should remain after promote + discard"
+        );
     }
 
     #[test]
