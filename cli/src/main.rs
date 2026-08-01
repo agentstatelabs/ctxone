@@ -8,6 +8,7 @@ mod onboarding;
 mod service;
 mod sources;
 mod workspace;
+mod worktree;
 
 /// The workspace used when nothing more specific is detected.
 ///
@@ -916,6 +917,13 @@ enum Commands {
     Plan {
         #[command(subcommand)]
         action: PlanAction,
+    },
+    /// Plan-scoped git worktrees: isolated files + HEAD per unit of work so
+    /// parallel agents can't clobber each other, while sharing the CTXone brain.
+    /// `start` a worktree, work there, `finish` to merge back + tear down.
+    Worktree {
+        #[command(subcommand)]
+        action: worktree::WorktreeAction,
     },
     /// Manage taints — markers that flag paths as needing verification,
     /// blocking write attempts, or watching for changes. Three kinds:
@@ -3285,6 +3293,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let branch = cli.branch.clone();
             let format = cli.format;
             handle_agents(action, &server, &branch, format, client.clone()).await?;
+        }
+        Commands::Worktree { action } => {
+            worktree::run(action)?;
         }
         Commands::Plan { action } => {
             let server = cli.server.clone();
