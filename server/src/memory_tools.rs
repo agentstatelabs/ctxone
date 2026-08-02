@@ -173,6 +173,11 @@ pub struct SessionStats {
     pub tokens_saved: AtomicU64,
     pub total_graph_size_chars: AtomicU64,
     graph_size_dirty: AtomicBool,
+    /// Epoch-ms of the last full flat-size recompute (0 = never). Throttles the
+    /// expensive whole-graph serialization: even when dirty, we recompute at
+    /// most once per window, so a busy write/recall path doesn't walk a
+    /// multi-MB graph on every call (the -32001 write-timeout cause).
+    flat_size_at_ms: AtomicU64,
 
     // LLM-observed fields, populated by agent reports.
     pub llm_input_tokens: AtomicU64,
@@ -238,6 +243,7 @@ impl SessionStats {
             tokens_saved: AtomicU64::new(0),
             total_graph_size_chars: AtomicU64::new(0),
             graph_size_dirty: AtomicBool::new(true),
+            flat_size_at_ms: AtomicU64::new(0),
             llm_input_tokens: AtomicU64::new(0),
             llm_output_tokens: AtomicU64::new(0),
             llm_cache_read_tokens: AtomicU64::new(0),
@@ -269,6 +275,7 @@ impl SessionStats {
             tokens_saved: AtomicU64::new(tokens_saved),
             total_graph_size_chars: AtomicU64::new(0),
             graph_size_dirty: AtomicBool::new(true),
+            flat_size_at_ms: AtomicU64::new(0),
             llm_input_tokens: AtomicU64::new(llm_input),
             llm_output_tokens: AtomicU64::new(llm_output),
             llm_cache_read_tokens: AtomicU64::new(llm_cache_read),
@@ -938,13 +945,26 @@ pub fn estimate_flat_size(repo: &Repository, ref_name: &str) -> usize {
 /// Ensure the cached flat-size is current. If dirty, refreshes it and clears the flag.
 /// Call this just before reading `session.total_graph_size_chars` in a read-heavy path.
 pub fn ensure_flat_size(repo: &Repository, session: &SessionStats, ref_name: &str) {
-    if session.graph_size_dirty.load(Ordering::Relaxed) {
-        let size = estimate_flat_size(repo, ref_name) as u64;
-        session
-            .total_graph_size_chars
-            .store(size, Ordering::Relaxed);
-        session.graph_size_dirty.store(false, Ordering::Relaxed);
+    if !session.graph_size_dirty.load(Ordering::Relaxed) {
+        return;
     }
+    // Throttle the whole-graph walk: even while dirty, recompute at most once
+    // per window. flat_size is a slowly-changing estimate for the savings
+    // ratio, so a stale value between recomputes is fine — and it keeps a busy
+    // write/recall path from serializing a multi-MB graph on every call.
+    const THROTTLE_MS: u64 = 30_000;
+    let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    let last = session.flat_size_at_ms.load(Ordering::Relaxed);
+    if last != 0 && now_ms.saturating_sub(last) < THROTTLE_MS {
+        return; // recomputed recently; keep the (slightly stale) cached size
+    }
+
+    let size = estimate_flat_size(repo, ref_name) as u64;
+    session
+        .total_graph_size_chars
+        .store(size, Ordering::Relaxed);
+    session.flat_size_at_ms.store(now_ms, Ordering::Relaxed);
+    session.graph_size_dirty.store(false, Ordering::Relaxed);
 }
 
 /// Wrap a response string with token stats metadata.
@@ -5130,6 +5150,48 @@ mod tests {
         assert_eq!(
             remaining, 0,
             "no drafts should remain after promote + discard"
+        );
+    }
+
+    #[test]
+    fn ensure_flat_size_throttles_the_whole_graph_walk() {
+        let repo = Arc::new(Repository::new(Box::new(
+            agentstategraph_storage::SqliteStorage::in_memory().expect("in-memory sqlite"),
+        )));
+        repo.init().unwrap();
+        let seed = |k: &str, v: &str| {
+            repo.set_json(
+                "main",
+                k,
+                &serde_json::json!(v),
+                CommitOptions::new("t", IntentCategory::Custom("Observe".to_string()), "s"),
+            )
+            .unwrap();
+        };
+        seed("/memory/a", "small");
+
+        let session = SessionStats::new(); // dirty=true, at_ms=0
+        ensure_flat_size(&repo, &session, "main");
+        let first = session.total_graph_size_chars.load(Ordering::Relaxed);
+        assert!(first > 0);
+
+        // Grow the graph a lot and mark dirty again.
+        seed("/memory/b", &"x".repeat(5000));
+        session.mark_dirty();
+        // Within the throttle window, the walk is skipped -> size stays stale.
+        ensure_flat_size(&repo, &session, "main");
+        assert_eq!(
+            session.total_graph_size_chars.load(Ordering::Relaxed),
+            first,
+            "recompute must be throttled within the window"
+        );
+
+        // Force the window open (pretend the last compute was long ago) -> recomputes.
+        session.flat_size_at_ms.store(1, Ordering::Relaxed);
+        ensure_flat_size(&repo, &session, "main");
+        assert!(
+            session.total_graph_size_chars.load(Ordering::Relaxed) > first,
+            "recompute after the window sees the grown graph"
         );
     }
 
