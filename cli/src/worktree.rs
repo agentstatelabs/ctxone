@@ -33,8 +33,16 @@ pub enum WorktreeAction {
         /// (per-worktree target, removed on `finish`).
         #[arg(long)]
         shared_target: bool,
+        /// Isolate via a fresh CLONE (its own .git) into `../<repo>-clone-<plan>`
+        /// instead of a worktree — for remote/cloud agents on another machine.
+        /// Merge-back is via origin (push the branch), not a local merge.
+        #[arg(long)]
+        clone: bool,
+        /// Clone URL (default: this repo's `origin` remote). Only with --clone.
+        #[arg(long)]
+        url: Option<String>,
     },
-    /// List this repo's plan-scoped worktrees.
+    /// List this repo's plan-scoped worktrees and clones.
     List,
     /// Merge the plan's branch back into the target branch, then tear the
     /// worktree down (force-remove + delete branch + prune). Run from anywhere;
@@ -51,6 +59,10 @@ pub enum WorktreeAction {
         /// Branch to merge into.
         #[arg(long, default_value = "main")]
         into: String,
+        /// Finish a --clone workspace: push the branch to origin (with --push),
+        /// then remove the clone directory. Merge to main happens on origin/MR.
+        #[arg(long)]
+        clone: bool,
     },
 }
 
@@ -121,15 +133,96 @@ pub fn run(action: WorktreeAction) -> Res {
             plan,
             from,
             shared_target,
-        } => start(&root, &plan, &from, shared_target),
+            clone,
+            url,
+        } => {
+            if clone {
+                start_clone(&root, &plan, url.as_deref())
+            } else {
+                start(&root, &plan, &from, shared_target)
+            }
+        }
         WorktreeAction::List => list(&root),
         WorktreeAction::Finish {
             plan,
             push,
             keep,
             into,
-        } => finish(&root, &plan, &into, push, keep),
+            clone,
+        } => {
+            if clone {
+                finish_clone(&root, &plan, push)
+            } else {
+                finish(&root, &plan, &into, push, keep)
+            }
+        }
     }
+}
+
+/// `<parent>/<repo>-clone-<plan>` — the isolated clone directory.
+fn clone_dir(root: &Path, plan: &str) -> PathBuf {
+    let repo_name = root
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "repo".into());
+    root.parent()
+        .unwrap_or(root)
+        .join(format!("{repo_name}-clone-{plan}"))
+}
+
+fn start_clone(root: &Path, plan: &str, url: Option<&str>) -> Res {
+    let dir = clone_dir(root, plan);
+    let branch = format!("plan/{plan}");
+    if dir.exists() {
+        println!("Clone already exists: {}", dir.display());
+        println!("  cd {}", dir.display());
+        return Ok(());
+    }
+    let url = match url {
+        Some(u) => u.to_string(),
+        None => git_stdout(&["remote", "get-url", "origin"], root)?,
+    };
+    if url.is_empty() {
+        return Err("no `origin` remote — pass --url <remote>".into());
+    }
+    let parent = dir.parent().unwrap_or(root);
+    git_checked(&["clone", &url, &dir.to_string_lossy()], parent)?;
+    git_checked(&["checkout", "-b", &branch], &dir)?;
+    println!("\u{2713} clone {} on branch {}", dir.display(), branch);
+    println!("  Open your agent/session there:  cd {}", dir.display());
+    println!("  When done:  ctx worktree finish {plan} --clone --push");
+    Ok(())
+}
+
+fn finish_clone(root: &Path, plan: &str, push: bool) -> Res {
+    let dir = clone_dir(root, plan);
+    let branch = format!("plan/{plan}");
+    if !dir.exists() {
+        return Err(format!(
+            "no clone at {} — run `ctx worktree start {plan} --clone` first",
+            dir.display()
+        )
+        .into());
+    }
+    let dirty = git_stdout(&["status", "--porcelain"], &dir)?;
+    if !dirty.is_empty() {
+        return Err(format!(
+            "clone {} has uncommitted changes — commit or stash them first",
+            dir.display()
+        )
+        .into());
+    }
+    if push {
+        git_checked(&["push", "origin", &branch], &dir)?;
+        println!("\u{2713} pushed {branch} to origin (merge it via MR / on the main checkout)");
+    } else {
+        println!("  (not pushed — pass --push to publish {branch} before teardown)");
+    }
+    // A clone is a plain directory (its own .git), so teardown is a recursive
+    // remove — not `git worktree remove`.
+    std::fs::remove_dir_all(&dir)?;
+    println!("\u{2713} removed clone {}", dir.display());
+    Ok(())
 }
 
 fn start(root: &Path, plan: &str, from: &str, shared_target: bool) -> Res {
@@ -206,15 +299,33 @@ fn list(root: &Path) -> Res {
     }
     flush(&path, &branch);
 
-    if rows.is_empty() {
-        println!(
-            "No plan-scoped worktrees for {}.",
-            prefix.trim_end_matches("-wt-")
-        );
+    // Clones have their own .git and aren't in `git worktree list`; scan siblings.
+    let repo_name = prefix.trim_end_matches("-wt-").to_string();
+    let clone_prefix = format!("{repo_name}-clone-");
+    let mut clone_rows: Vec<(String, String)> = Vec::new();
+    if let Some(parent) = root.parent()
+        && let Ok(entries) = std::fs::read_dir(parent)
+    {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if let Some(plan) = name.strip_prefix(&clone_prefix)
+                && e.path().is_dir()
+            {
+                clone_rows.push((plan.to_string(), e.path().to_string_lossy().into_owned()));
+            }
+        }
+    }
+    clone_rows.sort();
+
+    if rows.is_empty() && clone_rows.is_empty() {
+        println!("No plan-scoped worktrees or clones for {repo_name}.");
         return Ok(());
     }
     for (plan, branch, p) in rows {
-        println!("  {plan:<22} [{branch}]  {p}");
+        println!("  wt     {plan:<20} [{branch}]  {p}");
+    }
+    for (plan, p) in clone_rows {
+        println!("  clone  {plan:<20} [plan/{plan}]  {p}");
     }
     Ok(())
 }
