@@ -607,6 +607,7 @@ fn router_with_config_inner(
         )
         .route("/api/plans/{name}/next", get(next_plan_task))
         .route("/api/plans/{name}/archive", post(archive_plan))
+        .route("/api/plans/{name}/provenance", get(plan_provenance))
         .route(
             "/api/plans/{name}/force_complete",
             post(force_complete_plan),
@@ -2936,6 +2937,84 @@ async fn get_plan(
         }
     }
     Ok(Json(out))
+}
+
+/// `GET /api/plans/{name}/provenance` — the per-feature trust artifact (t-004).
+/// Stitches the existing signals into one "prove what and why" object: the plan
+/// and its tasks WITH PROOFS (what was done), the sessions that worked it (who),
+/// the decisions recorded under the plan (why), and the token cost (t-002).
+/// "Not only see what the agent did, but prove it and prove why."
+async fn plan_provenance(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+    Path(name): Path<String>,
+    Query(q): Query<RefQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
+    let store = plan_tools::make_store(repo.clone(), DEFAULT_AGENT_ID);
+    let plan = store
+        .get_plan(&q.ref_name, &name)
+        .map_err(substrate_error_to_response)?;
+    let tasks = store.list_tasks(&q.ref_name, &name).unwrap_or_default();
+    let plan_json = plan_tools::plan_to_json(&plan, &tasks, true);
+
+    // Proof summary: how much of the plan is backed by evidence.
+    let (mut total, mut done, mut commit_proofs) = (0u64, 0u64, 0u64);
+    if let Some(arr) = plan_json["tasks"].as_array() {
+        for t in arr {
+            total += 1;
+            if t["status"] == "done" {
+                done += 1;
+            }
+            if t.get("proof")
+                .and_then(|p| p.get("kind"))
+                .and_then(|k| k.as_str())
+                == Some("commit")
+            {
+                commit_proofs += 1;
+            }
+        }
+    }
+
+    // Sessions linked to the plan + their token usage; and the cost rollup
+    // (reuses the t-002 join, keeping pricing read-time in Lens).
+    let snaps = s.sessions.snapshot_all();
+    let mut plans_of = std::collections::HashMap::new();
+    let mut sessions = Vec::new();
+    for snap in &snaps {
+        let ps = plans_linked_to_session(&repo, &q.ref_name, &snap.session_id);
+        if ps.iter().any(|p| p == &name) {
+            sessions.push(serde_json::json!({
+                "session_id": snap.session_id,
+                "name": snap.name,
+                "llm_input_tokens": snap.llm_input_tokens,
+                "llm_output_tokens": snap.llm_output_tokens,
+                "last_model": snap.last_model,
+                "cumulative_ratio": snap.cumulative_ratio,
+            }));
+        }
+        if !ps.is_empty() {
+            plans_of.insert(snap.session_id.clone(), ps);
+        }
+    }
+    let cost = plan_cost_rollup(&name, &snaps, &plans_of);
+
+    // Decisions/memories recorded under this plan's context (the "why").
+    let decisions = repo
+        .get_tree(&q.ref_name, &format!("/memory/{name}"))
+        .unwrap_or(serde_json::Value::Null);
+
+    Ok(Json(serde_json::json!({
+        "plan": plan_json,
+        "proof_summary": {
+            "tasks_total": total,
+            "tasks_done": done,
+            "tasks_with_commit_proof": commit_proofs,
+        },
+        "sessions": sessions,
+        "decisions": decisions,
+        "cost": cost.get("totals").cloned().unwrap_or(serde_json::Value::Null),
+    })))
 }
 
 #[instrument(skip_all, fields(name = %name, ref_name = %q.ref_name, agent = %agent_id.0))]
