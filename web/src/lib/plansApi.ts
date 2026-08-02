@@ -220,6 +220,83 @@ export async function forceCompletePlan(
 	});
 }
 
+// -- Cost-per-feature (t-002) & provenance (t-004) ------------------------
+
+/**
+ * One session's LLM usage as returned by `GET /api/stats/plan/{plan}/cost`.
+ * Fields map 1:1 into `PlanCostSession` from `pricing.ts` for read-time
+ * pricing — the server deliberately ships tokens, not dollars.
+ */
+export interface PlanCostSessionRow {
+	session_id: string;
+	name: string | null;
+	llm_input_tokens: number;
+	llm_output_tokens: number;
+	llm_cache_read_tokens: number;
+	llm_cache_create_tokens: number;
+	last_model: string | null;
+	models_used?: string[];
+	cumulative_ratio: number;
+}
+
+export interface PlanCostTotals {
+	llm_input_tokens: number;
+	llm_output_tokens: number;
+	llm_cache_read_tokens: number;
+	llm_cache_create_tokens: number;
+	ctx_tokens_saved: number;
+}
+
+export interface PlanCostResponse {
+	plan: string;
+	session_count: number;
+	sessions: PlanCostSessionRow[];
+	totals: PlanCostTotals;
+}
+
+/** `GET /api/stats/plan/{plan}/cost` — sums LLM usage of every linked session. */
+export async function getPlanCost(plan: string): Promise<PlanCostResponse> {
+	return fetchJson(`/api/stats/plan/${encodeURIComponent(plan)}/cost`);
+}
+
+/** A session that worked the plan, as embedded in the provenance artifact. */
+export interface ProvenanceSession {
+	session_id: string;
+	name: string | null;
+	llm_input_tokens: number;
+	llm_output_tokens: number;
+	last_model: string | null;
+	cumulative_ratio: number;
+}
+
+export interface ProofSummary {
+	tasks_total: number;
+	tasks_done: number;
+	tasks_with_commit_proof: number;
+}
+
+/**
+ * `GET /api/plans/{name}/provenance` — the per-feature trust artifact (t-004):
+ * the plan and its proofs (what), the sessions (who), the decisions (why), and
+ * the token cost. `decisions` is the raw `/memory/{plan}` subtree (or null).
+ */
+export interface ProvenanceResponse {
+	plan: Plan;
+	proof_summary: ProofSummary;
+	sessions: ProvenanceSession[];
+	decisions: unknown;
+	cost: PlanCostTotals | null;
+}
+
+export async function getPlanProvenance(
+	name: string,
+	branch = 'main'
+): Promise<ProvenanceResponse> {
+	return fetchJson(
+		`/api/plans/${encodeURIComponent(name)}/provenance?ref=${ref(branch)}`
+	);
+}
+
 export async function nextTask(
 	plan: string,
 	opts: {

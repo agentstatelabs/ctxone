@@ -59,6 +59,18 @@ export const PRICING: Record<string, ModelPricing> = {
 		cache_read: 1.5,
 		cache_write: 18.75
 	},
+	// Current-gen Anthropic models report HYPHENATED ids (claude-opus-4-8),
+	// not the dotted form above — pricingFor() does an exact key match, so the
+	// key must be spelled exactly as agents report it. Opus 4.8: $5/$25 per 1M
+	// (cache_read = 0.1x input, cache_write = 1.25x input, the Anthropic
+	// prompt-cache ratios).
+	'claude-opus-4-8': {
+		provider: 'anthropic',
+		input: 5.0,
+		output: 25.0,
+		cache_read: 0.5,
+		cache_write: 6.25
+	},
 
 	// -- OpenAI --
 	'gpt-4o': {

@@ -29,6 +29,14 @@
 	import TaskDetailPanel from './TaskDetailPanel.svelte';
 	import AddTaskModal from './AddTaskModal.svelte';
 	import ConfirmButton from './ConfirmButton.svelte';
+	import CostPerFeature from './CostPerFeature.svelte';
+	import ProvenanceCard from './ProvenanceCard.svelte';
+	import { goto } from '$app/navigation';
+
+	/** Chain the trust story: a plan's session → the sessions view. */
+	function openSession(sessionId: string) {
+		goto(`/sessions?session=${encodeURIComponent(sessionId)}`);
+	}
 
 	/* ---------------------------------------------------------------- *
 	 *  Data                                                            *
@@ -500,6 +508,19 @@
 		{:else}
 			<TimelineView tasks={visibleTasks} onOpen={openTask} />
 		{/if}
+
+		<!-- Trust & cost views (t-002 / t-004). Keyed on plan so they reload
+		     when the selection changes; branch flows through to provenance. -->
+		{#key selectedPlan.name + '@' + branchStore.current}
+			<div class="trust-grid">
+				<ProvenanceCard
+					plan={selectedPlan.name}
+					branch={branchStore.current}
+					onOpenSession={openSession}
+				/>
+				<CostPerFeature plan={selectedPlan.name} onOpenSession={openSession} />
+			</div>
+		{/key}
 	{:else if !error}
 		<p class="empty">
 			{plans.length === 0
@@ -745,6 +766,13 @@
 		font-style: italic;
 		text-align: center;
 		padding: var(--lens-space-12) 0;
+	}
+	/* Trust & cost cards sit side by side on wide viewports, stack on narrow. */
+	.trust-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+		gap: var(--lens-space-4);
+		margin-top: var(--lens-space-4);
 	}
 	.toasts {
 		position: fixed;

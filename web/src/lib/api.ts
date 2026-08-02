@@ -270,6 +270,70 @@ export async function whyDidWe(decision: string): Promise<WhyResponse> {
 	return fetchJson(`/api/memory/why_did_we?decision=${encodeURIComponent(decision)}`);
 }
 
+// -- Session arcs (t-003) & recall log (t-004) ----------------------------
+
+/**
+ * One topic arc from `GET /api/sessions/{sid}/segments`. Arcs split with no
+ * LLM: a new arc starts on a branch/cwd change or an idle gap. `start`/`end`
+ * are turn indices (inclusive); `reason` is why THIS arc began.
+ */
+export interface SessionSegment {
+	start: number;
+	end: number;
+	turn_count: number;
+	branch: string | null;
+	cwd: string | null;
+	started_at: string | null;
+	ended_at: string | null;
+	tokens: number;
+	label: string;
+	/** "start" | "branch" | "cwd" | "gap". */
+	reason: string;
+}
+
+export interface SegmentsResponse {
+	session: string;
+	gap_minutes: number;
+	segment_count: number;
+	segments: SessionSegment[];
+}
+
+/** `GET /api/sessions/{sid}/segments?gap=<min>` — split a session into arcs. */
+export async function getSessionSegments(
+	sessionId: string,
+	gapMinutes = 30
+): Promise<SegmentsResponse> {
+	return fetchJson(
+		`/api/sessions/${encodeURIComponent(sessionId)}/segments?gap=${gapMinutes}`
+	);
+}
+
+/** One recall injection recorded for a session (t-004). */
+export interface RecallLogEntry {
+	at: string;
+	topic: string;
+	/** Memory paths injected into context (not their content). */
+	paths: string[];
+	tokens_sent: number;
+	savings_ratio: number;
+}
+
+export interface RecallLogResponse {
+	session_id: string;
+	recall_log: RecallLogEntry[];
+}
+
+/**
+ * `GET /api/sessions/{sid}/recall-log` — the in-memory audit of what memory
+ * each recall injected. Session-global (no namespace); non-durable, so empty
+ * for a session with no live recalls since the Hub last started.
+ */
+export async function getSessionRecallLog(
+	sessionId: string
+): Promise<RecallLogResponse> {
+	return fetchJson(`/api/sessions/${encodeURIComponent(sessionId)}/recall-log`);
+}
+
 // -- Reminders ------------------------------------------------------------
 
 export type ReminderStatus =

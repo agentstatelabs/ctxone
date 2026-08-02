@@ -5,6 +5,25 @@
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
 	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 	import { renderMarkdown } from '$lib/markdown';
+	import { tick } from 'svelte';
+	import SessionArcs from './SessionArcs.svelte';
+	import RecallLogTimeline from './RecallLogTimeline.svelte';
+
+	/** Scroll a turn into view when an arc is clicked. Turns render with
+	 * id="turn-{turn_index}"; briefly highlight the target. `tick()` (not
+	 * requestAnimationFrame) waits for Svelte to flush the DOM after clearing
+	 * the search, and isn't throttled when the tab is backgrounded. */
+	async function scrollToTurn(turnIndex: number) {
+		if (typeof document === 'undefined') return;
+		// Clearing any active transcript search first so the target is rendered.
+		turnSearch = '';
+		await tick();
+		const el = document.getElementById(`turn-${turnIndex}`);
+		if (!el) return;
+		el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+		el.classList.add('turn-flash');
+		setTimeout(() => el.classList.remove('turn-flash'), 1600);
+	}
 
 	interface Session {
 		session_id: string;
@@ -971,6 +990,10 @@
 						</div>
 					{/if}
 
+					<SessionArcs sessionId={selected.session_id} onScrollToTurn={scrollToTurn} />
+
+					<RecallLogTimeline sessionId={selected.session_id} />
+
 					<h3>
 							Conversation
 							{#if turns.length}
@@ -1005,7 +1028,7 @@
 						<ol class="turns" onmouseup={captureSelection} onkeyup={captureSelection}>
 							{#each filteredTurns as t (t.key)}
 								{@const q = turnSearch.trim()}
-								<li class="turn">
+								<li class="turn" id="turn-{t.turn_index ?? 0}">
 									<div class="turn-head">
 										<span class="turn-idx">#{(t.turn_index ?? 0) + 1}</span>
 										{#if t.model}<span class="turn-model">{t.model}</span>{/if}
@@ -1816,6 +1839,20 @@
 		border-radius: var(--lens-radius-sm);
 		background: var(--lens-surface);
 		padding: 0.5rem 0.6rem;
+	}
+	/* Brief highlight when an arc scrolls a turn into view. */
+	:global(.turn.turn-flash) {
+		animation: turn-flash 1.6s ease-out;
+	}
+	@keyframes turn-flash {
+		0% {
+			border-color: var(--lens-accent);
+			background: var(--lens-accent-surface);
+		}
+		100% {
+			border-color: var(--lens-border);
+			background: var(--lens-surface);
+		}
 	}
 	.turn-head {
 		display: flex;
