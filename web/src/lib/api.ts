@@ -131,6 +131,40 @@ export async function getSessions(): Promise<SessionSnapshot[]> {
 	return fetchJson('/api/stats/sessions');
 }
 
+/**
+ * One workspace's aggregate stats from `GET /api/namespaces/summary` — the
+ * hub-global rollup that feeds the Hub Home. Token totals are summed from the
+ * process-global session registry, scoped to the sessions resident in the
+ * workspace; `graph` mirrors the per-ref stats (`/api/stats/{ref}`) for `main`.
+ * Project metadata (display name, remote) is NOT here — join it client-side
+ * from `listProjects()`.
+ */
+export interface WorkspaceSummary {
+	namespace: string;
+	session_count: number;
+	tokens: {
+		used: number;
+		saved: number;
+		llm_input: number;
+		llm_output: number;
+		llm_cache_read: number;
+		llm_cache_create: number;
+	};
+	/** Graph counts for `main`; shape matches StatsResponse (extra fields ignored). */
+	graph: {
+		commit_count: number;
+		path_count: number;
+		branch_count: number;
+		epoch_count: number;
+	} | null;
+}
+
+/** `GET /api/namespaces/summary` — per-workspace rollup for the Hub Home. */
+export async function getNamespacesSummary(): Promise<WorkspaceSummary[]> {
+	const data = await fetchJson<{ workspaces: WorkspaceSummary[] }>('/api/namespaces/summary');
+	return data.workspaces;
+}
+
 export async function getSessionTokenStats(sessionId: string): Promise<SessionSnapshot> {
 	return fetchJson(`/api/stats/tokens/${encodeURIComponent(sessionId)}`);
 }

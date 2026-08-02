@@ -27,7 +27,11 @@
 	type NavGroup = { label: string; items: NavItem[]; key?: 'code' };
 
 	const NAV_GROUPS: NavGroup[] = [
-		{ label: 'Home', items: [{ href: '/', label: 'Dashboard' }] },
+		{ label: 'Home', items: [{ href: '/', label: 'Hub' }] },
+		{
+			label: 'Workspace',
+			items: [{ href: '/workspace', label: 'Dashboard' }]
+		},
 		{
 			label: 'Work',
 			items: [

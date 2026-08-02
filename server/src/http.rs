@@ -673,6 +673,7 @@ fn router_with_config_inner(
             axum::routing::post(add_session_link),
         )
         .route("/api/namespaces", get(list_namespaces))
+        .route("/api/namespaces/summary", get(namespaces_summary))
         .route("/api/session_tombstones", get(list_session_tombstones))
         // Session sync (t-019): re-ingest local Claude Code transcripts by
         // spawning the co-located `ctx ingest-session --all` CLI.
@@ -4135,6 +4136,103 @@ async fn list_namespaces(State(s): State<HubState>) -> impl IntoResponse {
     Json(serde_json::json!({ "namespaces": out })).into_response()
 }
 
+/// Per-workspace token totals, summed from the process-global session registry.
+#[derive(Default)]
+struct WorkspaceTokens {
+    session_count: u64,
+    used: u64,
+    saved: u64,
+    llm_input: u64,
+    llm_output: u64,
+    llm_cache_read: u64,
+    llm_cache_create: u64,
+}
+
+/// Sum token counters across the snapshots belonging to one workspace. `ids` is
+/// the placement set (session ids with nodes in the workspace); with
+/// `complement` the workspace is everything NOT in `ids` — how `default` is
+/// computed, mirroring `list_sessions`. Pure so it can be unit-tested.
+fn sum_workspace_tokens(
+    snaps: &[SessionSnapshot],
+    ids: &std::collections::HashSet<String>,
+    complement: bool,
+) -> WorkspaceTokens {
+    let mut t = WorkspaceTokens::default();
+    for snap in snaps {
+        let here = ids.contains(&snap.session_id);
+        if here == !complement {
+            t.session_count += 1;
+            t.used += snap.session_tokens_used;
+            t.saved += snap.session_tokens_saved;
+            t.llm_input += snap.llm_input_tokens;
+            t.llm_output += snap.llm_output_tokens;
+            t.llm_cache_read += snap.llm_cache_read_tokens;
+            t.llm_cache_create += snap.llm_cache_create_tokens;
+        }
+    }
+    t
+}
+
+/// `GET /api/namespaces/summary` — hub-global per-workspace rollup for the Hub
+/// Home. One call returns token + graph aggregates for every workspace so the
+/// home page needs no N+1 fan-out. Purely namespace-derived; project metadata
+/// (display_name / remote) is joined client-side from `/api/projects`.
+async fn namespaces_summary(State(s): State<HubState>) -> impl IntoResponse {
+    let mut names: Vec<String> = match s.repo.list_namespaces() {
+        Ok(ns) => ns.iter().map(|n| n.as_str().to_string()).collect(),
+        Err(e) => return internal_error(e).into_response(),
+    };
+    if !names.iter().any(|n| n == Namespace::DEFAULT) {
+        names.insert(0, Namespace::DEFAULT.to_string());
+    }
+
+    let snaps = s.sessions.snapshot_all();
+    // Sessions placed in a named namespace; `default` is the complement.
+    let mut placed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut ids_by_ns: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
+    for name in &names {
+        if name == Namespace::DEFAULT {
+            continue;
+        }
+        if let Ok(repo) = s.repo_for(&NamespaceId(name.clone())) {
+            let ids = session_ids_with_nodes(&repo);
+            placed.extend(ids.iter().cloned());
+            ids_by_ns.insert(name.clone(), ids);
+        }
+    }
+
+    let empty = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for name in &names {
+        let Ok(repo) = s.repo_for(&NamespaceId(name.clone())) else {
+            continue;
+        };
+        let tokens = if name == Namespace::DEFAULT {
+            sum_workspace_tokens(&snaps, &placed, true)
+        } else {
+            sum_workspace_tokens(&snaps, ids_by_ns.get(name).unwrap_or(&empty), false)
+        };
+        // Same graph counts the per-ns `stats` handler returns
+        // (commit_count / path_count / branch_count / epoch_count).
+        let graph = repo.stats("main").unwrap_or(serde_json::Value::Null);
+        out.push(serde_json::json!({
+            "namespace": name,
+            "session_count": tokens.session_count,
+            "tokens": {
+                "used": tokens.used,
+                "saved": tokens.saved,
+                "llm_input": tokens.llm_input,
+                "llm_output": tokens.llm_output,
+                "llm_cache_read": tokens.llm_cache_read,
+                "llm_cache_create": tokens.llm_cache_create,
+            },
+            "graph": graph,
+        }));
+    }
+    Json(serde_json::json!({ "workspaces": out })).into_response()
+}
+
 #[derive(Deserialize)]
 struct AddSessionLinkRequest {
     plan: String,
@@ -5321,6 +5419,39 @@ async fn detect_project_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sum_workspace_tokens_named_and_default_complement() {
+        let snap = |id: &str, used: u64, saved: u64, li: u64, lo: u64| SessionSnapshot {
+            session_id: id.to_string(),
+            session_tokens_used: used,
+            session_tokens_saved: saved,
+            llm_input_tokens: li,
+            llm_output_tokens: lo,
+            ..Default::default()
+        };
+        let snaps = vec![
+            snap("a", 100, 10, 5, 1),
+            snap("b", 200, 20, 7, 2),
+            snap("ghost", 1, 0, 0, 0), // registry-only, no node anywhere
+        ];
+        let placed: std::collections::HashSet<String> =
+            ["a".to_string(), "b".to_string()].into_iter().collect();
+
+        // Named workspace "feat" owns {a} -> only a is summed.
+        let feat_ids: std::collections::HashSet<String> = ["a".to_string()].into_iter().collect();
+        let named = sum_workspace_tokens(&snaps, &feat_ids, false);
+        assert_eq!(named.session_count, 1);
+        assert_eq!(named.used, 100);
+        assert_eq!(named.saved, 10);
+        assert_eq!(named.llm_input, 5);
+        assert_eq!(named.llm_output, 1);
+
+        // default = complement of placed -> only the ghost (not placed anywhere).
+        let def = sum_workspace_tokens(&snaps, &placed, true);
+        assert_eq!(def.session_count, 1);
+        assert_eq!(def.used, 1);
+    }
 
     #[test]
     fn plan_cost_rollup_sums_only_linked_sessions() {
