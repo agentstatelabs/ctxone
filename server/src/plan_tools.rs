@@ -842,6 +842,7 @@ pub struct PlanCompleteParams {
     /// Proof object: `{kind, value, note?}`. `kind` is one of
     /// commit|file|test|text. Prefer `commit` when available, then
     /// `file`, then `test`, then `text` as a last resort.
+    #[serde(deserialize_with = "de_proof_flexible")]
     pub proof: ProofParam,
     pub reason: Option<String>,
     #[serde(default = "default_ref", rename = "ref")]
@@ -856,6 +857,21 @@ pub struct ProofParam {
     pub value: String,
     /// Optional human-readable note.
     pub note: Option<String>,
+}
+
+/// Deserialize a [`ProofParam`] that may arrive either as an object
+/// `{kind,value,note?}` OR as a JSON *string* of that object. Some MCP clients
+/// stringify nested tool arguments, which otherwise fails the whole tool call
+/// with `-32602 expected struct ProofParam`. Accept both shapes.
+fn de_proof_flexible<'de, D>(d: D) -> Result<ProofParam, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = serde_json::Value::deserialize(d)?;
+    match v {
+        serde_json::Value::String(s) => serde_json::from_str(&s).map_err(serde::de::Error::custom),
+        other => serde_json::from_value(other).map_err(serde::de::Error::custom),
+    }
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -1179,6 +1195,27 @@ mod tests {
     use super::*;
     use agentstategraph::Repository;
     use agentstategraph_storage::SqliteStorage;
+
+    #[test]
+    fn plan_complete_params_accept_proof_as_object_or_stringified() {
+        // Normal object form.
+        let obj: PlanCompleteParams = serde_json::from_value(serde_json::json!({
+            "plan_id": "p", "task_id": "t-1",
+            "proof": { "kind": "commit", "value": "abc123" }
+        }))
+        .expect("object proof");
+        assert_eq!(obj.proof.kind, "commit");
+        assert_eq!(obj.proof.value, "abc123");
+
+        // Stringified-object form (buggy MCP clients) — must also parse.
+        let strified: PlanCompleteParams = serde_json::from_value(serde_json::json!({
+            "plan_id": "p", "task_id": "t-1",
+            "proof": "{\"kind\":\"commit\",\"value\":\"abc123\"}"
+        }))
+        .expect("stringified proof");
+        assert_eq!(strified.proof.kind, "commit");
+        assert_eq!(strified.proof.value, "abc123");
+    }
 
     fn fresh_repo() -> Arc<Repository> {
         let repo = Arc::new(Repository::new(Box::new(
