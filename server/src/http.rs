@@ -640,6 +640,8 @@ fn router_with_config_inner(
         )
         // Topic-arc segmentation of a session (t-003).
         .route("/api/sessions/{sid}/segments", get(session_segments))
+        // Recall-injection audit for a session (t-004).
+        .route("/api/sessions/{sid}/recall-log", get(session_recall_log))
         // Session title (t-016): human-readable name for a session id.
         .route(
             "/api/sessions/{sid}/title",
@@ -3817,6 +3819,21 @@ async fn session_segments(
         "segment_count": segments.len(),
         "segments": segments,
     })))
+}
+
+/// `GET /api/sessions/{sid}/recall-log` — the in-memory audit of what memory
+/// each recall injected into this session (t-004): topic, paths, tokens,
+/// savings. "Prove what the agent was told." Lightweight and non-durable
+/// (recall runs every prompt); empty for a session with no live recalls.
+async fn session_recall_log(
+    State(s): State<HubState>,
+    Path(sid): Path<String>,
+) -> Json<serde_json::Value> {
+    let session = s.sessions.get_or_create(&sid);
+    Json(serde_json::json!({
+        "session_id": sid,
+        "recall_log": session.recall_log_snapshot(),
+    }))
 }
 
 // -- Session title (t-016) ----------------------------------------------

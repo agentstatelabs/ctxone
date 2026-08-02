@@ -202,7 +202,28 @@ pub struct SessionStats {
     /// for it to be safely captured — which is the point: imports do not have
     /// to be redone once we do.
     extra_tokens: RwLock<BTreeMap<String, u64>>,
+
+    /// A lightweight, in-memory ring buffer of the most recent recalls on this
+    /// session (t-004): the topic, which memory paths were injected, and the
+    /// token/savings numbers. This is the "prove what the agent was told"
+    /// audit — recall runs on every prompt, so it is deliberately in-memory
+    /// (no graph write per recall) and capped. Lost on restart by design.
+    recall_log: RwLock<std::collections::VecDeque<RecallLogEntry>>,
 }
+
+/// One recorded recall injection (t-004).
+#[derive(Debug, Clone, Serialize)]
+pub struct RecallLogEntry {
+    pub at: String,
+    pub topic: String,
+    /// The memory paths injected into context (not their content).
+    pub paths: Vec<String>,
+    pub tokens_sent: usize,
+    pub savings_ratio: f64,
+}
+
+/// Most recent recalls kept per session.
+const RECALL_LOG_CAP: usize = 50;
 
 impl Default for SessionStats {
     fn default() -> Self {
@@ -226,6 +247,7 @@ impl SessionStats {
             last_provider: RwLock::new(None),
             active_repo: RwLock::new(None),
             extra_tokens: RwLock::new(BTreeMap::new()),
+            recall_log: RwLock::new(std::collections::VecDeque::new()),
         }
     }
 
@@ -256,6 +278,7 @@ impl SessionStats {
             last_provider: RwLock::new(last_provider),
             active_repo: RwLock::new(None),
             extra_tokens: RwLock::new(extra_tokens),
+            recall_log: RwLock::new(std::collections::VecDeque::new()),
         }
     }
 
@@ -307,6 +330,37 @@ impl SessionStats {
             flat_tokens.saturating_sub(sent_tokens) as u64,
             Ordering::Relaxed,
         );
+    }
+
+    /// Record one recall injection in the in-memory ring buffer (t-004).
+    /// Cheap (no graph write) and capped, since recall runs every prompt.
+    pub fn log_recall(
+        &self,
+        topic: &str,
+        paths: Vec<String>,
+        tokens_sent: usize,
+        savings_ratio: f64,
+    ) {
+        if let Ok(mut log) = self.recall_log.write() {
+            log.push_back(RecallLogEntry {
+                at: chrono::Utc::now().to_rfc3339(),
+                topic: topic.to_string(),
+                paths,
+                tokens_sent,
+                savings_ratio,
+            });
+            while log.len() > RECALL_LOG_CAP {
+                log.pop_front();
+            }
+        }
+    }
+
+    /// Snapshot the recall log, newest last.
+    pub fn recall_log_snapshot(&self) -> Vec<RecallLogEntry> {
+        self.recall_log
+            .read()
+            .map(|l| l.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Mark the cached graph size as stale. Call after any write.
@@ -1137,6 +1191,23 @@ pub fn run_recall_scoped(
         "ctx_tokens_estimated_flat": flat_size / 4,
         "ctx_savings_ratio": if total > 0 { flat_size as f64 / total as f64 } else { 0.0 },
     });
+
+    // Record this injection in the in-memory recall log (t-004): what the agent
+    // was told, for the trust view. Paths only — no content, no graph write.
+    let ratio = if total > 0 {
+        flat_size as f64 / total as f64
+    } else {
+        0.0
+    };
+    let injected_paths: Vec<String> = result["results"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|r| r.get("path").and_then(|p| p.as_str()).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    session.log_recall(topic, injected_paths, total / 4, ratio);
 
     // Extend the recall response with the session's live LLM usage
     // when the agent has reported at least one turn. Sessions that
@@ -5060,6 +5131,33 @@ mod tests {
             remaining, 0,
             "no drafts should remain after promote + discard"
         );
+    }
+
+    #[test]
+    fn recall_populates_the_injection_log() {
+        let repo = Arc::new(Repository::new(Box::new(
+            agentstategraph_storage::SqliteStorage::in_memory().expect("in-memory sqlite"),
+        )));
+        repo.init().unwrap();
+        repo.set_json(
+            "main",
+            "/memory/db/f1",
+            &serde_json::json!("we use sqlite not postgres"),
+            CommitOptions::new("t", IntentCategory::Custom("Observe".to_string()), "seed"),
+        )
+        .unwrap();
+
+        let session = SessionStats::new();
+        let _ = run_recall_scoped(&repo, &session, "sqlite", 1500, "main", None);
+        let log = session.recall_log_snapshot();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].topic, "sqlite");
+        assert!(log[0].paths.iter().any(|p| p.contains("/memory/db/f1")));
+        assert!(log[0].tokens_sent > 0);
+
+        // A second recall appends; the log preserves order.
+        let _ = run_recall_scoped(&repo, &session, "postgres", 1500, "main", None);
+        assert_eq!(session.recall_log_snapshot().len(), 2);
     }
 
     #[test]
