@@ -942,16 +942,59 @@ pub fn estimate_flat_size(repo: &Repository, ref_name: &str) -> usize {
     }
 }
 
+/// Process-global cached flat size (chars) of the `main` graph, published by the
+/// background refresher (`spawn_flat_size_refresher`) so no REQUEST ever
+/// serializes the whole graph — the -32001 write/recall latency. 0 = not yet
+/// computed (before the first background pass), which falls back to the
+/// throttled synchronous compute.
+static GRAPH_FLAT_SIZE_CHARS: AtomicU64 = AtomicU64::new(0);
+
+/// Spawn a background loop that recomputes the `main` flat size every
+/// `interval_secs` and publishes it to [`GRAPH_FLAT_SIZE_CHARS`]. The expensive
+/// serialization runs on a blocking thread, off the request path AND off the
+/// async runtime's worker threads.
+pub fn spawn_flat_size_refresher(repo: Arc<Repository>, interval_secs: u64) {
+    let interval = std::time::Duration::from_secs(interval_secs.max(5));
+    tokio::spawn(async move {
+        loop {
+            let r = repo.clone();
+            let size = tokio::task::spawn_blocking(move || estimate_flat_size(&r, "main") as u64)
+                .await
+                .unwrap_or(0);
+            if size > 0 {
+                GRAPH_FLAT_SIZE_CHARS.store(size, Ordering::Relaxed);
+            }
+            tokio::time::sleep(interval).await;
+        }
+    });
+}
+
 /// Ensure the cached flat-size is current. If dirty, refreshes it and clears the flag.
 /// Call this just before reading `session.total_graph_size_chars` in a read-heavy path.
 pub fn ensure_flat_size(repo: &Repository, session: &SessionStats, ref_name: &str) {
+    // Fast path: once the background refresher has published the main-graph size
+    // (a few seconds after startup), requests just copy it — no whole-graph
+    // serialization on the hot path. A 433 MB graph took ~12s to serialize; the
+    // background task keeps that off every request. Before the first pass
+    // (global == 0), fall through to the throttled synchronous compute so a
+    // freshly-started hub still reports a real ratio.
+    if ref_name == "main" {
+        let global = GRAPH_FLAT_SIZE_CHARS.load(Ordering::Relaxed);
+        if global > 0 {
+            session
+                .total_graph_size_chars
+                .store(global, Ordering::Relaxed);
+            session.graph_size_dirty.store(false, Ordering::Relaxed);
+            return;
+        }
+    }
+
     if !session.graph_size_dirty.load(Ordering::Relaxed) {
         return;
     }
-    // Throttle the whole-graph walk: even while dirty, recompute at most once
-    // per window. flat_size is a slowly-changing estimate for the savings
-    // ratio, so a stale value between recomputes is fine — and it keeps a busy
-    // write/recall path from serializing a multi-MB graph on every call.
+    // Fallback (non-main ref, or before the first background refresh): throttle
+    // the whole-graph walk — recompute at most once per window. flat_size is a
+    // slowly-changing estimate, so a stale value between recomputes is fine.
     const THROTTLE_MS: u64 = 30_000;
     let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
     let last = session.flat_size_at_ms.load(Ordering::Relaxed);

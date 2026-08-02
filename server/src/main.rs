@@ -785,6 +785,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
+                // Keep the flat-size (savings-ratio baseline) fresh off the
+                // request path: a background task recomputes it every ~20s so no
+                // recall/write ever serializes the whole graph (the -32001 cause).
+                memory_tools::spawn_flat_size_refresher(repo.clone(), 20);
+
                 let listener = tokio::net::TcpListener::bind(&addr).await?;
                 // `into_make_service_with_connect_info::<SocketAddr>()` attaches
                 // the peer IP to each request so the rate limiter's
