@@ -6,6 +6,7 @@
 	import ScopeBadge from '$lib/ScopeBadge.svelte';
 	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 	import { renderMarkdown } from '$lib/markdown';
+	import { estimateCost, formatUsd } from '$lib/pricing';
 	import { tick } from 'svelte';
 	import SessionArcs from './SessionArcs.svelte';
 	import RecallLogTimeline from './RecallLogTimeline.svelte';
@@ -38,6 +39,8 @@
 		llm_input_tokens: number;
 		llm_output_tokens: number;
 		llm_cache_read_tokens: number;
+		/** Optional — older hubs omit it; used for the cost estimate. */
+		llm_cache_create_tokens?: number;
 		llm_call_count: number;
 		last_model: string | null;
 		/** Every model the session used (server; t-022). Optional — older
@@ -965,7 +968,22 @@
 
 					{#if selected.llm_call_count > 0}
 						<h3>LLM Consumption</h3>
+						{@const estCost = estimateCost(selected.last_model, {
+							input: selected.llm_input_tokens,
+							output: selected.llm_output_tokens,
+							cache_read: selected.llm_cache_read_tokens,
+							cache_create: selected.llm_cache_create_tokens ?? 0
+						})}
 						<div class="stat-grid">
+							<div class="stat">
+								<div
+									class="stat-value"
+									title={estCost === null
+										? `Cost not tracked for model ${selected.last_model ?? 'unknown'}`
+										: 'Estimated at read-time from web/src/lib/pricing.ts'}
+								>{estCost === null ? '—' : formatUsd(estCost)}</div>
+								<div class="stat-label">Est. cost{estCost === null ? ' (unpriced)' : ''}</div>
+							</div>
 							<div class="stat">
 								<div class="stat-value" title={exact(selected.llm_call_count)}>{fmt(selected.llm_call_count)}</div>
 								<div class="stat-label">API calls</div>
