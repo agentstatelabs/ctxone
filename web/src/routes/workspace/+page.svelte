@@ -6,7 +6,8 @@
 		getSessions,
 		getLog,
 		getActivity,
-		getDueReminders
+		getDueReminders,
+		listProjects
 	} from '$lib/api';
 	import type {
 		StatsResponse,
@@ -14,7 +15,8 @@
 		SessionSnapshot,
 		CommitEntry,
 		Reminder,
-		ActivityResponse
+		ActivityResponse,
+		Project
 	} from '$lib/api';
 	import { listPlans, listPlanTasks, type Plan, type Task } from '$lib/plansApi';
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
@@ -74,6 +76,9 @@
 	let plansL = $state<Load<PlansData>>(pending());
 	let remindersL = $state<Load<Reminder[]>>(pending());
 	let activityL = $state<Load<ActivityResponse>>(pending());
+	// Project metadata (display name, remote) for the workspace identity header —
+	// global registry, joined by the current namespace. Best-effort, non-blocking.
+	let project = $state<Project | null>(null);
 
 	function friendly(e: unknown): string {
 		const msg = e instanceof Error ? e.message : String(e);
@@ -117,6 +122,10 @@
 			activityL = pending();
 		}
 		connected = await getHealth();
+		// Workspace identity — cheap global registry lookup, joined by namespace.
+		void listProjects()
+			.then((ps) => (project = ps.find((p) => p.namespace === namespaceStore.current) ?? null))
+			.catch(() => (project = null));
 		await Promise.all([
 			track(() => getTokenStats(), (l) => (tokensL = l)),
 			track(() => getSessions(), (l) => (sessionsL = l)),
@@ -162,6 +171,51 @@
 	const overdueCount = $derived(
 		dueReminders.filter((r) => Date.parse(r.due_at) < Date.now()).length
 	);
+
+	// Workspace-scoped token totals — summed from THIS workspace's sessions.
+	// (The old dashboard fed the tiles from getTokenStats, which is the hub-wide
+	// aggregate — wrong for a per-workspace view. `wsRatio` mirrors the
+	// per-session cumulative_ratio: (used+saved)/used.)
+	const wsUsed = $derived(sessionList.reduce((n, s) => n + s.session_tokens_used, 0));
+	const wsSaved = $derived(sessionList.reduce((n, s) => n + s.session_tokens_saved, 0));
+	const wsRatio = $derived(wsUsed > 0 ? (wsUsed + wsSaved) / wsUsed : 0);
+
+	// Import stats — what has been ingested into this workspace.
+	const workspaceName = $derived(project?.display_name || namespaceStore.current);
+	const bySource = $derived.by(() => {
+		const m = new Map<string, number>();
+		for (const s of sessionList) {
+			const k = s.source ?? 'unknown';
+			m.set(k, (m.get(k) ?? 0) + 1);
+		}
+		return [...m.entries()].sort((a, b) => b[1] - a[1]);
+	});
+	const distinctModels = $derived.by(() => {
+		const set = new Set<string>();
+		for (const s of sessionList) {
+			(s.models_used ?? []).forEach((m) => set.add(m));
+			if (s.last_model) set.add(s.last_model);
+		}
+		return [...set];
+	});
+	const importRange = $derived.by(() => {
+		let min: number | null = null;
+		let max: number | null = null;
+		for (const s of sessionList) {
+			const a = s.started_at ? Date.parse(s.started_at) : NaN;
+			const b = s.updated_at ? Date.parse(s.updated_at) : NaN;
+			if (!Number.isNaN(a)) min = min === null ? a : Math.min(min, a);
+			if (!Number.isNaN(b)) max = max === null ? b : Math.max(max, b);
+		}
+		return { min, max };
+	});
+	function shortDate(ms: number | null): string {
+		return ms === null ? '—' : new Date(ms).toLocaleDateString();
+	}
+	function shortRemote(url: string | null | undefined): string | null {
+		if (!url) return null;
+		return url.replace(/^https?:\/\/[^/]+\//, '').replace(/\.git$/, '');
+	}
 
 	// Token economics: one x-slice per session, used vs saved.
 	const econPoints = $derived<AreaPoint[]>(
@@ -424,7 +478,14 @@
 </script>
 
 <header class="dash-head">
-	<h2>Dashboard</h2>
+	<div class="ws-id">
+		<a class="up" href="/" title="Back to hub overview">← Hub</a>
+		<h2>{workspaceName}</h2>
+		<code class="ws-ns" title="namespace">{namespaceStore.current}</code>
+		{#if shortRemote(project?.remote_url)}
+			<span class="ws-remote" title={project?.remote_url}>{shortRemote(project?.remote_url)}</span>
+		{/if}
+	</div>
 	<div class="head-meta">
 		<span class="hub" class:down={!connected}>
 			<span class="hub-dot"></span>
@@ -457,19 +518,19 @@
 <div class="stat-row">
 	<StatTile
 		label="Tokens saved"
-		value={tokensL.data ? formatCompact(tokensL.data.session_tokens_saved) : '—'}
-		unit={tokensL.data ? `tok · ${trimFloat(tokensL.data.cumulative_ratio, 1)}× ratio` : undefined}
+		value={sessionsL.status === 'ready' ? formatCompact(wsSaved) : '—'}
+		unit={sessionsL.status === 'ready' ? `tok · ${trimFloat(wsRatio, 1)}× ratio` : undefined}
 		spark={savedSeries.length > 1 ? savedSeries : undefined}
 		sparkColor="var(--lens-ok, #4ade80)"
 		accent
-		title="Cumulative tokens saved vs flat memory, with the savings ratio"
+		title="Tokens this workspace saved vs flat memory, with the savings ratio"
 	/>
 	<StatTile
 		label="Session tokens used"
-		value={tokensL.data ? formatCompact(tokensL.data.session_tokens_used) : '—'}
-		unit={tokensL.data ? 'tok' : undefined}
+		value={sessionsL.status === 'ready' ? formatCompact(wsUsed) : '—'}
+		unit={sessionsL.status === 'ready' ? 'tok' : undefined}
 		spark={usedSeries.length > 1 ? usedSeries : undefined}
-		title="Tokens actually sent across all sessions"
+		title="Tokens sent across this workspace's sessions"
 	/>
 	<StatTile
 		label="Plans in flight"
@@ -490,6 +551,70 @@
 		spark={asSpark(memorySub)}
 		title="Structural size of the memory graph on {branchStore.current}"
 	/>
+</div>
+
+<!-- ── Import stats + drill-down ─────────────────────────────────────────── -->
+<div class="ws-facts">
+	<Panel
+		title="Import stats"
+		scope="all branches"
+		status={sessionsL.status}
+		errorText={sessionsL.error}
+		emptyTitle="Nothing imported yet"
+		emptyText="Run ctx ingest-session, or point an agent at this workspace, to populate it."
+	>
+		<div class="import-grid">
+			<div class="imp"><span class="imp-n">{sessionList.length}</span><span class="imp-l">sessions</span></div>
+			<div class="imp"><span class="imp-n">{formatCompact(wsUsed)}</span><span class="imp-l">tokens used</span></div>
+			<div class="imp"><span class="imp-n">{formatCompact(wsSaved)}</span><span class="imp-l">tokens saved</span></div>
+			<div class="imp"><span class="imp-n">{distinctModels.length}</span><span class="imp-l">models</span></div>
+		</div>
+		<dl class="import-meta">
+			<div class="im-row">
+				<dt>Imported</dt>
+				<dd>{shortDate(importRange.min)} → {shortDate(importRange.max)}</dd>
+			</div>
+			{#if bySource.length}
+				<div class="im-row">
+					<dt>Agents</dt>
+					<dd class="chips">
+						{#each bySource as [src, n] (src)}<span class="chip">{src} <strong>{n}</strong></span>{/each}
+					</dd>
+				</div>
+			{/if}
+			{#if distinctModels.length}
+				<div class="im-row">
+					<dt>Models</dt>
+					<dd class="chips">
+						{#each distinctModels as m (m)}<span class="chip mono">{m}</span>{/each}
+					</dd>
+				</div>
+			{/if}
+		</dl>
+	</Panel>
+
+	<nav class="drill" aria-label="Drill into this workspace">
+		<a class="drill-card" href="/branches">
+			<span class="d-n">{statsL.data ? statsL.data.branch_count : '—'}</span>
+			<span class="d-l">Branches</span>
+		</a>
+		<a class="drill-card" href="/plans">
+			<span class="d-n">{plansL.status === 'ready' ? activePlans.length : '—'}</span>
+			<span class="d-l">Plans</span>
+		</a>
+		<a class="drill-card" href="/sessions">
+			<span class="d-n">{sessionList.length}</span>
+			<span class="d-l">Sessions</span>
+		</a>
+		<a class="drill-card" href="/history">
+			<span class="d-n">{statsL.data ? formatCompact(statsL.data.commit_count) : '—'}</span>
+			<span class="d-l">History · {statsL.data?.epoch_count ?? 0} epochs</span>
+		</a>
+		<a class="drill-card" href="/browse">
+			<span class="d-n">{statsL.data ? formatCompact(statsL.data.path_count) : '—'}</span>
+			<span class="d-l">Memory paths</span>
+		</a>
+	</nav>
 </div>
 
 <div class="grid">
@@ -719,6 +844,145 @@
 		font-size: var(--lens-font-size-lg);
 		font-weight: 700;
 		color: var(--lens-text-strong);
+	}
+
+	/* ── Workspace identity ────────────────────────────────────────────── */
+	.ws-id {
+		display: flex;
+		align-items: baseline;
+		gap: 0.6rem;
+		flex-wrap: wrap;
+	}
+	.ws-id .up {
+		font-size: var(--lens-font-size-xs);
+		color: var(--lens-accent);
+		text-decoration: none;
+	}
+	.ws-id .up:hover {
+		text-decoration: underline;
+	}
+	.ws-ns {
+		font-family: var(--lens-font-mono);
+		font-size: var(--lens-font-size-xs);
+		color: var(--lens-text-secondary);
+		background: var(--lens-overlay);
+		border: 1px solid var(--lens-border);
+		border-radius: var(--lens-radius-sm);
+		padding: 0.05rem 0.4rem;
+	}
+	.ws-remote {
+		font-family: var(--lens-font-mono);
+		font-size: var(--lens-font-size-xs);
+		color: var(--lens-text-faint);
+	}
+
+	/* ── Import stats + drill-down ─────────────────────────────────────── */
+	.ws-facts {
+		display: grid;
+		grid-template-columns: 2fr 1fr;
+		gap: var(--lens-space-4);
+		margin-bottom: var(--lens-space-5);
+	}
+	@media (max-width: 900px) {
+		.ws-facts {
+			grid-template-columns: 1fr;
+		}
+	}
+	.import-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+		gap: var(--lens-space-3);
+		margin-bottom: var(--lens-space-3);
+	}
+	.imp {
+		display: flex;
+		flex-direction: column;
+	}
+	.imp-n {
+		font-size: 1.4rem;
+		font-weight: 700;
+		color: var(--lens-text-strong);
+		line-height: 1.1;
+	}
+	.imp-l {
+		font-size: var(--lens-font-size-xs);
+		color: var(--lens-text-secondary);
+	}
+	.import-meta {
+		margin: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 0.4rem;
+		border-top: 1px solid var(--lens-border);
+		padding-top: var(--lens-space-3);
+	}
+	.im-row {
+		display: flex;
+		gap: 0.6rem;
+		align-items: baseline;
+		font-size: var(--lens-font-size-sm);
+	}
+	.im-row dt {
+		flex: none;
+		width: 4.5rem;
+		color: var(--lens-text-secondary);
+	}
+	.im-row dd {
+		margin: 0;
+		color: var(--lens-text);
+	}
+	.chips {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.3rem;
+	}
+	.chip {
+		background: var(--lens-overlay);
+		border: 1px solid var(--lens-border);
+		border-radius: var(--lens-radius-full);
+		padding: 0.05rem 0.5rem;
+		font-size: var(--lens-font-size-xs);
+		color: var(--lens-text-secondary);
+	}
+	.chip.mono {
+		font-family: var(--lens-font-mono);
+	}
+	.chip strong {
+		color: var(--lens-text-strong);
+	}
+
+	.drill {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
+		gap: var(--lens-space-2);
+		align-content: start;
+	}
+	.drill-card {
+		display: flex;
+		flex-direction: column;
+		gap: 0.15rem;
+		text-decoration: none;
+		background: var(--lens-surface);
+		border: 1px solid var(--lens-border);
+		border-radius: var(--lens-radius-md);
+		padding: 0.55rem 0.7rem;
+		transition:
+			border-color 0.1s,
+			background 0.1s;
+	}
+	.drill-card:hover {
+		border-color: var(--lens-border-strong);
+		background: var(--lens-surface-raised);
+	}
+	.d-n {
+		font-size: 1.15rem;
+		font-weight: 700;
+		color: var(--lens-text-strong);
+		font-variant-numeric: tabular-nums;
+	}
+	.d-l {
+		font-size: var(--lens-font-size-2xs);
+		color: var(--lens-text-secondary);
 	}
 
 	.head-meta {
