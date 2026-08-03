@@ -4,6 +4,8 @@
 	import { CallGraphView } from '@agentstate/lens-core';
 	import { codeClient } from '$lib/codeApi';
 	import { selectedRepo } from '$lib/repoStore';
+	import EmptyState from '$lib/EmptyState.svelte';
+	import RepoBadge from '$lib/RepoBadge.svelte';
 
 	let client = $derived(codeClient($selectedRepo));
 
@@ -21,18 +23,22 @@
 </script>
 
 <div class="page">
-	<h2>Graph Explorer</h2>
+	<h2>Graph Explorer {#if $selectedRepo}<RepoBadge />{/if}</h2>
 
-	{#key client}
-		<CallGraphView
-			{client}
-			{symbolHref}
-			onViewSymbol={(q) => goto(symbolHref(q))}
-			searchHref="/code/search"
-			{initialQuery}
-			onQueryChange={syncUrl}
-		/>
-	{/key}
+	{#if !$selectedRepo}
+		<EmptyState icon="◧" title="No repo selected" description="Pick a repo from the sidebar's ASD section to explore its call graph." />
+	{:else}
+		{#key client}
+			<CallGraphView
+				{client}
+				{symbolHref}
+				onViewSymbol={(q) => goto(symbolHref(q))}
+				searchHref="/code/search"
+				{initialQuery}
+				onQueryChange={syncUrl}
+			/>
+		{/key}
+	{/if}
 </div>
 
 <style>

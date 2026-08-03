@@ -3,6 +3,8 @@
 	import { SymbolSearch } from '@agentstate/lens-core';
 	import { codeClient } from '$lib/codeApi';
 	import { selectedRepo } from '$lib/repoStore';
+	import EmptyState from '$lib/EmptyState.svelte';
+	import RepoBadge from '$lib/RepoBadge.svelte';
 
 	let client = $derived(codeClient($selectedRepo));
 
@@ -26,18 +28,22 @@
 </script>
 
 <div class="page">
-	<h2>Code Search</h2>
+	<h2>Code Search {#if $selectedRepo}<RepoBadge />{/if}</h2>
 
-	{#key client}
-		<SymbolSearch
-			{client}
-			{symbolHref}
-			{initialQuery}
-			{initialKind}
-			{initialLanguage}
-			onParamsChange={syncUrl}
-		/>
-	{/key}
+	{#if !$selectedRepo}
+		<EmptyState icon="◧" title="No repo selected" description="Pick a repo from the sidebar's ASD section to search its symbols." />
+	{:else}
+		{#key client}
+			<SymbolSearch
+				{client}
+				{symbolHref}
+				{initialQuery}
+				{initialKind}
+				{initialLanguage}
+				onParamsChange={syncUrl}
+			/>
+		{/key}
+	{/if}
 </div>
 
 <style>

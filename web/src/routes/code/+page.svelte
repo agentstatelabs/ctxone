@@ -3,6 +3,8 @@
 	import { getAsdHealth, getSymbols, listFiles } from '$lib/codeApi';
 	import type { AsdHealth, FileEntry, SymbolSummary } from '$lib/codeTypes';
 	import { selectedRepo } from '$lib/repoStore';
+	import EmptyState from '$lib/EmptyState.svelte';
+	import RepoBadge from '$lib/RepoBadge.svelte';
 
 	let health = $state<AsdHealth | null>(null);
 	let symbols = $state<SymbolSummary[]>([]);
@@ -70,28 +72,23 @@
 </script>
 
 <div class="page">
-	<h2>Code Overview</h2>
+	<h2>Code Overview {#if $selectedRepo}<RepoBadge health={health ? 'running' : error ? 'error' : null} />{/if}</h2>
 
 	{#if !$selectedRepo}
-		<div class="offline-card">
-			<div class="offline-title">No repo selected</div>
-			<p class="muted">
-				Pick one from the sidebar's <strong>ASD</strong> section, or run
-				<code>asd repo add</code> in a project to register it.
-			</p>
-		</div>
+		<EmptyState
+			icon="◧"
+			title="No repo selected"
+			description="Pick a repo from the sidebar's ASD section, or run `asd repo add` in a project to register it for code intelligence."
+		/>
 	{:else if loading}
 		<p class="muted">loading…</p>
 	{:else if error || !health}
-		<div class="offline-card">
-			<div class="offline-title">ASD server unreachable</div>
-			<p class="muted">
-				The hub's process pool couldn't open
-				<code>{$selectedRepo}</code>'s <code>.asd-state.db</code>. Check that
-				the path in <code>~/.config/asd/repos.toml</code> still exists, then
-				reload.
-			</p>
-		</div>
+		<EmptyState
+			icon="🔌"
+			tone="error"
+			title="ASD server unreachable"
+			description="The hub's process pool couldn't open {$selectedRepo}'s .asd-state.db. Check the path in ~/.config/asd/repos.toml still exists, then reload."
+		/>
 	{:else}
 		<div class="status-row">
 			<span class="dot connected"></span>
@@ -189,19 +186,6 @@
 
 	.muted {
 		color: var(--text-3);
-	}
-
-	.offline-card {
-		background: var(--bg-1);
-		border: 1px solid var(--border);
-		border-radius: 8px;
-		padding: 1.25rem 1.5rem;
-	}
-
-	.offline-title {
-		color: var(--danger);
-		font-weight: 600;
-		margin-bottom: 0.5rem;
 	}
 
 	.status-row {

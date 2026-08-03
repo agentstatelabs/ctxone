@@ -2,6 +2,8 @@
 	import { FileBrowser } from '@agentstate/lens-core';
 	import { codeClient } from '$lib/codeApi';
 	import { selectedRepo } from '$lib/repoStore';
+	import EmptyState from '$lib/EmptyState.svelte';
+	import RepoBadge from '$lib/RepoBadge.svelte';
 
 	let client = $derived(codeClient($selectedRepo));
 
@@ -11,11 +13,15 @@
 </script>
 
 <div class="page">
-	<h2>Files</h2>
+	<h2>Files {#if $selectedRepo}<RepoBadge />{/if}</h2>
 
-	{#key client}
-		<FileBrowser {client} {fileHref} />
-	{/key}
+	{#if !$selectedRepo}
+		<EmptyState icon="◧" title="No repo selected" description="Pick a repo from the sidebar's ASD section to browse its files." />
+	{:else}
+		{#key client}
+			<FileBrowser {client} {fileHref} />
+		{/key}
+	{/if}
 </div>
 
 <style>

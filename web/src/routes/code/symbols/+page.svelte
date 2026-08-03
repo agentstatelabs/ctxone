@@ -1,7 +1,10 @@
 <script lang="ts">
+	import { goto } from '$app/navigation';
 	import { getSymbols } from '$lib/codeApi';
 	import type { SymbolSummary } from '$lib/codeTypes';
 	import { selectedRepo } from '$lib/repoStore';
+	import EmptyState from '$lib/EmptyState.svelte';
+	import RepoBadge from '$lib/RepoBadge.svelte';
 
 	const KINDS = ['', 'function', 'method', 'class', 'module', 'variable'];
 	const PAGE_SIZE = 50;
@@ -47,7 +50,7 @@
 </script>
 
 <div class="page">
-	<h2>Symbols</h2>
+	<h2>Symbols {#if $selectedRepo}<RepoBadge />{/if}</h2>
 
 	<div class="filters">
 		<input
@@ -69,10 +72,14 @@
 		</select>
 	</div>
 
-	{#if loading}
+	{#if !$selectedRepo}
+		<EmptyState icon="◧" title="No repo selected" description="Pick a repo from the sidebar's ASD section to browse its symbols." />
+	{:else if loading}
 		<p class="muted">loading…</p>
 	{:else if error}
-		<p class="error">{error}</p>
+		<EmptyState icon="🔌" tone="error" title="Couldn’t load symbols" description={error} />
+	{:else if filtered.length === 0}
+		<EmptyState icon="🔍" title="No symbols match" description="No symbols match these filters. Clear or widen them to see more." />
 	{:else}
 		<div class="meta">
 			{filtered.length.toLocaleString()} of {all.length.toLocaleString()} symbols
@@ -90,7 +97,7 @@
 			</thead>
 			<tbody>
 				{#each visible as s (s.symbol_id)}
-					<tr onclick={() => (window.location.href = `/code/symbols/${encodeURIComponent(s.qname)}`)}>
+					<tr onclick={() => goto(`/code/symbols/${encodeURIComponent(s.qname)}`)}>
 						<td><span class="kind-badge kind-{s.kind}">{s.kind}</span></td>
 						<td class="qname-cell">
 							<a href="/code/symbols/{encodeURIComponent(s.qname)}">{s.qname}</a>
