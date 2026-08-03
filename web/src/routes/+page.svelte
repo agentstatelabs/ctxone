@@ -13,6 +13,7 @@
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
 	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 	import { estimateCost, formatUsd } from '$lib/pricing';
+	import Skeleton from '$lib/Skeleton.svelte';
 	import { StatTile, formatCompact, trimFloat } from '@agentstate/lens-core';
 	import Panel from '$lib/dashboard/Panel.svelte';
 	import EmptyState from '$lib/EmptyState.svelte';
@@ -172,6 +173,18 @@
 			actionLabel="Register a workspace"
 			actionHref="/projects"
 		/>
+	{:else if loading && workspaces.length === 0}
+		<Panel title="Workspaces" scope="hub-wide" status="ready">
+			<div class="grid" aria-hidden="true">
+				{#each Array(4) as _, i (i)}
+					<div class="card skeleton-card">
+						<Skeleton width="55%" height="1rem" />
+						<Skeleton width="80%" height="0.85rem" />
+						<Skeleton width="90%" height="0.8rem" />
+					</div>
+				{/each}
+			</div>
+		</Panel>
 	{:else}
 	<Panel
 		title="Workspaces"
@@ -376,6 +389,12 @@
 	}
 	.stat.cost {
 		color: var(--lens-text-secondary);
+	}
+	.skeleton-card {
+		display: flex;
+		flex-direction: column;
+		gap: 0.55rem;
+		cursor: default;
 	}
 	.grid-toolbar {
 		display: flex;
