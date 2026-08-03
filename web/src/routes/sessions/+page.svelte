@@ -609,6 +609,21 @@
 		});
 	}
 
+	// Coarse recency bucket for the date-sorted list's group headers. Undated
+	// sessions sink into their own bucket at the bottom (they sort last too).
+	function dateBucket(ms: number | undefined, now = Date.now()): string {
+		if (ms === undefined) return 'Undated';
+		const startOfToday = new Date(now);
+		startOfToday.setHours(0, 0, 0, 0);
+		const t = startOfToday.getTime();
+		const day = 86_400_000;
+		if (ms >= t) return 'Today';
+		if (ms >= t - day) return 'Yesterday';
+		if (ms >= t - 7 * day) return 'Last 7 days';
+		if (ms >= t - 30 * day) return 'Last 30 days';
+		return 'Older';
+	}
+
 	// ── Toolbar: search / sort / filter (persisted to localStorage) ─────────
 	type SortKey = 'date' | 'used' | 'saved' | 'ratio' | 'name';
 	type SortDir = 'asc' | 'desc';
@@ -726,6 +741,8 @@
 		return list;
 	});
 	const paged: Session[] = $derived(filtered.slice(0, visibleCount));
+	// Group the list under recency headers only when it's actually date-sorted.
+	const grouped = $derived.by(() => sortKey === 'date');
 
 	// ── Within-session transcript search ───────────────────────────────────
 	let turnSearch = $state(''); // cleared on session change (see loadTurns)
@@ -881,8 +898,11 @@
 					{#if filtered.length === 0}
 						<p class="muted no-match">No sessions match.</p>
 					{/if}
-					{#each paged as s (s.session_id)}
+					{#each paged as s, i (s.session_id)}
 						{@const date = sessionDate(s)}
+						{#if grouped && dateBucket(date) !== (i > 0 ? dateBucket(sessionDate(paged[i - 1])) : null)}
+							<div class="date-group">{dateBucket(date)}</div>
+						{/if}
 						<button
 							class="session-row"
 							class:active={selected?.session_id === s.session_id}
@@ -1604,6 +1624,22 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0.5rem;
+	}
+	.date-group {
+		position: sticky;
+		top: 0;
+		z-index: 1;
+		background: var(--bg-0);
+		font-size: 0.7rem;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		color: var(--text-3);
+		padding: 0.35rem 0.1rem 0.15rem;
+		border-bottom: 1px solid var(--border);
+	}
+	.date-group:not(:first-child) {
+		margin-top: 0.35rem;
 	}
 
 	.session-row {
