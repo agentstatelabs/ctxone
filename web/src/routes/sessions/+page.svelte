@@ -958,6 +958,11 @@
 						</p>
 					{/if}
 
+					<!-- The session's topic map first — orient before the deep sections. -->
+					<SessionArcs sessionId={selected.session_id} onScrollToTurn={scrollToTurn} />
+
+					<RecallLogTimeline sessionId={selected.session_id} />
+
 					{#if selected.llm_call_count > 0}
 						<h3>LLM Consumption</h3>
 						<div class="stat-grid">
@@ -1023,10 +1028,6 @@
 							{/if}
 						</div>
 					{/if}
-
-					<SessionArcs sessionId={selected.session_id} onScrollToTurn={scrollToTurn} />
-
-					<RecallLogTimeline sessionId={selected.session_id} />
 
 					<h3>
 							Conversation
