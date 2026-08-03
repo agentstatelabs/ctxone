@@ -624,6 +624,12 @@
 	let sortDir: SortDir = $state('desc');
 	let agentFilter: string[] = $state([]); // empty = all
 	let modelFilter: string[] = $state([]); // empty = all
+	let dateFilter = $state<'' | '24h' | '7d' | '30d'>(''); // '' = all time
+	const DATE_WINDOW_MS: Record<'24h' | '7d' | '30d', number> = {
+		'24h': 86_400_000,
+		'7d': 604_800_000,
+		'30d': 2_592_000_000
+	};
 	const PAGE_SIZE = 30;
 	let visibleCount = $state(PAGE_SIZE);
 
@@ -638,13 +644,15 @@
 			if (p.sortDir === 'asc' || p.sortDir === 'desc') sortDir = p.sortDir;
 			if (Array.isArray(p.agentFilter)) agentFilter = p.agentFilter;
 			if (Array.isArray(p.modelFilter)) modelFilter = p.modelFilter;
+			if (p.dateFilter === '24h' || p.dateFilter === '7d' || p.dateFilter === '30d')
+				dateFilter = p.dateFilter;
 		} catch {
 			/* ignore malformed persisted state */
 		}
 	});
 	// Persist on change.
 	$effect(() => {
-		const snapshot = JSON.stringify({ sortKey, sortDir, agentFilter, modelFilter });
+		const snapshot = JSON.stringify({ sortKey, sortDir, agentFilter, modelFilter, dateFilter });
 		if (typeof localStorage !== 'undefined') localStorage.setItem(LS_KEY, snapshot);
 	});
 	// Debounce the search box → searchQuery (250ms).
@@ -655,7 +663,7 @@
 	});
 	// Any filter/sort/search change resets paging to the first page.
 	$effect(() => {
-		void [searchQuery, sortKey, sortDir, agentFilter, modelFilter];
+		void [searchQuery, sortKey, sortDir, agentFilter, modelFilter, dateFilter];
 		visibleCount = PAGE_SIZE;
 	});
 
@@ -682,6 +690,11 @@
 				// Match if the session used ANY of the filtered models.
 				const used = sessionModels(s);
 				if (!used.some((m) => modelFilter.includes(m))) return false;
+			}
+			if (dateFilter) {
+				// Undated sessions can't satisfy a recency window.
+				const d = sessionDate(s);
+				if (d === undefined || Date.now() - d > DATE_WINDOW_MS[dateFilter]) return false;
 			}
 			return true;
 		});
@@ -814,9 +827,21 @@
 								{sortDir === 'asc' ? '↑' : '↓'}
 							</button>
 						</div>
+						<div class="date-seg" role="radiogroup" aria-label="Filter by recency">
+							{#each [['', 'All'], ['24h', '24h'], ['7d', '7d'], ['30d', '30d']] as [val, label] (val)}
+								<button
+									type="button"
+									class="dseg"
+									class:on={dateFilter === val}
+									role="radio"
+									aria-checked={dateFilter === val}
+									onclick={() => (dateFilter = val as typeof dateFilter)}
+								>{label}</button>
+							{/each}
+						</div>
 						<span class="count">{filtered.length} of {sessions.length}</span>
 					</div>
-					{#if agentOptions.length > 1 || modelOptions.length > 1 || agentFilter.length || modelFilter.length}
+					{#if agentOptions.length > 1 || modelOptions.length > 1 || agentFilter.length || modelFilter.length || dateFilter}
 						<div class="chips">
 							{#if agentOptions.length > 1 || agentFilter.length}
 								{#each agentOptions as a}
@@ -839,10 +864,10 @@
 									>{m}</button>
 								{/each}
 							{/if}
-							{#if agentFilter.length || modelFilter.length}
+							{#if agentFilter.length || modelFilter.length || dateFilter}
 								<button
 									class="chip clear"
-									onclick={() => { agentFilter = []; modelFilter = []; }}
+									onclick={() => { agentFilter = []; modelFilter = []; dateFilter = ''; }}
 								>Clear</button>
 							{/if}
 						</div>
@@ -866,6 +891,14 @@
 							{/if}
 							<div class="session-tags">
 								<span class="agent-chip">{agentType(s)}</span>
+								{#each sessionModels(s).slice(0, 2) as m (m)}
+									<span class="model-chip" title={m}>{m}</span>
+								{/each}
+								{#if sessionModels(s).length > 2}
+									<span class="model-chip more" title={sessionModels(s).join(', ')}
+										>+{sessionModels(s).length - 2}</span
+									>
+								{/if}
 								{#if date !== undefined}
 									<span class="row-date" title={new Date(date).toLocaleString()}>{shortDate(date)}</span>
 								{/if}
@@ -2243,9 +2276,48 @@
 		border: 1px solid color-mix(in srgb, var(--lens-accent, #6ea8ff) 30%, var(--border));
 		color: var(--lens-accent, #93c5fd);
 	}
+	.model-chip {
+		font-size: 0.66rem;
+		font-family: var(--lens-font-mono, monospace);
+		padding: 0.08rem 0.35rem;
+		border-radius: 4px;
+		background: var(--bg-2);
+		border: 1px solid var(--border);
+		color: var(--text-2);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		max-width: 9rem;
+	}
+	.model-chip.more {
+		color: var(--text-3);
+	}
 	.row-date {
 		font-size: 0.72rem;
 		color: var(--text-3);
+		margin-left: auto;
+	}
+	.date-seg {
+		display: inline-flex;
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		overflow: hidden;
+	}
+	.dseg {
+		background: var(--bg-1);
+		color: var(--text-2);
+		border: none;
+		border-left: 1px solid var(--border);
+		padding: 0.2rem 0.5rem;
+		font-size: 0.78rem;
+		cursor: pointer;
+	}
+	.dseg:first-child {
+		border-left: none;
+	}
+	.dseg.on {
+		background: var(--accent-bg);
+		color: var(--text-0);
 	}
 	.load-more {
 		background: var(--bg-hover);
