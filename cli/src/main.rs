@@ -6006,21 +6006,40 @@ async fn run_capture_turn(
     }
 
     let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+
+    // Detect which adapter produced this transcript. A Stop hook hands us one
+    // file, and for non-Claude sources (Codex rollouts, Gemini sessions, …)
+    // running it through the Claude JSONL parser yields zero turns — the reason
+    // Codex Stop hooks captured nothing. Claude keeps its existing efficient
+    // tail path; other sources parse via their own adapter and namespace the id
+    // (e.g. `codex:<uuid>`) so they can't collide with Claude session rows.
+    let detected = crate::sources::source_ref_for_path(&transcript_path)
+        .filter(|(src, _)| src.id() != "claude");
+
     // last_turns gives us tail items; for the full-turn path we need their
     // absolute index in the session so paths stay stable across captures.
-    let all_count = crate::ingest::parse_turns(&transcript_path).len();
-    let recent = crate::ingest::last_turns(&transcript_path, turns);
-    let base_idx = all_count.saturating_sub(recent.len());
+    let (recent, base_idx, derived_sid): (Vec<crate::ingest::Turn>, usize, String) =
+        if let Some((src, sref)) = &detected {
+            let mut all = src.parse(sref);
+            let all_count = all.len();
+            let take = turns.min(all_count);
+            let base = all_count - take;
+            // split_off takes the tail by ownership (Turn is not Clone).
+            let tail = all.split_off(base);
+            (tail, base, sref.namespaced_id(src.id()))
+        } else {
+            let all_count = crate::ingest::parse_turns(&transcript_path).len();
+            let recent = crate::ingest::last_turns(&transcript_path, turns);
+            let base = all_count.saturating_sub(recent.len());
+            // Claude Code names files <uuid>.jsonl; derive the id from the stem.
+            (recent, base, session_id_for_file(&transcript_path))
+        };
     let source_file = transcript_path
         .file_name()
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
 
-    // If no explicit --session was passed, derive one from the transcript
-    // filename (Claude Code names files <uuid>.jsonl) so each captured
-    // session lands as its own row on the Sessions page.
-    let derived_sid = session_id_for_file(&transcript_path);
     let effective_session: Option<&str> = match session {
         Some(s) => Some(s),
         None => Some(derived_sid.as_str()),

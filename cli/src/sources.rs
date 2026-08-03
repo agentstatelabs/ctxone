@@ -856,6 +856,32 @@ pub fn source_by_id(id: &str) -> Option<Box<dyn SessionSource>> {
     all_sources().into_iter().find(|s| s.id() == id)
 }
 
+/// Detect which source owns a single transcript `path` and return it alongside
+/// a fully-resolved [`SessionRef`] (native id + cwd), or `None` if no source
+/// recognises it.
+///
+/// This is the seam the Stop-hook capture path uses: a hook hands us one
+/// transcript file (Claude `<uuid>.jsonl`, Codex `rollout-*.jsonl`, Gemini
+/// `session-*.json`, …) and we must parse it with the right adapter instead of
+/// assuming Claude JSONL. Each source's filename predicates are mutually
+/// exclusive (Claude's `discover_in` excludes `rollout-`, Codex requires it,
+/// Gemini uses `session-*.json`), so the first match is unambiguous. We reuse
+/// `discover_in(parent)` so the source's own metadata reader fills `native_id`
+/// and `cwd` — the fields that route the session to its workspace.
+pub fn source_ref_for_path(path: &Path) -> Option<(Box<dyn SessionSource>, SessionRef)> {
+    let dir = path.parent()?;
+    let want = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    for src in all_sources() {
+        let hit = src.discover_in(dir).into_iter().find(|r| {
+            std::fs::canonicalize(&r.path).unwrap_or_else(|_| r.path.clone()) == want
+        });
+        if let Some(r) = hit {
+            return Some((src, r));
+        }
+    }
+    None
+}
+
 /// Group refs by project label, preserving discovery order within a group.
 ///
 /// Discovery returns a flat list because that is the useful shape for
@@ -875,6 +901,27 @@ pub fn group_by_label(refs: Vec<SessionRef>) -> Vec<(String, Vec<PathBuf>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_ref_for_path_routes_codex_and_claude_by_filename() {
+        // A dir holding one Codex rollout and one Claude transcript. Detection
+        // is by filename predicate, so empty files are enough — this is the
+        // seam the Stop-hook capture path relies on to not run a Codex rollout
+        // through the Claude parser.
+        let dir = std::env::temp_dir().join(format!("ctx-src-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let codex = dir.join("rollout-2026-06-15T17-37-13-019ecda5-753a-7e31-87d2-a78b2cb024e8.jsonl");
+        let claude = dir.join("abc-123.jsonl");
+        std::fs::write(&codex, "").unwrap();
+        std::fs::write(&claude, "").unwrap();
+
+        let (src, _) = source_ref_for_path(&codex).expect("codex rollout should be detected");
+        assert_eq!(src.id(), "codex");
+        let (src, _) = source_ref_for_path(&claude).expect("claude transcript should be detected");
+        assert_eq!(src.id(), "claude");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn label_recovers_last_two_components() {
