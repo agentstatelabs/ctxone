@@ -5,6 +5,7 @@
 	import { branchStore } from '$lib/branchStore.svelte';
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
 	import ScopeBadge from '$lib/ScopeBadge.svelte';
+	import EmptyState from '$lib/EmptyState.svelte';
 	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 
 	type ViewMode = 'tree' | 'flat';
@@ -197,7 +198,11 @@
 <div class="browser">
 	<div class="path-list">
 		{#if paths.length === 0}
-			<p class="empty">No paths found on {branchStore.current}. Start by remembering something.</p>
+			<EmptyState
+					icon="🧠"
+					title="No memory on this branch yet"
+					description="The memory graph is empty here. Capture a fact with `ctx remember` (or the Recall/Remember tools) to populate it."
+				/>
 		{:else if viewMode === 'flat'}
 			{#each paths as path}
 				<button
@@ -480,7 +485,6 @@
 	.error {
 		color: var(--danger);
 	}
-	.empty,
 	.hint {
 		color: var(--text-3);
 	}

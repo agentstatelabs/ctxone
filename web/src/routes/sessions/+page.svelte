@@ -4,6 +4,7 @@
 	import { formatCompact } from '@agentstate/lens-core';
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
 	import ScopeBadge from '$lib/ScopeBadge.svelte';
+	import EmptyState from '$lib/EmptyState.svelte';
 	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 	import { renderMarkdown } from '$lib/markdown';
 	import { estimateCost, formatUsd } from '$lib/pricing';
@@ -819,7 +820,13 @@
 	{:else if loading && sessions.length === 0}
 		<p class="muted">Loading sessions…</p>
 	{:else if sessions.length === 0}
-		<p class="muted">No sessions yet. Run <code>ctx recall</code> or <code>ctx remember</code> to start one.</p>
+		<EmptyState
+			icon="🗂️"
+			title="No sessions in this workspace yet"
+			description="Sessions appear as agents run recall/remember here, or after you sync local transcripts."
+			actionLabel={syncing ? 'Syncing…' : 'Sync transcripts'}
+			onAction={syncSessions}
+		/>
 	{:else}
 		<div class="layout">
 			<div class="list-col">

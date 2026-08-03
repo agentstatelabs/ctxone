@@ -14,6 +14,7 @@
 	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 	import { StatTile, formatCompact, trimFloat } from '@agentstate/lens-core';
 	import Panel from '$lib/dashboard/Panel.svelte';
+	import EmptyState from '$lib/EmptyState.svelte';
 
 	// Hub Home is the ONE cross-workspace view: it does not scope by branch and
 	// treats the namespace header as irrelevant (every endpoint it calls is
@@ -36,6 +37,8 @@
 
 	let workspaceCount = $derived(workspaces.length);
 	let totalSessions = $derived(workspaces.reduce((n, w) => n + w.session_count, 0));
+	// Fresh install: no registered projects and nothing ingested anywhere.
+	let firstRun = $derived(!loading && projects.length === 0 && totalSessions === 0);
 
 	let panelStatus = $derived<'loading' | 'error' | 'empty' | 'ready'>(
 		loading ? 'loading' : error ? 'error' : workspaces.length === 0 ? 'empty' : 'ready'
@@ -120,6 +123,15 @@
 		/>
 	</div>
 
+	{#if firstRun}
+		<EmptyState
+			icon="👋"
+			title="Welcome to CTXone"
+			description="No workspaces are populated yet. Register a project to map a code repo to its own workspace, or just start using ctx — recall/remember populate the default workspace automatically."
+			actionLabel="Register a workspace"
+			actionHref="/projects"
+		/>
+	{:else}
 	<Panel
 		title="Workspaces"
 		scope="hub-wide"
@@ -169,6 +181,7 @@
 				{/each}
 			</div>
 	</Panel>
+	{/if}
 </div>
 
 <style>

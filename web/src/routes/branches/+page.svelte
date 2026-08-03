@@ -4,6 +4,7 @@
 	import { listPlans } from '$lib/plansApi';
 	import { branchStore } from '$lib/branchStore.svelte';
 	import ScopeBadge from '$lib/ScopeBadge.svelte';
+	import EmptyState from '$lib/EmptyState.svelte';
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
 	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 
@@ -119,7 +120,11 @@
 	{:else if loading && rows.length === 0}
 		<p class="muted">Loading branches…</p>
 	{:else if rows.length === 0}
-		<p class="muted">No branches.</p>
+		<EmptyState
+			icon="⎇"
+			title="No branches yet"
+			description="This workspace has no branches. Create one above to fork the memory graph for parallel work."
+		/>
 	{:else}
 		<table class="branches">
 			<thead>

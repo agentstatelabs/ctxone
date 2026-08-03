@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { branchStore } from '$lib/branchStore.svelte';
 	import ScopeBadge from '$lib/ScopeBadge.svelte';
+	import EmptyState from '$lib/EmptyState.svelte';
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
 	import { getBranches } from '$lib/api';
 	import {
@@ -523,11 +524,15 @@
 			</div>
 		{/key}
 	{:else if !error}
-		<p class="empty">
-			{plans.length === 0
-				? 'No plans on this branch yet — create one from the switcher above.'
-				: 'Select a plan from the switcher above.'}
-		</p>
+		{#if plans.length === 0}
+			<EmptyState
+				icon="📋"
+				title="No plans on this branch yet"
+				description="Plans track multi-step work with proof-backed tasks. Create one from the switcher above, or an agent can via `ctx plan new`."
+			/>
+		{:else}
+			<EmptyState icon="👆" title="Select a plan" description="Pick a plan from the switcher above to see its tasks." />
+		{/if}
 	{/if}
 </div>
 
@@ -756,12 +761,6 @@
 		font-family: var(--lens-font-mono);
 		font-size: var(--lens-font-size-2xs);
 		color: var(--lens-text-secondary);
-	}
-	.empty {
-		color: var(--lens-text-faint);
-		font-style: italic;
-		text-align: center;
-		padding: var(--lens-space-12) 0;
 	}
 	/* Trust & cost cards sit side by side on wide viewports, stack on narrow. */
 	.trust-grid {

@@ -3,6 +3,7 @@
 	import type { PinnedItem } from '$lib/api';
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
 	import ScopeBadge from '$lib/ScopeBadge.svelte';
+	import EmptyState from '$lib/EmptyState.svelte';
 	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 
 	let pinned: PinnedItem[] = $state([]);
@@ -181,7 +182,11 @@
 {#if loading && pinned.length === 0}
 	<p class="muted">Loading...</p>
 {:else if grouped.length === 0}
-	<p class="muted">No pinned memories yet. Upload a markdown file above or run <code>ctx prime ./docs/VISION.md --pin</code>.</p>
+	<EmptyState
+		icon="📌"
+		title="No pinned memories yet"
+		description="Pinned memories ride every recall, regardless of topic — use them for critical context. Upload a markdown file above, or run `ctx prime ./docs/VISION.md --pin`."
+	/>
 {:else}
 	<div class="controls-bar">
 		<div class="seg-group" role="tablist" aria-label="View mode">

@@ -5,6 +5,7 @@
 	import { branchStore } from '$lib/branchStore.svelte';
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
 	import ScopeBadge from '$lib/ScopeBadge.svelte';
+	import EmptyState from '$lib/EmptyState.svelte';
 	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 
 	let commits: CommitEntry[] = $state([]);
@@ -102,7 +103,11 @@
 	{/each}
 
 	{#if commits.length === 0 && !error}
-		<p class="empty">No commits yet.</p>
+		<EmptyState
+			icon="🕓"
+			title="No commits on this branch yet"
+			description="Every remember, plan change, and ingest writes a commit here. Nothing has been recorded on this branch."
+		/>
 	{/if}
 </div>
 
@@ -170,7 +175,6 @@
 	}
 
 	.error { color: var(--danger); }
-	.empty { color: var(--text-3); padding: 2rem; text-align: center; }
 
 
 	.ago {

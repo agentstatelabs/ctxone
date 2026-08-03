@@ -14,6 +14,7 @@
 	} from '$lib/api';
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
 	import ScopeBadge from '$lib/ScopeBadge.svelte';
+	import EmptyState from '$lib/EmptyState.svelte';
 	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 
 	type Filter = 'due' | 'pending' | 'all';
@@ -282,13 +283,17 @@
 	{:else if loading && reminders.length === 0}
 		<p class="muted">Loading reminders…</p>
 	{:else if reminders.length === 0}
-		<p class="muted">
-			{filter === 'due'
-				? 'Nothing actionable right now.'
+		<EmptyState
+			icon="⏰"
+			title={filter === 'due'
+				? 'Nothing actionable right now'
 				: filter === 'pending'
-					? 'No pending reminders.'
-					: 'No reminders yet.'}
-		</p>
+					? 'No pending reminders'
+					: 'No reminders yet'}
+			description={filter === 'all'
+				? 'Reminders let agents schedule future work in this workspace (e.g. `ctx remind`). None have been created.'
+				: undefined}
+		/>
 	{:else}
 		{#each groups as group}
 			<h3 class="day-label" class:overdue={group.label === 'Overdue'}>{group.label}</h3>
