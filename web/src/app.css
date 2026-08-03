@@ -348,6 +348,16 @@ body {
 	--lens-ok: var(--success);
 	--lens-warn: var(--warning);
 	--lens-info: var(--info);
+
+	/* Symbol-kind badge colors (Code views). Mapped to theme-aware semantic
+	   tokens so kind badges adapt per theme, instead of the hardcoded Nord
+	   hexes the /code pages previously fell back to. Single source of truth —
+	   the pages reference var(--kind-*). */
+	--kind-function: var(--lens-accent);
+	--kind-method: var(--lens-ok);
+	--kind-class: var(--lens-warn);
+	--kind-module: var(--lens-info);
+	--kind-variable: var(--lens-text-secondary);
 }
 
 /* ---------------------------------------------------------------------------
