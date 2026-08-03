@@ -13,6 +13,7 @@
 		type ReminderExecution
 	} from '$lib/api';
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
+	import ScopeBadge from '$lib/ScopeBadge.svelte';
 	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 
 	type Filter = 'due' | 'pending' | 'all';
@@ -211,7 +212,7 @@
 
 <div class="page">
 	<header class="page-header">
-		<h1>Reminders</h1>
+		<h1>Reminders <ScopeBadge /></h1>
 		<span class="ago">refreshed {formatAgo(auto.lastRefreshed)}</span>
 		<button class="btn" onclick={() => (showCreate = !showCreate)}>
 			{showCreate ? 'Cancel' : '+ New reminder'}

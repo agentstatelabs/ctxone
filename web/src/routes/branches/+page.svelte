@@ -3,6 +3,7 @@
 	import { getBranches, createBranch } from '$lib/api';
 	import { listPlans } from '$lib/plansApi';
 	import { branchStore } from '$lib/branchStore.svelte';
+	import ScopeBadge from '$lib/ScopeBadge.svelte';
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
 	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 
@@ -88,7 +89,7 @@
 
 <div class="page">
 	<header class="page-header">
-		<h1>Branches</h1>
+		<h1>Branches <ScopeBadge /></h1>
 		<span class="ago">refreshed {formatAgo(auto.lastRefreshed)}</span>
 		<button class="btn" onclick={() => (showCreate = !showCreate)}>
 			{showCreate ? 'Cancel' : '+ New branch'}

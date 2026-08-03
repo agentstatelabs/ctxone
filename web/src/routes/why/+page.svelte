@@ -2,6 +2,7 @@
 	import { untrack } from 'svelte';
 	import { whyDidWe, type WhyResponse, type WhyBlame } from '$lib/api';
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
+	import ScopeBadge from '$lib/ScopeBadge.svelte';
 
 	let question = $state('');
 	let response: WhyResponse | null = $state(null);
@@ -75,7 +76,7 @@
 	}
 </script>
 
-<h2>Why did we…</h2>
+<h2>Why did we… <ScopeBadge /></h2>
 <p class="hint">
 	Trace a decision back to the commits that made it. Searches decision text on
 	<code>main</code> and follows each hit's blame chain.

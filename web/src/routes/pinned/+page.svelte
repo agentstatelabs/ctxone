@@ -2,6 +2,7 @@
 	import { getPinned, primeSections, parseMarkdownSections } from '$lib/api';
 	import type { PinnedItem } from '$lib/api';
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
+	import ScopeBadge from '$lib/ScopeBadge.svelte';
 	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 
 	let pinned: PinnedItem[] = $state([]);
@@ -142,7 +143,7 @@
 </script>
 
 <h2>
-	Pinned Memory
+	Pinned Memory <ScopeBadge />
 	<span class="ago">refreshed {formatAgo(auto.lastRefreshed)}</span>
 </h2>
 <p class="intro">

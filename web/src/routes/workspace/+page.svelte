@@ -2,7 +2,6 @@
 	import {
 		getHealth,
 		getStats,
-		getTokenStats,
 		getSessions,
 		getLog,
 		getActivity,
@@ -11,7 +10,6 @@
 	} from '$lib/api';
 	import type {
 		StatsResponse,
-		TokenStats,
 		SessionSnapshot,
 		CommitEntry,
 		Reminder,
@@ -69,7 +67,6 @@
 	}
 
 	let connected = $state(true);
-	let tokensL = $state<Load<TokenStats>>(pending());
 	let sessionsL = $state<Load<SessionSnapshot[]>>(pending());
 	let statsL = $state<Load<StatsResponse>>(pending());
 	let logL = $state<Load<CommitEntry[]>>(pending());
@@ -113,7 +110,6 @@
 	async function refreshAll(initial: boolean) {
 		const branch = branchStore.current;
 		if (initial) {
-			tokensL = pending();
 			sessionsL = pending();
 			statsL = pending();
 			logL = pending();
@@ -127,7 +123,6 @@
 			.then((ps) => (project = ps.find((p) => p.namespace === namespaceStore.current) ?? null))
 			.catch(() => (project = null));
 		await Promise.all([
-			track(() => getTokenStats(), (l) => (tokensL = l)),
 			track(() => getSessions(), (l) => (sessionsL = l)),
 			track(() => getStats(branch), (l) => (statsL = l)),
 			track(() => getLog(branch, 1000), (l) => (logL = l)),
@@ -209,6 +204,42 @@
 		}
 		return { min, max };
 	});
+	// A workspace-scoped aggregate snapshot for the Token-economics panel /
+	// LlmStats — summed from THIS workspace's sessions, replacing the hub-wide
+	// getTokenStats aggregate the old dashboard fed here.
+	const wsSnapshot = $derived.by<SessionSnapshot>(() => {
+		const agg: SessionSnapshot = {
+			session_id: '_workspace',
+			session_tokens_used: wsUsed,
+			session_tokens_saved: wsSaved,
+			total_graph_size_chars: 0,
+			total_graph_size_tokens: 0,
+			cumulative_ratio: wsRatio,
+			llm_input_tokens: 0,
+			llm_output_tokens: 0,
+			llm_cache_read_tokens: 0,
+			llm_cache_create_tokens: 0,
+			llm_call_count: 0,
+			last_model: null,
+			last_provider: null,
+			models_used: distinctModels
+		};
+		for (const s of sessionList) {
+			agg.total_graph_size_chars += s.total_graph_size_chars ?? 0;
+			agg.total_graph_size_tokens += s.total_graph_size_tokens ?? 0;
+			agg.llm_input_tokens! += s.llm_input_tokens ?? 0;
+			agg.llm_output_tokens! += s.llm_output_tokens ?? 0;
+			agg.llm_cache_read_tokens! += s.llm_cache_read_tokens ?? 0;
+			agg.llm_cache_create_tokens! += s.llm_cache_create_tokens ?? 0;
+			agg.llm_call_count! += s.llm_call_count ?? 0;
+			if (s.last_model) {
+				agg.last_model = s.last_model;
+				agg.last_provider = s.last_provider ?? agg.last_provider;
+			}
+		}
+		return agg;
+	});
+
 	function shortDate(ms: number | null): string {
 		return ms === null ? '—' : new Date(ms).toLocaleDateString();
 	}
@@ -649,13 +680,13 @@
 		emptyTitle="No token traffic yet"
 		emptyText="Run an agent recall or context call to start measuring savings."
 	>
-		{#if tokensL.data}
+		{#if sessionsL.status === 'ready'}
 			<div class="econ-strip">
-				<span class="econ-ratio">{trimFloat(tokensL.data.cumulative_ratio, 1)}×</span>
+				<span class="econ-ratio">{trimFloat(wsSnapshot.cumulative_ratio, 1)}×</span>
 				<span class="econ-ratio-label">savings vs flat memory</span>
 				<span class="econ-fig">
 					graph size (flat equivalent)
-					<strong>{tokensL.data.total_graph_size_tokens.toLocaleString()} tok</strong>
+					<strong>{wsSnapshot.total_graph_size_tokens.toLocaleString()} tok</strong>
 				</span>
 			</div>
 		{/if}
@@ -674,8 +705,8 @@
 					<BarChart data={modelBars} orientation="horizontal" labelWidth={150} />
 				</div>
 			{/if}
-			{#if tokensL.data}
-				<LlmStats snapshot={tokensL.data} />
+			{#if sessionsL.status === 'ready'}
+				<LlmStats snapshot={wsSnapshot} />
 			{/if}
 		</div>
 	</Panel>

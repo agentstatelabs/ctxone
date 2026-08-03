@@ -3,6 +3,7 @@
 	import { computeBurn } from '$lib/sessionBurn';
 	import { formatCompact } from '@agentstate/lens-core';
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
+	import ScopeBadge from '$lib/ScopeBadge.svelte';
 	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 	import { renderMarkdown } from '$lib/markdown';
 	import { tick } from 'svelte';
@@ -762,7 +763,7 @@
 
 <div class="page">
 	<div class="header">
-		<h1>Sessions</h1>
+		<h1>Sessions <ScopeBadge /></h1>
 		<button class="refresh-btn" onclick={load} disabled={loading}>
 			{loading ? 'Loading…' : 'Refresh'}
 		</button>

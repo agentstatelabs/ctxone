@@ -7,6 +7,7 @@
 	} from '$lib/teamApi';
 	import type { TaintRecord, TaintCheck } from '$lib/teamApi';
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
+	import ScopeBadge from '$lib/ScopeBadge.svelte';
 	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 
 	// ── Active taints ────────────────────────────────────────────────────────
@@ -248,7 +249,7 @@
 </script>
 
 <h2>
-	Taint / Quarantine / Watch
+	Taint / Quarantine / Watch <ScopeBadge />
 	<span class="ago">refreshed {formatAgo(auto.lastRefreshed)}</span>
 </h2>
 
