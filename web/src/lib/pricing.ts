@@ -71,6 +71,17 @@ export const PRICING: Record<string, ModelPricing> = {
 		cache_read: 0.5,
 		cache_write: 6.25
 	},
+	// Rest of the current-gen Anthropic line, hyphenated as agents report them.
+	// Opus 4.6–5 share $5/$25; Sonnet 4.5–5 share $3/$15; Haiku 4.5 $0.80/$4;
+	// Fable 5 $10/$50. cache_read ≈ 0.1× input, cache_write ≈ 1.25× input.
+	'claude-opus-5': { provider: 'anthropic', input: 5.0, output: 25.0, cache_read: 0.5, cache_write: 6.25 },
+	'claude-opus-4-7': { provider: 'anthropic', input: 5.0, output: 25.0, cache_read: 0.5, cache_write: 6.25 },
+	'claude-opus-4-6': { provider: 'anthropic', input: 5.0, output: 25.0, cache_read: 0.5, cache_write: 6.25 },
+	'claude-sonnet-5': { provider: 'anthropic', input: 3.0, output: 15.0, cache_read: 0.3, cache_write: 3.75 },
+	'claude-sonnet-4-6': { provider: 'anthropic', input: 3.0, output: 15.0, cache_read: 0.3, cache_write: 3.75 },
+	'claude-sonnet-4-5': { provider: 'anthropic', input: 3.0, output: 15.0, cache_read: 0.3, cache_write: 3.75 },
+	'claude-haiku-4-5': { provider: 'anthropic', input: 0.8, output: 4.0, cache_read: 0.08, cache_write: 1.0 },
+	'claude-fable-5': { provider: 'anthropic', input: 10.0, output: 50.0, cache_read: 1.0, cache_write: 12.5 },
 
 	// -- OpenAI --
 	'gpt-4o': {

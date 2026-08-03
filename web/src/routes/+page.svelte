@@ -12,6 +12,7 @@
 	} from '$lib/api';
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
 	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
+	import { estimateCost, formatUsd } from '$lib/pricing';
 	import { StatTile, formatCompact, trimFloat } from '@agentstate/lens-core';
 	import Panel from '$lib/dashboard/Panel.svelte';
 	import EmptyState from '$lib/EmptyState.svelte';
@@ -40,6 +41,46 @@
 	// Fresh install: no registered projects and nothing ingested anywhere.
 	let firstRun = $derived(!loading && projects.length === 0 && totalSessions === 0);
 
+	/** Rough (≈) cost for a workspace, priced from its representative model. */
+	function wsCost(w: WorkspaceSummary): number | null {
+		return estimateCost(w.representative_model ?? null, {
+			input: w.tokens.llm_input,
+			output: w.tokens.llm_output,
+			cache_read: w.tokens.llm_cache_read,
+			cache_create: w.tokens.llm_cache_create
+		});
+	}
+
+	let wsSort = $state<'sessions' | 'saved' | 'commits' | 'cost'>('sessions');
+	const SORT_LABELS: Record<typeof wsSort, string> = {
+		sessions: 'Sessions',
+		saved: 'Tokens saved',
+		commits: 'Commits',
+		cost: 'Est. cost'
+	};
+	let sortedWorkspaces = $derived.by(() => {
+		const arr = [...workspaces];
+		arr.sort((a, b) => {
+			switch (wsSort) {
+				case 'saved':
+					return b.tokens.saved - a.tokens.saved;
+				case 'commits':
+					return (b.graph?.commit_count ?? 0) - (a.graph?.commit_count ?? 0);
+				case 'cost':
+					return (wsCost(b) ?? -1) - (wsCost(a) ?? -1);
+				default:
+					return b.session_count - a.session_count;
+			}
+		});
+		return arr;
+	});
+	// The workspace that has saved the most tokens — the hub's efficiency star.
+	let topSaverNs = $derived(
+		workspaces.length
+			? workspaces.reduce((top, w) => (w.tokens.saved > top.tokens.saved ? w : top)).namespace
+			: null
+	);
+
 	let panelStatus = $derived<'loading' | 'error' | 'empty' | 'ready'>(
 		loading ? 'loading' : error ? 'error' : workspaces.length === 0 ? 'empty' : 'ready'
 	);
@@ -56,7 +97,7 @@
 			healthy = ok;
 			tokens = tok;
 			// Busiest workspaces first — most sessions is the useful default.
-			workspaces = [...ws].sort((a, b) => b.session_count - a.session_count);
+			workspaces = ws;
 			projects = projs;
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
@@ -140,9 +181,22 @@
 		emptyTitle="No workspaces yet"
 		emptyText="Register one under Settings → Workspaces, or run ctx recall / ctx remember to populate the default workspace."
 	>
+		{#if workspaces.length > 1}
+			<div class="grid-toolbar">
+				<label class="sort-lbl">
+					Sort
+					<select bind:value={wsSort} aria-label="Sort workspaces">
+						{#each Object.entries(SORT_LABELS) as [k, label] (k)}
+							<option value={k}>{label}</option>
+						{/each}
+					</select>
+				</label>
+			</div>
+		{/if}
 		<div class="grid" aria-label="Workspaces">
-			{#each workspaces as w (w.namespace)}
+			{#each sortedWorkspaces as w (w.namespace)}
 					{@const remote = shortRemote(remoteOf(w.namespace))}
+					{@const cost = wsCost(w)}
 					<button
 						type="button"
 						class="card"
@@ -152,6 +206,9 @@
 					>
 						<div class="card-head">
 							<span class="card-name">{displayName(w.namespace)}</span>
+							{#if w.namespace === topSaverNs && w.tokens.saved > 0}
+								<span class="top-saver" title="Most tokens saved in the hub">★ top saver</span>
+							{/if}
 							<code class="card-ns">{w.namespace}</code>
 						</div>
 						{#if remote}<div class="card-remote" title={remoteOf(w.namespace)}>{remote}</div>{/if}
@@ -164,6 +221,11 @@
 									<span class="saved">· {formatCompact(w.tokens.saved)} saved</span>
 								{/if}
 							</span>
+							{#if cost !== null}
+								<span class="stat cost" title="Rough estimate from the workspace's most-common model ({w.representative_model})">
+									≈ {formatUsd(cost)}
+								</span>
+							{/if}
 						</div>
 
 						{#if w.graph}
@@ -311,6 +373,41 @@
 	}
 	.saved {
 		color: var(--lens-ok);
+	}
+	.stat.cost {
+		color: var(--lens-text-secondary);
+	}
+	.grid-toolbar {
+		display: flex;
+		justify-content: flex-end;
+		margin-bottom: var(--lens-space-2, 0.5rem);
+	}
+	.sort-lbl {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
+		font-size: var(--lens-font-size-xs);
+		color: var(--lens-text-secondary);
+	}
+	.sort-lbl select {
+		background: var(--lens-surface);
+		color: var(--lens-text);
+		border: 1px solid var(--lens-border);
+		border-radius: var(--lens-radius-sm);
+		padding: 0.15rem 0.4rem;
+		font-size: var(--lens-font-size-xs);
+	}
+	.top-saver {
+		font-size: 0.62rem;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.03em;
+		color: var(--lens-ok);
+		background: color-mix(in srgb, var(--lens-ok) 14%, transparent);
+		border: 1px solid color-mix(in srgb, var(--lens-ok) 35%, var(--lens-border));
+		border-radius: var(--lens-radius-full);
+		padding: 0.02rem 0.4rem;
+		white-space: nowrap;
 	}
 	.card-counts {
 		display: flex;

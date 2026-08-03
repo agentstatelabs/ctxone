@@ -142,6 +142,9 @@ export async function getSessions(): Promise<SessionSnapshot[]> {
 export interface WorkspaceSummary {
 	namespace: string;
 	session_count: number;
+	/** Most-common last_model across the workspace's sessions — for a rough
+	 * (≈) cost estimate on the Hub Home. Null when no session reported a model. */
+	representative_model?: string | null;
 	tokens: {
 		used: number;
 		saved: number;

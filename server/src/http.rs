@@ -4173,6 +4173,30 @@ fn sum_workspace_tokens(
     t
 }
 
+/// The most-common `last_model` among a workspace's sessions — a representative
+/// model the Hub Home uses for a rough cost estimate. Workspaces often mix
+/// models, so the frontend labels the figure "≈". Same matching semantics as
+/// [`sum_workspace_tokens`].
+fn representative_model(
+    snaps: &[SessionSnapshot],
+    ids: &std::collections::HashSet<String>,
+    complement: bool,
+) -> Option<String> {
+    let mut counts: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
+    for snap in snaps {
+        if ids.contains(&snap.session_id) != !complement {
+            continue;
+        }
+        if let Some(m) = snap.last_model.as_deref() {
+            *counts.entry(m).or_insert(0) += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .max_by_key(|&(_, c)| c)
+        .map(|(m, _)| m.to_string())
+}
+
 /// `GET /api/namespaces/summary` — hub-global per-workspace rollup for the Hub
 /// Home. One call returns token + graph aggregates for every workspace so the
 /// home page needs no N+1 fan-out. Purely namespace-derived; project metadata
@@ -4208,17 +4232,21 @@ async fn namespaces_summary(State(s): State<HubState>) -> impl IntoResponse {
         let Ok(repo) = s.repo_for(&NamespaceId(name.clone())) else {
             continue;
         };
-        let tokens = if name == Namespace::DEFAULT {
-            sum_workspace_tokens(&snaps, &placed, true)
+        let is_default = name == Namespace::DEFAULT;
+        let ids: &std::collections::HashSet<String> = if is_default {
+            &placed
         } else {
-            sum_workspace_tokens(&snaps, ids_by_ns.get(name).unwrap_or(&empty), false)
+            ids_by_ns.get(name).unwrap_or(&empty)
         };
+        let tokens = sum_workspace_tokens(&snaps, ids, is_default);
+        let model = representative_model(&snaps, ids, is_default);
         // Same graph counts the per-ns `stats` handler returns
         // (commit_count / path_count / branch_count / epoch_count).
         let graph = repo.stats("main").unwrap_or(serde_json::Value::Null);
         out.push(serde_json::json!({
             "namespace": name,
             "session_count": tokens.session_count,
+            "representative_model": model,
             "tokens": {
                 "used": tokens.used,
                 "saved": tokens.saved,
