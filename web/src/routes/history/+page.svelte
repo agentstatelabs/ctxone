@@ -4,6 +4,7 @@
 	import type { CommitEntry } from '$lib/api';
 	import { branchStore } from '$lib/branchStore.svelte';
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
+	import ScopeBadge from '$lib/ScopeBadge.svelte';
 	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 
 	let commits: CommitEntry[] = $state([]);
@@ -61,7 +62,7 @@
 </script>
 
 <h2>
-	Commit History <span class="branch-label">on {branchStore.current}</span>
+	Commit History <ScopeBadge branch />
 	<span class="ago">refreshed {formatAgo(auto.lastRefreshed)}</span>
 </h2>
 
@@ -171,13 +172,6 @@
 	.error { color: var(--danger); }
 	.empty { color: var(--text-3); padding: 2rem; text-align: center; }
 
-	.branch-label {
-		font-size: 0.85rem;
-		font-family: monospace;
-		color: var(--accent);
-		font-weight: normal;
-		margin-left: 0.5rem;
-	}
 
 	.ago {
 		font-size: 0.75rem;

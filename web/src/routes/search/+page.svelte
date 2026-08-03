@@ -2,6 +2,7 @@
 	import { searchValues } from '$lib/api';
 	import type { SearchResult } from '$lib/api';
 	import { branchStore } from '$lib/branchStore.svelte';
+	import ScopeBadge from '$lib/ScopeBadge.svelte';
 
 	let query = $state('');
 	let results: SearchResult[] = $state([]);
@@ -21,7 +22,7 @@
 	}
 </script>
 
-<h2>Search Memory <span class="branch-label">on {branchStore.current}</span></h2>
+<h2>Search Memory <ScopeBadge branch /></h2>
 
 <form onsubmit={handleSearch} class="search-form">
 	<input
@@ -86,13 +87,6 @@
 	.count { color: var(--text-3); margin-bottom: 1rem; }
 	.error { color: var(--danger); }
 
-	.branch-label {
-		font-size: 0.85rem;
-		font-family: monospace;
-		color: var(--accent);
-		font-weight: normal;
-		margin-left: 0.5rem;
-	}
 
 	.results {
 		background: var(--bg-1);

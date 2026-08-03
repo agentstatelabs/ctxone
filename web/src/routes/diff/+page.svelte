@@ -3,6 +3,7 @@
 	import type { DiffOp, DiffResponse, MergeResult } from '$lib/api';
 	import { branchStore } from '$lib/branchStore.svelte';
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
+	import ScopeBadge from '$lib/ScopeBadge.svelte';
 	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 
 	let branches: string[] = $state(['main']);
@@ -123,7 +124,7 @@
 </script>
 
 <h2>
-	Diff Branches
+	Diff Branches <ScopeBadge />
 	<span class="ago">refreshed {formatAgo(auto.lastRefreshed)}</span>
 </h2>
 

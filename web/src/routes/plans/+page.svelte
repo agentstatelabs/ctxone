@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { branchStore } from '$lib/branchStore.svelte';
+	import ScopeBadge from '$lib/ScopeBadge.svelte';
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
 	import { getBranches } from '$lib/api';
 	import {
@@ -376,7 +377,7 @@
 	<header class="topbar">
 		<h2>Plans</h2>
 		<PlanSwitcher {plans} {selectedName} onSelect={selectPlan} onCreate={handleCreatePlan} />
-		<span class="branch-label">on {branchStore.current}</span>
+		<ScopeBadge branch />
 		<span class="ago">refreshed {formatAgo(auto.lastRefreshed)}</span>
 		<span class="top-spacer"></span>
 		{#if selectedPlan}
@@ -579,11 +580,6 @@
 		margin: 0;
 		font-size: var(--lens-font-size-lg);
 		color: var(--lens-text-strong);
-	}
-	.branch-label {
-		color: var(--lens-muted);
-		font-family: var(--lens-font-mono);
-		font-size: var(--lens-font-size-xs);
 	}
 	.ago {
 		font-size: var(--lens-font-size-2xs);

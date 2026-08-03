@@ -3,6 +3,7 @@
 	import { getLog, type CommitEntry } from '$lib/api';
 	import { branchStore } from '$lib/branchStore.svelte';
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
+	import ScopeBadge from '$lib/ScopeBadge.svelte';
 
 	/** Tail polls fast (3s) — this page IS the auto-refresh, so it runs its
 	 * own interval instead of the global 30s useAutoRefresh loop. */
@@ -82,7 +83,7 @@
 </script>
 
 <h2>
-	Tail <span class="branch-label">on {branchStore.current}</span>
+	Tail <ScopeBadge branch />
 	{#if hoverPaused}
 		<span class="live-pill paused">⏸ paused</span>
 	{:else}
@@ -142,13 +143,6 @@
 </div>
 
 <style>
-	.branch-label {
-		font-size: 0.85rem;
-		font-family: monospace;
-		color: var(--accent);
-		font-weight: normal;
-		margin-left: 0.5rem;
-	}
 
 	.live-pill {
 		display: inline-flex;
