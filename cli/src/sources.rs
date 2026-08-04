@@ -872,9 +872,10 @@ pub fn source_ref_for_path(path: &Path) -> Option<(Box<dyn SessionSource>, Sessi
     let dir = path.parent()?;
     let want = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     for src in all_sources() {
-        let hit = src.discover_in(dir).into_iter().find(|r| {
-            std::fs::canonicalize(&r.path).unwrap_or_else(|_| r.path.clone()) == want
-        });
+        let hit = src
+            .discover_in(dir)
+            .into_iter()
+            .find(|r| std::fs::canonicalize(&r.path).unwrap_or_else(|_| r.path.clone()) == want);
         if let Some(r) = hit {
             return Some((src, r));
         }
@@ -910,7 +911,8 @@ mod tests {
         // through the Claude parser.
         let dir = std::env::temp_dir().join(format!("ctx-src-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
-        let codex = dir.join("rollout-2026-06-15T17-37-13-019ecda5-753a-7e31-87d2-a78b2cb024e8.jsonl");
+        let codex =
+            dir.join("rollout-2026-06-15T17-37-13-019ecda5-753a-7e31-87d2-a78b2cb024e8.jsonl");
         let claude = dir.join("abc-123.jsonl");
         std::fs::write(&codex, "").unwrap();
         std::fs::write(&claude, "").unwrap();
