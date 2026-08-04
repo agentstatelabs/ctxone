@@ -4924,6 +4924,19 @@ const SESSION_SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// `{"sessions":N,"turns":M,"tokens":T}` which we parse and echo back along
 /// with `elapsed_ms`. Timeout → 504; missing `ctx` binary → 400 (set
 /// `--ctx-binary`); non-zero CLI exit → 500 with the stderr tail.
+/// Read an Anthropic API key from `~/.ctxone/anthropic_key`, trimmed. `None`
+/// when the file is missing or empty. Lets the session sweep run memory
+/// extraction without the key sitting in the service plist's env.
+fn read_anthropic_key_file() -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let path = std::path::Path::new(&home)
+        .join(".ctxone")
+        .join("anthropic_key");
+    let key = std::fs::read_to_string(path).ok()?;
+    let key = key.trim().to_string();
+    (!key.is_empty()).then_some(key)
+}
+
 /// Run one whole-machine, all-sources session ingest by spawning the co-located
 /// `ctx` CLI, and return `(sessions, turns, tokens, elapsed_ms)`.
 ///
@@ -4973,6 +4986,18 @@ pub async fn run_session_sync(
         .arg("main")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+
+    // Give the ingest subprocess an ANTHROPIC_API_KEY so the sweep runs memory
+    // extraction (the Haiku pass). The child inherits the hub's env, so if the
+    // hub already has the key nothing is needed. Otherwise fall back to a
+    // 600-perm key file (`~/.ctxone/anthropic_key`) so the secret need not live
+    // in the world-readable service plist. Absent both, ingest still captures
+    // turns + tokens and simply skips extraction.
+    if std::env::var_os("ANTHROPIC_API_KEY").is_none()
+        && let Some(key) = read_anthropic_key_file()
+    {
+        cmd.env("ANTHROPIC_API_KEY", key);
+    }
 
     let child = match cmd.spawn() {
         Ok(c) => c,

@@ -5183,9 +5183,16 @@ async fn ingest_one_session(
         }
     }
 
-    // Memory extraction, per turn — only when an API key is set.
+    // Memory extraction, per turn — only when an API key is set. Watermarked so
+    // each turn is extracted exactly once even though a grown session re-ingests
+    // in full (avoids duplicate memories + repeated Haiku cost across sweeps).
     if !dry_run && !tokens_only && !api_key.is_empty() {
-        for turn in turns.iter() {
+        let sid = effective_session.unwrap_or("default");
+        let already = crate::ingest::extraction_watermark(sid);
+        for (idx, turn) in turns.iter().enumerate() {
+            if idx < already {
+                continue; // extracted on a prior ingest/sweep
+            }
             if !turn.is_substantial() {
                 continue;
             }
@@ -5195,6 +5202,9 @@ async fn ingest_one_session(
             }
             out.memories += memories.len();
         }
+        // Watermark past every turn we examined (substantial or not), so
+        // non-substantial turns are not re-checked next sweep either.
+        crate::ingest::set_extraction_watermark(sid, turns.len());
     }
 
     // Derive plan links from the just-stored turns. A whole-session post-pass,

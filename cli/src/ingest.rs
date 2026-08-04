@@ -23,6 +23,65 @@ fn truncate_on_char_boundary(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
+// ── Extraction watermark ──────────────────────────────────────────────────────
+//
+// Memory extraction (the Haiku pass) must run EXACTLY ONCE per turn, but the
+// incremental sync skip is per-SESSION: an active session that grew by one turn
+// re-ingests in full, which would otherwise re-extract every prior turn on every
+// sweep — duplicate memories and repeated Haiku cost. We track, per session, how
+// many leading turns have already been extracted and skip those on re-ingest.
+//
+// Stored per-machine (the scraper is inherently local — transcripts live on the
+// machine that produced them), in a single JSON file. Advances only, never
+// rewinds; best-effort so a lost/corrupt file just re-extracts once.
+
+/// Path to the per-machine extraction watermark file (`~/.ctxone/…`).
+fn extraction_watermark_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".ctxone")
+        .join("extraction-watermarks.json")
+}
+
+fn load_watermarks_at(p: &Path) -> BTreeMap<String, usize> {
+    std::fs::read(p)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn set_watermark_at(p: &Path, session_id: &str, count: usize) {
+    if let Some(dir) = p.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let mut map = load_watermarks_at(p);
+    let entry = map.entry(session_id.to_string()).or_insert(0);
+    if count <= *entry {
+        return; // monotonic: nothing new, avoid a needless rewrite
+    }
+    *entry = count;
+    if let Ok(bytes) = serde_json::to_vec(&map) {
+        let tmp = p.with_extension("json.tmp");
+        if std::fs::write(&tmp, &bytes).is_ok() {
+            let _ = std::fs::rename(&tmp, p);
+        }
+    }
+}
+
+/// Number of leading turns of `session_id` already extracted on this machine.
+pub fn extraction_watermark(session_id: &str) -> usize {
+    load_watermarks_at(&extraction_watermark_path())
+        .get(session_id)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Record that `count` leading turns of `session_id` have been extracted.
+/// Monotonic (never moves backward), atomic (temp + rename), best-effort.
+pub fn set_extraction_watermark(session_id: &str, count: usize) {
+    set_watermark_at(&extraction_watermark_path(), session_id, count);
+}
+
 // ── JSONL structures ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Default, Serialize)]
@@ -1152,6 +1211,33 @@ pub fn last_turns(path: &Path, n: usize) -> Vec<Turn> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extraction_watermark_is_monotonic_and_per_session() {
+        let dir = std::env::temp_dir().join(format!("ctx-wm-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join("watermarks.json");
+
+        assert_eq!(load_watermarks_at(&p).get("s1").copied().unwrap_or(0), 0);
+
+        set_watermark_at(&p, "s1", 3);
+        assert_eq!(load_watermarks_at(&p)["s1"], 3);
+
+        // Monotonic: a lower count does not rewind.
+        set_watermark_at(&p, "s1", 2);
+        assert_eq!(load_watermarks_at(&p)["s1"], 3);
+
+        // Advances forward.
+        set_watermark_at(&p, "s1", 5);
+        assert_eq!(load_watermarks_at(&p)["s1"], 5);
+
+        // Independent per session.
+        set_watermark_at(&p, "codex:abc", 1);
+        assert_eq!(load_watermarks_at(&p)["codex:abc"], 1);
+        assert_eq!(load_watermarks_at(&p)["s1"], 5);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn turn_on(branches: &[&str], ts: &str) -> Turn {
         Turn {
