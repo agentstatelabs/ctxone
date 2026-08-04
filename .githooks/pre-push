@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+#
+# pre-push hook: run the same formatting gate CI runs, before anything reaches
+# origin. The CI `fmt` job runs `cargo fmt --all -- --check` and fails the whole
+# pipeline on any diff — this catches it locally instead, where it's a 1-second
+# fix rather than a round-trip through a failed build.
+#
+# Enable once per clone:  git config core.hooksPath .githooks
+# (scripts/setup-hooks.sh does this for you.)
+#
+# Bypass in a genuine emergency:  git push --no-verify
+set -uo pipefail
+
+# Only gate when Rust sources are part of what's being pushed is overkill here —
+# fmt is fast and the check is cheap, so always run it.
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "pre-push: cargo not found — skipping fmt check" >&2
+  exit 0
+fi
+
+echo "pre-push: cargo fmt --all -- --check"
+if ! cargo fmt --all -- --check; then
+  cat >&2 <<'MSG'
+
+✗ pre-push blocked: code is not rustfmt-clean (CI's `fmt` job would fail).
+
+  Fix:      cargo fmt --all
+  Then:     git add -u && git commit --amend --no-edit   # or a new commit
+  Re-push.
+
+  Emergency bypass (discouraged): git push --no-verify
+MSG
+  exit 1
+fi
+exit 0
