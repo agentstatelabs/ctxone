@@ -35,6 +35,11 @@ use serde::{Deserialize, Serialize};
 /// Default path prefix where plans live in the state graph.
 pub const PLANS_PREFIX: &str = "/plans";
 
+/// Shown to agents after a plan is closed, reflecting the intended workflow:
+/// a summary is required, and pushing + opening an MR is expected (not enforced).
+pub const CLOSE_REMINDER: &str = "Plan closed. Push your task commits and open an MR for the plan's branch \
+so the work can be reviewed and merged.";
+
 /// Environment variable that controls the "lock plans nearing
 /// completion" guard. When set to a float in `[0.0, 1.0]`, any plan
 /// whose `(done + abandoned) / total` ratio is **>= the threshold**
@@ -233,48 +238,22 @@ pub fn detect_plan_regressions(
     out
 }
 
-/// After a merge, promote any plan whose tasks are now all terminal from
-/// `active` to `completed`. The substrate only performs this rollup during a
-/// task transition (`complete`/`abandon`); a merge that brings in the final
-/// terminal task from another branch leaves `_meta.status` lagging at `active`.
-/// This restores the invariant "a plan is completed iff every task is
-/// terminal". `archived` plans are left untouched (an explicit user state).
+/// No-op retained for call-site stability.
 ///
-/// Returns the names of the plans it promoted.
+/// Closing a plan is now an explicit, summary-gated action (`close_plan`);
+/// the engine no longer auto-promotes on the last terminal transition, and a
+/// merge must not silently complete a plan without its required summary. So
+/// this no longer flips `active` plans to `completed` after a merge — a plan
+/// closed on the source branch carries its `Completed` status and summary
+/// across via its `_meta`, and an un-closed plan stays `active` until someone
+/// runs `close_plan`. Always returns an empty list.
 pub fn promote_completed_plans(
-    store: &TaskStore,
-    repo: &Repository,
-    target: &str,
-    agent: &str,
+    _store: &TaskStore,
+    _repo: &Repository,
+    _target: &str,
+    _agent: &str,
 ) -> Vec<String> {
-    let mut promoted = Vec::new();
-    let plans = match store.list_plans(target) {
-        Ok(p) => p,
-        Err(_) => return promoted,
-    };
-    for plan in plans {
-        if plan.status != PlanStatus::Active {
-            continue;
-        }
-        let tasks = store.list_tasks(target, &plan.name).unwrap_or_default();
-        if tasks.is_empty() || !tasks.iter().all(|t| t.status.is_terminal()) {
-            continue;
-        }
-        // Flip the status leaf under the plan's _meta object.
-        let path = format!("{}/{}/{}/status", PLANS_PREFIX, plan.name, paths::META_KEY);
-        let opts = CommitOptions::new(
-            agent,
-            IntentCategory::Merge,
-            format!("promote plan '{}' to completed after merge", plan.name),
-        );
-        if repo
-            .set_json(target, &path, &serde_json::json!("completed"), opts)
-            .is_ok()
-        {
-            promoted.push(plan.name);
-        }
-    }
-    promoted
+    Vec::new()
 }
 
 pub fn task_status_label(s: TaskStatus) -> &'static str {
@@ -736,6 +715,9 @@ pub fn plan_to_json(plan: &Plan, tasks: &[Task], with_tasks: bool) -> serde_json
         "created_at": plan.created_at.to_rfc3339(),
         "created_by": plan.created_by,
         "archived_at": plan.archived_at.map(|t| t.to_rfc3339()),
+        "summary": plan.summary,
+        "closed_at": plan.closed_at.map(|t| t.to_rfc3339()),
+        "closed_by": plan.closed_by,
         "task_counts": task_counts,
     });
 
@@ -936,10 +918,23 @@ pub struct PlanForceCompleteParams {
     pub plan_id: String,
     #[serde(default = "default_ref", rename = "ref")]
     pub ref_name: String,
+    /// Required closing summary — what the plan achieved. A plan cannot be
+    /// completed without one (the plan-level analog of a task's proof).
+    pub summary: String,
     /// Reason recorded on every open task that gets abandoned. If
     /// omitted, defaults to "Plan force-completed by user".
     #[serde(default)]
     pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PlanCloseParams {
+    pub plan_id: String,
+    #[serde(default = "default_ref", rename = "ref")]
+    pub ref_name: String,
+    /// Required closing summary — what the plan achieved. A plan cannot be
+    /// closed without one (the plan-level analog of a task's proof).
+    pub summary: String,
 }
 
 #[derive(Serialize, Debug)]
@@ -1053,8 +1048,15 @@ pub fn force_complete_plan(
     store: &TaskStore,
     ref_name: &str,
     plan: &str,
+    summary: &str,
     reason: Option<String>,
 ) -> Result<ForceCompleteResult, PlanToolError> {
+    if summary.trim().is_empty() {
+        return Err(PlanToolError::InvalidInput(
+            "a summary is required to complete a plan".to_string(),
+        ));
+    }
+
     let plan_meta = store.get_plan(ref_name, plan)?;
     match plan_meta.status {
         PlanStatus::Completed => {
@@ -1092,11 +1094,28 @@ pub fn force_complete_plan(
         }
     }
 
-    let final_plan = store.get_plan(ref_name, plan)?;
+    // The engine no longer auto-promotes on the last terminal transition —
+    // close the plan explicitly, recording the required summary.
+    let final_plan = store.close_plan(ref_name, plan, summary)?;
     Ok(ForceCompleteResult {
         plan: final_plan,
         abandoned_task_ids: abandoned,
     })
+}
+
+/// Close an already-finished plan, recording the required `summary`.
+///
+/// This is the primary, gated close path (`ctx plan close`): it refuses
+/// unless every task is already terminal and a non-empty summary is given.
+/// Unlike [`force_complete_plan`], it does not abandon open tasks — the
+/// caller is expected to have finished or abandoned them first.
+pub fn close_plan(
+    store: &TaskStore,
+    ref_name: &str,
+    plan: &str,
+    summary: &str,
+) -> Result<Plan, PlanToolError> {
+    Ok(store.close_plan(ref_name, plan, summary)?)
 }
 
 /// Move a plan and every task it contains from `source_ref` to
@@ -1320,7 +1339,8 @@ mod tests {
             )
             .expect("complete task");
 
-        let result = force_complete_plan(&store, "main", "p1", None).expect("force complete");
+        let result = force_complete_plan(&store, "main", "p1", "test summary", None)
+            .expect("force complete");
         assert_eq!(result.plan.status, PlanStatus::Completed);
         // Two tasks abandoned; t1 was already done so untouched.
         assert_eq!(result.abandoned_task_ids.len(), 2);
@@ -1367,8 +1387,8 @@ mod tests {
             .unwrap();
 
         // Plan is now Completed — second force-complete is a no-op.
-        let result =
-            force_complete_plan(&store, "main", "p1", None).expect("idempotent force complete");
+        let result = force_complete_plan(&store, "main", "p1", "test summary", None)
+            .expect("idempotent force complete");
         assert_eq!(result.plan.status, PlanStatus::Completed);
         assert!(result.abandoned_task_ids.is_empty());
     }
@@ -1378,7 +1398,7 @@ mod tests {
         let (_repo, store) = fresh_store();
         create_plan(&store, "main", "p1", None).unwrap();
         store.archive_plan("main", "p1").unwrap();
-        let err = force_complete_plan(&store, "main", "p1", None)
+        let err = force_complete_plan(&store, "main", "p1", "test summary", None)
             .expect_err("archived plan should reject");
         assert!(matches!(err, PlanToolError::InvalidInput(_)));
     }
@@ -1387,8 +1407,8 @@ mod tests {
     fn force_complete_rejects_empty_plan() {
         let (_repo, store) = fresh_store();
         create_plan(&store, "main", "p1", None).unwrap();
-        let err =
-            force_complete_plan(&store, "main", "p1", None).expect_err("empty plan should reject");
+        let err = force_complete_plan(&store, "main", "p1", "test summary", None)
+            .expect_err("empty plan should reject");
         assert!(matches!(err, PlanToolError::InvalidInput(_)));
     }
 
@@ -1408,8 +1428,14 @@ mod tests {
             vec![],
         )
         .unwrap();
-        let _ = force_complete_plan(&store, "main", "p1", Some("scope cut for v2".into()))
-            .expect("force complete");
+        let _ = force_complete_plan(
+            &store,
+            "main",
+            "p1",
+            "test summary",
+            Some("scope cut for v2".into()),
+        )
+        .expect("force complete");
         let t1_after = store.get_task("main", "p1", &t1.id).expect("get t1");
         assert_eq!(
             t1_after.abandoned_reason.as_deref(),
@@ -1913,12 +1939,18 @@ mod tests {
             PlanStatus::Active
         );
 
+        // Merge no longer auto-promotes: closing is explicit + summary-gated.
         let promoted = promote_completed_plans(&store, &repo, "main", "test-agent");
-        assert_eq!(promoted, vec!["p".to_string()]);
+        assert!(promoted.is_empty(), "merge must not auto-close plans");
         assert_eq!(
             store.get_plan("main", "p").unwrap().status,
-            PlanStatus::Completed
+            PlanStatus::Active
         );
+
+        // An explicit close (all tasks now terminal) completes it.
+        let closed = close_plan(&store, "main", "p", "both branches merged").unwrap();
+        assert_eq!(closed.status, PlanStatus::Completed);
+        assert_eq!(closed.summary.as_deref(), Some("both branches merged"));
 
         // Proofs from both branches survive the merge.
         for t in store.list_tasks("main", "p").unwrap() {

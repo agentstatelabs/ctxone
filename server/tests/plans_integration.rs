@@ -692,7 +692,7 @@ async fn delete_plan_removes_it() {
 }
 
 #[tokio::test]
-async fn completing_last_task_promotes_plan_to_completed() {
+async fn completing_last_task_leaves_plan_active_until_explicit_close() {
     let router = test_router();
     let _ = call_json(
         router.clone(),
@@ -724,6 +724,23 @@ async fn completing_last_task_promotes_plan_to_completed() {
         ),
     )
     .await;
+
+    // Completing the last task no longer auto-completes the plan.
+    let (_, body) = call_json(router.clone(), get("/api/plans/p1")).await;
+    assert_eq!(body["status"], "active");
+
+    // An explicit, summary-gated close completes it.
+    let (_, closed) = call_json(
+        router.clone(),
+        post_json_with_agent(
+            "/api/plans/p1/close",
+            "test",
+            json!({"summary": "shipped the one task"}),
+        ),
+    )
+    .await;
+    assert_eq!(closed["plan"]["status"], "completed");
+    assert_eq!(closed["plan"]["summary"], "shipped the one task");
 
     let (_, body) = call_json(router, get("/api/plans/p1")).await;
     assert_eq!(body["status"], "completed");

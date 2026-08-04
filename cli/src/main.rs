@@ -1504,12 +1504,25 @@ enum PlanAction {
     /// this over `complete` when you want to shelve a plan without
     /// marking its open tasks abandoned.
     Archive { plan_id: String },
+    /// Close a finished plan, recording a REQUIRED summary of what it
+    /// achieved (the plan-level analog of a task's proof). Refuses unless
+    /// every task is already done or abandoned. Then push your commits and
+    /// open an MR for the plan's branch.
+    Close {
+        plan_id: String,
+        /// Required: a short summary of what the plan achieved.
+        #[arg(long, short)]
+        summary: String,
+    },
     /// Force-complete a plan: abandon every still-open task with a fixed
-    /// reason and let the engine promote the plan to `completed`.
+    /// reason, then close the plan. Requires a summary like `close`.
     /// Idempotent on already-completed plans; rejected on archived or
-    /// empty plans.
+    /// empty plans. Prefer `close` when the work is genuinely finished.
     Complete {
         plan_id: String,
+        /// Required: a short summary of what the plan achieved.
+        #[arg(long, short)]
+        summary: String,
         /// Reason recorded on every abandoned task. Defaults to
         /// "Plan force-completed by user".
         #[arg(long, short)]
@@ -7737,14 +7750,48 @@ async fn handle_plan(
                 println!("Archived plan {}", v["name"].as_str().unwrap_or(""));
             });
         }
-        PlanAction::Complete { plan_id, reason } => {
+        PlanAction::Close { plan_id, summary } => {
+            let url = format!(
+                "{}/api/plans/{}/close?ref={}",
+                server,
+                urlencoding(&plan_id),
+                urlencoding(&branch)
+            );
+            let body = serde_json::json!({ "summary": summary });
+            let resp = match client
+                .post(&url)
+                .header("X-CTXone-Agent", &agent_id)
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "plan close failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(format, &parsed, |v| {
+                let plan_name = v["plan"]["name"].as_str().unwrap_or("");
+                println!("Closed plan {}", plan_name);
+                if let Some(r) = v["reminder"].as_str() {
+                    println!("  {}", r);
+                }
+            });
+        }
+        PlanAction::Complete {
+            plan_id,
+            summary,
+            reason,
+        } => {
             let url = format!(
                 "{}/api/plans/{}/force_complete?ref={}",
                 server,
                 urlencoding(&plan_id),
                 urlencoding(&branch)
             );
-            let body = serde_json::json!({ "reason": reason });
+            let body = serde_json::json!({ "summary": summary, "reason": reason });
             let resp = match client
                 .post(&url)
                 .header("X-CTXone-Agent", &agent_id)
@@ -7777,6 +7824,9 @@ async fn handle_plan(
                             println!("  - {}", s);
                         }
                     }
+                }
+                if let Some(r) = v["reminder"].as_str() {
+                    println!("  {}", r);
                 }
             });
         }

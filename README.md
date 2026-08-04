@@ -1,6 +1,21 @@
 # CTXone
 
-Persistent, searchable, accountable memory for AI agents. Eliminate context anxiety.
+> **The Agent System of Record.**
+
+CTXone records every agent and user interaction — decisions, plans, code changes, and full work sessions — and turns per-agent and per-developer silos into **shared institutional memory** any agent or teammate can recall cold. It's built on [AgentStateGraph](https://github.com/agentstatelabs/agentstategraph), so everything it records is content-addressed, branchable, and blameable: not just *what* was decided, but *who*, *when*, and *why*.
+
+Agents are brilliant and amnesiac. Each session starts from zero, re-derives what was already settled, and evaporates when the window closes — the reasoning, the decisions, and the cost all lost. CTXone is the durable record that fixes that: work happens, CTXone captures it, and the next agent (or the next teammate, or you in three weeks) inherits it instead of rediscovering it.
+
+## What CTXone gives you
+
+- **Durable memory** — `remember` / `recall` decisions, conventions, and gotchas across sessions; token-budgeted recall injects the right prior context instead of re-reading docs (typically thousands-fold cheaper than re-deriving it).
+- **Decision provenance** — `why_did_we` and blame trace any decision to who made it, when, and the reasoning — before you reverse a settled call.
+- **Plans & tasks that survive sessions** — shared plans with a task state machine, **required proof to close a task and a required summary to close a plan**, agent assignment, and cross-plan links.
+- **Full session capture** — a Stop-hook scraper ingests whole transcripts from **Claude Code, Codex, Gemini, and Cursor** into one timeline: every turn, tool call, model, token count, and cost — turning throwaway sessions into a searchable record.
+- **Token & cost accounting** — per-session and per-workspace spend, savings, and cache metrics, surfaced live.
+- **CTXone Lens** — a web UI over all of it: dashboard, plans, sessions, memory browse, history, branches, taint, and diff.
+- **Team-shared, branchable, multi-repo** — one workspace per repo in a central Hub; isolated agent worktrees, one shared mind. Branches, merges, and taint/quarantine carry through.
+- **Connect anything** — a broad MCP tool surface plus an HTTP API, a `ctx` CLI, and a Python client (`pip install ctxone`).
 
 **Part of a suite:** CTXone is the shared **team layer** for
 **[AgentStateDeveloper](https://github.com/agentstatelabs/AgentStateDeveloper)**
@@ -11,7 +26,7 @@ Persistent, searchable, accountable memory for AI agents. Eliminate context anxi
 
 | Component | Directory | Description |
 |-----------|-----------|-------------|
-| **CTXone Hub** | `server/` | MCP server (56 tools) + HTTP API + Lens web UI — one daemon, the memory interface for AI tools |
+| **CTXone Hub** | `server/` | MCP server + HTTP API + Lens web UI — one daemon, the memory interface for AI tools |
 | **CTXone Engine** | `engine/` | Core memory + graph layer (AgentStateGraph) |
 | **CTXone Lens** | `web/` | Web UI: dashboard, plans, sessions, browse, history, branches, taint, diff. ⌘K palette, 15s auto-refresh, multi-theme |
 | **ctx** | `cli/` | CLI for memory, plans, branches, taint, and team operations |

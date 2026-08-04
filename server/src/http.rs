@@ -612,6 +612,7 @@ fn router_with_config_inner(
             "/api/plans/{name}/force_complete",
             post(force_complete_plan),
         )
+        .route("/api/plans/{name}/close", post(close_plan_handler))
         .route("/api/plans/{name}/move", post(move_plan_handler))
         .route("/api/plans/{name}/relocate", post(relocate_plan))
         // Reminder endpoints
@@ -3274,10 +3275,43 @@ async fn move_plan_handler(
 
 #[derive(Deserialize, Default)]
 struct ForceCompleteBody {
+    /// Required closing summary — what the plan achieved.
+    #[serde(default)]
+    summary: String,
     /// Reason recorded on every still-open task. Optional — falls
     /// back to the standard "Plan force-completed by user" string.
     #[serde(default)]
     reason: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct ClosePlanBody {
+    /// Required closing summary — what the plan achieved.
+    #[serde(default)]
+    summary: String,
+}
+
+/// `POST /api/plans/{name}/close` — the gated close: requires every task
+/// terminal and a non-empty summary. Does not abandon open tasks.
+async fn close_plan_handler(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+    agent_id: AgentId,
+    Path(name): Path<String>,
+    Query(q): Query<RefQuery>,
+    body: Option<Json<ClosePlanBody>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
+    let store = plan_tools::make_store(repo.clone(), &agent_id.0);
+    let summary = body.map(|Json(b)| b.summary).unwrap_or_default();
+    let plan = plan_tools::close_plan(&store, &q.ref_name, &name, &summary)
+        .map_err(plan_error_to_response)?;
+    let tasks = store.list_tasks(&q.ref_name, &name).unwrap_or_default();
+    s.sessions.mark_all_dirty();
+    Ok(Json(serde_json::json!({
+        "plan": plan_tools::plan_to_json(&plan, &tasks, true),
+        "reminder": plan_tools::CLOSE_REMINDER,
+    })))
 }
 
 #[instrument(skip_all, fields(name = %name, ref_name = %q.ref_name, agent = %agent_id.0))]
@@ -3291,14 +3325,17 @@ async fn force_complete_plan(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
     let store = plan_tools::make_store(repo.clone(), &agent_id.0);
-    let reason = body.and_then(|Json(b)| b.reason);
-    let result = plan_tools::force_complete_plan(&store, &q.ref_name, &name, reason)
+    let (summary, reason) = body
+        .map(|Json(b)| (b.summary, b.reason))
+        .unwrap_or_default();
+    let result = plan_tools::force_complete_plan(&store, &q.ref_name, &name, &summary, reason)
         .map_err(plan_error_to_response)?;
     let tasks = store.list_tasks(&q.ref_name, &name).unwrap_or_default();
     s.sessions.mark_all_dirty();
     Ok(Json(serde_json::json!({
         "plan": plan_tools::plan_to_json(&result.plan, &tasks, true),
         "abandoned_task_ids": result.abandoned_task_ids,
+        "reminder": plan_tools::CLOSE_REMINDER,
     })))
 }
 

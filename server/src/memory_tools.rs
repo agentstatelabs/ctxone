@@ -2846,7 +2846,7 @@ impl CtxOneServer {
         use crate::plan_tools as pt;
         let p = params.0;
         let store = pt::make_store(self.repo.clone(), &self.agent_id);
-        match pt::force_complete_plan(&store, &p.ref_name, &p.plan_id, p.reason) {
+        match pt::force_complete_plan(&store, &p.ref_name, &p.plan_id, &p.summary, p.reason) {
             Ok(result) => {
                 self.session.mark_dirty();
                 let tasks = store
@@ -2855,6 +2855,35 @@ impl CtxOneServer {
                 serde_json::to_string(&serde_json::json!({
                     "plan": pt::plan_to_json(&result.plan, &tasks, true),
                     "abandoned_task_ids": result.abandoned_task_ids,
+                    "reminder": pt::CLOSE_REMINDER,
+                }))
+                .unwrap_or_else(|_| "{}".into())
+            }
+            Err(e) => pt::err_json(e),
+        }
+    }
+
+    #[tool(
+        description = "Close a finished plan, recording a REQUIRED summary of what it \
+        achieved — the plan-level analog of a task's proof. Refuses unless every task is \
+        already done or abandoned, and unless a non-empty `summary` is given. Prefer this \
+        over `plan_complete` when the work is genuinely finished; use `plan_complete` only \
+        to force-close a plan with open tasks (it abandons them). After closing, push your \
+        commits and open an MR for the plan's branch."
+    )]
+    async fn plan_close(&self, params: Parameters<crate::plan_tools::PlanCloseParams>) -> String {
+        use crate::plan_tools as pt;
+        let p = params.0;
+        let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        match pt::close_plan(&store, &p.ref_name, &p.plan_id, &p.summary) {
+            Ok(plan) => {
+                self.session.mark_dirty();
+                let tasks = store
+                    .list_tasks(&p.ref_name, &p.plan_id)
+                    .unwrap_or_default();
+                serde_json::to_string(&serde_json::json!({
+                    "plan": pt::plan_to_json(&plan, &tasks, true),
+                    "reminder": pt::CLOSE_REMINDER,
                 }))
                 .unwrap_or_else(|_| "{}".into())
             }
