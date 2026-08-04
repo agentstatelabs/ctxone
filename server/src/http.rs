@@ -4924,24 +4924,22 @@ const SESSION_SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// `{"sessions":N,"turns":M,"tokens":T}` which we parse and echo back along
 /// with `elapsed_ms`. Timeout → 504; missing `ctx` binary → 400 (set
 /// `--ctx-binary`); non-zero CLI exit → 500 with the stderr tail.
-async fn sync_sessions(
-    State(s): State<HubState>,
-    // Deliberately not used to target the import: sync is machine-wide and
-    // each transcript routes to its own workspace. Kept so the extractor still
-    // validates the header and the handler signature documents the choice.
-    _ns: NamespaceId,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let ctx_bin = s.ctx_binary.clone().unwrap_or_else(|| "ctx".to_string());
-    // Fall back to the conventional default port if the binary wasn't built
-    // with a self URL (library/test callers). The Hub binary always sets this.
-    let base_url = s
-        .self_base_url
-        .clone()
-        .unwrap_or_else(|| "http://127.0.0.1:3001".to_string());
-
+/// Run one whole-machine, all-sources session ingest by spawning the co-located
+/// `ctx` CLI, and return `(sessions, turns, tokens, elapsed_ms)`.
+///
+/// Shared by the on-demand `POST /api/sessions/sync` endpoint and the hub's
+/// background session-sweep interval (see `main.rs`), so both drive capture the
+/// exact same way — the hub *pulls* transcripts on a schedule instead of each
+/// agent tool *pushing* them via a per-tool Stop hook (no per-tool config, no
+/// hook-trust gates, resilient to harness changes). Ingest is incremental
+/// (fingerprint-skip), so repeated sweeps only touch new/changed sessions.
+pub async fn run_session_sync(
+    ctx_bin: &str,
+    base_url: &str,
+) -> Result<(u64, u64, u64, u64), (StatusCode, String)> {
     let start = std::time::Instant::now();
 
-    let mut cmd = tokio::process::Command::new(&ctx_bin);
+    let mut cmd = tokio::process::Command::new(ctx_bin);
     cmd.arg("ingest-session")
         .arg("--all")
         .arg("--full-turn")
@@ -4952,7 +4950,7 @@ async fn sync_sessions(
         .arg("--source")
         .arg("all")
         .arg("--server")
-        .arg(&base_url)
+        .arg(base_url)
         // NOT this request's namespace. `--all` walks every project on the
         // machine, so pinning one namespace for the whole run is what
         // collapsed transcripts from N repos into a single workspace. The CLI
@@ -5052,6 +5050,25 @@ async fn sync_sessions(
     };
 
     let elapsed_ms = start.elapsed().as_millis() as u64;
+    Ok((sessions, turns, tokens, elapsed_ms))
+}
+
+async fn sync_sessions(
+    State(s): State<HubState>,
+    // Deliberately not used to target the import: sync is machine-wide and
+    // each transcript routes to its own workspace. Kept so the extractor still
+    // validates the header and the handler signature documents the choice.
+    _ns: NamespaceId,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let ctx_bin = s.ctx_binary.clone().unwrap_or_else(|| "ctx".to_string());
+    // Fall back to the conventional default port if the binary wasn't built
+    // with a self URL (library/test callers). The Hub binary always sets this.
+    let base_url = s
+        .self_base_url
+        .clone()
+        .unwrap_or_else(|| "http://127.0.0.1:3001".to_string());
+
+    let (sessions, turns, tokens, elapsed_ms) = run_session_sync(&ctx_bin, &base_url).await?;
     info!(
         sessions,
         turns,

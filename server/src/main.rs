@@ -697,6 +697,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             self_base_url: Some(self_base_url),
         };
 
+        // Values for the background session-sweep task (below). Cloned before
+        // `hub_config` is moved into the router.
+        let sync_ctx_bin = hub_config.ctx_binary.clone();
+        let sync_base_url = hub_config.self_base_url.clone();
+
         // Capture db_path for background flush tasks.
         let flush_db_path = if storage_type == "sqlite" {
             Some(db_path.clone())
@@ -789,6 +794,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // request path: a background task recomputes it every ~20s so no
                 // recall/write ever serializes the whole graph (the -32001 cause).
                 memory_tools::spawn_flat_size_refresher(repo.clone(), 20);
+
+                // Background session-sweep: the hub PULLS agent transcripts from
+                // every source on a schedule (default 300s, env
+                // CTXONE_SESSION_SYNC_INTERVAL_SECS, 0 disables) instead of each
+                // tool PUSHING them via a per-tool Stop hook. No per-tool config,
+                // no hook-trust gates, resilient to harness changes; ingest is
+                // incremental so quiet sweeps are cheap. Only runs when a self URL
+                // is known (the real hub binary; library/test callers skip it).
+                let sync_interval: u64 = std::env::var("CTXONE_SESSION_SYNC_INTERVAL_SECS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(300);
+                if let Some(base_url) = sync_base_url.clone()
+                    && sync_interval > 0
+                {
+                    let ctx_bin = sync_ctx_bin.clone().unwrap_or_else(|| "ctx".to_string());
+                    tokio::spawn(async move {
+                        let mut interval =
+                            tokio::time::interval(std::time::Duration::from_secs(sync_interval));
+                        interval.tick().await; // skip the immediate first tick
+                        loop {
+                            interval.tick().await;
+                            // Awaiting to completion before the next tick means
+                            // sweeps never overlap even if one runs long.
+                            match http::run_session_sync(&ctx_bin, &base_url).await {
+                                Ok((sessions, turns, tokens, elapsed_ms)) => info!(
+                                    sessions,
+                                    turns, tokens, elapsed_ms, "background session sweep complete"
+                                ),
+                                Err((_code, msg)) => {
+                                    warn!(error = %msg, "background session sweep failed")
+                                }
+                            }
+                        }
+                    });
+                    info!(
+                        interval_secs = sync_interval,
+                        "background session sweep scheduled"
+                    );
+                }
 
                 let listener = tokio::net::TcpListener::bind(&addr).await?;
                 // `into_make_service_with_connect_info::<SocketAddr>()` attaches
