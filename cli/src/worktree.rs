@@ -235,6 +235,17 @@ fn start(root: &Path, plan: &str, from: &str, shared_target: bool) -> Res {
     let wt = l.wt_dir.to_string_lossy().into_owned();
     git_checked(&["worktree", "add", &wt, "-b", &l.branch, from], root)?;
 
+    // Auto-enable the repo's tracked git hooks (e.g. the pre-push rustfmt gate)
+    // so agent worktrees inherit the same pre-push checks CI runs, without
+    // anyone remembering to run scripts/setup-hooks.sh. core.hooksPath lives in
+    // the shared config, so setting it once covers every worktree; a relative
+    // `.githooks` resolves against each worktree's own tree. No-op for repos
+    // that ship no `.githooks/`.
+    if l.wt_dir.join(".githooks").is_dir() {
+        let _ = git(&["config", "core.hooksPath", ".githooks"], root);
+        println!("  Hooks: pre-push fmt gate enabled (.githooks)");
+    }
+
     if shared_target {
         let cargo_dir = l.wt_dir.join(".cargo");
         std::fs::create_dir_all(&cargo_dir)?;
