@@ -3596,6 +3596,7 @@ fn handle_service(action: ServiceAction) -> Result<(), Box<dyn std::error::Error
         } => {
             let spec = service::ServiceSpec {
                 hub_bin: find_hub_binary(),
+                ctx_bin: current_ctx_bin(),
                 db_path: path.unwrap_or_else(canonical_db_path),
                 port,
                 lens: !no_lens,

@@ -22,6 +22,11 @@ pub const WINDOWS_TASK: &str = "CtxOneHub";
 /// Everything needed to render a service unit.
 pub struct ServiceSpec {
     pub hub_bin: String,
+    /// Absolute path to the `ctx` CLI the hub shells out to for the background
+    /// session sweep + on-demand `/api/sessions/sync`. Baked in because the
+    /// service runs under a minimal launchd/systemd PATH that usually lacks the
+    /// install dir (e.g. /opt/homebrew/bin), so a bare `ctx` would not resolve.
+    pub ctx_bin: String,
     pub db_path: String,
     pub port: u16,
     pub lens: bool,
@@ -40,6 +45,10 @@ impl ServiceSpec {
         args.push(self.db_path.clone());
         args.push("--port".to_string());
         args.push(self.port.to_string());
+        // Bake the ctx path so the hub's session sweep resolves it under the
+        // service's minimal PATH.
+        args.push("--ctx-binary".to_string());
+        args.push(self.ctx_bin.clone());
         args
     }
 
@@ -794,6 +803,7 @@ mod tests {
     fn spec(auth: Option<&str>, lens: bool) -> ServiceSpec {
         ServiceSpec {
             hub_bin: "/opt/homebrew/bin/ctxone-hub".into(),
+            ctx_bin: "/opt/homebrew/bin/ctx".into(),
             db_path: "/Users/user/.ctxone/memory.db".into(),
             port: 3001,
             lens,
@@ -813,7 +823,9 @@ mod tests {
                 "--path",
                 "/Users/user/.ctxone/memory.db",
                 "--port",
-                "3001"
+                "3001",
+                "--ctx-binary",
+                "/opt/homebrew/bin/ctx"
             ]
         );
     }
