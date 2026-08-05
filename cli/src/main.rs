@@ -5747,6 +5747,39 @@ async fn run_session_action(
 /// Deliberately transcript-driven rather than trusting the stored session
 /// list: a session's origin is a property of where it ran, which lives in the
 /// transcript, not in whatever namespace it currently happens to sit in.
+/// Read a session's working directory from its stored graph turns, in the
+/// `default` namespace. The cwd lives per-turn at
+/// `/sessions/<sid>/turns/<tNNNN>/cwd`; the earliest turns are checked so a
+/// session that changed directory mid-run still routes to where it started.
+/// Agent-agnostic — it reads what was ingested, not what is on disk — so it
+/// resolves sessions the on-disk sources can't (the t-009 claude gap).
+async fn fetch_session_cwd_from_graph(
+    client: &reqwest::Client,
+    server: &str,
+    sid: &str,
+) -> Option<String> {
+    for turn in ["t0000", "t0001", "t0002"] {
+        let path = format!("/sessions/{sid}/turns/{turn}/cwd");
+        let url = format!(
+            "{server}/api/state/main?path={}&namespace=default",
+            urlencoding(&path)
+        );
+        let Ok(resp) = client.get(url).send().await else {
+            continue;
+        };
+        if !resp.status().is_success() {
+            continue;
+        }
+        if let Ok(v) = resp.json::<serde_json::Value>().await
+            && let Some(s) = v.as_str()
+            && !s.trim().is_empty()
+        {
+            return Some(s.to_string());
+        }
+    }
+    None
+}
+
 async fn run_reattribute(
     server: &str,
     clients: &ClientFactory,
@@ -5772,15 +5805,53 @@ async fn run_reattribute(
         }
     }
 
-    // Every session currently in `default`.
     let default_client = clients.build(Some("default"));
-    let sessions: Vec<serde_json::Value> = default_client
+
+    // Enumerate the sessions to consider from TWO sources and union them:
+    //
+    //  1. The process-global session registry (`/api/stats/sessions`). This is
+    //     an LRU and does not list every session whose nodes live in `default`.
+    //  2. The `default` GRAPH itself (`/sessions/<id>` subtrees). This reaches
+    //     the large historical transcripts the registry has long since dropped
+    //     — the bulk of what keeps `default` heavy.
+    //
+    // `max_depth=2` lists `/sessions/<id>/<field>` (well under the list cap, so
+    // no session is truncated away); the id is path segment 2.
+    let registry: Vec<serde_json::Value> = default_client
         .get(format!("{server}/api/stats/sessions"))
         .send()
         .await?
         .json()
         .await?;
-    println!("{} sessions in `default`.", sessions.len());
+    let mut sids: std::collections::BTreeSet<String> = registry
+        .iter()
+        .filter_map(|s| s["session_id"].as_str().map(str::to_string))
+        .collect();
+    let registry_count = sids.len();
+    if let Ok(resp) = default_client
+        .get(format!(
+            "{server}/api/state/main/paths?prefix=/sessions&max_depth=2&namespace=default"
+        ))
+        .send()
+        .await
+        && let Ok(paths) = resp.json::<Vec<String>>().await
+    {
+        for p in &paths {
+            if let Some(id) = p
+                .strip_prefix("/sessions/")
+                .and_then(|rest| rest.split('/').next())
+                .filter(|id| !id.is_empty())
+            {
+                sids.insert(id.to_string());
+            }
+        }
+    }
+    println!(
+        "{} sessions in `default` ({} from registry, {} total incl. graph).",
+        sids.len(),
+        registry_count,
+        sids.len(),
+    );
 
     // No fallback override: a session whose cwd doesn't resolve stays in
     // `default`, which is exactly where reattribution should leave it.
@@ -5788,17 +5859,21 @@ async fn run_reattribute(
     let mut plan: Vec<(String, String)> = Vec::new(); // (sid, target-ns)
     let mut unresolved = 0usize;
 
-    for s in &sessions {
-        let Some(sid) = s["session_id"].as_str() else {
-            continue;
+    for sid in &sids {
+        // Resolve cwd: prefer the on-disk transcript (what a fresh ingest would
+        // use), then fall back to the cwd stored in the session's own graph
+        // turns. The graph fallback is what lets us route claude sessions (and
+        // any session whose transcript the sources can't discover), closing the
+        // gap that left the heavy sessions stuck in `default`.
+        let cwd: Option<String> = match cwd_by_sid.get(sid) {
+            Some(c) => Some(c.clone()),
+            None => fetch_session_cwd_from_graph(&default_client, server, sid).await,
         };
-        let Some(cwd) = cwd_by_sid.get(sid) else {
-            // No transcript on disk for this id — cannot know where it ran, so
-            // it stays in `default` rather than being guessed at.
+        let Some(cwd) = cwd else {
             unresolved += 1;
             continue;
         };
-        match router.route(Some(cwd)).await.namespace() {
+        match router.route(Some(&cwd)).await.namespace() {
             Some(ns) if ns != "default" => plan.push((sid.to_string(), ns.to_string())),
             _ => {} // routes to default (or would-register under dry run): leave it
         }
@@ -5807,7 +5882,7 @@ async fn run_reattribute(
     println!(
         "\n{} to move, {} staying in `default` ({} unresolved, rest already default):",
         plan.len(),
-        sessions.len() - plan.len(),
+        sids.len() - plan.len(),
         unresolved,
     );
     for (sid, ns) in &plan {
