@@ -660,6 +660,10 @@ fn router_with_config_inner(
             "/api/sessions/{sid}/burn",
             axum::routing::put(put_session_burn),
         )
+        .route(
+            "/api/sessions/{sid}/analysis",
+            get(get_session_analysis).put(put_session_analysis),
+        )
         .route("/api/sessions/{sid}", axum::routing::delete(delete_session))
         .route(
             "/api/sessions/{sid}/move",
@@ -3981,6 +3985,70 @@ fn session_burn_path(sid: &str) -> String {
     format!("/sessions/{}/burn", sid)
 }
 
+fn session_analysis_path(sid: &str) -> String {
+    format!("/sessions/{}/analysis", sid)
+}
+
+/// `GET /api/sessions/{sid}/analysis` — the stored analysis record, or `null`.
+///
+/// Record shape (written by ingest after extraction): `{ analyzed_through,
+/// analyzed_at, provider, model, input_tokens, output_tokens, est_cost_usd }`.
+/// Authoritative status for "has this session been analyzed, and how far" —
+/// read by `ctx analyze` and the Lens analyze view, and by ingest to avoid
+/// re-analyzing turns already done on another machine.
+async fn get_session_analysis(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+    Path(sid): Path<String>,
+    Query(q): Query<SessionTurnQuery>,
+) -> Json<serde_json::Value> {
+    let Ok(repo) = s.repo_for(&ns) else {
+        return Json(serde_json::Value::Null);
+    };
+    let val = repo
+        .get_json(&q.ref_name, &session_analysis_path(&sid))
+        .unwrap_or(serde_json::Value::Null);
+    Json(val)
+}
+
+/// `PUT /api/sessions/{sid}/analysis` — store the session's analysis record.
+async fn put_session_analysis(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+    Path(sid): Path<String>,
+    agent_id: AgentId,
+    Query(q): Query<SessionTurnQuery>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !body.is_object() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "analysis body must be a JSON object".to_string(),
+        ));
+    }
+    let repo = s.repo_for(&ns)?;
+    let path = session_analysis_path(&sid);
+    let opts = CommitOptions::new(
+        &agent_id.0,
+        IntentCategory::Custom("Observe".to_string()),
+        format!("session analysis {}", sid),
+    )
+    .with_tags(vec![
+        format!("session:{}", sid),
+        "kind:session-analysis".to_string(),
+    ]);
+    let commit_id = repo
+        .set_json(&q.ref_name, &path, &body, opts)
+        .map_err(internal_error)?;
+    s.sessions.mark_all_dirty();
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "ref": q.ref_name,
+        "path": path,
+        "commit_id": format!("{}", commit_id.short()),
+    })))
+}
+
 /// `PUT /api/sessions/{sid}/burn` — store the session's efficiency score.
 ///
 /// Written at ingest so the dashboard's burn board reads a number rather than
@@ -4238,7 +4306,30 @@ fn representative_model(
 /// Home. One call returns token + graph aggregates for every workspace so the
 /// home page needs no N+1 fan-out. Purely namespace-derived; project metadata
 /// (display_name / remote) is joined client-side from `/api/projects`.
+/// Short-TTL memo for the hub-global workspace rollup (t-003). Each miss fans
+/// `repo.stats("main")` out across every namespace, and `stats()` walks up to
+/// 10k commits per namespace — ~1.9s on a large db. The rollup is a dashboard
+/// aggregate with no per-request inputs, so a few seconds of staleness is fine;
+/// this collapses a burst of Home page loads to one computation.
+fn namespaces_summary_cache()
+-> &'static std::sync::Mutex<Option<(std::time::Instant, serde_json::Value)>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<Option<(std::time::Instant, serde_json::Value)>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+const NAMESPACES_SUMMARY_TTL: std::time::Duration = std::time::Duration::from_secs(15);
+
 async fn namespaces_summary(State(s): State<HubState>) -> impl IntoResponse {
+    // Serve a fresh-enough cached rollup if we have one.
+    if let Ok(guard) = namespaces_summary_cache().lock()
+        && let Some((computed_at, payload)) = guard.as_ref()
+        && computed_at.elapsed() < NAMESPACES_SUMMARY_TTL
+    {
+        return Json(payload.clone()).into_response();
+    }
+
     let mut names: Vec<String> = match s.repo.list_namespaces() {
         Ok(ns) => ns.iter().map(|n| n.as_str().to_string()).collect(),
         Err(e) => return internal_error(e).into_response(),
@@ -4295,7 +4386,11 @@ async fn namespaces_summary(State(s): State<HubState>) -> impl IntoResponse {
             "graph": graph,
         }));
     }
-    Json(serde_json::json!({ "workspaces": out })).into_response()
+    let payload = serde_json::json!({ "workspaces": out });
+    if let Ok(mut guard) = namespaces_summary_cache().lock() {
+        *guard = Some((std::time::Instant::now(), payload.clone()));
+    }
+    Json(payload).into_response()
 }
 
 #[derive(Deserialize)]

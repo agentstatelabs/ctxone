@@ -583,8 +583,9 @@ impl ExtractionProvider {
             Self::Gemini => "GEMINI_API_KEY",
         }
     }
-    /// Slug for the `~/.ctxone/keys/<slug>` fallback key file.
-    fn key_slug(self) -> &'static str {
+    /// Slug for the `~/.ctxone/keys/<slug>` fallback key file, also used as the
+    /// provider label recorded on the analysis record.
+    pub fn key_slug(self) -> &'static str {
         match self {
             Self::Anthropic => "anthropic",
             Self::OpenAi => "openai",
@@ -592,6 +593,67 @@ impl ExtractionProvider {
             Self::OpenAiCompatible => "openai-compatible",
         }
     }
+}
+
+// ── Hub-stored analysis status ────────────────────────────────────────────────
+//
+// The authoritative record of what has been analyzed lives on the hub (so CLI +
+// Lens + other devices all see it); the local watermark is just the sweep's
+// fast-path cache. `analyzed_through` is the number of leading turns analyzed.
+
+/// GET the hub's `analyzed_through` for a session (0 when absent/unreachable).
+pub async fn hub_analyzed_through(hub: &str, session: &str, client: &reqwest::Client) -> usize {
+    let url = format!("{}/api/sessions/{}/analysis", hub, urlencode(session));
+    let Ok(resp) = client
+        .get(&url)
+        .header("X-CTXone-Session", session)
+        .send()
+        .await
+    else {
+        return 0;
+    };
+    if !resp.status().is_success() {
+        return 0;
+    }
+    let v: Value = resp.json().await.unwrap_or(Value::Null);
+    v.get("analyzed_through")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0) as usize
+}
+
+/// PUT the analysis record after extraction. Best-effort.
+pub async fn put_analysis_record(
+    hub: &str,
+    session: &str,
+    analyzed_through: usize,
+    provider: &str,
+    model: &str,
+    client: &reqwest::Client,
+) {
+    let body = serde_json::json!({
+        "analyzed_through": analyzed_through,
+        "analyzed_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "provider": provider,
+        "model": model,
+    });
+    let url = format!("{}/api/sessions/{}/analysis", hub, urlencode(session));
+    let _ = client
+        .put(&url)
+        .header("X-CTXone-Session", session)
+        .json(&body)
+        .send()
+        .await;
+}
+
+/// Minimal percent-encoding for a session id in a URL path segment (session
+/// ids can carry a `:` namespace prefix, e.g. `codex:<uuid>`).
+fn urlencode(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
+            _ => format!("%{:02X}", c as u32),
+        })
+        .collect()
 }
 
 /// Fully-resolved extraction config: which provider/model to call and the key.

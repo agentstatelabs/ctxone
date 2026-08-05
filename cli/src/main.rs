@@ -5189,10 +5189,13 @@ async fn ingest_one_session(
     // repeated LLM cost across sweeps).
     if let Some(cfg) = extraction.filter(|_| !dry_run && !tokens_only) {
         let sid = effective_session.unwrap_or("default");
-        let already = crate::ingest::extraction_watermark(sid);
+        // Skip past whatever has already been analyzed — locally (fast-path
+        // cache) or on the hub (authoritative; may reflect another machine).
+        let already = crate::ingest::extraction_watermark(sid)
+            .max(crate::ingest::hub_analyzed_through(server, sid, client).await);
         for (idx, turn) in turns.iter().enumerate() {
             if idx < already {
-                continue; // extracted on a prior ingest/sweep
+                continue; // already analyzed
             }
             if !turn.is_substantial() {
                 continue;
@@ -5203,9 +5206,20 @@ async fn ingest_one_session(
             }
             out.memories += memories.len();
         }
-        // Watermark past every turn we examined (substantial or not), so
-        // non-substantial turns are not re-checked next sweep either.
-        crate::ingest::set_extraction_watermark(sid, turns.len());
+        // Advance both records past every turn we examined (substantial or not),
+        // so non-substantial turns aren't re-checked and the hub reflects status.
+        if turns.len() > already {
+            crate::ingest::set_extraction_watermark(sid, turns.len());
+            crate::ingest::put_analysis_record(
+                server,
+                sid,
+                turns.len(),
+                cfg.provider.key_slug(),
+                &cfg.model,
+                client,
+            )
+            .await;
+        }
     }
 
     // Derive plan links from the just-stored turns. A whole-session post-pass,
