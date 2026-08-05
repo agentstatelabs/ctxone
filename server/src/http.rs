@@ -641,6 +641,7 @@ fn router_with_config_inner(
         )
         // Topic-arc segmentation of a session (t-003).
         .route("/api/sessions/{sid}/segments", get(session_segments))
+        .route("/api/sessions/{sid}/starter", get(session_starter))
         // Recall-injection audit for a session (t-004).
         .route("/api/sessions/{sid}/recall-log", get(session_recall_log))
         // Session title (t-016): human-readable name for a session id.
@@ -3868,6 +3869,29 @@ async fn session_segments(
         "gap_minutes": q.gap,
         "segment_count": segments.len(),
         "segments": segments,
+    })))
+}
+
+/// `GET /api/sessions/{sid}/starter?ref=<b>` — generate a fresh-session seed
+/// from the user's OWN words across this session (t-002). No LLM: pulls each
+/// user utterance verbatim, de-noises it, and groups by topic arc. This is the
+/// payload the "roll to a new session" nudge hands off when a session goes
+/// burning — carrying what the user said, not what the agent surmised.
+async fn session_starter(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+    Path(sid): Path<String>,
+    Query(q): Query<SegmentsQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
+    let tree = repo
+        .get_tree(&q.ref_name, &format!("/sessions/{sid}/turns"))
+        .unwrap_or(serde_json::Value::Null);
+    let title = read_session_title(&repo, &q.ref_name, &sid);
+    let starter = crate::starter::build_starter(&tree, title.as_deref());
+    Ok(Json(serde_json::json!({
+        "session": sid,
+        "starter": starter,
     })))
 }
 
