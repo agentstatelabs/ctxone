@@ -5235,19 +5235,25 @@ async fn ingest_one_session(
             }
             out.memories += memories.len();
         }
-        // Advance both records past every turn we examined (substantial or not),
-        // so non-substantial turns aren't re-checked and the hub reflects status.
+        // Advance the watermark past every turn we examined (substantial or
+        // not) and write the analysis record: status + a per-session summary and
+        // topic arcs (pseudo-branch structure) from one holistic LLM pass.
         if turns.len() > already {
             crate::ingest::set_extraction_watermark(sid, turns.len());
-            crate::ingest::put_analysis_record(
-                server,
-                sid,
-                turns.len(),
-                cfg.provider.key_slug(),
-                &cfg.model,
-                client,
-            )
-            .await;
+            let structure = crate::ingest::analyze_session(&turns, cfg, client).await;
+            let mut record = serde_json::json!({
+                "analyzed_through": turns.len(),
+                "analyzed_at": chrono::Utc::now()
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                "provider": cfg.provider.key_slug(),
+                "model": cfg.model,
+            });
+            if let Some(s) = structure {
+                record["summary"] = serde_json::Value::String(s.summary);
+                record["topics"] =
+                    serde_json::to_value(&s.topics).unwrap_or(serde_json::Value::Null);
+            }
+            crate::ingest::put_analysis(server, sid, &record, client).await;
         }
     }
 

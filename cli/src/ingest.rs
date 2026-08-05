@@ -621,28 +621,99 @@ pub async fn hub_analyzed_through(hub: &str, session: &str, client: &reqwest::Cl
         .unwrap_or(0) as usize
 }
 
-/// PUT the analysis record after extraction. Best-effort.
-pub async fn put_analysis_record(
-    hub: &str,
-    session: &str,
-    analyzed_through: usize,
-    provider: &str,
-    model: &str,
-    client: &reqwest::Client,
-) {
-    let body = serde_json::json!({
-        "analyzed_through": analyzed_through,
-        "analyzed_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        "provider": provider,
-        "model": model,
-    });
+/// PUT a full analysis record body for a session. Best-effort.
+pub async fn put_analysis(hub: &str, session: &str, body: &Value, client: &reqwest::Client) {
     let url = format!("{}/api/sessions/{}/analysis", hub, urlencode(session));
     let _ = client
         .put(&url)
         .header("X-CTXone-Session", session)
-        .json(&body)
+        .json(body)
         .send()
         .await;
+}
+
+// ── Session structure analysis (summary + topic arcs / pseudo-branches) ────────
+
+const SESSION_ANALYSIS_SYSTEM: &str = r#"You analyze an AI coding-agent session.
+You are given a compact, turn-indexed transcript (one line per turn, "T<i> [branch] U: <user> | A: <assistant>").
+
+Return ONLY a JSON object, no markdown fences:
+{
+  "summary": "2-4 sentence summary of the whole session",
+  "topics": [
+    {"start": <first turn index>, "end": <last turn index>, "label": "short topic label", "summary": "1-2 sentence summary of this topic"}
+  ]
+}
+
+A "topic" is a contiguous run of turns on one subject. A topic SHIFT (the work moves to a different subject) starts a new topic — these topic arcs act as pseudo-branches for clients that do not branch natively. Cover every turn; topics must be contiguous and non-overlapping, in order."#;
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TopicArc {
+    pub start: usize,
+    pub end: usize,
+    pub label: String,
+    #[serde(default)]
+    pub summary: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SessionAnalysis {
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub topics: Vec<TopicArc>,
+}
+
+fn first_line(s: &str, max: usize) -> String {
+    let line = s
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    truncate_on_char_boundary(line, max).replace('\n', " ")
+}
+
+/// A compact, index-tagged transcript so the model can segment the whole
+/// session by topic within a bounded context budget.
+fn condensed_transcript(turns: &[Turn]) -> String {
+    let mut out = String::new();
+    for (i, t) in turns.iter().enumerate() {
+        let branch = t.git_branches.first().map(|s| s.as_str()).unwrap_or("");
+        out.push_str(&format!(
+            "T{i} [{branch}] U: {} | A: {}\n",
+            first_line(&t.user_text, 160),
+            first_line(&t.assistant_text, 200),
+        ));
+    }
+    out
+}
+
+/// Produce a session summary + topic arcs (pseudo-branch structure) via one LLM
+/// call. `None` on any error or empty input.
+pub async fn analyze_session(
+    turns: &[Turn],
+    cfg: &ExtractionConfig,
+    client: &reqwest::Client,
+) -> Option<SessionAnalysis> {
+    if turns.is_empty() {
+        return None;
+    }
+    let transcript = condensed_transcript(turns);
+    let transcript = truncate_on_char_boundary(&transcript, 24_000).to_string();
+    let raw = call_extraction_llm(cfg, SESSION_ANALYSIS_SYSTEM, &transcript, client).await?;
+    let json_str = raw
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    match serde_json::from_str::<SessionAnalysis>(json_str) {
+        Ok(a) => Some(a),
+        Err(e) => {
+            eprintln!("  warn: could not parse session analysis: {e}");
+            None
+        }
+    }
 }
 
 /// Minimal percent-encoding for a session id in a URL path segment (session
@@ -1572,6 +1643,33 @@ pub fn last_turns(path: &Path, n: usize) -> Vec<Turn> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_analysis_parses_summary_and_topics() {
+        let json = r#"{"summary":"did X then Y",
+            "topics":[{"start":0,"end":3,"label":"setup","summary":"set up repo"},
+                      {"start":4,"end":9,"label":"bugfix","summary":"fixed panic"}]}"#;
+        let a: SessionAnalysis = serde_json::from_str(json).unwrap();
+        assert_eq!(a.summary, "did X then Y");
+        assert_eq!(a.topics.len(), 2);
+        assert_eq!(a.topics[1].label, "bugfix");
+        assert_eq!(a.topics[1].start, 4);
+        // Tolerates a missing topic summary.
+        let a2: SessionAnalysis =
+            serde_json::from_str(r#"{"summary":"s","topics":[{"start":0,"end":1,"label":"x"}]}"#)
+                .unwrap();
+        assert_eq!(a2.topics[0].summary, "");
+    }
+
+    #[test]
+    fn first_line_takes_first_nonblank_trimmed() {
+        assert_eq!(
+            first_line("\n\n  hello world  \nsecond", 100),
+            "hello world"
+        );
+        assert_eq!(first_line("verylongword", 4), "very");
+        assert_eq!(first_line("", 10), "");
+    }
 
     #[test]
     fn extraction_provider_parse_accepts_aliases() {
