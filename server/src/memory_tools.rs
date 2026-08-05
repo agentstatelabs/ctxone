@@ -170,7 +170,16 @@ pub struct TokenStats {
 /// measured savings ratio you see in Lens.
 pub struct SessionStats {
     pub tokens_sent: AtomicU64,
+    /// A bounded, HONEST savings ESTIMATE (not a measurement) — see
+    /// [`SessionStats::record`] and [`RECONSTRUCTION_FACTOR`]. Derived from the
+    /// real injected recall payload, not the whole-graph counterfactual that
+    /// produced the old implausible ~9000× ratios.
     pub tokens_saved: AtomicU64,
+    /// Injected tokens of the FIRST recall in this session — the "brought the
+    /// agent up to speed at startup" anchor. Captured once (0 until the first
+    /// recall); surfaced as the startup boost. Not persisted (recomputed on the
+    /// first recall after restart).
+    pub first_recall_tokens: AtomicU64,
     pub total_graph_size_chars: AtomicU64,
     graph_size_dirty: AtomicBool,
     /// Epoch-ms of the last full flat-size recompute (0 = never). Throttles the
@@ -230,6 +239,26 @@ pub struct RecallLogEntry {
 /// Most recent recalls kept per session.
 const RECALL_LOG_CAP: usize = 50;
 
+/// Conservative leverage multiplier behind the savings ESTIMATE.
+///
+/// Token savings from a memory tool is inherently a counterfactual — the whole
+/// point of CTX/ASD is to change what the agent does, so the run it "saved"
+/// never happened and cannot be measured. Rather than pretend otherwise (the
+/// old model divided the entire serialized graph by each injection, yielding
+/// implausible ~9000× ratios and billions of "saved" tokens), we state one
+/// honest assumption: a curated memory payload injected in N tokens would cost
+/// roughly this many × N for the agent to reconstruct from source (read, grep,
+/// re-derive). The estimate is therefore a small, bounded multiple of the REAL
+/// injected payload — never the whole graph — and grows with the session
+/// because recall runs per prompt. Presented in the UI as an explicit estimate.
+pub const RECONSTRUCTION_FACTOR: f64 = 4.0;
+
+/// The savings estimate (tokens) for a given cumulative injected payload:
+/// the `(FACTOR - 1)×` the agent didn't have to spend reconstructing it.
+pub fn savings_estimate_tokens(injected_tokens: u64) -> u64 {
+    ((RECONSTRUCTION_FACTOR - 1.0) * injected_tokens as f64) as u64
+}
+
 impl Default for SessionStats {
     fn default() -> Self {
         Self::new()
@@ -241,6 +270,7 @@ impl SessionStats {
         Self {
             tokens_sent: AtomicU64::new(0),
             tokens_saved: AtomicU64::new(0),
+            first_recall_tokens: AtomicU64::new(0),
             total_graph_size_chars: AtomicU64::new(0),
             graph_size_dirty: AtomicBool::new(true),
             flat_size_at_ms: AtomicU64::new(0),
@@ -270,9 +300,14 @@ impl SessionStats {
         last_provider: Option<String>,
         extra_tokens: BTreeMap<String, u64>,
     ) -> Self {
+        // The persisted `tokens_saved` may be a legacy whole-graph figure
+        // (the old, inflated model). Ignore it and re-derive from the restored
+        // injected total so restarts don't carry the implausible number forward.
+        let _ = tokens_saved;
         Self {
             tokens_sent: AtomicU64::new(tokens_sent),
-            tokens_saved: AtomicU64::new(tokens_saved),
+            tokens_saved: AtomicU64::new(savings_estimate_tokens(tokens_sent)),
+            first_recall_tokens: AtomicU64::new(0),
             total_graph_size_chars: AtomicU64::new(0),
             graph_size_dirty: AtomicBool::new(true),
             flat_size_at_ms: AtomicU64::new(0),
@@ -328,13 +363,31 @@ impl SessionStats {
         }
     }
 
+    /// Fold one injection into the session's token accounting.
+    ///
+    /// `sent_chars` is the REAL payload we injected (measured). `flat_chars`
+    /// (the whole-graph counterfactual) is intentionally unused for savings now
+    /// — see the note on [`RECONSTRUCTION_FACTOR`]. It is still passed so the
+    /// per-call `ctx_savings_ratio` topic-breadth hint in the recall response
+    /// can be computed by the caller.
     pub fn record(&self, sent_chars: usize, flat_chars: usize) {
-        let sent_tokens = sent_chars / 4;
-        let flat_tokens = flat_chars / 4;
-        self.tokens_sent
-            .fetch_add(sent_tokens as u64, Ordering::Relaxed);
-        self.tokens_saved.fetch_add(
-            flat_tokens.saturating_sub(sent_tokens) as u64,
+        let _ = flat_chars; // no longer feeds the cumulative savings estimate
+        let sent_tokens = (sent_chars / 4) as u64;
+        let total_sent = self.tokens_sent.fetch_add(sent_tokens, Ordering::Relaxed) + sent_tokens;
+        // Honest, GROWING savings estimate — not a measurement. A curated
+        // payload injected in `total_sent` tokens would cost roughly
+        // RECONSTRUCTION_FACTOR× that to rebuild by reading/grepping/re-deriving
+        // from source; the extra (FACTOR-1)× is what the agent didn't spend.
+        // Anchored on the real injected total and grows as the session grows
+        // (recall runs per prompt), with the big startup recall dominating
+        // early. `store` (not add) keeps it a pure function of `tokens_sent`.
+        self.tokens_saved
+            .store(savings_estimate_tokens(total_sent), Ordering::Relaxed);
+        // Startup anchor: remember the first recall's payload, once.
+        let _ = self.first_recall_tokens.compare_exchange(
+            0,
+            sent_tokens.max(1),
+            Ordering::Relaxed,
             Ordering::Relaxed,
         );
     }
@@ -436,7 +489,13 @@ impl SessionStats {
 pub struct SessionSnapshot {
     pub session_id: String,
     pub session_tokens_used: u64,
+    /// Honest, bounded savings ESTIMATE (not a measurement). See
+    /// [`RECONSTRUCTION_FACTOR`]. The UI must label it as an estimate.
     pub session_tokens_saved: u64,
+    /// Injected tokens of the session's first recall — the startup boost that
+    /// brought the agent up to speed. 0 if no recall happened this run.
+    #[serde(default)]
+    pub session_startup_tokens: u64,
     pub total_graph_size_chars: u64,
     pub total_graph_size_tokens: u64,
     pub cumulative_ratio: f64,
@@ -503,6 +562,7 @@ impl SessionSnapshot {
             session_id: session_id.to_string(),
             session_tokens_used: used,
             session_tokens_saved: saved,
+            session_startup_tokens: stats.first_recall_tokens.load(Ordering::Relaxed),
             total_graph_size_chars: graph_chars,
             total_graph_size_tokens: graph_tokens,
             cumulative_ratio: ratio,
@@ -682,6 +742,7 @@ impl SessionRegistry {
 
         let mut total_used = 0u64;
         let mut total_saved = 0u64;
+        let mut total_startup = 0u64;
         let mut graph_chars = 0u64;
         let mut llm_input = 0u64;
         let mut llm_output = 0u64;
@@ -696,6 +757,7 @@ impl SessionRegistry {
             }
             total_used += s.tokens_sent.load(Ordering::Relaxed);
             total_saved += s.tokens_saved.load(Ordering::Relaxed);
+            total_startup += s.first_recall_tokens.load(Ordering::Relaxed);
             graph_chars = graph_chars.max(s.total_graph_size_chars.load(Ordering::Relaxed));
             llm_input += s.llm_input_tokens.load(Ordering::Relaxed);
             llm_output += s.llm_output_tokens.load(Ordering::Relaxed);
@@ -714,6 +776,7 @@ impl SessionRegistry {
             session_id: "_aggregate".to_string(),
             session_tokens_used: total_used,
             session_tokens_saved: total_saved,
+            session_startup_tokens: total_startup,
             total_graph_size_chars: graph_chars,
             total_graph_size_tokens: graph_chars / 4,
             cumulative_ratio: ratio,
@@ -4278,6 +4341,54 @@ mod tests {
         repo
     }
 
+    // -------- honest savings estimate --------
+
+    #[test]
+    fn record_grows_savings_from_real_injected_payload_not_the_graph() {
+        let s = SessionStats::new();
+        // Two recalls; flat_chars is deliberately huge to prove it no longer
+        // feeds the estimate (the old model would bank ~the whole graph).
+        s.record(4_000, 40_000_000); // 1000 injected tokens
+        s.record(2_000, 40_000_000); // +500 injected tokens => 1500 total
+        let sent = s.tokens_sent.load(Ordering::Relaxed);
+        let saved = s.tokens_saved.load(Ordering::Relaxed);
+        assert_eq!(sent, 1_500);
+        // Bounded: exactly (FACTOR-1)× the real injected total, not billions.
+        assert_eq!(saved, savings_estimate_tokens(1_500));
+        assert_eq!(saved, 4_500); // FACTOR = 4.0 -> 3× injected
+    }
+
+    #[test]
+    fn first_recall_captures_startup_anchor_once() {
+        let s = SessionStats::new();
+        s.record(4_000, 0); // first recall: 1000 tokens
+        s.record(800, 0); // later, smaller recall: 200 tokens
+        // The startup anchor stays the FIRST payload, not the latest.
+        assert_eq!(s.first_recall_tokens.load(Ordering::Relaxed), 1_000);
+    }
+
+    #[test]
+    fn with_values_ignores_legacy_inflated_saved() {
+        // A persisted row from the old whole-graph model: implausible `saved`.
+        let s = SessionStats::with_values(
+            1_000,
+            9_999_999_999, // legacy inflated tokens_saved
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+            None,
+            BTreeMap::new(),
+        );
+        // Re-derived from the injected total instead of trusted.
+        assert_eq!(
+            s.tokens_saved.load(Ordering::Relaxed),
+            savings_estimate_tokens(1_000)
+        );
+    }
+
     // -------- slugify --------
 
     #[test]
@@ -5054,13 +5165,19 @@ mod tests {
         let alice = registry.get_or_create("alice");
         let bob = registry.get_or_create("bob");
 
-        alice.record(400, 4000); // 100 used, 900 saved
-        bob.record(800, 4000); // 200 used, 800 saved
+        // flat_chars (4000) no longer feeds savings — the estimate is a bounded
+        // multiple of the REAL injected payload only.
+        alice.record(400, 4000); // 100 injected
+        bob.record(800, 4000); // 200 injected
 
         let agg = registry.aggregate();
         assert_eq!(agg.session_id, "_aggregate");
         assert_eq!(agg.session_tokens_used, 300);
-        assert_eq!(agg.session_tokens_saved, 1700);
+        // Sum of each session's honest estimate: (FACTOR-1)*100 + (FACTOR-1)*200.
+        assert_eq!(
+            agg.session_tokens_saved,
+            savings_estimate_tokens(100) + savings_estimate_tokens(200)
+        );
     }
 
     #[test]
