@@ -5,6 +5,7 @@ mod gemini;
 mod ingest;
 mod metrics;
 mod onboarding;
+mod pricing;
 mod service;
 mod sources;
 mod workspace;
