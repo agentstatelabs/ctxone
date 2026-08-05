@@ -738,6 +738,9 @@ pub struct ExtractionConfig {
 
 #[derive(Deserialize, Default)]
 struct ExtractionToml {
+    /// Master switch. `enabled = false` disables analysis even when a key is
+    /// present (the user-level "disable analysis" control). Defaults to on.
+    enabled: Option<bool>,
     provider: Option<String>,
     model: Option<String>,
     base_url: Option<String>,
@@ -767,6 +770,11 @@ pub fn resolve_extraction_config() -> Option<ExtractionConfig> {
         .ok()
         .and_then(|s| toml::from_str(&s).ok())
         .unwrap_or_default();
+
+    // User-level control: `enabled = false` turns analysis off entirely.
+    if cfg.enabled == Some(false) {
+        return None;
+    }
 
     let provider = cfg
         .provider

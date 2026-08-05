@@ -68,17 +68,36 @@ All gated by the cost estimate.
 
 ## Control layer
 
-Same switches, two scopes:
+Same switches, two scopes.
 
-- **User:** enable/disable **scraping** and **analysis** independently, at
-  global / per-source / per-project / per-session granularity; provider/model
-  choice; spend caps. Default: scraping on, analysis **off until keyed** (never
-  silently spends).
-- **Team/Enterprise:** the same switches as **centrally-managed, RBAC-scoped
-  policy** via `agentstategraph-policy` (ties into the enterprise
-  policy-governed rollout): admins enforce/forbid scraping+analysis, restrict
-  allowed providers, set org spend caps and data-residency — enforced at the
-  hub, not per-machine.
+**User (shipped):**
+
+- **Disable scraping** — set the hub sweep interval to 0:
+  `CTXONE_SESSION_SYNC_INTERVAL_SECS=0` (no transcripts are pulled).
+- **Disable analysis** — `enabled = false` in `~/.ctxone/extraction.toml`
+  turns extraction/analysis off even when a key is present
+  (`resolve_extraction_config` returns `None`). Analysis is also implicitly off
+  until a key is configured, so it **never silently spends**.
+- **Provider/model choice** — `~/.ctxone/extraction.toml`.
+
+**User (designed, not yet shipped):** per-source / per-project / per-session
+granularity and spend caps.
+
+**Team/Enterprise (designed):** the same switches as **centrally-managed,
+RBAC-scoped policy** via `agentstategraph-policy` (ties into the enterprise
+policy-governed rollout): admins enforce/forbid scraping+analysis, restrict
+allowed providers, set org spend caps and data-residency — enforced at the hub,
+not per-machine.
+
+Example `~/.ctxone/extraction.toml`:
+
+```toml
+enabled  = true            # false disables analysis entirely
+provider = "anthropic"     # anthropic | openai | gemini | openai-compatible
+model    = "claude-haiku-4-5-20251001"
+# base_url = "https://…"   # openai-compatible only
+# key_file = "~/.ctxone/keys/anthropic"
+```
 
 ## Phases
 
