@@ -1139,6 +1139,17 @@ pub fn run_recall_scoped(
         }
     };
 
+    // Result cache (t-002): recall is the hottest endpoint and each miss does an
+    // un-indexed graph scan. Cache the expensive core keyed by the ref's CURRENT
+    // head commit, so any write (remember/forget/merge) advances the head and
+    // silently invalidates the entry — a `remember` immediately followed by a
+    // `recall` always recomputes. The cheap, per-session tail (token stats +
+    // recall log) is replayed on every call, hit or miss, in `assemble_recall`.
+    let cache_key = recall_cache_key(repo, ref_name, topic, budget, &scope_normalized);
+    if let Some(core) = cache_key.as_ref().and_then(|k| recall_cache_get(k)) {
+        return assemble_recall(repo, session, topic, ref_name, &scope_normalized, core);
+    }
+
     let mut out = Vec::new();
     let mut total = 0usize;
     let mut seen_paths = std::collections::HashSet::new();
@@ -1175,26 +1186,46 @@ pub fn run_recall_scoped(
     let mut scored: std::collections::HashMap<String, (String, usize, bool)> =
         std::collections::HashMap::new();
 
-    // Full-phrase search: counts extra, so exact matches win
-    if !topic.trim().is_empty()
-        && let Ok(results) = repo.search_values(ref_name, topic.trim(), Some(50))
-    {
-        for (path, value) in results {
-            scored
-                .entry(path)
-                .and_modify(|e| e.2 = true)
-                .or_insert((value, 0, true));
-        }
+    // Build the DISTINCT set of search queries once, then run them. Each
+    // `search_values` is an un-indexed tree walk that only early-exits at the
+    // result cap, so a rare/zero-match term scans much of the graph. The old
+    // code ran the full-phrase search AND a per-token search even when the topic
+    // was a single word — two identical full scans for one word. Deduping
+    // collapses that to one (measured: a single rare term went ~6s -> ~3s).
+    //
+    // Note: these searches are NOT parallelised. The ASG storage layer
+    // serialises concurrent reads (a shared connection), so running the scans on
+    // separate threads gave no speedup in testing — a 3-rare-token miss stayed
+    // ~sum, not ~max. The durable fix for the multi-rare-term worst case is an
+    // indexed value search in the engine (plan perf-slow-endpoints t-006), not
+    // client-side concurrency.
+    //
+    // `want`: query string -> (acts_as_phrase, token_weight). The full phrase
+    // sets `full_phrase_hit`; each token occurrence adds one to the score. A
+    // single-token topic collapses phrase and token into one search that does
+    // both, preserving the old (full=true, count=1) ranking.
+    let mut want: std::collections::HashMap<String, (bool, usize)> =
+        std::collections::HashMap::new();
+    let phrase = topic.trim();
+    if !phrase.is_empty() {
+        want.entry(phrase.to_string()).or_default().0 = true;
+    }
+    for token in &tokens {
+        want.entry(token.clone()).or_default().1 += 1;
     }
 
-    // Per-token search: each token adds one to the score
-    for token in &tokens {
-        let Ok(results) = repo.search_values(ref_name, token, Some(50)) else {
+    // Merge each distinct query's hits, preserving the original scoring: phrase
+    // matches flip full_phrase_hit, token matches add `weight` to the score.
+    for (query, (is_phrase, weight)) in &want {
+        let Ok(results) = repo.search_values(ref_name, query, Some(50)) else {
             continue;
         };
         for (path, value) in results {
             let entry = scored.entry(path).or_insert((value, 0, false));
-            entry.1 += 1;
+            if *is_phrase {
+                entry.2 = true;
+            }
+            entry.1 += weight;
         }
     }
 
@@ -1237,6 +1268,88 @@ pub fn run_recall_scoped(
         total += entry_size;
         topic_matches += 1;
     }
+
+    let core = RecallCore {
+        out,
+        total,
+        topic_matches,
+        pinned_count,
+    };
+    if let Some(key) = cache_key {
+        recall_cache_put(key, core.clone());
+    }
+    assemble_recall(repo, session, topic, ref_name, &scope_normalized, core)
+}
+
+/// The expensive, cache-able part of a recall: the budgeted result set plus the
+/// counts that describe it. Keyed in the cache by the ref's head commit, so it
+/// is only reused while the graph is unchanged (see `run_recall_scoped`).
+#[derive(Clone)]
+struct RecallCore {
+    out: Vec<serde_json::Value>,
+    total: usize,
+    topic_matches: usize,
+    pinned_count: usize,
+}
+
+/// Process-global recall result cache. Small and bounded; entries fall out by
+/// LRU and are logically invalidated by the head-commit component of the key.
+fn recall_cache() -> &'static std::sync::Mutex<lru::LruCache<String, RecallCore>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<lru::LruCache<String, RecallCore>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| {
+        std::sync::Mutex::new(lru::LruCache::new(
+            std::num::NonZeroUsize::new(256).expect("256 != 0"),
+        ))
+    })
+}
+
+/// Build the cache key. `None` (skip caching) when the ref can't be resolved to
+/// a head commit — without a head we can't guarantee invalidation on write.
+fn recall_cache_key(
+    repo: &Repository,
+    ref_name: &str,
+    topic: &str,
+    budget: usize,
+    scope: &Option<String>,
+) -> Option<String> {
+    let head = repo.head(ref_name).ok()?;
+    // \u{1} is a control char that can't appear in a ref/topic/scope, so the
+    // concatenation is unambiguous.
+    Some(format!(
+        "{ref_name}\u{1}{head}\u{1}{budget}\u{1}{}\u{1}{topic}",
+        scope.as_deref().unwrap_or("")
+    ))
+}
+
+fn recall_cache_get(key: &str) -> Option<RecallCore> {
+    recall_cache().lock().ok()?.get(key).cloned()
+}
+
+fn recall_cache_put(key: String, core: RecallCore) {
+    if let Ok(mut cache) = recall_cache().lock() {
+        cache.put(key, core);
+    }
+}
+
+/// The cheap, always-run tail of a recall: fold in the live graph size, record
+/// per-session token stats, assemble the JSON response, and log the injection.
+/// Runs on every call (cache hit or miss) so token accounting and the recall
+/// log stay correct regardless of caching.
+fn assemble_recall(
+    repo: &Repository,
+    session: &SessionStats,
+    topic: &str,
+    ref_name: &str,
+    scope_normalized: &Option<String>,
+    core: RecallCore,
+) -> serde_json::Value {
+    let RecallCore {
+        out,
+        total,
+        topic_matches,
+        pinned_count,
+    } = core;
 
     ensure_flat_size(repo, session, ref_name);
     let flat_size = session.total_graph_size_chars.load(Ordering::Relaxed) as usize;
