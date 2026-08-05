@@ -1301,6 +1301,11 @@ async fn plan_cost(
 #[derive(Deserialize)]
 struct PathQuery {
     path: Option<String>,
+    /// Optional depth cap (t-007). When set, nodes deeper than this are
+    /// returned as `{ "_truncated": true, ... }` placeholders and their
+    /// subtrees are never loaded — a cheap shallow view of a large ref instead
+    /// of materializing the whole tree. Absent = full tree (unchanged default).
+    max_depth: Option<usize>,
 }
 
 async fn get_state(
@@ -1311,9 +1316,12 @@ async fn get_state(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
     let path = q.path.unwrap_or_else(|| "/".to_string());
-    repo.get_json(&ref_name, &path)
-        .map(Json)
-        .map_err(internal_error)
+    match q.max_depth {
+        Some(depth) => repo.get_json_capped(&ref_name, &path, depth),
+        None => repo.get_json(&ref_name, &path),
+    }
+    .map(Json)
+    .map_err(internal_error)
 }
 
 #[derive(Deserialize)]
