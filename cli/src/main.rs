@@ -4938,7 +4938,7 @@ async fn ingest_one_session(
     full_turn: bool,
     tokens_only: bool,
     reingest: bool,
-    api_key: &str,
+    extraction: Option<&crate::ingest::ExtractionConfig>,
 ) -> SessionOutcome {
     use std::fmt::Write as _;
     let mut out = SessionOutcome::default();
@@ -5183,10 +5183,11 @@ async fn ingest_one_session(
         }
     }
 
-    // Memory extraction, per turn — only when an API key is set. Watermarked so
-    // each turn is extracted exactly once even though a grown session re-ingests
-    // in full (avoids duplicate memories + repeated Haiku cost across sweeps).
-    if !dry_run && !tokens_only && !api_key.is_empty() {
+    // Memory extraction, per turn — only when an extraction provider is
+    // configured. Watermarked so each turn is extracted exactly once even
+    // though a grown session re-ingests in full (avoids duplicate memories +
+    // repeated LLM cost across sweeps).
+    if let Some(cfg) = extraction.filter(|_| !dry_run && !tokens_only) {
         let sid = effective_session.unwrap_or("default");
         let already = crate::ingest::extraction_watermark(sid);
         for (idx, turn) in turns.iter().enumerate() {
@@ -5196,7 +5197,7 @@ async fn ingest_one_session(
             if !turn.is_substantial() {
                 continue;
             }
-            let memories = crate::ingest::extract_memories(turn, api_key, client).await;
+            let memories = crate::ingest::extract_memories(turn, cfg, client).await;
             for mem in &memories {
                 crate::ingest::store_memory(mem, server, branch, effective_session, client).await;
             }
@@ -5270,10 +5271,11 @@ async fn run_ingest_session(
     // Force a full re-ingest, ignoring the unchanged-fingerprint skip.
     reingest: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
-    if api_key.is_empty() && !tokens_only {
+    let extraction = crate::ingest::resolve_extraction_config();
+    if extraction.is_none() && !tokens_only {
         eprintln!(
-            "warn: ANTHROPIC_API_KEY not set — memory extraction disabled (use --tokens-only to suppress)"
+            "warn: no extraction provider/key configured — memory extraction disabled \
+             (set ~/.ctxone/keys/<provider> or a provider env var; use --tokens-only to suppress)"
         );
     }
 
@@ -5512,7 +5514,7 @@ async fn run_ingest_session(
                     full_turn,
                     tokens_only,
                     reingest,
-                    api_key.as_str(),
+                    extraction.as_ref(),
                 )
             })
             .buffer_unordered(INGEST_CONCURRENCY)
@@ -6029,7 +6031,7 @@ async fn run_capture_turn(
         return Ok(());
     }
 
-    let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+    let extraction = crate::ingest::resolve_extraction_config();
 
     // Detect which adapter produced this transcript. A Stop hook hands us one
     // file, and for non-Claude sources (Codex rollouts, Gemini sessions, …)
@@ -6094,10 +6096,13 @@ async fn run_capture_turn(
             )
             .await;
         }
-        if tokens_only || api_key.is_empty() || !turn.is_substantial() {
+        let Some(cfg) = extraction.as_ref().filter(|_| !tokens_only) else {
+            continue;
+        };
+        if !turn.is_substantial() {
             continue;
         }
-        let memories = crate::ingest::extract_memories(turn, &api_key, &client).await;
+        let memories = crate::ingest::extract_memories(turn, cfg, &client).await;
         for mem in &memories {
             crate::ingest::store_memory(mem, server, branch, effective_session, &client).await;
         }
