@@ -842,12 +842,107 @@ impl SessionSource for Cursor {
 // ── Registry ──────────────────────────────────────────────────────────────────
 
 /// Every known source, in the order they should be scanned.
+// ── Generic (import) ──────────────────────────────────────────────────────────
+
+/// A neutral JSON transcript format for importing sessions from clients with no
+/// local artifacts (e.g. server-side tools like Copilot). Import with
+/// `ctx ingest-session --source generic --file <transcript.json>`; extraction +
+/// analysis then run source-agnostically. No auto-discovery — import only.
+///
+/// Format:
+/// ```json
+/// { "turns": [
+///     {"user": "...", "assistant": "...", "timestamp": "2026-..", "model": "..",
+///      "tool_calls": ["..."]} ] }
+/// ```
+pub struct Generic;
+
+#[derive(serde::Deserialize)]
+struct GenericTranscript {
+    #[serde(default)]
+    turns: Vec<GenericTurn>,
+}
+
+#[derive(serde::Deserialize)]
+struct GenericTurn {
+    #[serde(default)]
+    user: String,
+    #[serde(default)]
+    assistant: String,
+    #[serde(default)]
+    timestamp: String,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    tool_calls: Vec<String>,
+}
+
+impl SessionSource for Generic {
+    fn id(&self) -> &'static str {
+        "generic"
+    }
+    fn label(&self) -> &'static str {
+        "Imported"
+    }
+    fn is_available(&self) -> bool {
+        // A format, not an install — always available for `--file` import.
+        true
+    }
+    fn discover_all(&self) -> Vec<SessionRef> {
+        vec![] // import-only; nothing to auto-discover
+    }
+    fn discover_for_project(&self, _project_dir: &Path) -> Vec<SessionRef> {
+        vec![]
+    }
+    /// A `--scan-dir` of `*.json` generic transcripts.
+    fn discover_in(&self, dir: &Path) -> Vec<SessionRef> {
+        scan_files(dir, |n| n.ends_with(".json"))
+            .into_iter()
+            .map(|path| SessionRef {
+                label: "Imported".to_string(),
+                path,
+                native_id: None,
+                cwd: None,
+                precomputed_fp: None,
+            })
+            .collect()
+    }
+    fn parse(&self, session: &SessionRef) -> Vec<Turn> {
+        let Ok(text) = std::fs::read_to_string(&session.path) else {
+            return vec![];
+        };
+        let Ok(t) = serde_json::from_str::<GenericTranscript>(&text) else {
+            eprintln!(
+                "  warn: {} is not a valid generic transcript",
+                session.path.display()
+            );
+            return vec![];
+        };
+        t.turns
+            .into_iter()
+            .map(|g| Turn {
+                user_text: g.user,
+                assistant_text: g.assistant,
+                tool_calls: g.tool_calls,
+                tool_calls_raw: vec![],
+                tokens: crate::ingest::TurnTokens::default(),
+                model: g.model,
+                timestamp: g.timestamp,
+                cwd: None,
+                git_branches: vec![],
+                git_commit: None,
+            })
+            .collect()
+    }
+}
+
 pub fn all_sources() -> Vec<Box<dyn SessionSource>> {
     vec![
         Box::new(ClaudeCode),
         Box::new(Codex),
         Box::new(Gemini),
         Box::new(Cursor),
+        Box::new(Generic),
     ]
 }
 
@@ -902,6 +997,35 @@ pub fn group_by_label(refs: Vec<SessionRef>) -> Vec<(String, Vec<PathBuf>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generic_source_parses_neutral_transcript() {
+        let dir = std::env::temp_dir().join(format!("ctx-gen-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join("s.json");
+        std::fs::write(
+            &p,
+            r#"{"turns":[
+                {"user":"do X","assistant":"did X with enough text to be substantial here","model":"gpt-5","tool_calls":["Edit: a.rs"]},
+                {"user":"do Y","assistant":"did Y"}
+            ]}"#,
+        )
+        .unwrap();
+        let sref = SessionRef {
+            label: "Imported".into(),
+            path: p,
+            native_id: None,
+            cwd: None,
+            precomputed_fp: None,
+        };
+        let turns = Generic.parse(&sref);
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].user_text, "do X");
+        assert_eq!(turns[0].model, "gpt-5");
+        assert_eq!(turns[0].tool_calls, vec!["Edit: a.rs".to_string()]);
+        assert_eq!(turns[1].assistant_text, "did Y");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn source_ref_for_path_routes_codex_and_claude_by_filename() {

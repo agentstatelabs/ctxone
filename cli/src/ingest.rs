@@ -1,5 +1,6 @@
-//! Session ingestion: parse Claude Code JSONL transcripts, extract structured
-//! memories via Haiku, and store token usage + facts in the Hub.
+//! Session ingestion: parse agent transcripts, extract structured memories via
+//! a configurable LLM provider (anthropic/openai/gemini/openai-compatible), and
+//! store token usage + facts in the Hub.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -21,6 +22,65 @@ fn truncate_on_char_boundary(s: &str, max_bytes: usize) -> &str {
         end -= 1;
     }
     &s[..end]
+}
+
+// ── Extraction watermark ──────────────────────────────────────────────────────
+//
+// Memory extraction (the Haiku pass) must run EXACTLY ONCE per turn, but the
+// incremental sync skip is per-SESSION: an active session that grew by one turn
+// re-ingests in full, which would otherwise re-extract every prior turn on every
+// sweep — duplicate memories and repeated Haiku cost. We track, per session, how
+// many leading turns have already been extracted and skip those on re-ingest.
+//
+// Stored per-machine (the scraper is inherently local — transcripts live on the
+// machine that produced them), in a single JSON file. Advances only, never
+// rewinds; best-effort so a lost/corrupt file just re-extracts once.
+
+/// Path to the per-machine extraction watermark file (`~/.ctxone/…`).
+fn extraction_watermark_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".ctxone")
+        .join("extraction-watermarks.json")
+}
+
+fn load_watermarks_at(p: &Path) -> BTreeMap<String, usize> {
+    std::fs::read(p)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn set_watermark_at(p: &Path, session_id: &str, count: usize) {
+    if let Some(dir) = p.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let mut map = load_watermarks_at(p);
+    let entry = map.entry(session_id.to_string()).or_insert(0);
+    if count <= *entry {
+        return; // monotonic: nothing new, avoid a needless rewrite
+    }
+    *entry = count;
+    if let Ok(bytes) = serde_json::to_vec(&map) {
+        let tmp = p.with_extension("json.tmp");
+        if std::fs::write(&tmp, &bytes).is_ok() {
+            let _ = std::fs::rename(&tmp, p);
+        }
+    }
+}
+
+/// Number of leading turns of `session_id` already extracted on this machine.
+pub fn extraction_watermark(session_id: &str) -> usize {
+    load_watermarks_at(&extraction_watermark_path())
+        .get(session_id)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Record that `count` leading turns of `session_id` have been extracted.
+/// Monotonic (never moves backward), atomic (temp + rename), best-effort.
+pub fn set_extraction_watermark(session_id: &str, count: usize) {
+    set_watermark_at(&extraction_watermark_path(), session_id, count);
 }
 
 // ── JSONL structures ──────────────────────────────────────────────────────────
@@ -488,6 +548,277 @@ Rules:
 - Skip: routine file reads, search results, compilation output unless something important was revealed
 - Return ONLY a valid JSON array. No markdown fences, no explanation."#;
 
+// ── Extraction provider ───────────────────────────────────────────────────────
+//
+// The extraction LLM is pluggable: the shared, provider-neutral prompt
+// (EXTRACTION_SYSTEM) is sent to whichever provider the user configured, and the
+// per-provider request/response shape is handled by `call_extraction_llm`.
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtractionProvider {
+    Anthropic,
+    OpenAi,
+    Gemini,
+    /// Any OpenAI `/chat/completions`-compatible endpoint (base_url required).
+    OpenAiCompatible,
+}
+
+impl ExtractionProvider {
+    fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "anthropic" | "claude" => Some(Self::Anthropic),
+            "openai" => Some(Self::OpenAi),
+            "gemini" | "google" => Some(Self::Gemini),
+            "openai-compatible" | "openai_compatible" | "compatible" => {
+                Some(Self::OpenAiCompatible)
+            }
+            _ => None,
+        }
+    }
+    /// Env var conventionally holding this provider's key.
+    fn key_env(self) -> &'static str {
+        match self {
+            Self::Anthropic => "ANTHROPIC_API_KEY",
+            Self::OpenAi | Self::OpenAiCompatible => "OPENAI_API_KEY",
+            Self::Gemini => "GEMINI_API_KEY",
+        }
+    }
+    /// Slug for the `~/.ctxone/keys/<slug>` fallback key file, also used as the
+    /// provider label recorded on the analysis record.
+    pub fn key_slug(self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic",
+            Self::OpenAi => "openai",
+            Self::Gemini => "gemini",
+            Self::OpenAiCompatible => "openai-compatible",
+        }
+    }
+}
+
+// ── Hub-stored analysis status ────────────────────────────────────────────────
+//
+// The authoritative record of what has been analyzed lives on the hub (so CLI +
+// Lens + other devices all see it); the local watermark is just the sweep's
+// fast-path cache. `analyzed_through` is the number of leading turns analyzed.
+
+/// GET the hub's `analyzed_through` for a session (0 when absent/unreachable).
+pub async fn hub_analyzed_through(hub: &str, session: &str, client: &reqwest::Client) -> usize {
+    let url = format!("{}/api/sessions/{}/analysis", hub, urlencode(session));
+    let Ok(resp) = client
+        .get(&url)
+        .header("X-CTXone-Session", session)
+        .send()
+        .await
+    else {
+        return 0;
+    };
+    if !resp.status().is_success() {
+        return 0;
+    }
+    let v: Value = resp.json().await.unwrap_or(Value::Null);
+    v.get("analyzed_through")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0) as usize
+}
+
+/// PUT a full analysis record body for a session. Best-effort.
+pub async fn put_analysis(hub: &str, session: &str, body: &Value, client: &reqwest::Client) {
+    let url = format!("{}/api/sessions/{}/analysis", hub, urlencode(session));
+    let _ = client
+        .put(&url)
+        .header("X-CTXone-Session", session)
+        .json(body)
+        .send()
+        .await;
+}
+
+// ── Session structure analysis (summary + topic arcs / pseudo-branches) ────────
+
+const SESSION_ANALYSIS_SYSTEM: &str = r#"You analyze an AI coding-agent session.
+You are given a compact, turn-indexed transcript (one line per turn, "T<i> [branch] U: <user> | A: <assistant>").
+
+Return ONLY a JSON object, no markdown fences:
+{
+  "summary": "2-4 sentence summary of the whole session",
+  "topics": [
+    {"start": <first turn index>, "end": <last turn index>, "label": "short topic label", "summary": "1-2 sentence summary of this topic"}
+  ]
+}
+
+A "topic" is a contiguous run of turns on one subject. A topic SHIFT (the work moves to a different subject) starts a new topic — these topic arcs act as pseudo-branches for clients that do not branch natively. Cover every turn; topics must be contiguous and non-overlapping, in order."#;
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TopicArc {
+    pub start: usize,
+    pub end: usize,
+    pub label: String,
+    #[serde(default)]
+    pub summary: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SessionAnalysis {
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub topics: Vec<TopicArc>,
+}
+
+fn first_line(s: &str, max: usize) -> String {
+    let line = s
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    truncate_on_char_boundary(line, max).replace('\n', " ")
+}
+
+/// A compact, index-tagged transcript so the model can segment the whole
+/// session by topic within a bounded context budget.
+fn condensed_transcript(turns: &[Turn]) -> String {
+    let mut out = String::new();
+    for (i, t) in turns.iter().enumerate() {
+        let branch = t.git_branches.first().map(|s| s.as_str()).unwrap_or("");
+        out.push_str(&format!(
+            "T{i} [{branch}] U: {} | A: {}\n",
+            first_line(&t.user_text, 160),
+            first_line(&t.assistant_text, 200),
+        ));
+    }
+    out
+}
+
+/// Produce a session summary + topic arcs (pseudo-branch structure) via one LLM
+/// call. `None` on any error or empty input.
+pub async fn analyze_session(
+    turns: &[Turn],
+    cfg: &ExtractionConfig,
+    client: &reqwest::Client,
+) -> Option<SessionAnalysis> {
+    if turns.is_empty() {
+        return None;
+    }
+    let transcript = condensed_transcript(turns);
+    let transcript = truncate_on_char_boundary(&transcript, 24_000).to_string();
+    let raw = call_extraction_llm(cfg, SESSION_ANALYSIS_SYSTEM, &transcript, client).await?;
+    let json_str = raw
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    match serde_json::from_str::<SessionAnalysis>(json_str) {
+        Ok(a) => Some(a),
+        Err(e) => {
+            eprintln!("  warn: could not parse session analysis: {e}");
+            None
+        }
+    }
+}
+
+/// Minimal percent-encoding for a session id in a URL path segment (session
+/// ids can carry a `:` namespace prefix, e.g. `codex:<uuid>`).
+fn urlencode(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
+            _ => format!("%{:02X}", c as u32),
+        })
+        .collect()
+}
+
+/// Fully-resolved extraction config: which provider/model to call and the key.
+pub struct ExtractionConfig {
+    pub provider: ExtractionProvider,
+    pub model: String,
+    /// Required for `OpenAiCompatible`; ignored otherwise.
+    pub base_url: Option<String>,
+    pub api_key: String,
+}
+
+#[derive(Deserialize, Default)]
+struct ExtractionToml {
+    /// Master switch. `enabled = false` disables analysis even when a key is
+    /// present (the user-level "disable analysis" control). Defaults to on.
+    enabled: Option<bool>,
+    provider: Option<String>,
+    model: Option<String>,
+    base_url: Option<String>,
+    key_file: Option<String>,
+}
+
+fn ctxone_home() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".ctxone")
+}
+
+/// Read a key from an explicit file path (trimmed); `None` if missing/empty.
+fn read_key_file(path: &Path) -> Option<String> {
+    let k = std::fs::read_to_string(path).ok()?.trim().to_string();
+    (!k.is_empty()).then_some(k)
+}
+
+/// Resolve the extraction config from `~/.ctxone/extraction.toml` + env + key
+/// files. Returns `None` when no API key can be found — extraction is then
+/// simply skipped (turns + tokens are still captured).
+///
+/// Precedence: explicit `key_file` in the toml → the provider's env var →
+/// `~/.ctxone/keys/<provider>`. Defaults to Anthropic Haiku when the toml is
+/// absent, preserving prior behaviour.
+pub fn resolve_extraction_config() -> Option<ExtractionConfig> {
+    let cfg: ExtractionToml = std::fs::read_to_string(ctxone_home().join("extraction.toml"))
+        .ok()
+        .and_then(|s| toml::from_str(&s).ok())
+        .unwrap_or_default();
+
+    // User-level control: `enabled = false` turns analysis off entirely.
+    if cfg.enabled == Some(false) {
+        return None;
+    }
+
+    let provider = cfg
+        .provider
+        .as_deref()
+        .and_then(ExtractionProvider::parse)
+        .unwrap_or(ExtractionProvider::Anthropic);
+
+    let model = cfg.model.unwrap_or_else(|| match provider {
+        ExtractionProvider::Anthropic => "claude-haiku-4-5-20251001".to_string(),
+        ExtractionProvider::OpenAi | ExtractionProvider::OpenAiCompatible => {
+            "gpt-5-mini".to_string()
+        }
+        ExtractionProvider::Gemini => "gemini-3-flash".to_string(),
+    });
+
+    let api_key = cfg
+        .key_file
+        .as_deref()
+        .and_then(|p| read_key_file(Path::new(&shellexpand_home(p))))
+        .or_else(|| {
+            std::env::var(provider.key_env())
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
+        .or_else(|| read_key_file(&ctxone_home().join("keys").join(provider.key_slug())))?;
+
+    Some(ExtractionConfig {
+        provider,
+        model,
+        base_url: cfg.base_url,
+        api_key,
+    })
+}
+
+/// Expand a leading `~/` to `$HOME` in a config-supplied path.
+fn shellexpand_home(p: &str) -> String {
+    if let Some(rest) = p.strip_prefix("~/") {
+        let home = std::env::var("HOME").unwrap_or_default();
+        format!("{home}/{rest}")
+    } else {
+        p.to_string()
+    }
+}
+
 #[derive(Serialize)]
 struct AnthropicRequest {
     model: String,
@@ -525,64 +856,16 @@ pub struct ExtractedMemory {
 
 pub async fn extract_memories(
     turn: &Turn,
-    api_key: &str,
+    cfg: &ExtractionConfig,
     client: &reqwest::Client,
 ) -> Vec<ExtractedMemory> {
     let exchange = turn.to_exchange_text();
-    let req = AnthropicRequest {
-        model: "claude-haiku-4-5-20251001".to_string(),
-        max_tokens: 4096,
-        system: EXTRACTION_SYSTEM.to_string(),
-        messages: vec![AnthropicMessage {
-            role: "user".to_string(),
-            content: exchange,
-        }],
+    let raw = match call_extraction_llm(cfg, EXTRACTION_SYSTEM, &exchange, client).await {
+        Some(r) => r,
+        None => return vec![],
     };
 
-    let resp = match client
-        .post("https://api.anthropic.com/v1/messages")
-        .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01")
-        .header("content-type", "application/json")
-        .json(&req)
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("  warn: Haiku API call failed: {}", e);
-            return vec![];
-        }
-    };
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        eprintln!(
-            "  warn: Haiku returned {}: {}",
-            status,
-            truncate_on_char_boundary(&body, 200)
-        );
-        return vec![];
-    }
-
-    let ar: AnthropicResponse = match resp.json().await {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("  warn: failed to parse Haiku response: {}", e);
-            return vec![];
-        }
-    };
-
-    let raw = ar
-        .content
-        .iter()
-        .filter(|c| c.content_type == "text")
-        .filter_map(|c| c.text.as_deref())
-        .collect::<Vec<_>>()
-        .join("");
-
-    // Strip markdown fences if model added them despite instructions.
+    // Strip markdown fences if the model added them despite instructions.
     let json_str = raw
         .trim()
         .trim_start_matches("```json")
@@ -598,6 +881,222 @@ pub async fn extract_memories(
             vec![]
         }
     }
+}
+
+/// Send `system` + `user` to the configured provider; return the model's raw
+/// text, or `None` on any error (logged). Dispatches the per-provider shape.
+async fn call_extraction_llm(
+    cfg: &ExtractionConfig,
+    system: &str,
+    user: &str,
+    client: &reqwest::Client,
+) -> Option<String> {
+    match cfg.provider {
+        ExtractionProvider::Anthropic => call_anthropic(cfg, system, user, client).await,
+        ExtractionProvider::OpenAi | ExtractionProvider::OpenAiCompatible => {
+            call_openai(cfg, system, user, client).await
+        }
+        ExtractionProvider::Gemini => call_gemini(cfg, system, user, client).await,
+    }
+}
+
+/// Log a non-success HTTP response and return `None`.
+async fn warn_bad_response(who: &str, resp: reqwest::Response) -> Option<String> {
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    eprintln!(
+        "  warn: {who} returned {status}: {}",
+        truncate_on_char_boundary(&body, 200)
+    );
+    None
+}
+
+async fn call_anthropic(
+    cfg: &ExtractionConfig,
+    system: &str,
+    user: &str,
+    client: &reqwest::Client,
+) -> Option<String> {
+    let req = AnthropicRequest {
+        model: cfg.model.clone(),
+        max_tokens: 4096,
+        system: system.to_string(),
+        messages: vec![AnthropicMessage {
+            role: "user".to_string(),
+            content: user.to_string(),
+        }],
+    };
+    let resp = client
+        .post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", &cfg.api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&req)
+        .send()
+        .await
+        .map_err(|e| eprintln!("  warn: Anthropic call failed: {e}"))
+        .ok()?;
+    if !resp.status().is_success() {
+        return warn_bad_response("Anthropic", resp).await;
+    }
+    let ar: AnthropicResponse = resp
+        .json()
+        .await
+        .map_err(|e| eprintln!("  warn: parse Anthropic response: {e}"))
+        .ok()?;
+    Some(
+        ar.content
+            .iter()
+            .filter(|c| c.content_type == "text")
+            .filter_map(|c| c.text.as_deref())
+            .collect::<Vec<_>>()
+            .join(""),
+    )
+}
+
+async fn call_openai(
+    cfg: &ExtractionConfig,
+    system: &str,
+    user: &str,
+    client: &reqwest::Client,
+) -> Option<String> {
+    let base = cfg
+        .base_url
+        .as_deref()
+        .unwrap_or("https://api.openai.com")
+        .trim_end_matches('/');
+    let req = OpenAiRequest {
+        model: cfg.model.clone(),
+        messages: vec![
+            OpenAiMessage {
+                role: "system",
+                content: system.to_string(),
+            },
+            OpenAiMessage {
+                role: "user",
+                content: user.to_string(),
+            },
+        ],
+    };
+    let resp = client
+        .post(format!("{base}/v1/chat/completions"))
+        .bearer_auth(&cfg.api_key)
+        .json(&req)
+        .send()
+        .await
+        .map_err(|e| eprintln!("  warn: OpenAI call failed: {e}"))
+        .ok()?;
+    if !resp.status().is_success() {
+        return warn_bad_response("OpenAI", resp).await;
+    }
+    let or: OpenAiResponse = resp
+        .json()
+        .await
+        .map_err(|e| eprintln!("  warn: parse OpenAI response: {e}"))
+        .ok()?;
+    or.choices.into_iter().next().map(|c| c.message.content)
+}
+
+async fn call_gemini(
+    cfg: &ExtractionConfig,
+    system: &str,
+    user: &str,
+    client: &reqwest::Client,
+) -> Option<String> {
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+        cfg.model
+    );
+    let req = GeminiRequest {
+        system_instruction: GeminiContent {
+            role: None,
+            parts: vec![GeminiPart {
+                text: system.to_string(),
+            }],
+        },
+        contents: vec![GeminiContent {
+            role: Some("user".to_string()),
+            parts: vec![GeminiPart {
+                text: user.to_string(),
+            }],
+        }],
+    };
+    let resp = client
+        .post(&url)
+        .header("x-goog-api-key", &cfg.api_key)
+        .json(&req)
+        .send()
+        .await
+        .map_err(|e| eprintln!("  warn: Gemini call failed: {e}"))
+        .ok()?;
+    if !resp.status().is_success() {
+        return warn_bad_response("Gemini", resp).await;
+    }
+    let gr: GeminiResponse = resp
+        .json()
+        .await
+        .map_err(|e| eprintln!("  warn: parse Gemini response: {e}"))
+        .ok()?;
+    let cand = gr.candidates.into_iter().next()?;
+    Some(
+        cand.content
+            .parts
+            .into_iter()
+            .map(|p| p.text)
+            .collect::<Vec<_>>()
+            .join(""),
+    )
+}
+
+// OpenAI / OpenAI-compatible chat-completions shapes.
+#[derive(Serialize)]
+struct OpenAiRequest {
+    model: String,
+    messages: Vec<OpenAiMessage>,
+}
+#[derive(Serialize)]
+struct OpenAiMessage {
+    role: &'static str,
+    content: String,
+}
+#[derive(Deserialize)]
+struct OpenAiResponse {
+    choices: Vec<OpenAiChoice>,
+}
+#[derive(Deserialize)]
+struct OpenAiChoice {
+    message: OpenAiRespMessage,
+}
+#[derive(Deserialize)]
+struct OpenAiRespMessage {
+    #[serde(default)]
+    content: String,
+}
+
+// Gemini generateContent shapes.
+#[derive(Serialize)]
+struct GeminiRequest {
+    system_instruction: GeminiContent,
+    contents: Vec<GeminiContent>,
+}
+#[derive(Serialize, Deserialize)]
+struct GeminiContent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<String>,
+    parts: Vec<GeminiPart>,
+}
+#[derive(Serialize, Deserialize)]
+struct GeminiPart {
+    text: String,
+}
+#[derive(Deserialize)]
+struct GeminiResponse {
+    #[serde(default)]
+    candidates: Vec<GeminiCandidate>,
+}
+#[derive(Deserialize)]
+struct GeminiCandidate {
+    content: GeminiContent,
 }
 
 // ── Hub writes ────────────────────────────────────────────────────────────────
@@ -1152,6 +1651,94 @@ pub fn last_turns(path: &Path, n: usize) -> Vec<Turn> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_analysis_parses_summary_and_topics() {
+        let json = r#"{"summary":"did X then Y",
+            "topics":[{"start":0,"end":3,"label":"setup","summary":"set up repo"},
+                      {"start":4,"end":9,"label":"bugfix","summary":"fixed panic"}]}"#;
+        let a: SessionAnalysis = serde_json::from_str(json).unwrap();
+        assert_eq!(a.summary, "did X then Y");
+        assert_eq!(a.topics.len(), 2);
+        assert_eq!(a.topics[1].label, "bugfix");
+        assert_eq!(a.topics[1].start, 4);
+        // Tolerates a missing topic summary.
+        let a2: SessionAnalysis =
+            serde_json::from_str(r#"{"summary":"s","topics":[{"start":0,"end":1,"label":"x"}]}"#)
+                .unwrap();
+        assert_eq!(a2.topics[0].summary, "");
+    }
+
+    #[test]
+    fn first_line_takes_first_nonblank_trimmed() {
+        assert_eq!(
+            first_line("\n\n  hello world  \nsecond", 100),
+            "hello world"
+        );
+        assert_eq!(first_line("verylongword", 4), "very");
+        assert_eq!(first_line("", 10), "");
+    }
+
+    #[test]
+    fn extraction_provider_parse_accepts_aliases() {
+        use ExtractionProvider::*;
+        assert_eq!(ExtractionProvider::parse("anthropic"), Some(Anthropic));
+        assert_eq!(ExtractionProvider::parse("Claude"), Some(Anthropic));
+        assert_eq!(ExtractionProvider::parse("openai"), Some(OpenAi));
+        assert_eq!(ExtractionProvider::parse("gemini"), Some(Gemini));
+        assert_eq!(ExtractionProvider::parse("google"), Some(Gemini));
+        assert_eq!(
+            ExtractionProvider::parse("openai-compatible"),
+            Some(OpenAiCompatible)
+        );
+        assert_eq!(ExtractionProvider::parse("nope"), None);
+    }
+
+    #[test]
+    fn provider_key_env_and_slug() {
+        assert_eq!(ExtractionProvider::Anthropic.key_env(), "ANTHROPIC_API_KEY");
+        assert_eq!(ExtractionProvider::OpenAi.key_env(), "OPENAI_API_KEY");
+        assert_eq!(
+            ExtractionProvider::OpenAiCompatible.key_env(),
+            "OPENAI_API_KEY"
+        );
+        assert_eq!(ExtractionProvider::Gemini.key_slug(), "gemini");
+    }
+
+    #[test]
+    fn shellexpand_home_expands_leading_tilde() {
+        // Absolute paths pass through; `~/` expands under $HOME (no env mutation,
+        // so we assert the suffix rather than the full path).
+        assert_eq!(shellexpand_home("/abs/path"), "/abs/path");
+        assert!(shellexpand_home("~/.ctxone/k").ends_with("/.ctxone/k"));
+    }
+
+    #[test]
+    fn extraction_watermark_is_monotonic_and_per_session() {
+        let dir = std::env::temp_dir().join(format!("ctx-wm-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join("watermarks.json");
+
+        assert_eq!(load_watermarks_at(&p).get("s1").copied().unwrap_or(0), 0);
+
+        set_watermark_at(&p, "s1", 3);
+        assert_eq!(load_watermarks_at(&p)["s1"], 3);
+
+        // Monotonic: a lower count does not rewind.
+        set_watermark_at(&p, "s1", 2);
+        assert_eq!(load_watermarks_at(&p)["s1"], 3);
+
+        // Advances forward.
+        set_watermark_at(&p, "s1", 5);
+        assert_eq!(load_watermarks_at(&p)["s1"], 5);
+
+        // Independent per session.
+        set_watermark_at(&p, "codex:abc", 1);
+        assert_eq!(load_watermarks_at(&p)["codex:abc"], 1);
+        assert_eq!(load_watermarks_at(&p)["s1"], 5);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn turn_on(branches: &[&str], ts: &str) -> Turn {
         Turn {

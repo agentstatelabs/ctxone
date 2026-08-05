@@ -208,15 +208,39 @@
 	}
 	let expandedTools: Record<string, boolean> = $state({});
 
+	// Hub-stored analysis record (P2/P4): status + summary + topic arcs.
+	let analysis: {
+		analyzed_through?: number;
+		analyzed_at?: string;
+		provider?: string;
+		model?: string;
+		summary?: string;
+		topics?: { start: number; end: number; label: string; summary?: string }[];
+	} | null = $state(null);
+
 	$effect(() => {
 		if (selected) {
 			loadMemories(selected.session_id);
 			loadTurns(selected.session_id);
+			loadAnalysis(selected.session_id);
 		} else {
 			memories = [];
 			turns = [];
+			analysis = null;
 		}
 	});
+
+	async function loadAnalysis(sessionId: string) {
+		analysis = null;
+		try {
+			const r = await hubFetch(`/api/sessions/${encodeURIComponent(sessionId)}/analysis`);
+			if (!r.ok) return; // 404 / null → not analyzed yet
+			const v = await r.json();
+			if (v && typeof v === 'object') analysis = v;
+		} catch {
+			/* best-effort */
+		}
+	}
 
 	async function loadTurns(sessionId: string) {
 		turnsLoading = true;
@@ -977,6 +1001,47 @@
 							<div class="stat-label">Savings ratio</div>
 						</div>
 					</div>
+
+					{#if analysis}
+						<div
+							style="margin:0.75rem 0; padding:0.75rem; border:1px solid var(--border); border-radius:8px; background:var(--bg-subtle, transparent)"
+						>
+							<div style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap; margin-bottom:0.4rem">
+								<span
+									style="font-size:0.7rem; text-transform:uppercase; letter-spacing:0.05em; color:var(--success)"
+									>analyzed</span
+								>
+								{#if analysis.provider}
+									<span style="font-size:0.75rem; color:var(--text-muted)"
+										>{analysis.provider}{analysis.model ? ` · ${analysis.model}` : ''}</span
+									>
+								{/if}
+								{#if analysis.analyzed_through != null}
+									<span style="font-size:0.75rem; color:var(--text-muted)"
+										>{analysis.analyzed_through} turns analyzed</span
+									>
+								{/if}
+							</div>
+							{#if analysis.summary}
+								<p style="margin:0 0 0.5rem; font-size:0.9rem">{analysis.summary}</p>
+							{/if}
+							{#if analysis.topics?.length}
+								<div style="display:flex; flex-direction:column; gap:0.35rem">
+									{#each analysis.topics as t}
+										<div style="border-left:2px solid var(--accent, var(--border)); padding-left:0.5rem">
+											<div style="font-size:0.82rem; font-weight:600">
+												{t.label}
+												<span style="font-weight:400; color:var(--text-muted)">T{t.start}–{t.end}</span>
+											</div>
+											{#if t.summary}
+												<div style="font-size:0.8rem; color:var(--text-muted)">{t.summary}</div>
+											{/if}
+										</div>
+									{/each}
+								</div>
+							{/if}
+						</div>
+					{/if}
 
 					{#if selected.session_tokens_used === 0 && selected.llm_call_count > 0}
 						<p class="zero-hint">
