@@ -919,6 +919,12 @@ enum Commands {
         #[command(subcommand)]
         action: PlanAction,
     },
+    /// Analyze scraped/imported agent sessions: see what has been analyzed,
+    /// and estimate the cost of analyzing what hasn't (before spending).
+    Analyze {
+        #[command(subcommand)]
+        action: AnalyzeAction,
+    },
     /// Plan-scoped git worktrees: isolated files + HEAD per unit of work so
     /// parallel agents can't clobber each other, while sharing the CTXone brain.
     /// `start` a worktree, work there, `finish` to merge back + tear down.
@@ -978,6 +984,23 @@ enum Commands {
     Reminder {
         #[command(subcommand)]
         action: ReminderAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum AnalyzeAction {
+    /// List sessions with their analysis status (analyzed / partial / none).
+    List,
+    /// Estimate the cost of analyzing not-yet-analyzed turns, without spending.
+    /// Uses the configured provider/model unless overridden.
+    Estimate {
+        /// Override the extraction provider for the estimate
+        /// (anthropic|openai|gemini|openai-compatible).
+        #[arg(long)]
+        provider: Option<String>,
+        /// Override the model for the estimate.
+        #[arg(long)]
+        model: Option<String>,
     },
 }
 
@@ -3326,6 +3349,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let branch = cli.branch.clone();
             let format = cli.format;
             handle_plan(action, &server, &branch, format, client.clone()).await?;
+        }
+        Commands::Analyze { action } => {
+            let server = cli.server.clone();
+            let format = cli.format;
+            handle_analyze(action, &server, format, client.clone()).await?;
         }
         Commands::Taint { action } => {
             let server = cli.server.clone();
@@ -7141,6 +7169,165 @@ fn priority_tag(priority: &str) -> &'static str {
         "low" => "[LO]",
         _ => "[??]",
     }
+}
+
+async fn handle_analyze(
+    action: AnalyzeAction,
+    server: &str,
+    format: OutputFormat,
+    client: reqwest::Client,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match action {
+        AnalyzeAction::List => analyze_list(server, format, &client).await,
+        AnalyzeAction::Estimate { provider, model } => {
+            analyze_estimate(server, format, provider, model, &client).await
+        }
+    }
+}
+
+/// `ctx analyze list` — sessions with their hub-recorded analysis status.
+async fn analyze_list(
+    server: &str,
+    format: OutputFormat,
+    client: &reqwest::Client,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let sessions: Vec<Value> = client
+        .get(format!("{server}/api/stats/sessions"))
+        .send()
+        .await?
+        .json()
+        .await
+        .unwrap_or_default();
+
+    let mut rows: Vec<Value> = Vec::new();
+    for s in &sessions {
+        let Some(sid) = s.get("session_id").and_then(|x| x.as_str()) else {
+            continue;
+        };
+        let analysis: Value = match client
+            .get(format!(
+                "{server}/api/sessions/{}/analysis",
+                urlencoding(sid)
+            ))
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => r.json().await.unwrap_or(Value::Null),
+            _ => Value::Null,
+        };
+        rows.push(serde_json::json!({
+            "session": sid,
+            "source": s.get("source").cloned().unwrap_or(Value::Null),
+            "analyzed_through": analysis.get("analyzed_through").cloned().unwrap_or(Value::Null),
+            "analyzed_at": analysis.get("analyzed_at").cloned().unwrap_or(Value::Null),
+            "provider": analysis.get("provider").cloned().unwrap_or(Value::Null),
+            "status": if analysis.is_null() { "none" } else { "analyzed" },
+        }));
+    }
+
+    emit(format, &Value::Array(rows.clone()), |_| {
+        let analyzed = rows.iter().filter(|r| r["status"] == "analyzed").count();
+        println!(
+            "{} sessions · {} analyzed · {} none",
+            rows.len(),
+            analyzed,
+            rows.len() - analyzed
+        );
+        for r in &rows {
+            println!(
+                "  {:<8} through={:<5} {:<10} {}",
+                r["status"].as_str().unwrap_or(""),
+                r["analyzed_through"]
+                    .as_u64()
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "-".into()),
+                r["provider"].as_str().unwrap_or("-"),
+                r["session"].as_str().unwrap_or(""),
+            );
+        }
+    });
+    Ok(())
+}
+
+/// `ctx analyze estimate` — dry-run cost of analyzing not-yet-analyzed turns.
+/// Scans every discoverable session, counts substantial turns past each
+/// session's hub `analyzed_through`, and prices them. Never spends.
+async fn analyze_estimate(
+    server: &str,
+    format: OutputFormat,
+    provider_override: Option<String>,
+    model_override: Option<String>,
+    client: &reqwest::Client,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::sources::SessionSource;
+
+    let cfg = crate::ingest::resolve_extraction_config();
+    let provider = provider_override
+        .or_else(|| cfg.as_ref().map(|c| c.provider.key_slug().to_string()))
+        .unwrap_or_else(|| "anthropic".to_string());
+    let model = model_override
+        .or_else(|| cfg.as_ref().map(|c| c.model.clone()))
+        .unwrap_or_else(|| "claude-haiku-4-5-20251001".to_string());
+    let price = crate::pricing::price_for(&provider, &model);
+
+    let mut sessions_with_work = 0usize;
+    let mut total_turns = 0usize;
+    let mut total_chars = 0usize;
+    for src in crate::sources::all_sources()
+        .iter()
+        .filter(|s| s.is_available())
+    {
+        for sref in src.discover_all() {
+            let sid = sref.namespaced_id(src.id());
+            let analyzed = crate::ingest::hub_analyzed_through(server, &sid, client).await;
+            let turns = src.parse(&sref);
+            let mut sturns = 0usize;
+            let mut schars = 0usize;
+            for (idx, t) in turns.iter().enumerate() {
+                if idx < analyzed || !t.is_substantial() {
+                    continue;
+                }
+                sturns += 1;
+                schars += t.to_exchange_text().len();
+            }
+            if sturns > 0 {
+                sessions_with_work += 1;
+                total_turns += sturns;
+                total_chars += schars;
+            }
+        }
+    }
+
+    let est = crate::pricing::estimate_cost(total_turns, total_chars, &price);
+    let out = serde_json::json!({
+        "provider": provider,
+        "model": model,
+        "sessions_with_unanalyzed": sessions_with_work,
+        "turns": est.turns,
+        "input_tokens": est.input_tokens,
+        "output_tokens": est.output_tokens,
+        "est_usd": est.usd,
+    });
+    emit(format, &out, |v| {
+        println!(
+            "Estimate — {} / {}",
+            v["provider"].as_str().unwrap_or(""),
+            v["model"].as_str().unwrap_or("")
+        );
+        println!(
+            "  {} sessions with unanalyzed work · {} turns",
+            v["sessions_with_unanalyzed"].as_u64().unwrap_or(0),
+            v["turns"].as_u64().unwrap_or(0),
+        );
+        println!(
+            "  ~{} input + ~{} output tokens",
+            v["input_tokens"].as_u64().unwrap_or(0),
+            v["output_tokens"].as_u64().unwrap_or(0),
+        );
+        println!("  est. cost: ${:.2}", v["est_usd"].as_f64().unwrap_or(0.0));
+        println!("  (approximate; nothing was spent)");
+    });
+    Ok(())
 }
 
 async fn handle_plan(
