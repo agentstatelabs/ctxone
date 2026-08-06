@@ -4,6 +4,11 @@ All notable changes to CTXone are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 the project's `0.9.x` series (incremented by 0.0.01 per release).
 
+## [v0.9.27] — 2026-08-06
+
+### Changed
+- CLI output no longer frames the per-recall flat-vs-injected ratio as "savings" — the last place still using the old "N tokens sent vs M flat (X× savings)" language. `ctx recall` now reports just the honest injected-token count, and `ctx demo`'s cumulative line reads "Estimated savings this session (conservative model … can't be measured) — N injected · ~M saved (est.)", consistent with the Lens reframing in v0.9.26.
+
 ## [v0.9.26] — 2026-08-06
 
 ### Changed

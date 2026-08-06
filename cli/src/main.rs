@@ -2148,29 +2148,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .get("ctx_tokens_sent")
                     .and_then(|x| x.as_u64())
                     .unwrap_or(0);
-                let flat = v
-                    .get("ctx_tokens_estimated_flat")
-                    .and_then(|x| x.as_u64())
-                    .unwrap_or(0);
-                let ratio = v
-                    .get("ctx_savings_ratio")
-                    .and_then(|x| x.as_f64())
-                    .unwrap_or(0.0);
                 println!(
-                    "\n{} pinned + {} topic matches, {} tokens sent (flat would be ~{}, {:.1}x savings)",
-                    pinned_count, topic_matches, sent, flat, ratio
+                    "\n{} pinned + {} topic matches, {} tokens injected",
+                    pinned_count, topic_matches, sent
                 );
 
                 // Exact counts if requested
-                if let (Some(exact_sent), Some(exact_flat), Some(exact_ratio)) = (
+                if let (Some(exact_sent), Some(exact_flat)) = (
                     v.get("ctx_tokens_sent_exact").and_then(|x| x.as_u64()),
                     v.get("ctx_tokens_estimated_flat_exact")
                         .and_then(|x| x.as_u64()),
-                    v.get("ctx_savings_ratio_exact").and_then(|x| x.as_f64()),
                 ) {
                     println!(
-                        "  exact (cl100k_base): {} sent, {} flat, {:.1}x savings",
-                        exact_sent, exact_flat, exact_ratio
+                        "  exact (cl100k_base): {} injected, {} full-graph",
+                        exact_sent, exact_flat
                     );
                 }
             });
@@ -6428,18 +6419,10 @@ async fn run_demo(server: &str, client: reqwest::Client) -> Result<(), Box<dyn s
                 .get("ctx_tokens_sent")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            let flat = parsed
-                .get("ctx_tokens_estimated_flat")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let ratio = parsed
-                .get("ctx_savings_ratio")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0);
 
             println!(
-                "  recall \"{}\"  →  {} matches, {} tokens sent vs {} flat ({:.1}x savings)",
-                topic, matches, sent, flat, ratio
+                "  recall \"{}\"  →  {} matches, {} tokens injected",
+                topic, matches, sent
             );
         }
     }
@@ -6459,16 +6442,12 @@ async fn run_demo(server: &str, client: reqwest::Client) -> Result<(), Box<dyn s
             .get("session_tokens_saved")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
-        let ratio = parsed
-            .get("cumulative_ratio")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-
         println!();
-        println!("Cumulative savings this session:");
+        println!("Estimated savings this session (conservative model — savings from a memory");
+        println!("tool is a counterfactual and can't be measured, so this is an estimate):");
         println!(
-            "  {} tokens sent, {} tokens saved, {:.1}x overall",
-            used, saved, ratio
+            "  {} tokens injected · ~{} tokens saved (est.), growing as the session grows",
+            used, saved
         );
     }
 
