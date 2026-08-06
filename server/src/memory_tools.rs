@@ -166,8 +166,15 @@ pub struct TokenStats {
 /// back via `record_llm_usage` (MCP) or `POST /api/stats/llm_usage`.
 /// They give us ground-truth measurements — "what the model actually
 /// consumed" — to complement the CTXone-side counters, which only
-/// know "what CTXone sent." These two views together produce the
-/// measured savings ratio you see in Lens.
+/// know "what CTXone sent."
+///
+/// NOTE: these ground-truth counters do NOT feed `tokens_saved`. Savings from
+/// a memory tool is inherently a counterfactual (the run it avoided never
+/// happened) and cannot be measured — `tokens_saved` is a deliberately
+/// conservative ESTIMATE derived from the real injected payload; see
+/// [`RECONSTRUCTION_FACTOR`]. The `llm_*` counters drive the honest,
+/// measured views (cost, cache-hit rate, and the session efficiency/burn
+/// signal), which are separate from the savings estimate.
 pub struct SessionStats {
     pub tokens_sent: AtomicU64,
     /// A bounded, HONEST savings ESTIMATE (not a measurement) — see
