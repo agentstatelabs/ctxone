@@ -20,3 +20,7 @@ bindings/python/build/
 bindings/python/dist/
 .claude/worktrees/
 ctxone.db.bak.*
+.asd-state.db
+.asd/v1/
+.asd/cache/
+.asd/index.log
