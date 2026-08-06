@@ -242,6 +242,37 @@
 		}
 	}
 
+	// ── Roll to a fresh session ───────────────────────────────────────────────
+	// When a session goes diminishing/burning, the fix is a new session seeded
+	// with what the USER said (not an agent summary). Fetch that starter and put
+	// it on the clipboard so the user can paste it into a fresh session.
+	let starterBusy = $state(false);
+	let starterCopied = $state(false);
+	let starterError: string | null = $state(null);
+
+	async function rollNewSession() {
+		if (!selected) return;
+		starterBusy = true;
+		starterError = null;
+		starterCopied = false;
+		try {
+			const r = await hubFetch(
+				`/api/sessions/${encodeURIComponent(selected.session_id)}/starter`
+			);
+			if (!r.ok) throw new Error(`starter fetch failed (${r.status})`);
+			const v = await r.json();
+			const md: string = v?.starter?.markdown ?? '';
+			if (!md) throw new Error('empty starter');
+			await navigator.clipboard.writeText(md);
+			starterCopied = true;
+			setTimeout(() => (starterCopied = false), 4000);
+		} catch (e) {
+			starterError = e instanceof Error ? e.message : 'could not build starter';
+		} finally {
+			starterBusy = false;
+		}
+	}
+
 	async function loadTurns(sessionId: string) {
 		turnsLoading = true;
 		turnsError = null;
@@ -535,11 +566,12 @@
 		commitLinkFilter = 'all';
 	});
 
-	function ratioColor(r: number): string {
-		if (r >= 5) return 'var(--success)';
-		if (r >= 2) return 'var(--success)';
-		if (r >= 1.2) return 'var(--accent)';
-		return 'var(--text-2)';
+	/** Efficiency verdict → colour. Higher burn is worse (see sessionBurn.ts). */
+	function burnColor(level: string): string {
+		if (level === 'burning') return 'var(--danger, #f87171)';
+		if (level === 'diminishing') return 'var(--warning, #fbbf24)';
+		if (level === 'productive') return 'var(--success)';
+		return 'var(--text-2)'; // unknown / too early
 	}
 
 	// Compact display (12.4K / 17.5M / 1.2B) — exact value goes in the
@@ -959,8 +991,8 @@
 							</div>
 							<div class="session-meta">
 								<span>{fmt(s.session_tokens_used)} tokens used</span>
-								<span class="ratio" style="color: {ratioColor(s.cumulative_ratio)}">
-									{s.cumulative_ratio.toFixed(1)}x
+								<span class="ratio" style="color: var(--success)" title="Estimated tokens saved (model, not measured)">
+									{fmt(s.session_tokens_saved)} saved
 								</span>
 							</div>
 						</button>
@@ -987,20 +1019,43 @@
 							<div class="stat-label">Tokens used</div>
 						</div>
 						<div class="stat">
-							<div class="stat-value" style="color: var(--success)" title={exact(selected.session_tokens_saved)}>{fmt(selected.session_tokens_saved)}</div>
-							<div class="stat-label">Tokens saved</div>
+							<div class="stat-value" style="color: var(--success)" title="Estimated, not measured — a conservative model of reconstruction cost.">{fmt(selected.session_tokens_saved)}</div>
+							<div class="stat-label">Tokens saved (est.)</div>
 						</div>
 						<div class="stat">
 							<div class="stat-value" title={exact(selected.total_graph_size_tokens)}>{fmt(selected.total_graph_size_tokens)}</div>
 							<div class="stat-label">Graph size (tokens)</div>
 						</div>
 						<div class="stat">
-							<div class="stat-value" style="color: {ratioColor(selected.cumulative_ratio)}; font-size: 2rem">
-								{selected.cumulative_ratio.toFixed(1)}x
+							<div
+								class="stat-value"
+								style="color: {burnColor(burn.level)}; font-size: 2rem"
+								title={burn.detail}
+							>
+								{burn.ratio != null ? `${burn.ratio.toFixed(1)}x` : '—'}
 							</div>
-							<div class="stat-label">Savings ratio</div>
+							<div class="stat-label">Cost/edit vs best</div>
 						</div>
 					</div>
+
+					{#if burn.level === 'burning' || burn.level === 'diminishing'}
+						<div class="burn-cta" class:burning={burn.level === 'burning'}>
+							<div class="burn-cta-text">
+								<strong>{burn.headline}</strong>
+								<span>{burn.detail}</span>
+							</div>
+							<div class="burn-cta-actions">
+								<button class="burn-btn" onclick={rollNewSession} disabled={starterBusy}>
+									{starterBusy ? 'Building…' : starterCopied ? '✓ Starter copied' : 'Roll to a new session'}
+								</button>
+								{#if starterCopied}
+									<span class="burn-hint">Paste it into a fresh session — it carries what you said, not an agent summary.</span>
+								{:else if starterError}
+									<span class="burn-hint err">{starterError}</span>
+								{/if}
+							</div>
+						</div>
+					{/if}
 
 					{#if analysis}
 						<div
@@ -1801,6 +1856,70 @@
 		letter-spacing: 0.06em;
 		color: var(--text-3);
 		margin-top: 0.25rem;
+	}
+
+	.burn-cta {
+		margin-top: 1rem;
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.75rem 1rem;
+		align-items: center;
+		justify-content: space-between;
+		padding: 0.85rem 1rem;
+		border: 1px solid var(--warning, #fbbf24);
+		border-radius: 8px;
+		background: color-mix(in srgb, var(--warning, #fbbf24) 8%, transparent);
+	}
+	.burn-cta.burning {
+		border-color: var(--danger, #f87171);
+		background: color-mix(in srgb, var(--danger, #f87171) 10%, transparent);
+	}
+	.burn-cta-text {
+		display: flex;
+		flex-direction: column;
+		gap: 0.15rem;
+		min-width: 260px;
+		flex: 1;
+	}
+	.burn-cta-text strong {
+		font-size: 0.9rem;
+	}
+	.burn-cta-text span {
+		font-size: 0.82rem;
+		color: var(--text-2);
+	}
+	.burn-cta-actions {
+		display: flex;
+		flex-direction: column;
+		gap: 0.3rem;
+		align-items: flex-end;
+	}
+	.burn-btn {
+		border: 1px solid var(--border);
+		background: var(--bg-0);
+		color: var(--text-0);
+		border-radius: 6px;
+		padding: 0.45rem 0.8rem;
+		font-size: 0.85rem;
+		font-weight: 600;
+		cursor: pointer;
+		white-space: nowrap;
+	}
+	.burn-btn:hover:not(:disabled) {
+		border-color: var(--accent);
+	}
+	.burn-btn:disabled {
+		opacity: 0.6;
+		cursor: default;
+	}
+	.burn-hint {
+		font-size: 0.75rem;
+		color: var(--text-3);
+		max-width: 260px;
+		text-align: right;
+	}
+	.burn-hint.err {
+		color: var(--danger, #f87171);
 	}
 
 	.model-info {

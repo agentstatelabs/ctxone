@@ -14,7 +14,7 @@
 	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 	import { estimateCost, formatUsd } from '$lib/pricing';
 	import Skeleton from '$lib/Skeleton.svelte';
-	import { StatTile, formatCompact, trimFloat } from '@agentstate/lens-core';
+	import { StatTile, formatCompact } from '@agentstate/lens-core';
 	import Panel from '$lib/dashboard/Panel.svelte';
 	import EmptyState from '$lib/EmptyState.svelte';
 
@@ -157,11 +157,11 @@
 			title="Total context tokens sent across every session in the hub"
 		/>
 		<StatTile
-			label="Tokens saved"
+			label="Tokens saved (est.)"
 			value={tokens ? formatCompact(tokens.session_tokens_saved) : '—'}
-			unit={tokens ? `tok · ${trimFloat(tokens.cumulative_ratio, 1)}× ratio` : undefined}
+			unit="tok · estimate"
 			accent
-			title="Total tokens CTXone kept out of prompts vs a flat context"
+			title="Estimated, not measured. Savings from a memory tool is a counterfactual — the run it avoided never happened — so this is a deliberately conservative model: a curated recall payload costs roughly a quarter of what reconstructing the same context from source would. It grows as sessions grow."
 		/>
 	</div>
 

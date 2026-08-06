@@ -26,8 +26,7 @@
 		BarChart,
 		Donut,
 		CalendarHeatmap,
-		formatCompact,
-		trimFloat
+		formatCompact
 	} from '@agentstate/lens-core';
 	import type { AreaPoint, SeriesDef, ChartDatum, HeatCell } from '@agentstate/lens-core';
 	import Panel from '$lib/dashboard/Panel.svelte';
@@ -212,6 +211,7 @@
 			session_id: '_workspace',
 			session_tokens_used: wsUsed,
 			session_tokens_saved: wsSaved,
+			session_startup_tokens: 0,
 			total_graph_size_chars: 0,
 			total_graph_size_tokens: 0,
 			cumulative_ratio: wsRatio,
@@ -225,6 +225,7 @@
 			models_used: distinctModels
 		};
 		for (const s of sessionList) {
+			agg.session_startup_tokens! += s.session_startup_tokens ?? 0;
 			agg.total_graph_size_chars += s.total_graph_size_chars ?? 0;
 			agg.total_graph_size_tokens += s.total_graph_size_tokens ?? 0;
 			agg.llm_input_tokens! += s.llm_input_tokens ?? 0;
@@ -548,13 +549,13 @@
 
 <div class="stat-row">
 	<StatTile
-		label="Tokens saved"
+		label="Tokens saved (est.)"
 		value={sessionsL.status === 'ready' ? formatCompact(wsSaved) : '—'}
-		unit={sessionsL.status === 'ready' ? `tok · ${trimFloat(wsRatio, 1)}× ratio` : undefined}
+		unit={sessionsL.status === 'ready' ? 'tok · estimate' : undefined}
 		spark={savedSeries.length > 1 ? savedSeries : undefined}
 		sparkColor="var(--lens-ok, #4ade80)"
 		accent
-		title="Tokens this workspace saved vs flat memory, with the savings ratio"
+		title="Estimated, not measured. Savings from a memory tool is a counterfactual, so this is a conservative model: a curated recall payload costs roughly a quarter of reconstructing the same context from source. Grows as sessions grow."
 	/>
 	<StatTile
 		label="Session tokens used"
@@ -597,7 +598,7 @@
 		<div class="import-grid">
 			<div class="imp"><span class="imp-n">{sessionList.length}</span><span class="imp-l">sessions</span></div>
 			<div class="imp"><span class="imp-n">{formatCompact(wsUsed)}</span><span class="imp-l">tokens used</span></div>
-			<div class="imp"><span class="imp-n">{formatCompact(wsSaved)}</span><span class="imp-l">tokens saved</span></div>
+			<div class="imp"><span class="imp-n">{formatCompact(wsSaved)}</span><span class="imp-l">tokens saved (est.)</span></div>
 			<div class="imp"><span class="imp-n">{distinctModels.length}</span><span class="imp-l">models</span></div>
 		</div>
 		<dl class="import-meta">
@@ -682,11 +683,11 @@
 	>
 		{#if sessionsL.status === 'ready'}
 			<div class="econ-strip">
-				<span class="econ-ratio">{trimFloat(wsSnapshot.cumulative_ratio, 1)}×</span>
-				<span class="econ-ratio-label">savings vs flat memory</span>
+				<span class="econ-ratio">{formatCompact(wsSaved)}</span>
+				<span class="econ-ratio-label">tokens saved (estimate)</span>
 				<span class="econ-fig">
-					graph size (flat equivalent)
-					<strong>{wsSnapshot.total_graph_size_tokens.toLocaleString()} tok</strong>
+					startup boost (first recall)
+					<strong>{formatCompact(wsSnapshot.session_startup_tokens ?? 0)} tok</strong>
 				</span>
 			</div>
 		{/if}

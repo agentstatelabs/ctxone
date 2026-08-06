@@ -32,7 +32,12 @@ export interface StatsResponse {
 
 export interface TokenStats {
 	session_tokens_used: number;
+	/** Honest, bounded savings ESTIMATE (not a measurement). See the server's
+	 *  RECONSTRUCTION_FACTOR. Always render it as an estimate. */
 	session_tokens_saved: number;
+	/** Injected tokens of the session's first recall — the startup boost that
+	 *  brought the agent up to speed. May be absent on older Hubs. */
+	session_startup_tokens?: number;
 	total_graph_size_chars: number;
 	total_graph_size_tokens: number;
 	cumulative_ratio: number;
