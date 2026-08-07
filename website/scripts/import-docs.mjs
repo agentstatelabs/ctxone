@@ -85,6 +85,13 @@ const MAPPING = [
 		order: 5,
 		title: 'Memory branch scoping',
 	},
+	{
+		src: 'AGENT_STRUCTURE.md',
+		section: 'how-it-works',
+		slug: 'agent-structure',
+		order: 6,
+		title: 'Agent structure',
+	},
 
 	// Reference
 	{
@@ -171,10 +178,17 @@ const MAPPING = [
 		title: 'Token economics',
 	},
 	{
+		src: 'COST_SAVINGS.md',
+		section: 'why-ctxone',
+		slug: 'cost-savings',
+		order: 4,
+		title: 'Cost savings',
+	},
+	{
 		src: 'USE_CASES.md',
 		section: 'why-ctxone',
 		slug: 'use-cases',
-		order: 4,
+		order: 5,
 		title: 'Use cases',
 	},
 ];
