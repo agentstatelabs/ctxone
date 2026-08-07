@@ -44,6 +44,10 @@ export default defineConfig({
 							label: 'Memory MCP design',
 							slug: 'how-it-works/memory-mcp-design',
 						},
+						{
+							label: 'Agent structure',
+							slug: 'how-it-works/agent-structure',
+						},
 					],
 				},
 				{
@@ -78,6 +82,7 @@ export default defineConfig({
 						{ label: 'Vision', slug: 'why-ctxone/vision' },
 						{ label: 'Context anxiety', slug: 'why-ctxone/context-anxiety' },
 						{ label: 'Token economics', slug: 'why-ctxone/token-economics' },
+						{ label: 'Cost savings', slug: 'why-ctxone/cost-savings' },
 						{ label: 'Use cases', slug: 'why-ctxone/use-cases' },
 					],
 				},
