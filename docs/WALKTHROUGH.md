@@ -17,7 +17,7 @@ provenance so you can trace why a decision was made.**
 
 ```bash
 # Install (macOS/Linux)
-brew install ctxone/tap/ctxone
+brew install agentstatelabs/ctxone/ctxone
 # or: curl -sSL .../install.sh | sh   |   docker run ... ghcr.io/ctxone/ctxone
 
 # Start the Hub (memory server)

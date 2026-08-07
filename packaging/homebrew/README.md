@@ -1,56 +1,36 @@
 # Homebrew tap
 
-CtxOne is distributable via Homebrew once the release workflow publishes
-a rendered `ctxone.rb` to the `ctxone/homebrew-tap` repository.
+CtxOne is distributable via Homebrew. Each release publishes a rendered
+`ctxone.rb` to the `agentstatelabs/homebrew-ctxone` tap (sourced from
+`git.internal.example/agentstategroup/homebrew-ctxone`, mirrored to GitHub).
 
 ## For users
 
 ```bash
-brew tap ctxone/tap
+brew tap agentstatelabs/ctxone
 brew install ctxone
 ```
 
 Or in one step:
 
 ```bash
-brew install ctxone/tap/ctxone
+brew install agentstatelabs/ctxone/ctxone
 ```
 
 ## For maintainers
 
-1. **Create the tap repository once:** a GitHub repo at `ctxone/homebrew-tap`
-   with the structure:
+The tap is published by `scripts/release.sh`, not by a CI workflow. There is
+no `HOMEBREW_TAP_TOKEN` secret and no `homebrew-tap` GitHub Action — those
+were removed. `scripts/release.sh` is the single tap publisher.
 
-   ```
-   homebrew-tap/
-   └── Formula/
-       └── ctxone.rb
-   ```
+Prereqs and the full flow live in [`RELEASE.md`](../../RELEASE.md). In short,
+the release script:
 
-2. **Create a PAT** with repo write access for `ctxone/homebrew-tap` and
-   save it as the `HOMEBREW_TAP_TOKEN` secret on the main repo.
+1. Builds `ctxone-hub` and `ctx` for the four macOS / Linux targets and
+   uploads the tarballs to the GitHub release.
+2. Patches `Formula/ctxone.rb` in the sibling `../homebrew-ctxone` clone —
+   the version field plus all four URL + sha256 pairs — then commits and
+   pushes to GitLab. The GitLab → GitHub push mirror replicates within
+   seconds so `brew` sees the new formula.
 
-3. **Enable the `homebrew-tap` workflow** — it runs on every tag push,
-   reads the freshly-published GitHub release, computes sha256 sums for
-   each macOS / Linux tarball, renders `ctxone.rb.template` with those
-   values, and commits it to the tap repo.
-
-## Template substitutions
-
-`ctxone.rb.template` uses placeholders the workflow replaces with real
-values:
-
-| Placeholder | Example |
-|---|---|
-| `{{VERSION}}` | `0.60.0` |
-| `{{URL_DARWIN_ARM64}}` | `https://github.com/ctxone/ctxone/releases/download/v0.60.0/ctxone-v0.60.0-aarch64-apple-darwin.tar.gz` |
-| `{{SHA_DARWIN_ARM64}}` | `abc123...` |
-| `{{URL_DARWIN_X86_64}}` | (matching macOS Intel URL) |
-| `{{SHA_DARWIN_X86_64}}` | (sha256) |
-| `{{URL_LINUX_X86_64}}` | (Linux x86_64 URL) |
-| `{{SHA_LINUX_X86_64}}` | (sha256) |
-| `{{URL_LINUX_ARM64}}` | (Linux arm64 URL) |
-| `{{SHA_LINUX_ARM64}}` | (sha256) |
-
-The template does NOT include Windows — Homebrew is macOS and Linux only.
-Windows users should use `install.ps1`.
+Homebrew covers macOS and Linux only. Windows users should use `install.ps1`.

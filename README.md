@@ -62,7 +62,7 @@ token savings in 5 minutes.
 **macOS (Homebrew):**
 
 ```bash
-brew install ctxone/tap/ctxone
+brew install agentstatelabs/ctxone/ctxone
 ```
 
 **macOS / Linux** (one-liner):

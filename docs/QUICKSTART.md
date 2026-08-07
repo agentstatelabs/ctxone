@@ -7,7 +7,7 @@ From nothing to seeing live token savings in about five minutes.
 **macOS (Homebrew — recommended):**
 
 ```bash
-brew install ctxone/tap/ctxone
+brew install agentstatelabs/ctxone/ctxone
 ```
 
 **macOS / Linux** (one-liner):
