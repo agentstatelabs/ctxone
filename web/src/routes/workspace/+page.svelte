@@ -29,7 +29,7 @@
 		formatCompact
 	} from '@agentstate/lens-core';
 	import type { AreaPoint, SeriesDef, ChartDatum, HeatCell } from '@agentstate/lens-core';
-	import { estimateCost, formatUsd } from '$lib/pricing';
+	import { estimateCost, formatUsd, resolvePricing } from '$lib/pricing';
 	import Panel from '$lib/dashboard/Panel.svelte';
 	import QuickCapture from '$lib/dashboard/QuickCapture.svelte';
 	import LlmStats from '$lib/dashboard/LlmStats.svelte';
@@ -480,6 +480,8 @@
 		tokensPerCall: number;
 		cost: number | null;
 		costPerMTok: number | null;
+		/** null = unpriced, 'family' = best-effort estimate, 'exact' = real rate. */
+		priceSource: 'exact' | 'family' | null;
 	}
 	const modelEfficiency = $derived.by((): ModelEfficiencyRow[] => {
 		return Object.entries(byModel)
@@ -499,10 +501,38 @@
 					calls: u.call_count,
 					tokensPerCall: u.call_count > 0 ? Math.round(total / u.call_count) : 0,
 					cost,
-					costPerMTok: cost !== null && total > 0 ? (cost / total) * 1_000_000 : null
+					costPerMTok: cost !== null && total > 0 ? (cost / total) * 1_000_000 : null,
+					priceSource: resolvePricing(model)?.source ?? null
 				};
 			})
-			.sort((a, b) => b.total - a.total);
+			// Sort by total COST descending (what actually hits the bill), priced
+			// rows first; unpriced fall to the bottom, ranked by token volume.
+			.sort((a, b) => {
+				if (a.cost === null && b.cost === null) return b.total - a.total;
+				if (a.cost === null) return 1;
+				if (b.cost === null) return -1;
+				return b.cost - a.cost;
+			});
+	});
+
+	/**
+	 * The "cheaper per token, dearer overall" takeaway (#1). Fires only when the
+	 * model with the LOWEST per-token rate actually cost MORE in total than the
+	 * model with the highest per-token rate — the counterintuitive case a sticker
+	 * price hides. Returns null when there's nothing surprising to say.
+	 */
+	const efficiencyInsight = $derived.by(() => {
+		const priced = modelEfficiency.filter(
+			(r) => r.cost !== null && r.costPerMTok !== null && r.total > 0
+		);
+		if (priced.length < 2) return null;
+		const cheapestRate = priced.reduce((a, b) => (b.costPerMTok! < a.costPerMTok! ? b : a));
+		const dearestRate = priced.reduce((a, b) => (b.costPerMTok! > a.costPerMTok! ? b : a));
+		if (cheapestRate.model === dearestRate.model) return null;
+		// The inversion: the cheaper-per-token model cost more overall.
+		if (cheapestRate.cost! <= dearestRate.cost!) return null;
+		const mult = dearestRate.total > 0 ? cheapestRate.total / dearestRate.total : 0;
+		return { cheapestRate, dearestRate, mult };
 	});
 
 	// Plan health: task-status distribution across active plans.
@@ -778,10 +808,21 @@
 			{#if modelEfficiency.length > 0}
 				<div class="econ-eff">
 					<h4>Model efficiency</h4>
-					<p class="eff-note">
-						True per-model split. Cost per 1M tokens exposes "cheaper but chattier" —
-						a low sticker price can still cost more if the model burns more tokens.
-					</p>
+					{#if efficiencyInsight}
+						<p class="eff-takeaway">
+							<strong>{efficiencyInsight.cheapestRate.model}</strong> is your cheapest per token
+							({formatUsd(efficiencyInsight.cheapestRate.costPerMTok!)}/1M) but cost
+							<strong>more overall</strong> ({formatUsd(efficiencyInsight.cheapestRate.cost!)})
+							than {efficiencyInsight.dearestRate.model}
+							({formatUsd(efficiencyInsight.dearestRate.cost!)}){#if efficiencyInsight.mult >= 1.1}{' '}—
+							it burned {efficiencyInsight.mult.toFixed(1)}× the tokens{/if}.
+						</p>
+					{:else}
+						<p class="eff-note">
+							True per-model split. Cost per 1M tokens exposes "cheaper but chattier" —
+							a low sticker price can still cost more if the model burns more tokens.
+						</p>
+					{/if}
 					<div class="eff-scroll">
 						<table class="eff">
 							<thead>
@@ -796,8 +837,15 @@
 							</thead>
 							<tbody>
 								{#each modelEfficiency as r (r.model)}
-									<tr>
-										<td class="model">{r.model}</td>
+									<tr class:cheapest-rate={efficiencyInsight?.cheapestRate.model === r.model}>
+										<td class="model">
+											{r.model}
+											{#if r.priceSource === 'family'}
+												<span class="est-badge" title="Family estimate — no exact price for this model"
+													>est</span
+												>
+											{/if}
+										</td>
 										<td class="num">{formatCompact(r.total)}</td>
 										<td class="num">{formatCompact(r.calls)}</td>
 										<td class="num">{formatCompact(r.tokensPerCall)}</td>
@@ -811,7 +859,8 @@
 						</table>
 					</div>
 					<p class="eff-note muted">
-						“—” = model not in the price table; token counts are exact regardless.
+						Sorted by total cost. <span class="est-badge">est</span> = family-estimated price
+						(no exact rate yet); “—” = unpriced. Token counts are exact regardless.
 					</p>
 				</div>
 			{/if}
@@ -1306,6 +1355,37 @@
 		margin: 0 0 var(--lens-space-2);
 		font-size: var(--lens-font-size-xs);
 		color: var(--lens-muted);
+	}
+
+	.eff-takeaway {
+		margin: 0 0 var(--lens-space-3);
+		padding: var(--lens-space-2) var(--lens-space-3);
+		font-size: var(--lens-font-size-xs);
+		line-height: 1.5;
+		color: var(--lens-fg, #e6e6e6);
+		background: color-mix(in srgb, var(--lens-warn, #ebcb8b) 12%, transparent);
+		border-left: 3px solid var(--lens-warn, #ebcb8b);
+		border-radius: var(--lens-radius-sm, 4px);
+	}
+
+	.eff-takeaway strong {
+		color: var(--lens-fg, #fff);
+	}
+
+	.est-badge {
+		display: inline-block;
+		margin-left: 0.35em;
+		padding: 0 0.35em;
+		font-size: 0.85em;
+		font-weight: 600;
+		color: var(--lens-warn, #ebcb8b);
+		background: color-mix(in srgb, var(--lens-warn, #ebcb8b) 15%, transparent);
+		border-radius: var(--lens-radius-sm, 3px);
+		vertical-align: baseline;
+	}
+
+	table.eff tr.cheapest-rate {
+		background: color-mix(in srgb, var(--lens-warn, #ebcb8b) 8%, transparent);
 	}
 
 	.eff-note.muted {
