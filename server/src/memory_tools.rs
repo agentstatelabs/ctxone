@@ -5323,15 +5323,30 @@ mod tests {
     fn registry_aggregate_picks_most_common_model() {
         let registry = SessionRegistry::new();
         // Two sessions on opus, one on sonnet — opus should win.
-        registry
-            .get_or_create("a")
-            .record_llm_usage(1, 1, 0, 0, Some("claude-opus-4-7".into()), None);
-        registry
-            .get_or_create("b")
-            .record_llm_usage(1, 1, 0, 0, Some("claude-opus-4-7".into()), None);
-        registry
-            .get_or_create("c")
-            .record_llm_usage(1, 1, 0, 0, Some("claude-sonnet-4-6".into()), None);
+        registry.get_or_create("a").record_llm_usage(
+            1,
+            1,
+            0,
+            0,
+            Some("claude-opus-4-7".into()),
+            None,
+        );
+        registry.get_or_create("b").record_llm_usage(
+            1,
+            1,
+            0,
+            0,
+            Some("claude-opus-4-7".into()),
+            None,
+        );
+        registry.get_or_create("c").record_llm_usage(
+            1,
+            1,
+            0,
+            0,
+            Some("claude-sonnet-4-6".into()),
+            None,
+        );
 
         let agg = registry.aggregate();
         // Without a model the cost panel can't price the aggregate's ratio;
@@ -5369,9 +5384,14 @@ mod tests {
         registry
             .get_or_create("b")
             .record_llm_usage(200, 20, 0, 0, Some("gpt-5.2".into()), None);
-        registry
-            .get_or_create("b")
-            .record_llm_usage(1, 1, 0, 0, Some("claude-opus-4-8".into()), None);
+        registry.get_or_create("b").record_llm_usage(
+            1,
+            1,
+            0,
+            0,
+            Some("claude-opus-4-8".into()),
+            None,
+        );
 
         let by = registry.aggregate().llm_by_model;
         assert_eq!(by.get("gpt-5.2").unwrap().input_tokens, 300);
