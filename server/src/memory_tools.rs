@@ -540,6 +540,15 @@ impl SessionStats {
         self.by_model.read().map(|g| g.clone()).unwrap_or_default()
     }
 
+    /// Replace the per-model breakdown wholesale. Used by the backfill that
+    /// recomputes `by_model` from the stored per-turn snapshots — a REPLACE
+    /// (not an add) so re-running it is idempotent and never double-counts.
+    pub fn set_by_model(&self, map: BTreeMap<String, ModelUsage>) {
+        if let Ok(mut w) = self.by_model.write() {
+            *w = map;
+        }
+    }
+
     /// Read the last-observed model, if any.
     pub fn last_model(&self) -> Option<String> {
         self.last_model.read().ok().and_then(|g| g.clone())

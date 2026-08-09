@@ -279,8 +279,14 @@
 		{ key: 'used', label: 'Tokens used', color: 'var(--lens-accent, #6ea8ff)' },
 		{ key: 'saved', label: 'Tokens saved', color: 'var(--lens-ok, #4ade80)' }
 	];
+	// The panel earns its place on EITHER recall traffic (used/saved) OR LLM
+	// usage — otherwise a workspace whose sessions were only token-ingested
+	// (recall counters 0, but real per-model LLM data) would hide the model
+	// efficiency + consumption views entirely.
 	const hasEconTraffic = $derived(
-		sessionList.some((s) => s.session_tokens_used + s.session_tokens_saved > 0)
+		sessionList.some(
+			(s) => s.session_tokens_used + s.session_tokens_saved > 0 || (s.llm_call_count ?? 0) > 0
+		)
 	);
 	function shortId(t: number | string): string {
 		const s = String(t);
