@@ -122,32 +122,37 @@ describe('LlmConsumptionPanel', () => {
 		expect(savings).toMatch(/%/);
 	});
 
-	it('shows "cost not tracked" for unknown models', () => {
+	it('still shows token savings for an unpriced model (no pricing needed)', () => {
 		const { getByTestId, queryByTestId } = render(LlmConsumptionPanel, {
 			snapshot: snap({
 				llm_input_tokens: 100,
 				llm_output_tokens: 50,
 				llm_call_count: 1,
-				last_model: 'some-obscure-model-v3'
+				last_model: 'some-obscure-model-v3',
+				cumulative_ratio: 4.0
 			})
 		});
 
-		expect(getByTestId('cost-missing').textContent).toContain('Cost not tracked');
-		expect(getByTestId('cost-missing').textContent).toContain('some-obscure-model-v3');
-		// No cost row rendered when model is unknown
+		// Headline savings is token-based → 4× → 75%, shown despite no pricing.
+		const savings = getByTestId('measured-savings').textContent!;
+		expect(savings).toContain('75%');
+		// No dollar figure for an unpriced model, but no scary "cost not tracked".
 		expect(queryByTestId('cost-estimated')).toBeNull();
+		expect(queryByTestId('cost-missing')).toBeNull();
 	});
 
-	it('shows "cost not tracked" when no model metadata is present at all', () => {
-		const { getByTestId } = render(LlmConsumptionPanel, {
+	it('shows no savings row when there is neither a ratio nor pricing', () => {
+		const { queryByTestId } = render(LlmConsumptionPanel, {
 			snapshot: snap({
 				llm_input_tokens: 100,
 				llm_output_tokens: 50,
 				llm_call_count: 1
-				// no last_model
+				// no last_model, no ratio
 			})
 		});
 
-		expect(getByTestId('cost-missing').textContent).toContain('unknown');
+		// Nothing to claim → the row is absent rather than a misleading 0%.
+		expect(queryByTestId('measured-savings')).toBeNull();
+		expect(queryByTestId('cost-estimated')).toBeNull();
 	});
 });

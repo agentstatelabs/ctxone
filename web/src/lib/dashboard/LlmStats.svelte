@@ -58,19 +58,14 @@
 		snapshot.cumulative_ratio > 0 ? snapshot.cumulative_ratio : (snapshot.fallback_ratio ?? 0)
 	);
 
+	/** Headline savings %, derived straight from the TOKEN ratio — no pricing,
+	 * so it shows for every model. */
+	const savingsPct = $derived(formatSavingsPercent(effectiveRatio));
+
+	/** Dollar figures are optional extras, shown only for priced models; they
+	 * never gate the headline token savings. */
 	const estimatedCost = $derived(estimateCost(lastModel, tokenBreakdown));
 	const withoutCost = $derived(estimateWithoutCtxone(lastModel, tokenBreakdown, effectiveRatio));
-
-	/** Measured savings ratio: estimated-without ÷ estimated-with. */
-	const measuredSavings = $derived.by(() => {
-		if (estimatedCost === null || withoutCost === null) return null;
-		if (estimatedCost <= 0) return null;
-		return withoutCost / estimatedCost;
-	});
-
-	/** Same measurement shown as a percentage reduction, e.g. "75%". */
-	const savingsPct = $derived(formatSavingsPercent(measuredSavings));
-
 	const pricingTracked = $derived(pricingFor(lastModel) !== null);
 </script>
 
@@ -125,6 +120,15 @@
 		</dl>
 
 		<div class="cost" data-testid="cost-block">
+			{#if savingsPct !== null && effectiveRatio > 0}
+				<div class="row">
+					<dt>{ratioEstimated ? 'Estimated savings' : 'Measured savings'}</dt>
+					<dd class="ratio" data-testid="measured-savings">
+						{ratioEstimated ? '≈' : ''}{savingsPct}
+						<span class="muted">fewer tokens</span>
+					</dd>
+				</div>
+			{/if}
 			{#if pricingTracked && estimatedCost !== null}
 				<div class="row">
 					<dt>Estimated cost</dt>
@@ -139,17 +143,6 @@
 						</dd>
 					</div>
 				{/if}
-				{#if savingsPct !== null && effectiveRatio > 0}
-					<div class="row">
-						<dt>{ratioEstimated ? 'Estimated savings' : 'Measured savings'}</dt>
-						<dd class="ratio" data-testid="measured-savings">{ratioEstimated ? '≈' : ''}{savingsPct}</dd>
-					</div>
-				{/if}
-			{:else}
-				<p class="llm-empty" data-testid="cost-missing">
-					Cost not tracked for model=<code>{lastModel ?? 'unknown'}</code>. Add pricing in
-					<code>web/src/lib/pricing.ts</code>.
-				</p>
 			{/if}
 		</div>
 	{/if}
