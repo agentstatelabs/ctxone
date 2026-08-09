@@ -224,6 +224,12 @@ pub struct SessionStats {
     /// to be redone once we do.
     extra_tokens: RwLock<BTreeMap<String, u64>>,
 
+    /// Per-model LLM usage: which models this session used and how much on each.
+    /// Accumulated per `record_llm_usage` call (each carries its own model), so
+    /// a multi-model session keeps a real split instead of collapsing to
+    /// `last_model`. Persisted as JSON, same as `extra_tokens`.
+    by_model: RwLock<BTreeMap<String, ModelUsage>>,
+
     /// A lightweight, in-memory ring buffer of the most recent recalls on this
     /// session (t-004): the topic, which memory paths were injected, and the
     /// token/savings numbers. This is the "prove what the agent was told"
@@ -266,6 +272,49 @@ pub fn savings_estimate_tokens(injected_tokens: u64) -> u64 {
     ((RECONSTRUCTION_FACTOR - 1.0) * injected_tokens as f64) as u64
 }
 
+/// One model's share of a session's LLM usage.
+///
+/// The four `llm_*` session counters answer "what did this session spend";
+/// this answers "on which model". A session that switches models (a Codex run
+/// hopping between gpt-5.x variants, or Fable → Opus) accumulates a separate
+/// entry per model, so Lens can compute real model efficiency — tokens per
+/// model, and cost per model where the model is priced — instead of bucketing a
+/// whole session onto its `last_model`. Serializes as JSON both on the snapshot
+/// and in the persistence column, same pattern as `extra_tokens`.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct ModelUsage {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    #[serde(default)]
+    pub cache_create_tokens: u64,
+    #[serde(default)]
+    pub call_count: u64,
+}
+
+impl ModelUsage {
+    /// Fold another turn's usage into this model's running totals.
+    fn add(&mut self, input: u64, output: u64, cache_read: u64, cache_create: u64) {
+        self.input_tokens += input;
+        self.output_tokens += output;
+        self.cache_read_tokens += cache_read;
+        self.cache_create_tokens += cache_create;
+        self.call_count += 1;
+    }
+
+    /// Fold an entire other breakdown in (used when aggregating sessions).
+    fn merge(&mut self, other: &ModelUsage) {
+        self.input_tokens += other.input_tokens;
+        self.output_tokens += other.output_tokens;
+        self.cache_read_tokens += other.cache_read_tokens;
+        self.cache_create_tokens += other.cache_create_tokens;
+        self.call_count += other.call_count;
+    }
+}
+
 impl Default for SessionStats {
     fn default() -> Self {
         Self::new()
@@ -290,6 +339,7 @@ impl SessionStats {
             last_provider: RwLock::new(None),
             active_repo: RwLock::new(None),
             extra_tokens: RwLock::new(BTreeMap::new()),
+            by_model: RwLock::new(BTreeMap::new()),
             recall_log: RwLock::new(std::collections::VecDeque::new()),
         }
     }
@@ -306,6 +356,7 @@ impl SessionStats {
         last_model: Option<String>,
         last_provider: Option<String>,
         extra_tokens: BTreeMap<String, u64>,
+        by_model: BTreeMap<String, ModelUsage>,
     ) -> Self {
         // The persisted `tokens_saved` may be a legacy whole-graph figure
         // (the old, inflated model). Ignore it and re-derive from the restored
@@ -327,6 +378,7 @@ impl SessionStats {
             last_provider: RwLock::new(last_provider),
             active_repo: RwLock::new(None),
             extra_tokens: RwLock::new(extra_tokens),
+            by_model: RwLock::new(by_model),
             recall_log: RwLock::new(std::collections::VecDeque::new()),
         }
     }
@@ -459,6 +511,18 @@ impl SessionStats {
             .fetch_add(cache_create_tokens, Ordering::Relaxed);
         self.llm_call_count.fetch_add(1, Ordering::Relaxed);
 
+        if let Some(ref m) = model {
+            // Attribute this turn's tokens to its own model, so a multi-model
+            // session keeps a real per-model split for efficiency views.
+            if let Ok(mut w) = self.by_model.write() {
+                w.entry(m.clone()).or_default().add(
+                    input_tokens,
+                    output_tokens,
+                    cache_read_tokens,
+                    cache_create_tokens,
+                );
+            }
+        }
         if let Some(m) = model
             && let Ok(mut w) = self.last_model.write()
         {
@@ -469,6 +533,11 @@ impl SessionStats {
         {
             *w = Some(p);
         }
+    }
+
+    /// Read the accumulated per-model usage breakdown.
+    pub fn by_model(&self) -> BTreeMap<String, ModelUsage> {
+        self.by_model.read().map(|g| g.clone()).unwrap_or_default()
     }
 
     /// Read the last-observed model, if any.
@@ -563,6 +632,13 @@ pub struct SessionSnapshot {
     /// aggregate estimate is available. Never persisted — purely a view field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_ratio: Option<f64>,
+
+    /// Per-model LLM usage split (t-023). Which models the session used and how
+    /// much on each, so Lens can show real model efficiency instead of bucketing
+    /// the whole session onto `last_model`. Summed across sessions in the
+    /// aggregate. Empty for sessions ingested before per-model capture.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub llm_by_model: BTreeMap<String, ModelUsage>,
 }
 
 impl SessionSnapshot {
@@ -599,6 +675,7 @@ impl SessionSnapshot {
             updated_at: None,
             models_used: Vec::new(),
             fallback_ratio: None,
+            llm_by_model: stats.by_model(),
         }
     }
 }
@@ -775,10 +852,16 @@ impl SessionRegistry {
         // be priced or shown. We pick the most-common model (ties broken by
         // name for determinism) and let the frontend label the figure "≈".
         let mut model_counts: BTreeMap<String, u64> = BTreeMap::new();
+        // True per-model token totals, summed across every session — the real
+        // input to model-efficiency views (not last_model bucketing).
+        let mut by_model: BTreeMap<String, ModelUsage> = BTreeMap::new();
 
         for (_, s) in w.iter() {
             for (k, v) in s.extra_tokens() {
                 *extra.entry(k).or_insert(0) += v;
+            }
+            for (m, u) in s.by_model() {
+                by_model.entry(m).or_default().merge(&u);
             }
             total_used += s.tokens_sent.load(Ordering::Relaxed);
             total_saved += s.tokens_saved.load(Ordering::Relaxed);
@@ -836,6 +919,7 @@ impl SessionRegistry {
             updated_at: None,
             models_used: Vec::new(),
             fallback_ratio: None,
+            llm_by_model: by_model,
         }
     }
 
@@ -887,11 +971,13 @@ impl SessionRegistry {
         // when the column is already there, which is the steady state — hence
         // the discarded result rather than a warning on every startup.
         let _ = conn.execute_batch("ALTER TABLE ctxone_sessions ADD COLUMN extra_tokens TEXT;");
+        // Per-model usage split (t-023). No-op once the column exists.
+        let _ = conn.execute_batch("ALTER TABLE ctxone_sessions ADD COLUMN by_model TEXT;");
         let mut stmt = match conn.prepare(
             "SELECT session_id, tokens_sent, tokens_saved,
                     llm_input_tokens, llm_output_tokens, llm_cache_read_tokens,
                     llm_cache_create_tokens, llm_call_count, last_model, last_provider,
-                    extra_tokens
+                    extra_tokens, by_model
              FROM ctxone_sessions",
         ) {
             Ok(s) => s,
@@ -913,6 +999,7 @@ impl SessionRegistry {
                 row.get::<_, Option<String>>(8)?,
                 row.get::<_, Option<String>>(9)?,
                 row.get::<_, Option<String>>(10)?,
+                row.get::<_, Option<String>>(11)?,
             ))
         });
         let rows = match rows {
@@ -938,6 +1025,7 @@ impl SessionRegistry {
                     model,
                     provider,
                     extra_json,
+                    by_model_json,
                 ) = row;
                 // Unparseable extras degrade to empty rather than dropping the
                 // whole session — the four core counters still matter.
@@ -945,8 +1033,14 @@ impl SessionRegistry {
                     .as_deref()
                     .and_then(|s| serde_json::from_str::<BTreeMap<String, u64>>(s).ok())
                     .unwrap_or_default();
+                // Same degrade-to-empty policy for the per-model split.
+                let by_model = by_model_json
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str::<BTreeMap<String, ModelUsage>>(s).ok())
+                    .unwrap_or_default();
                 let stats = Arc::new(SessionStats::with_values(
                     sent, saved, llm_in, llm_out, llm_cr, llm_cc, calls, model, provider, extra,
+                    by_model,
                 ));
                 lru.put(id, stats);
                 loaded += 1;
@@ -988,6 +1082,7 @@ impl SessionRegistry {
         );
         // See the load path: no-op once the column exists.
         let _ = conn.execute_batch("ALTER TABLE ctxone_sessions ADD COLUMN extra_tokens TEXT;");
+        let _ = conn.execute_batch("ALTER TABLE ctxone_sessions ADD COLUMN by_model TEXT;");
         let mut written = 0usize;
         for s in &snaps {
             let ok = conn.execute(
@@ -995,8 +1090,8 @@ impl SessionRegistry {
                     (session_id, tokens_sent, tokens_saved,
                      llm_input_tokens, llm_output_tokens, llm_cache_read_tokens,
                      llm_cache_create_tokens, llm_call_count, last_model, last_provider,
-                     extra_tokens, updated_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                     extra_tokens, by_model, updated_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,strftime('%Y-%m-%dT%H:%M:%SZ','now'))
                  ON CONFLICT(session_id) DO UPDATE SET
                     tokens_sent             = excluded.tokens_sent,
                     tokens_saved            = excluded.tokens_saved,
@@ -1008,6 +1103,7 @@ impl SessionRegistry {
                     last_model              = excluded.last_model,
                     last_provider           = excluded.last_provider,
                     extra_tokens            = excluded.extra_tokens,
+                    by_model                = excluded.by_model,
                     updated_at              = excluded.updated_at",
                 sqlite_params![
                     s.session_id,
@@ -1024,6 +1120,10 @@ impl SessionRegistry {
                     // overwhelmingly common Anthropic-shaped session.
                     (!s.extra_tokens.is_empty())
                         .then(|| serde_json::to_string(&s.extra_tokens).ok())
+                        .flatten(),
+                    // Same sparse policy for the per-model split.
+                    (!s.llm_by_model.is_empty())
+                        .then(|| serde_json::to_string(&s.llm_by_model).ok())
                         .flatten(),
                 ],
             );
@@ -4419,6 +4519,7 @@ mod tests {
             None,
             None,
             BTreeMap::new(),
+            BTreeMap::new(),
         );
         // Re-derived from the injected total instead of trusted.
         assert_eq!(
@@ -5236,6 +5337,46 @@ mod tests {
         // Without a model the cost panel can't price the aggregate's ratio;
         // the roll-up must surface a representative (most-common) one.
         assert_eq!(agg.last_model.as_deref(), Some("claude-opus-4-7"));
+    }
+
+    #[test]
+    fn record_llm_usage_splits_tokens_by_model() {
+        let s = SessionStats::new();
+        // Two turns on opus, one on sonnet — each attributed to its own model.
+        s.record_llm_usage(100, 10, 0, 0, Some("claude-opus-4-8".into()), None);
+        s.record_llm_usage(200, 20, 5, 0, Some("claude-opus-4-8".into()), None);
+        s.record_llm_usage(50, 5, 0, 0, Some("claude-sonnet-4-6".into()), None);
+
+        let by = s.by_model();
+        let opus = by.get("claude-opus-4-8").expect("opus entry");
+        assert_eq!(opus.input_tokens, 300);
+        assert_eq!(opus.output_tokens, 30);
+        assert_eq!(opus.cache_read_tokens, 5);
+        assert_eq!(opus.call_count, 2);
+        let sonnet = by.get("claude-sonnet-4-6").expect("sonnet entry");
+        assert_eq!(sonnet.input_tokens, 50);
+        assert_eq!(sonnet.call_count, 1);
+        // Session totals still add up across models.
+        assert_eq!(s.llm_input_tokens.load(Ordering::Relaxed), 350);
+    }
+
+    #[test]
+    fn aggregate_sums_by_model_across_sessions() {
+        let registry = SessionRegistry::new();
+        registry
+            .get_or_create("a")
+            .record_llm_usage(100, 10, 0, 0, Some("gpt-5.2".into()), None);
+        registry
+            .get_or_create("b")
+            .record_llm_usage(200, 20, 0, 0, Some("gpt-5.2".into()), None);
+        registry
+            .get_or_create("b")
+            .record_llm_usage(1, 1, 0, 0, Some("claude-opus-4-8".into()), None);
+
+        let by = registry.aggregate().llm_by_model;
+        assert_eq!(by.get("gpt-5.2").unwrap().input_tokens, 300);
+        assert_eq!(by.get("gpt-5.2").unwrap().call_count, 2);
+        assert_eq!(by.get("claude-opus-4-8").unwrap().call_count, 1);
     }
 
     #[test]

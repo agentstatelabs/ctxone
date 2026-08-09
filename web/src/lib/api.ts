@@ -76,6 +76,20 @@ export interface SessionSnapshot extends TokenStats {
 	 * reporting agent's own field names (Codex `reasoning_output_tokens`,
 	 * Gemini `thoughts`/`tool`). Absent for Anthropic-shaped sessions. */
 	extra_tokens?: Record<string, number>;
+	/** True per-model usage split (t-023): which models the session used and how
+	 * much on each, so efficiency views don't have to bucket a whole session
+	 * onto `last_model`. Summed across sessions on the aggregate snapshot.
+	 * Absent for sessions ingested before per-model capture. */
+	llm_by_model?: Record<string, ModelUsage>;
+}
+
+/** One model's share of a session's LLM usage. Mirrors the server's ModelUsage. */
+export interface ModelUsage {
+	input_tokens: number;
+	output_tokens: number;
+	cache_read_tokens: number;
+	cache_create_tokens: number;
+	call_count: number;
 }
 
 export interface CommitEntry {

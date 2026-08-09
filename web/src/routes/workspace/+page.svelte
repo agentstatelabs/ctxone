@@ -29,6 +29,7 @@
 		formatCompact
 	} from '@agentstate/lens-core';
 	import type { AreaPoint, SeriesDef, ChartDatum, HeatCell } from '@agentstate/lens-core';
+	import { estimateCost, formatUsd } from '$lib/pricing';
 	import Panel from '$lib/dashboard/Panel.svelte';
 	import QuickCapture from '$lib/dashboard/QuickCapture.svelte';
 	import LlmStats from '$lib/dashboard/LlmStats.svelte';
@@ -222,7 +223,8 @@
 			llm_call_count: 0,
 			last_model: null,
 			last_provider: null,
-			models_used: distinctModels
+			models_used: distinctModels,
+			llm_by_model: {}
 		};
 		for (const s of sessionList) {
 			agg.session_startup_tokens! += s.session_startup_tokens ?? 0;
@@ -236,6 +238,22 @@
 			if (s.last_model) {
 				agg.last_model = s.last_model;
 				agg.last_provider = s.last_provider ?? agg.last_provider;
+			}
+			// Sum the true per-model split so efficiency views don't bucket a
+			// whole session onto its last model.
+			for (const [model, u] of Object.entries(s.llm_by_model ?? {})) {
+				const acc = (agg.llm_by_model![model] ??= {
+					input_tokens: 0,
+					output_tokens: 0,
+					cache_read_tokens: 0,
+					cache_create_tokens: 0,
+					call_count: 0
+				});
+				acc.input_tokens += u.input_tokens;
+				acc.output_tokens += u.output_tokens;
+				acc.cache_read_tokens += u.cache_read_tokens;
+				acc.cache_create_tokens += u.cache_create_tokens;
+				acc.call_count += u.call_count;
 			}
 		}
 		return agg;
@@ -421,19 +439,70 @@
 			: `${md}/${String(d.getFullYear()).slice(2)}`;
 	}
 
-	// Per-model LLM token totals across sessions (only when agents reported).
+	// True per-model token totals from the aggregated split (t-023). Each turn
+	// is attributed to its own model, so a session that switched models is not
+	// bucketed onto its last one. Falls back to last_model bucketing only for an
+	// older Hub that doesn't yet report `llm_by_model`.
+	const byModel = $derived(wsSnapshot.llm_by_model ?? {});
+	const hasByModel = $derived(Object.keys(byModel).length > 0);
+
 	const modelBars = $derived.by((): ChartDatum[] => {
 		const acc = new Map<string, number>();
-		for (const s of sessionList) {
-			const tok = (s.llm_input_tokens ?? 0) + (s.llm_output_tokens ?? 0);
-			if (tok <= 0) continue;
-			const label = s.last_model ?? s.last_provider ?? 'unknown';
-			acc.set(label, (acc.get(label) ?? 0) + tok);
+		if (hasByModel) {
+			for (const [label, u] of Object.entries(byModel)) {
+				const tok = u.input_tokens + u.output_tokens;
+				if (tok > 0) acc.set(label, tok);
+			}
+		} else {
+			for (const s of sessionList) {
+				const tok = (s.llm_input_tokens ?? 0) + (s.llm_output_tokens ?? 0);
+				if (tok <= 0) continue;
+				const label = s.last_model ?? s.last_provider ?? 'unknown';
+				acc.set(label, (acc.get(label) ?? 0) + tok);
+			}
 		}
 		return [...acc.entries()]
 			.map(([label, value]) => ({ label, value }))
 			.sort((a, b) => b.value - a.value)
 			.slice(0, 6);
+	});
+
+	// Model efficiency: per-model tokens, calls, tokens/call, and — where the
+	// model is priced — cost and cost per 1M tokens. This is the honest way to
+	// compare "cheaper but chattier" models: a low per-token price can lose to a
+	// model that needs far fewer tokens for the same work.
+	interface ModelEfficiencyRow {
+		model: string;
+		input: number;
+		output: number;
+		total: number;
+		calls: number;
+		tokensPerCall: number;
+		cost: number | null;
+		costPerMTok: number | null;
+	}
+	const modelEfficiency = $derived.by((): ModelEfficiencyRow[] => {
+		return Object.entries(byModel)
+			.map(([model, u]) => {
+				const total = u.input_tokens + u.output_tokens + u.cache_read_tokens + u.cache_create_tokens;
+				const cost = estimateCost(model, {
+					input: u.input_tokens,
+					output: u.output_tokens,
+					cache_read: u.cache_read_tokens,
+					cache_create: u.cache_create_tokens
+				});
+				return {
+					model,
+					input: u.input_tokens,
+					output: u.output_tokens,
+					total,
+					calls: u.call_count,
+					tokensPerCall: u.call_count > 0 ? Math.round(total / u.call_count) : 0,
+					cost,
+					costPerMTok: cost !== null && total > 0 ? (cost / total) * 1_000_000 : null
+				};
+			})
+			.sort((a, b) => b.total - a.total);
 	});
 
 	// Plan health: task-status distribution across active plans.
@@ -704,6 +773,46 @@
 				<div class="econ-models">
 					<h4>LLM tokens by model</h4>
 					<BarChart data={modelBars} orientation="horizontal" labelWidth={150} />
+				</div>
+			{/if}
+			{#if modelEfficiency.length > 0}
+				<div class="econ-eff">
+					<h4>Model efficiency</h4>
+					<p class="eff-note">
+						True per-model split. Cost per 1M tokens exposes "cheaper but chattier" —
+						a low sticker price can still cost more if the model burns more tokens.
+					</p>
+					<div class="eff-scroll">
+						<table class="eff">
+							<thead>
+								<tr>
+									<th>Model</th>
+									<th class="num">Tokens</th>
+									<th class="num">Calls</th>
+									<th class="num">Tok/call</th>
+									<th class="num">Cost</th>
+									<th class="num">$/1M tok</th>
+								</tr>
+							</thead>
+							<tbody>
+								{#each modelEfficiency as r (r.model)}
+									<tr>
+										<td class="model">{r.model}</td>
+										<td class="num">{formatCompact(r.total)}</td>
+										<td class="num">{formatCompact(r.calls)}</td>
+										<td class="num">{formatCompact(r.tokensPerCall)}</td>
+										<td class="num">{r.cost !== null ? formatUsd(r.cost) : '—'}</td>
+										<td class="num">
+											{r.costPerMTok !== null ? formatUsd(r.costPerMTok) : '—'}
+										</td>
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					</div>
+					<p class="eff-note muted">
+						“—” = model not in the price table; token counts are exact regardless.
+					</p>
 				</div>
 			{/if}
 			{#if sessionsL.status === 'ready'}
@@ -1178,6 +1287,7 @@
 	}
 
 	.econ-models h4,
+	.econ-eff h4,
 	.plan-bars h4 {
 		margin: 0 0 var(--lens-space-2);
 		font-size: var(--lens-font-size-2xs);
@@ -1185,6 +1295,54 @@
 		text-transform: uppercase;
 		letter-spacing: var(--lens-tracking-caps);
 		color: var(--lens-muted);
+	}
+
+	/* ── Model efficiency table ────────────────────────────────────────── */
+	.econ-eff {
+		grid-column: 1 / -1;
+	}
+
+	.eff-note {
+		margin: 0 0 var(--lens-space-2);
+		font-size: var(--lens-font-size-xs);
+		color: var(--lens-muted);
+	}
+
+	.eff-note.muted {
+		margin-top: var(--lens-space-2);
+		opacity: 0.75;
+	}
+
+	.eff-scroll {
+		overflow-x: auto;
+	}
+
+	table.eff {
+		width: 100%;
+		border-collapse: collapse;
+		font-size: var(--lens-font-size-xs);
+	}
+
+	table.eff th,
+	table.eff td {
+		padding: var(--lens-space-1) var(--lens-space-3);
+		border-bottom: 1px solid var(--lens-border-subtle, var(--lens-border));
+		white-space: nowrap;
+	}
+
+	table.eff th {
+		text-align: left;
+		color: var(--lens-muted);
+		font-weight: 600;
+	}
+
+	table.eff td.model {
+		font-family: var(--lens-font-mono, monospace);
+	}
+
+	table.eff .num {
+		text-align: right;
+		font-variant-numeric: tabular-nums;
 	}
 
 	/* ── Plan health ───────────────────────────────────────────────────── */
