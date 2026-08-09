@@ -1,6 +1,12 @@
 <script lang="ts">
 	import type { SessionSnapshot } from './api';
-	import { estimateCost, estimateWithoutCtxone, formatUsd, pricingFor } from './pricing';
+	import {
+		estimateCost,
+		estimateWithoutCtxone,
+		formatSavingsPercent,
+		formatUsd,
+		pricingFor
+	} from './pricing';
 
 	interface Props {
 		/** The session snapshot driving the panel. Usually the current
@@ -34,17 +40,26 @@
 		cache_create: llmCacheCreate
 	});
 
-	let estimatedCost = $derived(estimateCost(lastModel, tokenBreakdown));
-	let withoutCost = $derived(
-		estimateWithoutCtxone(lastModel, tokenBreakdown, snapshot.cumulative_ratio)
+	/** This session's own recall ratio, or the Hub's estimated fallback (the
+	 * workspace aggregate) when the session has usage but no recall counters of
+	 * its own. `ratioEstimated` drives the "≈" label. */
+	let ratioEstimated = $derived(snapshot.cumulative_ratio <= 0 && (snapshot.fallback_ratio ?? 0) > 0);
+	let effectiveRatio = $derived(
+		snapshot.cumulative_ratio > 0 ? snapshot.cumulative_ratio : (snapshot.fallback_ratio ?? 0)
 	);
 
-	/** Measured savings: estimated-without ÷ estimated-with. */
+	let estimatedCost = $derived(estimateCost(lastModel, tokenBreakdown));
+	let withoutCost = $derived(estimateWithoutCtxone(lastModel, tokenBreakdown, effectiveRatio));
+
+	/** Measured savings ratio: estimated-without ÷ estimated-with. */
 	let measuredSavings = $derived.by(() => {
 		if (estimatedCost === null || withoutCost === null) return null;
 		if (estimatedCost <= 0) return null;
 		return withoutCost / estimatedCost;
 	});
+
+	/** Same measurement shown as a percentage reduction, e.g. "75%". */
+	let savingsPct = $derived(formatSavingsPercent(measuredSavings));
 
 	let pricingTracked = $derived(pricingFor(lastModel) !== null);
 </script>
@@ -109,7 +124,7 @@
 					<dt>Estimated cost</dt>
 					<dd data-testid="cost-estimated">{formatUsd(estimatedCost)}</dd>
 				</div>
-				{#if withoutCost !== null && snapshot.cumulative_ratio > 0}
+				{#if withoutCost !== null && effectiveRatio > 0}
 					<div class="row">
 						<dt>Without CTXone</dt>
 						<dd data-testid="cost-without">
@@ -118,11 +133,11 @@
 						</dd>
 					</div>
 				{/if}
-				{#if measuredSavings !== null && snapshot.cumulative_ratio > 0}
+				{#if savingsPct !== null && effectiveRatio > 0}
 					<div class="row big">
-						<dt>Measured savings</dt>
+						<dt>{ratioEstimated ? 'Estimated savings' : 'Measured savings'}</dt>
 						<dd class="ratio" data-testid="measured-savings">
-							{measuredSavings.toFixed(1)}×
+							{ratioEstimated ? '≈' : ''}{savingsPct}
 						</dd>
 					</div>
 				{/if}

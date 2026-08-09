@@ -41,6 +41,11 @@ export interface TokenStats {
 	total_graph_size_chars: number;
 	total_graph_size_tokens: number;
 	cumulative_ratio: number;
+	/** Read-time reconciliation ratio, set by the Hub only when this session
+	 *  has LLM usage but `cumulative_ratio` is 0 (its recall savings accrued on
+	 *  another session id). It's the workspace-aggregate ratio, to be shown as a
+	 *  clearly-estimated "≈" figure. Absent when the session has its own ratio. */
+	fallback_ratio?: number | null;
 	/** LLM-observed fields, populated by agent usage reports. All
 	 * optional for back-compat with older Hubs that don't serialize
 	 * them, though current Hubs always include them (zeros until an

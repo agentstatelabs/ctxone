@@ -95,9 +95,31 @@ describe('LlmConsumptionPanel', () => {
 
 		const without = getByTestId('cost-without').textContent!;
 		expect(without).toMatch(/\$/);
-		// Measured savings = without / with, something > 1 when ratio > 1
+		// Measured savings shown as a percentage reduction. Only input is
+		// scaled by the ratio, so the blended % is below the raw (1 − 1/5 = 80%)
+		// but still a positive percent.
 		const savings = getByTestId('measured-savings').textContent!;
-		expect(savings).toMatch(/×/);
+		expect(savings).toMatch(/%/);
+		expect(savings).not.toMatch(/×/);
+	});
+
+	it('uses the estimated fallback ratio when the session has no recall counters', () => {
+		const { getByTestId } = render(LlmConsumptionPanel, {
+			snapshot: snap({
+				llm_input_tokens: 1_000_000,
+				llm_output_tokens: 1_000_000,
+				llm_call_count: 1,
+				last_model: 'claude-sonnet-4.5',
+				cumulative_ratio: 0, // no own recall savings…
+				fallback_ratio: 5.0 // …but the workspace aggregate lends one
+			})
+		});
+
+		const dt = getByTestId('measured-savings').closest('.row')!.querySelector('dt')!;
+		expect(dt.textContent).toContain('Estimated savings');
+		const savings = getByTestId('measured-savings').textContent!;
+		expect(savings).toContain('≈');
+		expect(savings).toMatch(/%/);
 	});
 
 	it('shows "cost not tracked" for unknown models', () => {

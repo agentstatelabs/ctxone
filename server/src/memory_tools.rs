@@ -552,6 +552,17 @@ pub struct SessionSnapshot {
     /// Empty until the session is (re-)ingested with this field.
     #[serde(default)]
     pub models_used: Vec<String>,
+
+    /// Read-time reconciliation ratio for sessions that have LLM usage but no
+    /// recall counters of their own (the common case: usage is batch-ingested
+    /// from transcripts, while recall savings accrue live on a different
+    /// session id). When `cumulative_ratio` is 0 but the session did spend
+    /// tokens, the HTTP layer fills this with the workspace-aggregate ratio so
+    /// the UI can show an honest, clearly-estimated "≈" savings figure instead
+    /// of hiding the row. `None` when the session has its own ratio, or when no
+    /// aggregate estimate is available. Never persisted — purely a view field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_ratio: Option<f64>,
 }
 
 impl SessionSnapshot {
@@ -587,6 +598,7 @@ impl SessionSnapshot {
             started_at: None,
             updated_at: None,
             models_used: Vec::new(),
+            fallback_ratio: None,
         }
     }
 }
@@ -757,6 +769,12 @@ impl SessionRegistry {
         let mut llm_cache_create = 0u64;
         let mut llm_calls = 0u64;
         let mut extra: BTreeMap<String, u64> = BTreeMap::new();
+        // Tally models so the roll-up can name a representative one. The
+        // aggregate has no single model of its own, but the cost panel gates on
+        // a priced `last_model`; without one the honest cumulative_ratio can't
+        // be priced or shown. We pick the most-common model (ties broken by
+        // name for determinism) and let the frontend label the figure "≈".
+        let mut model_counts: BTreeMap<String, u64> = BTreeMap::new();
 
         for (_, s) in w.iter() {
             for (k, v) in s.extra_tokens() {
@@ -771,7 +789,17 @@ impl SessionRegistry {
             llm_cache_read += s.llm_cache_read_tokens.load(Ordering::Relaxed);
             llm_cache_create += s.llm_cache_create_tokens.load(Ordering::Relaxed);
             llm_calls += s.llm_call_count.load(Ordering::Relaxed);
+            if let Some(m) = s.last_model() {
+                *model_counts.entry(m).or_insert(0) += 1;
+            }
         }
+
+        // Most-common model wins; `max_by_key` over an ordered map makes ties
+        // resolve to the last (lexicographically greatest) key, deterministically.
+        let representative_model = model_counts
+            .into_iter()
+            .max_by_key(|(_, c)| *c)
+            .map(|(m, _)| m);
 
         let ratio = if total_used > 0 {
             (total_used + total_saved) as f64 / total_used as f64
@@ -792,9 +820,11 @@ impl SessionRegistry {
             llm_cache_read_tokens: llm_cache_read,
             llm_cache_create_tokens: llm_cache_create,
             llm_call_count: llm_calls,
-            // The aggregate doesn't track per-session model/provider
-            // metadata — it's a roll-up, not a single session's view.
-            last_model: None,
+            // The aggregate is a roll-up, not a single session — but the cost
+            // panel needs a priced model to render the savings figure, so we
+            // surface the most-common model across sessions (frontend labels
+            // it "≈"). Provider stays None; the panel keys pricing off the model.
+            last_model: representative_model,
             last_provider: None,
             // Summed across sessions like the other counters, so a mixed-agent
             // machine still reports its true reasoning/thoughts totals.
@@ -805,6 +835,7 @@ impl SessionRegistry {
             started_at: None,
             updated_at: None,
             models_used: Vec::new(),
+            fallback_ratio: None,
         }
     }
 
@@ -5185,6 +5216,34 @@ mod tests {
             agg.session_tokens_saved,
             savings_estimate_tokens(100) + savings_estimate_tokens(200)
         );
+    }
+
+    #[test]
+    fn registry_aggregate_picks_most_common_model() {
+        let registry = SessionRegistry::new();
+        // Two sessions on opus, one on sonnet — opus should win.
+        registry
+            .get_or_create("a")
+            .record_llm_usage(1, 1, 0, 0, Some("claude-opus-4-7".into()), None);
+        registry
+            .get_or_create("b")
+            .record_llm_usage(1, 1, 0, 0, Some("claude-opus-4-7".into()), None);
+        registry
+            .get_or_create("c")
+            .record_llm_usage(1, 1, 0, 0, Some("claude-sonnet-4-6".into()), None);
+
+        let agg = registry.aggregate();
+        // Without a model the cost panel can't price the aggregate's ratio;
+        // the roll-up must surface a representative (most-common) one.
+        assert_eq!(agg.last_model.as_deref(), Some("claude-opus-4-7"));
+    }
+
+    #[test]
+    fn registry_aggregate_model_none_when_no_usage() {
+        let registry = SessionRegistry::new();
+        registry.get_or_create("a").record(400, 4000);
+        // Recall activity but no model reported → no representative model.
+        assert_eq!(registry.aggregate().last_model, None);
     }
 
     #[test]

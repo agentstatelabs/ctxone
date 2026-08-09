@@ -1002,6 +1002,7 @@ async fn session_token_stats(
                 snap.updated_at = meta.updated_at;
                 snap.models_used = meta.models_used;
             }
+            apply_fallback_ratio(&mut snap, s.sessions.aggregate().cumulative_ratio);
             Ok(Json(snap))
         }
         None => Err((
@@ -1100,6 +1101,13 @@ async fn list_sessions(State(s): State<HubState>, ns: NamespaceId) -> impl IntoR
             snap.updated_at = meta.updated_at;
             snap.models_used = meta.models_used;
         }
+    }
+    // Lend the workspace-aggregate ratio to sessions that spent tokens but have
+    // no recall counters of their own (see `apply_fallback_ratio`). Computed
+    // once — it's a roll-up over the same session set.
+    let aggregate_ratio = s.sessions.aggregate().cumulative_ratio;
+    for snap in &mut snaps {
+        apply_fallback_ratio(snap, aggregate_ratio);
     }
     Json(snaps)
 }
@@ -4310,6 +4318,19 @@ fn sum_workspace_tokens(
     t
 }
 
+/// Read-time savings reconciliation. A session whose recall savings accrued on
+/// another session id (usage batch-ingested from a transcript, recall done live
+/// under a different session) has `cumulative_ratio == 0` yet real LLM spend.
+/// Rather than hide its savings, we lend it the workspace-aggregate ratio as a
+/// clearly-estimated fallback so the UI can render "≈75% saved". Only applied
+/// when the session actually spent tokens and the aggregate shows real savings
+/// (> 1×); a session with its own ratio, or no usage, is left untouched.
+fn apply_fallback_ratio(snap: &mut SessionSnapshot, aggregate_ratio: f64) {
+    if snap.cumulative_ratio <= 0.0 && snap.llm_call_count > 0 && aggregate_ratio > 1.0 {
+        snap.fallback_ratio = Some(aggregate_ratio);
+    }
+}
+
 /// The most-common `last_model` among a workspace's sessions — a representative
 /// model the Hub Home uses for a rough cost estimate. Workspaces often mix
 /// models, so the frontend labels the figure "≈". Same matching semantics as
@@ -5632,6 +5653,45 @@ async fn detect_project_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fallback_ratio_lent_only_to_spending_sessions_without_own_ratio() {
+        // Session with usage but no recall ratio → gets the aggregate estimate.
+        let mut ingested = SessionSnapshot {
+            cumulative_ratio: 0.0,
+            llm_call_count: 5,
+            ..Default::default()
+        };
+        apply_fallback_ratio(&mut ingested, 4.0);
+        assert_eq!(ingested.fallback_ratio, Some(4.0));
+
+        // Session with its own ratio → left untouched (no double-labelling).
+        let mut own = SessionSnapshot {
+            cumulative_ratio: 3.2,
+            llm_call_count: 5,
+            ..Default::default()
+        };
+        apply_fallback_ratio(&mut own, 4.0);
+        assert_eq!(own.fallback_ratio, None);
+
+        // Session with no usage → nothing to estimate savings against.
+        let mut idle = SessionSnapshot {
+            cumulative_ratio: 0.0,
+            llm_call_count: 0,
+            ..Default::default()
+        };
+        apply_fallback_ratio(&mut idle, 4.0);
+        assert_eq!(idle.fallback_ratio, None);
+
+        // Aggregate shows no real savings (≤ 1×) → don't fabricate a figure.
+        let mut no_agg = SessionSnapshot {
+            cumulative_ratio: 0.0,
+            llm_call_count: 5,
+            ..Default::default()
+        };
+        apply_fallback_ratio(&mut no_agg, 1.0);
+        assert_eq!(no_agg.fallback_ratio, None);
+    }
 
     #[test]
     fn sum_workspace_tokens_named_and_default_complement() {

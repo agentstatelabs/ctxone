@@ -8,7 +8,13 @@
 <script lang="ts">
 	import type { TokenStats } from '$lib/api';
 	import { formatCompact } from '@agentstate/lens-core';
-	import { estimateCost, estimateWithoutCtxone, formatUsd, pricingFor } from '$lib/pricing';
+	import {
+		estimateCost,
+		estimateWithoutCtxone,
+		formatSavingsPercent,
+		formatUsd,
+		pricingFor
+	} from '$lib/pricing';
 
 	// Compact (12.4K / 4.3M / 10.5B / 1.2T) so a row cannot blow out the
 	// panel width — Codex sessions report input counts in the billions, which
@@ -43,17 +49,27 @@
 		cache_create: llmCacheCreate
 	});
 
-	const estimatedCost = $derived(estimateCost(lastModel, tokenBreakdown));
-	const withoutCost = $derived(
-		estimateWithoutCtxone(lastModel, tokenBreakdown, snapshot.cumulative_ratio)
+	/** Session's own recall ratio, or the Hub's estimated fallback (workspace
+	 * aggregate) when it has usage but no recall counters. Drives the "≈" label. */
+	const ratioEstimated = $derived(
+		snapshot.cumulative_ratio <= 0 && (snapshot.fallback_ratio ?? 0) > 0
+	);
+	const effectiveRatio = $derived(
+		snapshot.cumulative_ratio > 0 ? snapshot.cumulative_ratio : (snapshot.fallback_ratio ?? 0)
 	);
 
-	/** Measured savings: estimated-without ÷ estimated-with. */
+	const estimatedCost = $derived(estimateCost(lastModel, tokenBreakdown));
+	const withoutCost = $derived(estimateWithoutCtxone(lastModel, tokenBreakdown, effectiveRatio));
+
+	/** Measured savings ratio: estimated-without ÷ estimated-with. */
 	const measuredSavings = $derived.by(() => {
 		if (estimatedCost === null || withoutCost === null) return null;
 		if (estimatedCost <= 0) return null;
 		return withoutCost / estimatedCost;
 	});
+
+	/** Same measurement shown as a percentage reduction, e.g. "75%". */
+	const savingsPct = $derived(formatSavingsPercent(measuredSavings));
 
 	const pricingTracked = $derived(pricingFor(lastModel) !== null);
 </script>
@@ -114,7 +130,7 @@
 					<dt>Estimated cost</dt>
 					<dd data-testid="cost-estimated">{formatUsd(estimatedCost)}</dd>
 				</div>
-				{#if withoutCost !== null && snapshot.cumulative_ratio > 0}
+				{#if withoutCost !== null && effectiveRatio > 0}
 					<div class="row">
 						<dt>Without CTXone</dt>
 						<dd data-testid="cost-without">
@@ -123,10 +139,10 @@
 						</dd>
 					</div>
 				{/if}
-				{#if measuredSavings !== null && snapshot.cumulative_ratio > 0}
+				{#if savingsPct !== null && effectiveRatio > 0}
 					<div class="row">
-						<dt>Measured savings</dt>
-						<dd class="ratio" data-testid="measured-savings">{measuredSavings.toFixed(1)}×</dd>
+						<dt>{ratioEstimated ? 'Estimated savings' : 'Measured savings'}</dt>
+						<dd class="ratio" data-testid="measured-savings">{ratioEstimated ? '≈' : ''}{savingsPct}</dd>
 					</div>
 				{/if}
 			{:else}

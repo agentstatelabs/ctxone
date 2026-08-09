@@ -245,6 +245,31 @@ export function estimateCostForPlan(sessions: PlanCostSession[]): PlanCostSummar
 }
 
 /**
+ * Convert a savings *ratio* (counterfactual ÷ actual, e.g. 4× means CTXone
+ * spend was a quarter of the flat-context spend) into a percentage reduction:
+ * the share of the counterfactual bill that CTXone avoided.
+ *
+ *   ratio 4 → 75%, ratio 5 → 80%, ratio 2 → 50%, ratio 1 → 0%.
+ *
+ * We show a percent rather than an "Nx" multiplier because a truthful 4× reads
+ * as unimpressive next to competitors' inflated "1000×" claims, while the same
+ * number stated as "75% saved" is both honest and clearer. Formula:
+ * `1 − 1/ratio`. Returns null when nothing was measured or there was no saving
+ * (ratio ≤ 1), so callers can hide the row instead of showing "0%".
+ */
+export function savingsPercent(ratio: number | null | undefined): number | null {
+	if (ratio == null || !Number.isFinite(ratio) || ratio <= 1) return null;
+	return (1 - 1 / ratio) * 100;
+}
+
+/** `savingsPercent` rendered as a whole-percent string (e.g. "75%"), or null. */
+export function formatSavingsPercent(ratio: number | null | undefined): string | null {
+	const p = savingsPercent(ratio);
+	if (p === null) return null;
+	return `${Math.round(p)}%`;
+}
+
+/**
  * Format a USD amount for display. Uses 4 decimals below $0.1,
  * 3 decimals below $1, 2 decimals otherwise. Keeps small numbers
  * useful to read while keeping big numbers tidy.

@@ -4,8 +4,10 @@ import {
 	estimateCost,
 	estimateCostForPlan,
 	estimateWithoutCtxone,
+	formatSavingsPercent,
 	formatUsd,
 	pricingFor,
+	savingsPercent,
 	type PlanCostSession
 } from './pricing';
 
@@ -161,6 +163,29 @@ describe('formatUsd', () => {
 	it('shows 2 decimals above $1', () => {
 		expect(formatUsd(1.2345)).toBe('$1.23');
 		expect(formatUsd(100)).toBe('$100.00');
+	});
+});
+
+describe('savingsPercent', () => {
+	it('converts a ratio to a percentage reduction', () => {
+		expect(savingsPercent(4)).toBeCloseTo(75, 5); // 1 − 1/4
+		expect(savingsPercent(5)).toBeCloseTo(80, 5); // 1 − 1/5
+		expect(savingsPercent(2)).toBeCloseTo(50, 5);
+	});
+
+	it('returns null when there is no measurable saving', () => {
+		expect(savingsPercent(1)).toBeNull(); // exactly break-even
+		expect(savingsPercent(0)).toBeNull();
+		expect(savingsPercent(0.5)).toBeNull(); // ratio < 1 → spent more
+		expect(savingsPercent(null)).toBeNull();
+		expect(savingsPercent(undefined)).toBeNull();
+		expect(savingsPercent(Infinity)).toBeNull();
+	});
+
+	it('formats as a whole-percent string, or null', () => {
+		expect(formatSavingsPercent(4)).toBe('75%');
+		expect(formatSavingsPercent(5)).toBe('80%');
+		expect(formatSavingsPercent(1)).toBeNull();
 	});
 });
 

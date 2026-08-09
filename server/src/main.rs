@@ -958,10 +958,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         //      and the `CtxOneServer`, then flush it periodically and on exit
         //      using the same machinery the HTTP hub uses.
         // Skipped entirely for memory/postgres — no db_path to persist to.
-        let mcp_session_id: String = std::env::var("CTX_SESSION")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
+        // Attribution key for live recall + LLM-usage counters. We prefer an
+        // explicit CTX_SESSION, then the host agent's own session id when it
+        // exposes one (CLAUDE_SESSION_ID today; add siblings as other agents
+        // gain the convention). Matching the agent's session id is what makes a
+        // live session's recall savings land on the SAME row that transcript
+        // ingest later records LLM usage against — without it, recall pools on a
+        // generic "default"/agent_id row and per-session savings never appear.
+        let mcp_session_id: String = ["CTX_SESSION", "CLAUDE_SESSION_ID"]
+            .iter()
+            .find_map(|k| {
+                std::env::var(k)
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            })
             .unwrap_or_else(|| {
                 if namespace != agentstategraph_core::Namespace::DEFAULT {
                     namespace.clone()
