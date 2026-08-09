@@ -522,23 +522,32 @@
 	});
 
 	/**
-	 * The "cheaper per token, dearer overall" takeaway (#1). Fires only when the
-	 * model with the LOWEST per-token rate actually cost MORE in total than the
-	 * model with the highest per-token rate — the counterintuitive case a sticker
-	 * price hides. Returns null when there's nothing surprising to say.
+	 * The efficiency takeaway (#1). Leads with the model that costs the MOST
+	 * overall — where the money actually goes — and fires only when that biggest
+	 * spend comes from a model that's CHEAPER per token than some other model
+	 * which nonetheless cost less. That's the sticker-price trap: the priciest
+	 * bill isn't the priciest model, it's the chattiest. We contrast against the
+	 * pricier-per-token model with the sharpest rate gap. Returns null when the
+	 * biggest spender is also (at least) the most expensive per token — nothing
+	 * counterintuitive to flag.
 	 */
 	const efficiencyInsight = $derived.by(() => {
 		const priced = modelEfficiency.filter(
 			(r) => r.cost !== null && r.costPerMTok !== null && r.total > 0
 		);
 		if (priced.length < 2) return null;
-		const cheapestRate = priced.reduce((a, b) => (b.costPerMTok! < a.costPerMTok! ? b : a));
-		const dearestRate = priced.reduce((a, b) => (b.costPerMTok! > a.costPerMTok! ? b : a));
-		if (cheapestRate.model === dearestRate.model) return null;
-		// The inversion: the cheaper-per-token model cost more overall.
-		if (cheapestRate.cost! <= dearestRate.cost!) return null;
-		const mult = dearestRate.total > 0 ? cheapestRate.total / dearestRate.total : 0;
-		return { cheapestRate, dearestRate, mult };
+		// Biggest spend = top of the cost-sorted list.
+		const biggest = priced.reduce((a, b) => (b.cost! > a.cost! ? b : a));
+		// The pricier-per-token model with the largest rate gap over `biggest`.
+		const pricier = priced
+			.filter((r) => r.model !== biggest.model && r.costPerMTok! > biggest.costPerMTok!)
+			.reduce<(typeof priced)[number] | null>(
+				(best, r) => (best === null || r.costPerMTok! > best.costPerMTok! ? r : best),
+				null
+			);
+		if (!pricier) return null;
+		const mult = pricier.total > 0 ? biggest.total / pricier.total : 0;
+		return { biggest, pricier, mult };
 	});
 
 	// Plan health: task-status distribution across active plans.
@@ -816,12 +825,12 @@
 					<h4>Model efficiency</h4>
 					{#if efficiencyInsight}
 						<p class="eff-takeaway">
-							<strong>{efficiencyInsight.cheapestRate.model}</strong> is your cheapest per token
-							({formatUsd(efficiencyInsight.cheapestRate.costPerMTok!)}/1M) but cost
-							<strong>more overall</strong> ({formatUsd(efficiencyInsight.cheapestRate.cost!)})
-							than {efficiencyInsight.dearestRate.model}
-							({formatUsd(efficiencyInsight.dearestRate.cost!)}){#if efficiencyInsight.mult >= 1.1}{' '}—
-							it burned {efficiencyInsight.mult.toFixed(1)}× the tokens{/if}.
+							<strong>{efficiencyInsight.biggest.model}</strong> is your biggest spend
+							(<strong>{formatUsd(efficiencyInsight.biggest.cost!)}</strong>) — yet it's
+							<em>cheaper</em> per token ({formatUsd(efficiencyInsight.biggest.costPerMTok!)}/1M)
+							than {efficiencyInsight.pricier.model}
+							({formatUsd(efficiencyInsight.pricier.costPerMTok!)}/1M){#if efficiencyInsight.mult >= 1.1}{' '}—
+							it just ran {efficiencyInsight.mult.toFixed(1)}× the tokens{/if}.
 						</p>
 					{:else}
 						<p class="eff-note">
@@ -843,7 +852,7 @@
 							</thead>
 							<tbody>
 								{#each modelEfficiency as r (r.model)}
-									<tr class:cheapest-rate={efficiencyInsight?.cheapestRate.model === r.model}>
+									<tr class:biggest-spend={efficiencyInsight?.biggest.model === r.model}>
 										<td class="model">
 											{r.model}
 											{#if r.priceSource === 'family'}
@@ -1390,7 +1399,7 @@
 		vertical-align: baseline;
 	}
 
-	table.eff tr.cheapest-rate {
+	table.eff tr.biggest-spend {
 		background: color-mix(in srgb, var(--lens-warn, #ebcb8b) 8%, transparent);
 	}
 
