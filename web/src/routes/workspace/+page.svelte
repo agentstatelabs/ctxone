@@ -499,6 +499,21 @@
 					cache_read: u.cache_read_tokens,
 					cache_create: u.cache_create_tokens
 				});
+				// Effective per-token rate EXCLUDES cache reads from both the cost
+				// and the token count. Cache reads are re-reads of already-seen
+				// context (huge volume, ~10% of input price) — leaving them IN the
+				// denominator washes the rate down to a cache-blended figure; leaving
+				// their COST in but the tokens out inflates it wildly for cache-heavy
+				// sessions. Excluding both gives the honest cost of NEW work per
+				// token (input + output + first-time cache writes). `cost` stays
+				// all-in so the Cost column still reflects true total spend.
+				const rateTokens = u.input_tokens + u.output_tokens + u.cache_create_tokens;
+				const rateCost = estimateCost(model, {
+					input: u.input_tokens,
+					output: u.output_tokens,
+					cache_read: 0,
+					cache_create: u.cache_create_tokens
+				});
 				return {
 					model,
 					input: u.input_tokens,
@@ -507,7 +522,8 @@
 					calls: u.call_count,
 					tokensPerCall: u.call_count > 0 ? Math.round(total / u.call_count) : 0,
 					cost,
-					costPerMTok: cost !== null && total > 0 ? (cost / total) * 1_000_000 : null,
+					costPerMTok:
+						rateCost !== null && rateTokens > 0 ? (rateCost / rateTokens) * 1_000_000 : null,
 					priceSource: resolvePricing(model)?.source ?? null
 				};
 			})
@@ -614,6 +630,7 @@
 		return l.data !== null && !isEmpty(l.data) ? 'ready' : 'empty';
 	}
 	const econStatus = $derived(statusOf(sessionsL, () => !hasEconTraffic));
+	const effStatus = $derived(statusOf(sessionsL, () => modelEfficiency.length === 0));
 	const planStatus = $derived(statusOf(plansL, () => activePlans.length === 0));
 	// Follows the activity load: the heatmap is the panel's primary content
 	// now, so an activity failure must surface rather than being masked by a
@@ -820,68 +837,79 @@
 					<BarChart data={modelBars} orientation="horizontal" labelWidth={150} />
 				</div>
 			{/if}
-			{#if modelEfficiency.length > 0}
-				<div class="econ-eff">
-					<h4>Model efficiency</h4>
-					{#if efficiencyInsight}
-						<p class="eff-takeaway">
-							<strong>{efficiencyInsight.biggest.model}</strong> is your biggest spend
-							(<strong>{formatUsd(efficiencyInsight.biggest.cost!)}</strong>) — yet it's
-							<em>cheaper</em> per token ({formatUsd(efficiencyInsight.biggest.costPerMTok!)}/1M)
-							than {efficiencyInsight.pricier.model}
-							({formatUsd(efficiencyInsight.pricier.costPerMTok!)}/1M){#if efficiencyInsight.mult >= 1.1}{' '}—
-							it just ran {efficiencyInsight.mult.toFixed(1)}× the tokens{/if}.
-						</p>
-					{:else}
-						<p class="eff-note">
-							True per-model split. Cost per 1M tokens exposes "cheaper but chattier" —
-							a low sticker price can still cost more if the model burns more tokens.
-						</p>
-					{/if}
-					<div class="eff-scroll">
-						<table class="eff">
-							<thead>
-								<tr>
-									<th>Model</th>
-									<th class="num">Tokens</th>
-									<th class="num">Calls</th>
-									<th class="num">Tok/call</th>
-									<th class="num">Cost</th>
-									<th class="num">$/1M tok</th>
-								</tr>
-							</thead>
-							<tbody>
-								{#each modelEfficiency as r (r.model)}
-									<tr class:biggest-spend={efficiencyInsight?.biggest.model === r.model}>
-										<td class="model">
-											{r.model}
-											{#if r.priceSource === 'family'}
-												<span class="est-badge" title="Family estimate — no exact price for this model"
-													>est</span
-												>
-											{/if}
-										</td>
-										<td class="num">{formatCompact(r.total)}</td>
-										<td class="num">{formatCompact(r.calls)}</td>
-										<td class="num">{formatCompact(r.tokensPerCall)}</td>
-										<td class="num">{r.cost !== null ? formatUsd(r.cost) : '—'}</td>
-										<td class="num">
-											{r.costPerMTok !== null ? formatUsd(r.costPerMTok) : '—'}
-										</td>
-									</tr>
-								{/each}
-							</tbody>
-						</table>
-					</div>
-					<p class="eff-note muted">
-						Sorted by total cost. <span class="est-badge">est</span> = family-estimated price
-						(no exact rate yet); “—” = unpriced. Token counts are exact regardless.
-					</p>
-				</div>
-			{/if}
 			{#if sessionsL.status === 'ready'}
 				<LlmStats snapshot={wsSnapshot} />
 			{/if}
+		</div>
+	</Panel>
+
+	<!-- ── 2b · Model efficiency ────────────────────────────────────────── -->
+	<Panel
+		title="Model efficiency"
+		scope="all branches"
+		links={[{ href: '/sessions', label: 'Sessions' }]}
+		status={effStatus}
+		errorText={sessionsL.error}
+		emptyTitle="No per-model data yet"
+		emptyText="Import a session (ctx ingest-session) or let new agent usage flow through the hub."
+	>
+		<div class="econ-eff">
+			{#if efficiencyInsight}
+				<p class="eff-takeaway">
+					<strong>{efficiencyInsight.biggest.model}</strong> is your biggest spend
+					(<strong>{formatUsd(efficiencyInsight.biggest.cost!)}</strong>) — yet it's
+					<em>cheaper</em> per token ({formatUsd(efficiencyInsight.biggest.costPerMTok!)}/1M)
+					than {efficiencyInsight.pricier.model}
+					({formatUsd(efficiencyInsight.pricier.costPerMTok!)}/1M){#if efficiencyInsight.mult >= 1.1}{' '}—
+					it just ran {efficiencyInsight.mult.toFixed(1)}× the tokens{/if}.
+				</p>
+			{:else}
+				<p class="eff-note">
+					Effective cost per 1M non-cache tokens exposes "cheaper but chattier" — a low
+					sticker price can still cost more if the model burns more tokens.
+				</p>
+			{/if}
+			<div class="eff-scroll">
+				<table class="eff">
+					<thead>
+						<tr>
+							<th>Model</th>
+							<th class="num">Tokens</th>
+							<th class="num">Calls</th>
+							<th class="num">Tok/call</th>
+							<th class="num">Cost</th>
+							<th class="num" title="Effective cost per 1M new-work tokens (input + output + cache writes); cache reads excluded from the rate but included in Cost">$/1M</th>
+						</tr>
+					</thead>
+					<tbody>
+						{#each modelEfficiency as r (r.model)}
+							<tr class:biggest-spend={efficiencyInsight?.biggest.model === r.model}>
+								<td class="model">
+									{r.model}
+									{#if r.priceSource === 'family'}
+										<span class="est-badge" title="Family estimate — no exact price for this model"
+											>est</span
+										>
+									{/if}
+								</td>
+								<td class="num">{formatCompact(r.total)}</td>
+								<td class="num">{formatCompact(r.calls)}</td>
+								<td class="num">{formatCompact(r.tokensPerCall)}</td>
+								<td class="num">{r.cost !== null ? formatUsd(r.cost) : '—'}</td>
+								<td class="num">
+									{r.costPerMTok !== null ? formatUsd(r.costPerMTok) : '—'}
+								</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
+			<p class="eff-note muted">
+				Sorted by total cost. <strong>$/1M</strong> is the effective rate on new-work tokens
+				(input + output + cache writes); cache <em>reads</em> are excluded from the rate — they'd
+				otherwise wash it out — but are fully counted in Cost. <span class="est-badge">est</span>
+				= family-estimated price; “—” = unpriced. Token counts are exact regardless.
+			</p>
 		</div>
 	</Panel>
 
@@ -1351,7 +1379,6 @@
 	}
 
 	.econ-models h4,
-	.econ-eff h4,
 	.plan-bars h4 {
 		margin: 0 0 var(--lens-space-2);
 		font-size: var(--lens-font-size-2xs);
