@@ -29,10 +29,9 @@
 		formatCompact
 	} from '@agentstate/lens-core';
 	import type { AreaPoint, SeriesDef, ChartDatum, HeatCell } from '@agentstate/lens-core';
-	import { estimateCost, formatUsd, resolvePricing } from '$lib/pricing';
+	import { estimateCost, formatSavingsPercent, formatUsd, resolvePricing } from '$lib/pricing';
 	import Panel from '$lib/dashboard/Panel.svelte';
 	import QuickCapture from '$lib/dashboard/QuickCapture.svelte';
-	import LlmStats from '$lib/dashboard/LlmStats.svelte';
 	import BurnBoard from '$lib/dashboard/BurnBoard.svelte';
 	import RecentActivity from '$lib/dashboard/RecentActivity.svelte';
 
@@ -174,6 +173,11 @@
 	const wsUsed = $derived(sessionList.reduce((n, s) => n + s.session_tokens_used, 0));
 	const wsSaved = $derived(sessionList.reduce((n, s) => n + s.session_tokens_saved, 0));
 	const wsRatio = $derived(wsUsed > 0 ? (wsUsed + wsSaved) / wsUsed : 0);
+	// Recall savings as a percentage (token ratio), for the Recall savings panel.
+	const wsSavingsPct = $derived(formatSavingsPercent(wsRatio));
+	// Mirrors the server's RECONSTRUCTION_FACTOR — the bounded multiple behind
+	// the savings estimate. Kept in sync by hand (documented in memory_tools.rs).
+	const RECON_FACTOR = 4;
 
 	// Import stats — what has been ingested into this workspace.
 	const workspaceName = $derived(project?.display_name || namespaceStore.current);
@@ -566,6 +570,35 @@
 		return { biggest, pricier, mult };
 	});
 
+	/**
+	 * Clean LLM-usage summary, derived from the per-model split (`byModel`) —
+	 * NOT the aggregate `llm_*` counters. Those counters are additive and were
+	 * inflated by repeated historical ingests; the per-model map is a REPLACE
+	 * from the stored turns, so it's the single-count source of truth. Cost is
+	 * summed per model at each model's own rate (the efficiency Cost column),
+	 * not the whole pile priced at one representative model — the two bugs that
+	 * made "Estimated cost"/"Without CTXone" look 10× too big.
+	 */
+	const usage = $derived.by(() => {
+		let input = 0,
+			output = 0,
+			cacheRead = 0,
+			cacheCreate = 0,
+			calls = 0;
+		for (const u of Object.values(byModel)) {
+			input += u.input_tokens;
+			output += u.output_tokens;
+			cacheRead += u.cache_read_tokens;
+			cacheCreate += u.cache_create_tokens;
+			calls += u.call_count;
+		}
+		const cost = modelEfficiency.reduce((n, r) => n + (r.cost ?? 0), 0);
+		const untrackedModels = modelEfficiency.filter((r) => r.cost === null).length;
+		const cacheHit = cacheRead + input > 0 ? cacheRead / (cacheRead + input) : null;
+		return { input, output, cacheRead, cacheCreate, calls, cost, untrackedModels, cacheHit };
+	});
+	const usageStatus = $derived(statusOf(sessionsL, () => usage.calls === 0));
+
 	// Plan health: task-status distribution across active plans.
 	const taskDonut = $derived.by((): ChartDatum[] => {
 		let pendingN = 0;
@@ -802,20 +835,26 @@
 		</Panel>
 	</div>
 
-	<!-- ── 2 · Token economics ──────────────────────────────────────────── -->
+	<!-- ── 2 · Recall savings ───────────────────────────────────────────── -->
 	<Panel
-		title="Token economics"
+		title="Recall savings"
 		scope="all branches"
 		links={[{ href: '/sessions', label: 'Sessions' }]}
 		status={econStatus}
 		errorText={sessionsL.error}
-		emptyTitle="No token traffic yet"
-		emptyText="Run an agent recall or context call to start measuring savings."
+		emptyTitle="No recall traffic yet"
+		emptyText="These numbers accrue when an agent calls recall/context live through the hub. Ingested transcripts don't recall, so they don't count here."
 	>
 		{#if sessionsL.status === 'ready'}
 			<div class="econ-strip">
 				<span class="econ-ratio">{formatCompact(wsSaved)}</span>
 				<span class="econ-ratio-label">tokens saved (estimate)</span>
+				{#if wsSavingsPct}
+					<span class="econ-fig">
+						recall context
+						<strong>{wsSavingsPct} fewer tokens</strong>
+					</span>
+				{/if}
 				<span class="econ-fig">
 					startup boost (first recall)
 					<strong>{formatCompact(wsSnapshot.session_startup_tokens ?? 0)} tok</strong>
@@ -830,17 +869,48 @@
 			formatX={shortId}
 			ariaLabel="Tokens used vs saved per session"
 		/>
-		<div class="econ-side">
-			{#if modelBars.length > 0}
-				<div class="econ-models">
-					<h4>LLM tokens by model</h4>
-					<BarChart data={modelBars} orientation="horizontal" labelWidth={150} />
-				</div>
-			{/if}
-			{#if sessionsL.status === 'ready'}
-				<LlmStats snapshot={wsSnapshot} />
-			{/if}
-		</div>
+		<p class="eff-note muted">
+			A bounded estimate ({RECON_FACTOR}× the tokens recall injected — the re-reading it
+			avoided), not a measurement. Only sessions that recalled live through the hub appear.
+		</p>
+	</Panel>
+
+	<!-- ── 2b · LLM usage ───────────────────────────────────────────────── -->
+	<Panel
+		title="LLM usage"
+		scope="all branches"
+		links={[{ href: '/sessions', label: 'Sessions' }]}
+		status={usageStatus}
+		errorText={sessionsL.error}
+		emptyTitle="No LLM usage yet"
+		emptyText="Import a session (ctx ingest-session) or let agent usage flow through the hub."
+	>
+		<dl class="usage-rows">
+			<div class="u-row"><dt>Input tokens</dt><dd>{formatCompact(usage.input)}</dd></div>
+			<div class="u-row"><dt>Output tokens</dt><dd>{formatCompact(usage.output)}</dd></div>
+			<div class="u-row">
+				<dt>Cache read {#if usage.cacheHit !== null}<span class="u-muted">({(usage.cacheHit * 100).toFixed(0)}% hit)</span>{/if}</dt>
+				<dd>{formatCompact(usage.cacheRead)}</dd>
+			</div>
+			<div class="u-row"><dt>Cache create</dt><dd>{formatCompact(usage.cacheCreate)}</dd></div>
+			<div class="u-row"><dt>LLM calls</dt><dd>{formatCompact(usage.calls)}</dd></div>
+			<div class="u-row u-cost">
+				<dt>Estimated cost</dt>
+				<dd>{formatUsd(usage.cost)}</dd>
+			</div>
+		</dl>
+		<p class="eff-note muted">
+			Summed per model at each model's own rate (see Model efficiency), from the exact
+			per-turn token split.{#if usage.untrackedModels > 0}
+				{' '}{usage.untrackedModels} unpriced model{usage.untrackedModels === 1 ? '' : 's'} excluded
+				from cost.{/if}
+		</p>
+		{#if modelBars.length > 0}
+			<div class="econ-models">
+				<h4>Tokens by model</h4>
+				<BarChart data={modelBars} orientation="horizontal" labelWidth={150} />
+			</div>
+		{/if}
 	</Panel>
 
 	<!-- ── 2b · Model efficiency ────────────────────────────────────────── -->
@@ -1369,10 +1439,7 @@
 		font-weight: 600;
 	}
 
-	.econ-side {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-		gap: var(--lens-space-5);
+	.econ-models {
 		margin-top: var(--lens-space-4);
 		padding-top: var(--lens-space-4);
 		border-top: 1px solid var(--lens-border-subtle, var(--lens-border));
@@ -1386,6 +1453,51 @@
 		text-transform: uppercase;
 		letter-spacing: var(--lens-tracking-caps);
 		color: var(--lens-muted);
+	}
+
+	/* ── LLM usage rows ────────────────────────────────────────────────── */
+	.usage-rows {
+		margin: 0 0 var(--lens-space-3);
+	}
+
+	.u-row {
+		display: flex;
+		justify-content: space-between;
+		align-items: baseline;
+		padding: var(--lens-space-2) 0;
+		border-bottom: 1px solid var(--lens-border-subtle, var(--lens-border));
+	}
+
+	.u-row dt {
+		color: var(--lens-muted);
+		font-size: var(--lens-font-size-xs);
+	}
+
+	.u-row dd {
+		margin: 0;
+		font-variant-numeric: tabular-nums;
+		font-family: var(--lens-font-mono, monospace);
+	}
+
+	.u-muted {
+		color: var(--lens-muted);
+		font-size: 0.85em;
+	}
+
+	.u-row.u-cost {
+		border-bottom: none;
+		margin-top: var(--lens-space-1);
+	}
+
+	.u-row.u-cost dt {
+		color: var(--lens-fg, #e6e6e6);
+		font-weight: 600;
+	}
+
+	.u-row.u-cost dd {
+		font-size: 1.1rem;
+		font-weight: 700;
+		color: var(--lens-accent, #6ea8ff);
 	}
 
 	/* ── Model efficiency table ────────────────────────────────────────── */
