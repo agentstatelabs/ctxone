@@ -3,11 +3,22 @@
 	import { whyDidWe, type WhyResponse, type WhyBlame } from '$lib/api';
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
 	import ScopeBadge from '$lib/ScopeBadge.svelte';
+	import BrowsePane from '$lib/BrowsePane.svelte';
 
 	let question = $state('');
 	let response: WhyResponse | null = $state(null);
 	let searched = $state(false);
 	let error: string | null = $state(null);
+
+	// A trace path opens in the embedded browse pane instead of navigating away.
+	let target: string | null = $state(null);
+	let selected: string | null = $state(null);
+
+	function openInBrowser(path: string) {
+		// Reassign even when unchanged so re-clicking re-selects.
+		target = null;
+		target = path;
+	}
 
 	async function ask() {
 		const q = question.trim();
@@ -95,6 +106,8 @@
 	<p class="error">{error}</p>
 {/if}
 
+<div class="split">
+	<div class="results-col">
 {#if response}
 	{#if timeline.length === 0}
 		<p class="muted">
@@ -137,9 +150,13 @@
 						{#if ev.blame.reasoning}
 							<div class="event-reasoning">{ev.blame.reasoning}</div>
 						{/if}
-						<a class="event-path" href={`/browse?path=${encodeURIComponent(ev.tracePath)}`}>
+						<button
+							class="event-path"
+							class:selected={selected === ev.tracePath}
+							onclick={() => openInBrowser(ev.tracePath)}
+						>
 							{ev.tracePath}
-						</a>
+						</button>
 					</div>
 				</div>
 			{/each}
@@ -147,7 +164,15 @@
 	{/if}
 {:else if searched && !error}
 	<p class="muted">Tracing…</p>
+{:else}
+	<p class="muted">Trace a decision, then click a path to open it in the browser →</p>
 {/if}
+	</div>
+
+	<div class="browse-col">
+		<BrowsePane bind:target onselect={(p) => (selected = p)} />
+	</div>
+</div>
 
 <style>
 	.hint {
@@ -205,6 +230,19 @@
 	}
 	.muted {
 		color: var(--text-3);
+	}
+
+	.split {
+		display: grid;
+		grid-template-columns: minmax(260px, 420px) 1fr;
+		gap: 1.25rem;
+		align-items: start;
+	}
+
+	@media (max-width: 1000px) {
+		.split {
+			grid-template-columns: 1fr;
+		}
 	}
 
 	.timeline {
@@ -304,12 +342,21 @@
 	.event-path {
 		display: inline-block;
 		margin-top: 0.4rem;
+		padding: 0;
+		background: none;
+		border: none;
 		font-family: monospace;
 		font-size: 0.78rem;
 		color: var(--text-3);
 		text-decoration: none;
+		cursor: pointer;
 	}
 	.event-path:hover {
+		background: none;
+		color: var(--accent);
+		text-decoration: underline;
+	}
+	.event-path.selected {
 		color: var(--accent);
 		text-decoration: underline;
 	}
