@@ -1,6 +1,11 @@
 <script lang="ts">
 	import { getPlanCost, type PlanCostSessionRow } from '$lib/plansApi';
-	import { estimateCostForPlan, formatUsd, type PlanCostSummary } from '$lib/pricing';
+	import {
+		estimateCostForPlan,
+		formatSavingsPercent,
+		formatUsd,
+		type PlanCostSummary
+	} from '$lib/pricing';
 	import { formatCompact } from '@agentstate/lens-core';
 
 	interface Props {
@@ -68,10 +73,11 @@
 				<div class="hl-avoided">
 					CTXone avoided ~<strong>{formatUsd(summary.costAvoided)}</strong>
 					<span class="muted">
-						({(summary.costWithoutCtxone > 0
-							? summary.costWithoutCtxone / Math.max(summary.cost, 1e-9)
-							: 1
-						).toFixed(1)}× vs a flat context)
+						({formatSavingsPercent(
+							summary.costWithoutCtxone > 0
+								? summary.costWithoutCtxone / Math.max(summary.cost, 1e-9)
+								: 1
+						) ?? '0%'} less than a flat context)
 					</span>
 				</div>
 			{/if}

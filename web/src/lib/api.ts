@@ -41,6 +41,11 @@ export interface TokenStats {
 	total_graph_size_chars: number;
 	total_graph_size_tokens: number;
 	cumulative_ratio: number;
+	/** Read-time reconciliation ratio, set by the Hub only when this session
+	 *  has LLM usage but `cumulative_ratio` is 0 (its recall savings accrued on
+	 *  another session id). It's the workspace-aggregate ratio, to be shown as a
+	 *  clearly-estimated "≈" figure. Absent when the session has its own ratio. */
+	fallback_ratio?: number | null;
 	/** LLM-observed fields, populated by agent usage reports. All
 	 * optional for back-compat with older Hubs that don't serialize
 	 * them, though current Hubs always include them (zeros until an
@@ -71,6 +76,20 @@ export interface SessionSnapshot extends TokenStats {
 	 * reporting agent's own field names (Codex `reasoning_output_tokens`,
 	 * Gemini `thoughts`/`tool`). Absent for Anthropic-shaped sessions. */
 	extra_tokens?: Record<string, number>;
+	/** True per-model usage split (t-023): which models the session used and how
+	 * much on each, so efficiency views don't have to bucket a whole session
+	 * onto `last_model`. Summed across sessions on the aggregate snapshot.
+	 * Absent for sessions ingested before per-model capture. */
+	llm_by_model?: Record<string, ModelUsage>;
+}
+
+/** One model's share of a session's LLM usage. Mirrors the server's ModelUsage. */
+export interface ModelUsage {
+	input_tokens: number;
+	output_tokens: number;
+	cache_read_tokens: number;
+	cache_create_tokens: number;
+	call_count: number;
 }
 
 export interface CommitEntry {

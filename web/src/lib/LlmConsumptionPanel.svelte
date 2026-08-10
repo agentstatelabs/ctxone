@@ -1,6 +1,12 @@
 <script lang="ts">
 	import type { SessionSnapshot } from './api';
-	import { estimateCost, estimateWithoutCtxone, formatUsd, pricingFor } from './pricing';
+	import {
+		estimateCost,
+		estimateWithoutCtxone,
+		formatSavingsPercent,
+		formatUsd,
+		pricingFor
+	} from './pricing';
 
 	interface Props {
 		/** The session snapshot driving the panel. Usually the current
@@ -34,18 +40,23 @@
 		cache_create: llmCacheCreate
 	});
 
-	let estimatedCost = $derived(estimateCost(lastModel, tokenBreakdown));
-	let withoutCost = $derived(
-		estimateWithoutCtxone(lastModel, tokenBreakdown, snapshot.cumulative_ratio)
+	/** This session's own recall ratio, or the Hub's estimated fallback (the
+	 * workspace aggregate) when the session has usage but no recall counters of
+	 * its own. `ratioEstimated` drives the "≈" label. */
+	let ratioEstimated = $derived(snapshot.cumulative_ratio <= 0 && (snapshot.fallback_ratio ?? 0) > 0);
+	let effectiveRatio = $derived(
+		snapshot.cumulative_ratio > 0 ? snapshot.cumulative_ratio : (snapshot.fallback_ratio ?? 0)
 	);
 
-	/** Measured savings: estimated-without ÷ estimated-with. */
-	let measuredSavings = $derived.by(() => {
-		if (estimatedCost === null || withoutCost === null) return null;
-		if (estimatedCost <= 0) return null;
-		return withoutCost / estimatedCost;
-	});
+	/** Headline savings %, derived straight from the TOKEN ratio — no pricing.
+	 * The ratio is (tokens_sent + tokens_saved) / tokens_sent, so the percentage
+	 * is model-independent and shows for every model, priced or not. */
+	let savingsPct = $derived(formatSavingsPercent(effectiveRatio));
 
+	/** Dollar figures are an optional extra, shown only when the model happens
+	 * to be in the price table. They never gate the headline token savings. */
+	let estimatedCost = $derived(estimateCost(lastModel, tokenBreakdown));
+	let withoutCost = $derived(estimateWithoutCtxone(lastModel, tokenBreakdown, effectiveRatio));
 	let pricingTracked = $derived(pricingFor(lastModel) !== null);
 </script>
 
@@ -104,12 +115,21 @@
 		</dl>
 
 		<div class="cost-block" data-testid="cost-block">
+			{#if savingsPct !== null && effectiveRatio > 0}
+				<div class="row big">
+					<dt>{ratioEstimated ? 'Estimated savings' : 'Measured savings'}</dt>
+					<dd class="ratio" data-testid="measured-savings">
+						{ratioEstimated ? '≈' : ''}{savingsPct}
+						<span class="muted">fewer tokens</span>
+					</dd>
+				</div>
+			{/if}
 			{#if pricingTracked && estimatedCost !== null}
 				<div class="row">
 					<dt>Estimated cost</dt>
 					<dd data-testid="cost-estimated">{formatUsd(estimatedCost)}</dd>
 				</div>
-				{#if withoutCost !== null && snapshot.cumulative_ratio > 0}
+				{#if withoutCost !== null && effectiveRatio > 0}
 					<div class="row">
 						<dt>Without CTXone</dt>
 						<dd data-testid="cost-without">
@@ -118,19 +138,6 @@
 						</dd>
 					</div>
 				{/if}
-				{#if measuredSavings !== null && snapshot.cumulative_ratio > 0}
-					<div class="row big">
-						<dt>Measured savings</dt>
-						<dd class="ratio" data-testid="measured-savings">
-							{measuredSavings.toFixed(1)}×
-						</dd>
-					</div>
-				{/if}
-			{:else}
-				<p class="cost-missing" data-testid="cost-missing">
-					Cost not tracked for model=<code>{lastModel ?? 'unknown'}</code>.
-					Add pricing in <code>web/src/lib/pricing.ts</code>.
-				</p>
 			{/if}
 		</div>
 	{/if}
@@ -171,8 +178,7 @@
 		margin: 0;
 	}
 
-	.empty code,
-	.cost-missing code {
+	.empty code {
 		background: #0a0a0a;
 		border: 1px solid #222;
 		border-radius: 3px;
@@ -216,12 +222,6 @@
 		margin-top: 1rem;
 		padding-top: 0.75rem;
 		border-top: 1px dashed #222;
-	}
-
-	.cost-missing {
-		color: #888;
-		font-size: 0.85rem;
-		margin: 0;
 	}
 
 	.row.big dd.ratio {

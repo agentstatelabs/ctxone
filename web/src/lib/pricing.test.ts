@@ -4,8 +4,11 @@ import {
 	estimateCost,
 	estimateCostForPlan,
 	estimateWithoutCtxone,
+	formatSavingsPercent,
 	formatUsd,
 	pricingFor,
+	resolvePricing,
+	savingsPercent,
 	type PlanCostSession
 } from './pricing';
 
@@ -18,11 +21,34 @@ describe('pricingFor', () => {
 		expect(p!.output).toBeGreaterThan(p!.input);
 	});
 
-	it('returns null for unknown models', () => {
-		expect(pricingFor('gpt-9000')).toBeNull();
+	it('returns null for genuinely unknown models', () => {
+		expect(pricingFor('gpt-9000')).toBeNull(); // no gpt-9 family
+		expect(pricingFor('some-obscure-model-v3')).toBeNull();
 		expect(pricingFor('')).toBeNull();
 		expect(pricingFor(null)).toBeNull();
 		expect(pricingFor(undefined)).toBeNull();
+	});
+
+	it('family-matches churny model names to a best-effort rate', () => {
+		// The GPT-5/Codex fleet has no exact entries but must still price.
+		for (const m of ['gpt-5.2', 'gpt-5.4', 'gpt-5.2-codex', 'gpt-5.6-sol', 'codex-auto-review']) {
+			const r = resolvePricing(m);
+			expect(r, m).not.toBeNull();
+			expect(r!.source, m).toBe('family');
+			expect(r!.pricing.input, m).toBeGreaterThan(0);
+		}
+		// Mini sub-tier is cheaper than the flagship family base.
+		expect(resolvePricing('gpt-5.1-codex-mini')!.pricing.input).toBeLessThan(
+			resolvePricing('gpt-5.2')!.pricing.input
+		);
+		// New Claude versions auto-price at the family base.
+		expect(resolvePricing('claude-opus-9-9')!.family).toBe('Claude Opus');
+	});
+
+	it('prefers an exact entry over a family match', () => {
+		const r = resolvePricing('claude-opus-4-8');
+		expect(r!.source).toBe('exact');
+		expect(r!.pricing).toBe(PRICING['claude-opus-4-8']);
 	});
 
 	it('covers the v1 list of providers', () => {
@@ -161,6 +187,29 @@ describe('formatUsd', () => {
 	it('shows 2 decimals above $1', () => {
 		expect(formatUsd(1.2345)).toBe('$1.23');
 		expect(formatUsd(100)).toBe('$100.00');
+	});
+});
+
+describe('savingsPercent', () => {
+	it('converts a ratio to a percentage reduction', () => {
+		expect(savingsPercent(4)).toBeCloseTo(75, 5); // 1 − 1/4
+		expect(savingsPercent(5)).toBeCloseTo(80, 5); // 1 − 1/5
+		expect(savingsPercent(2)).toBeCloseTo(50, 5);
+	});
+
+	it('returns null when there is no measurable saving', () => {
+		expect(savingsPercent(1)).toBeNull(); // exactly break-even
+		expect(savingsPercent(0)).toBeNull();
+		expect(savingsPercent(0.5)).toBeNull(); // ratio < 1 → spent more
+		expect(savingsPercent(null)).toBeNull();
+		expect(savingsPercent(undefined)).toBeNull();
+		expect(savingsPercent(Infinity)).toBeNull();
+	});
+
+	it('formats as a whole-percent string, or null', () => {
+		expect(formatSavingsPercent(4)).toBe('75%');
+		expect(formatSavingsPercent(5)).toBe('80%');
+		expect(formatSavingsPercent(1)).toBeNull();
 	});
 });
 

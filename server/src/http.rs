@@ -543,6 +543,7 @@ fn router_with_config_inner(
         .route("/api/stats/tokens", get(token_stats))
         .route("/api/stats/tokens/{session_id}", get(session_token_stats))
         .route("/api/stats/sessions", get(list_sessions))
+        .route("/api/stats/backfill_by_model", post(backfill_by_model))
         .route("/api/stats/llm_usage", post(record_llm_usage))
         .route("/api/stats/plan/{plan}/cost", get(plan_cost))
         .route("/api/stats/{ref_name}", get(stats))
@@ -1002,6 +1003,7 @@ async fn session_token_stats(
                 snap.updated_at = meta.updated_at;
                 snap.models_used = meta.models_used;
             }
+            apply_fallback_ratio(&mut snap, s.sessions.aggregate().cumulative_ratio);
             Ok(Json(snap))
         }
         None => Err((
@@ -1101,7 +1103,94 @@ async fn list_sessions(State(s): State<HubState>, ns: NamespaceId) -> impl IntoR
             snap.models_used = meta.models_used;
         }
     }
+    // Lend the workspace-aggregate ratio to sessions that spent tokens but have
+    // no recall counters of their own (see `apply_fallback_ratio`). Computed
+    // once — it's a roll-up over the same session set.
+    let aggregate_ratio = s.sessions.aggregate().cumulative_ratio;
+    for snap in &mut snaps {
+        apply_fallback_ratio(snap, aggregate_ratio);
+    }
     Json(snaps)
+}
+
+/// `POST /api/stats/backfill_by_model` — recompute per-model usage from the
+/// stored per-turn snapshots for every session in this namespace.
+///
+/// The per-model split (t-023) only accrues for usage recorded AFTER the
+/// feature shipped; historical sessions have an empty `by_model`. But the raw
+/// material is already persisted: each turn at `/sessions/{id}/turns/{idx}`
+/// carries its own `model` and `tokens`. This walks those, sums per model, and
+/// REPLACES the session's `by_model` — no re-ingest (so no double-counting of
+/// the flat totals) and no graph writes (so no memory loss). Idempotent:
+/// re-running recomputes the same replacement. Scoped to the request namespace;
+/// call once per workspace whose sessions you want backfilled.
+async fn backfill_by_model(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
+    let ids = session_ids_with_nodes(&repo);
+    let mut sessions_updated = 0usize;
+    let mut turns_scanned = 0usize;
+    let mut models_seen: std::collections::BTreeSet<String> = Default::default();
+
+    for sid in ids {
+        // One read per session: the whole turns subtree as an object keyed by
+        // zero-padded index. Missing/non-object subtrees are simply skipped.
+        let turns = match repo.get_json("main", &format!("/sessions/{sid}/turns")) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let Some(obj) = turns.as_object() else {
+            continue;
+        };
+
+        let mut by_model: std::collections::BTreeMap<String, crate::memory_tools::ModelUsage> =
+            Default::default();
+        for turn in obj.values() {
+            let model = turn.get("model").and_then(|v| v.as_str()).unwrap_or("");
+            // Skip placeholders: empty, "unknown", and angle-bracket sentinels
+            // like "<synthetic>" that some stored turns carry.
+            if model.is_empty() || model == "unknown" || model.starts_with('<') {
+                continue;
+            }
+            let tok = turn.get("tokens");
+            let field = |k: &str| {
+                tok.and_then(|t| t.get(k))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+            };
+            let entry = by_model.entry(model.to_string()).or_default();
+            entry.input_tokens += field("input");
+            entry.output_tokens += field("output");
+            entry.cache_read_tokens += field("cache_read");
+            // Stored turns use the provider's field name `cache_creation`;
+            // ModelUsage calls it cache_create.
+            entry.cache_create_tokens += field("cache_creation");
+            entry.call_count += 1;
+            turns_scanned += 1;
+            models_seen.insert(model.to_string());
+        }
+
+        if !by_model.is_empty() {
+            s.sessions.get_or_create(&sid).set_by_model(by_model);
+            sessions_updated += 1;
+        }
+    }
+
+    // Persist so the backfill survives a restart (it's a REPLACE, so flushing
+    // the same result again is harmless).
+    if let Some(path) = &s.db_path {
+        s.sessions.flush_to_db(path);
+    }
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "namespace": ns.0,
+        "sessions_updated": sessions_updated,
+        "turns_scanned": turns_scanned,
+        "models": models_seen,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -4310,6 +4399,19 @@ fn sum_workspace_tokens(
     t
 }
 
+/// Read-time savings reconciliation. A session whose recall savings accrued on
+/// another session id (usage batch-ingested from a transcript, recall done live
+/// under a different session) has `cumulative_ratio == 0` yet real LLM spend.
+/// Rather than hide its savings, we lend it the workspace-aggregate ratio as a
+/// clearly-estimated fallback so the UI can render "≈75% saved". Only applied
+/// when the session actually spent tokens and the aggregate shows real savings
+/// (> 1×); a session with its own ratio, or no usage, is left untouched.
+fn apply_fallback_ratio(snap: &mut SessionSnapshot, aggregate_ratio: f64) {
+    if snap.cumulative_ratio <= 0.0 && snap.llm_call_count > 0 && aggregate_ratio > 1.0 {
+        snap.fallback_ratio = Some(aggregate_ratio);
+    }
+}
+
 /// The most-common `last_model` among a workspace's sessions — a representative
 /// model the Hub Home uses for a rough cost estimate. Workspaces often mix
 /// models, so the frontend labels the figure "≈". Same matching semantics as
@@ -5632,6 +5734,45 @@ async fn detect_project_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fallback_ratio_lent_only_to_spending_sessions_without_own_ratio() {
+        // Session with usage but no recall ratio → gets the aggregate estimate.
+        let mut ingested = SessionSnapshot {
+            cumulative_ratio: 0.0,
+            llm_call_count: 5,
+            ..Default::default()
+        };
+        apply_fallback_ratio(&mut ingested, 4.0);
+        assert_eq!(ingested.fallback_ratio, Some(4.0));
+
+        // Session with its own ratio → left untouched (no double-labelling).
+        let mut own = SessionSnapshot {
+            cumulative_ratio: 3.2,
+            llm_call_count: 5,
+            ..Default::default()
+        };
+        apply_fallback_ratio(&mut own, 4.0);
+        assert_eq!(own.fallback_ratio, None);
+
+        // Session with no usage → nothing to estimate savings against.
+        let mut idle = SessionSnapshot {
+            cumulative_ratio: 0.0,
+            llm_call_count: 0,
+            ..Default::default()
+        };
+        apply_fallback_ratio(&mut idle, 4.0);
+        assert_eq!(idle.fallback_ratio, None);
+
+        // Aggregate shows no real savings (≤ 1×) → don't fabricate a figure.
+        let mut no_agg = SessionSnapshot {
+            cumulative_ratio: 0.0,
+            llm_call_count: 5,
+            ..Default::default()
+        };
+        apply_fallback_ratio(&mut no_agg, 1.0);
+        assert_eq!(no_agg.fallback_ratio, None);
+    }
 
     #[test]
     fn sum_workspace_tokens_named_and_default_complement() {

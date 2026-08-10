@@ -29,9 +29,9 @@
 		formatCompact
 	} from '@agentstate/lens-core';
 	import type { AreaPoint, SeriesDef, ChartDatum, HeatCell } from '@agentstate/lens-core';
+	import { estimateCost, formatSavingsPercent, formatUsd, resolvePricing } from '$lib/pricing';
 	import Panel from '$lib/dashboard/Panel.svelte';
 	import QuickCapture from '$lib/dashboard/QuickCapture.svelte';
-	import LlmStats from '$lib/dashboard/LlmStats.svelte';
 	import BurnBoard from '$lib/dashboard/BurnBoard.svelte';
 	import RecentActivity from '$lib/dashboard/RecentActivity.svelte';
 
@@ -173,6 +173,11 @@
 	const wsUsed = $derived(sessionList.reduce((n, s) => n + s.session_tokens_used, 0));
 	const wsSaved = $derived(sessionList.reduce((n, s) => n + s.session_tokens_saved, 0));
 	const wsRatio = $derived(wsUsed > 0 ? (wsUsed + wsSaved) / wsUsed : 0);
+	// Recall savings as a percentage (token ratio), for the Recall savings panel.
+	const wsSavingsPct = $derived(formatSavingsPercent(wsRatio));
+	// Mirrors the server's RECONSTRUCTION_FACTOR — the bounded multiple behind
+	// the savings estimate. Kept in sync by hand (documented in memory_tools.rs).
+	const RECON_FACTOR = 4;
 
 	// Import stats — what has been ingested into this workspace.
 	const workspaceName = $derived(project?.display_name || namespaceStore.current);
@@ -222,7 +227,8 @@
 			llm_call_count: 0,
 			last_model: null,
 			last_provider: null,
-			models_used: distinctModels
+			models_used: distinctModels,
+			llm_by_model: {}
 		};
 		for (const s of sessionList) {
 			agg.session_startup_tokens! += s.session_startup_tokens ?? 0;
@@ -236,6 +242,22 @@
 			if (s.last_model) {
 				agg.last_model = s.last_model;
 				agg.last_provider = s.last_provider ?? agg.last_provider;
+			}
+			// Sum the true per-model split so efficiency views don't bucket a
+			// whole session onto its last model.
+			for (const [model, u] of Object.entries(s.llm_by_model ?? {})) {
+				const acc = (agg.llm_by_model![model] ??= {
+					input_tokens: 0,
+					output_tokens: 0,
+					cache_read_tokens: 0,
+					cache_create_tokens: 0,
+					call_count: 0
+				});
+				acc.input_tokens += u.input_tokens;
+				acc.output_tokens += u.output_tokens;
+				acc.cache_read_tokens += u.cache_read_tokens;
+				acc.cache_create_tokens += u.cache_create_tokens;
+				acc.call_count += u.call_count;
 			}
 		}
 		return agg;
@@ -261,8 +283,14 @@
 		{ key: 'used', label: 'Tokens used', color: 'var(--lens-accent, #6ea8ff)' },
 		{ key: 'saved', label: 'Tokens saved', color: 'var(--lens-ok, #4ade80)' }
 	];
+	// The panel earns its place on EITHER recall traffic (used/saved) OR LLM
+	// usage — otherwise a workspace whose sessions were only token-ingested
+	// (recall counters 0, but real per-model LLM data) would hide the model
+	// efficiency + consumption views entirely.
 	const hasEconTraffic = $derived(
-		sessionList.some((s) => s.session_tokens_used + s.session_tokens_saved > 0)
+		sessionList.some(
+			(s) => s.session_tokens_used + s.session_tokens_saved > 0 || (s.llm_call_count ?? 0) > 0
+		)
 	);
 	function shortId(t: number | string): string {
 		const s = String(t);
@@ -421,20 +449,155 @@
 			: `${md}/${String(d.getFullYear()).slice(2)}`;
 	}
 
-	// Per-model LLM token totals across sessions (only when agents reported).
+	// True per-model token totals from the aggregated split (t-023). Each turn
+	// is attributed to its own model, so a session that switched models is not
+	// bucketed onto its last one. Falls back to last_model bucketing only for an
+	// older Hub that doesn't yet report `llm_by_model`.
+	const byModel = $derived(wsSnapshot.llm_by_model ?? {});
+	const hasByModel = $derived(Object.keys(byModel).length > 0);
+
 	const modelBars = $derived.by((): ChartDatum[] => {
 		const acc = new Map<string, number>();
-		for (const s of sessionList) {
-			const tok = (s.llm_input_tokens ?? 0) + (s.llm_output_tokens ?? 0);
-			if (tok <= 0) continue;
-			const label = s.last_model ?? s.last_provider ?? 'unknown';
-			acc.set(label, (acc.get(label) ?? 0) + tok);
+		if (hasByModel) {
+			for (const [label, u] of Object.entries(byModel)) {
+				const tok = u.input_tokens + u.output_tokens;
+				if (tok > 0) acc.set(label, tok);
+			}
+		} else {
+			for (const s of sessionList) {
+				const tok = (s.llm_input_tokens ?? 0) + (s.llm_output_tokens ?? 0);
+				if (tok <= 0) continue;
+				const label = s.last_model ?? s.last_provider ?? 'unknown';
+				acc.set(label, (acc.get(label) ?? 0) + tok);
+			}
 		}
 		return [...acc.entries()]
 			.map(([label, value]) => ({ label, value }))
 			.sort((a, b) => b.value - a.value)
 			.slice(0, 6);
 	});
+
+	// Model efficiency: per-model tokens, calls, tokens/call, and — where the
+	// model is priced — cost and cost per 1M tokens. This is the honest way to
+	// compare "cheaper but chattier" models: a low per-token price can lose to a
+	// model that needs far fewer tokens for the same work.
+	interface ModelEfficiencyRow {
+		model: string;
+		input: number;
+		output: number;
+		total: number;
+		calls: number;
+		tokensPerCall: number;
+		cost: number | null;
+		costPerMTok: number | null;
+		/** null = unpriced, 'family' = best-effort estimate, 'exact' = real rate. */
+		priceSource: 'exact' | 'family' | null;
+	}
+	const modelEfficiency = $derived.by((): ModelEfficiencyRow[] => {
+		return Object.entries(byModel)
+			.map(([model, u]) => {
+				const total = u.input_tokens + u.output_tokens + u.cache_read_tokens + u.cache_create_tokens;
+				const cost = estimateCost(model, {
+					input: u.input_tokens,
+					output: u.output_tokens,
+					cache_read: u.cache_read_tokens,
+					cache_create: u.cache_create_tokens
+				});
+				// Effective per-token rate EXCLUDES cache reads from both the cost
+				// and the token count. Cache reads are re-reads of already-seen
+				// context (huge volume, ~10% of input price) — leaving them IN the
+				// denominator washes the rate down to a cache-blended figure; leaving
+				// their COST in but the tokens out inflates it wildly for cache-heavy
+				// sessions. Excluding both gives the honest cost of NEW work per
+				// token (input + output + first-time cache writes). `cost` stays
+				// all-in so the Cost column still reflects true total spend.
+				const rateTokens = u.input_tokens + u.output_tokens + u.cache_create_tokens;
+				const rateCost = estimateCost(model, {
+					input: u.input_tokens,
+					output: u.output_tokens,
+					cache_read: 0,
+					cache_create: u.cache_create_tokens
+				});
+				return {
+					model,
+					input: u.input_tokens,
+					output: u.output_tokens,
+					total,
+					calls: u.call_count,
+					tokensPerCall: u.call_count > 0 ? Math.round(total / u.call_count) : 0,
+					cost,
+					costPerMTok:
+						rateCost !== null && rateTokens > 0 ? (rateCost / rateTokens) * 1_000_000 : null,
+					priceSource: resolvePricing(model)?.source ?? null
+				};
+			})
+			// Sort by total COST descending (what actually hits the bill), priced
+			// rows first; unpriced fall to the bottom, ranked by token volume.
+			.sort((a, b) => {
+				if (a.cost === null && b.cost === null) return b.total - a.total;
+				if (a.cost === null) return 1;
+				if (b.cost === null) return -1;
+				return b.cost - a.cost;
+			});
+	});
+
+	/**
+	 * The efficiency takeaway (#1). Leads with the model that costs the MOST
+	 * overall — where the money actually goes — and fires only when that biggest
+	 * spend comes from a model that's CHEAPER per token than some other model
+	 * which nonetheless cost less. That's the sticker-price trap: the priciest
+	 * bill isn't the priciest model, it's the chattiest. We contrast against the
+	 * pricier-per-token model with the sharpest rate gap. Returns null when the
+	 * biggest spender is also (at least) the most expensive per token — nothing
+	 * counterintuitive to flag.
+	 */
+	const efficiencyInsight = $derived.by(() => {
+		const priced = modelEfficiency.filter(
+			(r) => r.cost !== null && r.costPerMTok !== null && r.total > 0
+		);
+		if (priced.length < 2) return null;
+		// Biggest spend = top of the cost-sorted list.
+		const biggest = priced.reduce((a, b) => (b.cost! > a.cost! ? b : a));
+		// The pricier-per-token model with the largest rate gap over `biggest`.
+		const pricier = priced
+			.filter((r) => r.model !== biggest.model && r.costPerMTok! > biggest.costPerMTok!)
+			.reduce<(typeof priced)[number] | null>(
+				(best, r) => (best === null || r.costPerMTok! > best.costPerMTok! ? r : best),
+				null
+			);
+		if (!pricier) return null;
+		const mult = pricier.total > 0 ? biggest.total / pricier.total : 0;
+		return { biggest, pricier, mult };
+	});
+
+	/**
+	 * Clean LLM-usage summary, derived from the per-model split (`byModel`) —
+	 * NOT the aggregate `llm_*` counters. Those counters are additive and were
+	 * inflated by repeated historical ingests; the per-model map is a REPLACE
+	 * from the stored turns, so it's the single-count source of truth. Cost is
+	 * summed per model at each model's own rate (the efficiency Cost column),
+	 * not the whole pile priced at one representative model — the two bugs that
+	 * made "Estimated cost"/"Without CTXone" look 10× too big.
+	 */
+	const usage = $derived.by(() => {
+		let input = 0,
+			output = 0,
+			cacheRead = 0,
+			cacheCreate = 0,
+			calls = 0;
+		for (const u of Object.values(byModel)) {
+			input += u.input_tokens;
+			output += u.output_tokens;
+			cacheRead += u.cache_read_tokens;
+			cacheCreate += u.cache_create_tokens;
+			calls += u.call_count;
+		}
+		const cost = modelEfficiency.reduce((n, r) => n + (r.cost ?? 0), 0);
+		const untrackedModels = modelEfficiency.filter((r) => r.cost === null).length;
+		const cacheHit = cacheRead + input > 0 ? cacheRead / (cacheRead + input) : null;
+		return { input, output, cacheRead, cacheCreate, calls, cost, untrackedModels, cacheHit };
+	});
+	const usageStatus = $derived(statusOf(sessionsL, () => usage.calls === 0));
 
 	// Plan health: task-status distribution across active plans.
 	const taskDonut = $derived.by((): ChartDatum[] => {
@@ -500,6 +663,7 @@
 		return l.data !== null && !isEmpty(l.data) ? 'ready' : 'empty';
 	}
 	const econStatus = $derived(statusOf(sessionsL, () => !hasEconTraffic));
+	const effStatus = $derived(statusOf(sessionsL, () => modelEfficiency.length === 0));
 	const planStatus = $derived(statusOf(plansL, () => activePlans.length === 0));
 	// Follows the activity load: the heatmap is the panel's primary content
 	// now, so an activity failure must surface rather than being masked by a
@@ -671,20 +835,26 @@
 		</Panel>
 	</div>
 
-	<!-- ── 2 · Token economics ──────────────────────────────────────────── -->
+	<!-- ── 2 · Recall savings ───────────────────────────────────────────── -->
 	<Panel
-		title="Token economics"
+		title="Recall savings"
 		scope="all branches"
 		links={[{ href: '/sessions', label: 'Sessions' }]}
 		status={econStatus}
 		errorText={sessionsL.error}
-		emptyTitle="No token traffic yet"
-		emptyText="Run an agent recall or context call to start measuring savings."
+		emptyTitle="No recall traffic yet"
+		emptyText="These numbers accrue when an agent calls recall/context live through the hub. Ingested transcripts don't recall, so they don't count here."
 	>
 		{#if sessionsL.status === 'ready'}
 			<div class="econ-strip">
 				<span class="econ-ratio">{formatCompact(wsSaved)}</span>
 				<span class="econ-ratio-label">tokens saved (estimate)</span>
+				{#if wsSavingsPct}
+					<span class="econ-fig">
+						recall context
+						<strong>{wsSavingsPct} fewer tokens</strong>
+					</span>
+				{/if}
 				<span class="econ-fig">
 					startup boost (first recall)
 					<strong>{formatCompact(wsSnapshot.session_startup_tokens ?? 0)} tok</strong>
@@ -699,16 +869,117 @@
 			formatX={shortId}
 			ariaLabel="Tokens used vs saved per session"
 		/>
-		<div class="econ-side">
-			{#if modelBars.length > 0}
-				<div class="econ-models">
-					<h4>LLM tokens by model</h4>
-					<BarChart data={modelBars} orientation="horizontal" labelWidth={150} />
-				</div>
+		<p class="eff-note muted">
+			A bounded estimate ({RECON_FACTOR}× the tokens recall injected — the re-reading it
+			avoided), not a measurement. Only sessions that recalled live through the hub appear.
+		</p>
+	</Panel>
+
+	<!-- ── 2b · LLM usage ───────────────────────────────────────────────── -->
+	<Panel
+		title="LLM usage"
+		scope="all branches"
+		links={[{ href: '/sessions', label: 'Sessions' }]}
+		status={usageStatus}
+		errorText={sessionsL.error}
+		emptyTitle="No LLM usage yet"
+		emptyText="Import a session (ctx ingest-session) or let agent usage flow through the hub."
+	>
+		<dl class="usage-rows">
+			<div class="u-row"><dt>Input tokens</dt><dd>{formatCompact(usage.input)}</dd></div>
+			<div class="u-row"><dt>Output tokens</dt><dd>{formatCompact(usage.output)}</dd></div>
+			<div class="u-row">
+				<dt>Cache read {#if usage.cacheHit !== null}<span class="u-muted">({(usage.cacheHit * 100).toFixed(0)}% hit)</span>{/if}</dt>
+				<dd>{formatCompact(usage.cacheRead)}</dd>
+			</div>
+			<div class="u-row"><dt>Cache create</dt><dd>{formatCompact(usage.cacheCreate)}</dd></div>
+			<div class="u-row"><dt>LLM calls</dt><dd>{formatCompact(usage.calls)}</dd></div>
+			<div class="u-row u-cost">
+				<dt>Estimated cost</dt>
+				<dd>{formatUsd(usage.cost)}</dd>
+			</div>
+		</dl>
+		<p class="eff-note muted">
+			Summed per model at each model's own rate (see Model efficiency), from the exact
+			per-turn token split.{#if usage.untrackedModels > 0}
+				{' '}{usage.untrackedModels} unpriced model{usage.untrackedModels === 1 ? '' : 's'} excluded
+				from cost.{/if}
+		</p>
+		{#if modelBars.length > 0}
+			<div class="econ-models">
+				<h4>Tokens by model</h4>
+				<BarChart data={modelBars} orientation="horizontal" labelWidth={150} />
+			</div>
+		{/if}
+	</Panel>
+
+	<!-- ── 2b · Model efficiency ────────────────────────────────────────── -->
+	<Panel
+		title="Model efficiency"
+		scope="all branches"
+		links={[{ href: '/sessions', label: 'Sessions' }]}
+		status={effStatus}
+		errorText={sessionsL.error}
+		emptyTitle="No per-model data yet"
+		emptyText="Import a session (ctx ingest-session) or let new agent usage flow through the hub."
+	>
+		<div class="econ-eff">
+			{#if efficiencyInsight}
+				<p class="eff-takeaway">
+					<strong>{efficiencyInsight.biggest.model}</strong> is your biggest spend
+					(<strong>{formatUsd(efficiencyInsight.biggest.cost!)}</strong>) — yet it's
+					<em>cheaper</em> per token ({formatUsd(efficiencyInsight.biggest.costPerMTok!)}/1M)
+					than {efficiencyInsight.pricier.model}
+					({formatUsd(efficiencyInsight.pricier.costPerMTok!)}/1M){#if efficiencyInsight.mult >= 1.1}{' '}—
+					it just ran {efficiencyInsight.mult.toFixed(1)}× the tokens{/if}.
+				</p>
+			{:else}
+				<p class="eff-note">
+					Effective cost per 1M non-cache tokens exposes "cheaper but chattier" — a low
+					sticker price can still cost more if the model burns more tokens.
+				</p>
 			{/if}
-			{#if sessionsL.status === 'ready'}
-				<LlmStats snapshot={wsSnapshot} />
-			{/if}
+			<div class="eff-scroll">
+				<table class="eff">
+					<thead>
+						<tr>
+							<th>Model</th>
+							<th class="num">Tokens</th>
+							<th class="num">Calls</th>
+							<th class="num">Tok/call</th>
+							<th class="num">Cost</th>
+							<th class="num" title="Effective cost per 1M new-work tokens (input + output + cache writes); cache reads excluded from the rate but included in Cost">$/1M</th>
+						</tr>
+					</thead>
+					<tbody>
+						{#each modelEfficiency as r (r.model)}
+							<tr class:biggest-spend={efficiencyInsight?.biggest.model === r.model}>
+								<td class="model">
+									{r.model}
+									{#if r.priceSource === 'family'}
+										<span class="est-badge" title="Family estimate — no exact price for this model"
+											>est</span
+										>
+									{/if}
+								</td>
+								<td class="num">{formatCompact(r.total)}</td>
+								<td class="num">{formatCompact(r.calls)}</td>
+								<td class="num">{formatCompact(r.tokensPerCall)}</td>
+								<td class="num">{r.cost !== null ? formatUsd(r.cost) : '—'}</td>
+								<td class="num">
+									{r.costPerMTok !== null ? formatUsd(r.costPerMTok) : '—'}
+								</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
+			<p class="eff-note muted">
+				Sorted by total cost. <strong>$/1M</strong> is the effective rate on new-work tokens
+				(input + output + cache writes); cache <em>reads</em> are excluded from the rate — they'd
+				otherwise wash it out — but are fully counted in Cost. <span class="est-badge">est</span>
+				= family-estimated price; “—” = unpriced. Token counts are exact regardless.
+			</p>
 		</div>
 	</Panel>
 
@@ -1168,10 +1439,7 @@
 		font-weight: 600;
 	}
 
-	.econ-side {
-		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-		gap: var(--lens-space-5);
+	.econ-models {
 		margin-top: var(--lens-space-4);
 		padding-top: var(--lens-space-4);
 		border-top: 1px solid var(--lens-border-subtle, var(--lens-border));
@@ -1185,6 +1453,130 @@
 		text-transform: uppercase;
 		letter-spacing: var(--lens-tracking-caps);
 		color: var(--lens-muted);
+	}
+
+	/* ── LLM usage rows ────────────────────────────────────────────────── */
+	.usage-rows {
+		margin: 0 0 var(--lens-space-3);
+	}
+
+	.u-row {
+		display: flex;
+		justify-content: space-between;
+		align-items: baseline;
+		padding: var(--lens-space-2) 0;
+		border-bottom: 1px solid var(--lens-border-subtle, var(--lens-border));
+	}
+
+	.u-row dt {
+		color: var(--lens-muted);
+		font-size: var(--lens-font-size-xs);
+	}
+
+	.u-row dd {
+		margin: 0;
+		font-variant-numeric: tabular-nums;
+		font-family: var(--lens-font-mono, monospace);
+	}
+
+	.u-muted {
+		color: var(--lens-muted);
+		font-size: 0.85em;
+	}
+
+	.u-row.u-cost {
+		border-bottom: none;
+		margin-top: var(--lens-space-1);
+	}
+
+	.u-row.u-cost dt {
+		color: var(--lens-fg, #e6e6e6);
+		font-weight: 600;
+	}
+
+	.u-row.u-cost dd {
+		font-size: 1.1rem;
+		font-weight: 700;
+		color: var(--lens-accent, #6ea8ff);
+	}
+
+	/* ── Model efficiency table ────────────────────────────────────────── */
+	.econ-eff {
+		grid-column: 1 / -1;
+	}
+
+	.eff-note {
+		margin: 0 0 var(--lens-space-2);
+		font-size: var(--lens-font-size-xs);
+		color: var(--lens-muted);
+	}
+
+	.eff-takeaway {
+		margin: 0 0 var(--lens-space-3);
+		padding: var(--lens-space-2) var(--lens-space-3);
+		font-size: var(--lens-font-size-xs);
+		line-height: 1.5;
+		color: var(--lens-fg, #e6e6e6);
+		background: color-mix(in srgb, var(--lens-warn, #ebcb8b) 12%, transparent);
+		border-left: 3px solid var(--lens-warn, #ebcb8b);
+		border-radius: var(--lens-radius-sm, 4px);
+	}
+
+	.eff-takeaway strong {
+		color: var(--lens-fg, #fff);
+	}
+
+	.est-badge {
+		display: inline-block;
+		margin-left: 0.35em;
+		padding: 0 0.35em;
+		font-size: 0.85em;
+		font-weight: 600;
+		color: var(--lens-warn, #ebcb8b);
+		background: color-mix(in srgb, var(--lens-warn, #ebcb8b) 15%, transparent);
+		border-radius: var(--lens-radius-sm, 3px);
+		vertical-align: baseline;
+	}
+
+	table.eff tr.biggest-spend {
+		background: color-mix(in srgb, var(--lens-warn, #ebcb8b) 8%, transparent);
+	}
+
+	.eff-note.muted {
+		margin-top: var(--lens-space-2);
+		opacity: 0.75;
+	}
+
+	.eff-scroll {
+		overflow-x: auto;
+	}
+
+	table.eff {
+		width: 100%;
+		border-collapse: collapse;
+		font-size: var(--lens-font-size-xs);
+	}
+
+	table.eff th,
+	table.eff td {
+		padding: var(--lens-space-1) var(--lens-space-3);
+		border-bottom: 1px solid var(--lens-border-subtle, var(--lens-border));
+		white-space: nowrap;
+	}
+
+	table.eff th {
+		text-align: left;
+		color: var(--lens-muted);
+		font-weight: 600;
+	}
+
+	table.eff td.model {
+		font-family: var(--lens-font-mono, monospace);
+	}
+
+	table.eff .num {
+		text-align: right;
+		font-variant-numeric: tabular-nums;
 	}
 
 	/* ── Plan health ───────────────────────────────────────────────────── */

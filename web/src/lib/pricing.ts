@@ -117,10 +117,138 @@ export const PRICING: Record<string, ModelPricing> = {
 	}
 };
 
-/** Look up pricing for a model, or `null` if not tracked. */
-export function pricingFor(model: string | null | undefined): ModelPricing | null {
+/**
+ * Model-FAMILY pricing — best-effort rates applied when an exact key is
+ * missing. Model names churn weekly (gpt-5.2 → 5.3-codex → 5.4 → 5.6-sol), and
+ * maintaining an exact row per variant is a losing game. Instead we match a
+ * family by pattern and lend it a representative base rate, clearly flagged as a
+ * FAMILY ESTIMATE so the UI can mark it "est."
+ *
+ * Provenance: rates below are approximate list prices for each family's flagship
+ * tier as of 2026-07 (USD per 1M tokens). They are deliberately conservative and
+ * meant for relative comparison, not billing. When a variant's real price is
+ * known, add an exact `PRICING` entry — exact always wins over family.
+ *
+ * ORDER MATTERS: more specific patterns (mini/nano, codex-mini) must precede the
+ * broad family catch so a cheaper sub-tier isn't priced at the flagship rate.
+ * The first matching entry wins.
+ *
+ * NOTE: this table is the seam for a future shared pricing SERVICE — the same
+ * "resolve a model name to a rate, with a freshness/estimate flag" contract that
+ * ThreadWeaver and other apps will need. Keep `resolvePricing` the single entry
+ * point so swapping this static table for a service call is a one-function change.
+ */
+interface PricingFamily {
+	/** Human-readable family label, surfaced in tooltips. */
+	family: string;
+	/** Matches the reported model id (case-insensitive). */
+	test: RegExp;
+	pricing: ModelPricing;
+}
+
+export const PRICING_FAMILIES: PricingFamily[] = [
+	// -- OpenAI GPT-5 line (incl. Codex + "-sol"/"-max" variants) --
+	// Mini/nano sub-tiers are much cheaper — match before the broad gpt-5 catch.
+	{
+		family: 'GPT-5 mini',
+		test: /^(gpt-5.*(mini|nano)|.*codex-mini)/i,
+		pricing: { provider: 'openai', input: 0.25, output: 2.0, cache_read: 0.025, cache_write: 0.25 }
+	},
+	{
+		family: 'GPT-5',
+		test: /^gpt-5/i,
+		pricing: { provider: 'openai', input: 1.25, output: 10.0, cache_read: 0.125, cache_write: 1.25 }
+	},
+	// Bare "codex-*" pseudo-models (e.g. codex-auto-review) → GPT-5 family.
+	{
+		family: 'Codex',
+		test: /^codex/i,
+		pricing: { provider: 'openai', input: 1.25, output: 10.0, cache_read: 0.125, cache_write: 1.25 }
+	},
+	// -- OpenAI reasoning (o-series) --
+	{
+		family: 'OpenAI o-series',
+		test: /^o[134](-|$)/i,
+		pricing: { provider: 'openai', input: 15.0, output: 60.0, cache_read: 7.5, cache_write: 15.0 }
+	},
+	// -- OpenAI GPT-4 line --
+	{
+		family: 'GPT-4o mini',
+		test: /^gpt-4.*mini/i,
+		pricing: { provider: 'openai', input: 0.15, output: 0.6, cache_read: 0.075, cache_write: 0.15 }
+	},
+	{
+		family: 'GPT-4',
+		test: /^gpt-4/i,
+		pricing: { provider: 'openai', input: 2.5, output: 10.0, cache_read: 1.25, cache_write: 2.5 }
+	},
+	// -- Anthropic Claude line (new versions auto-price at family base) --
+	{
+		family: 'Claude Opus',
+		test: /^claude-opus/i,
+		pricing: { provider: 'anthropic', input: 5.0, output: 25.0, cache_read: 0.5, cache_write: 6.25 }
+	},
+	{
+		family: 'Claude Sonnet',
+		test: /^claude-sonnet/i,
+		pricing: { provider: 'anthropic', input: 3.0, output: 15.0, cache_read: 0.3, cache_write: 3.75 }
+	},
+	{
+		family: 'Claude Haiku',
+		test: /^claude-haiku/i,
+		pricing: { provider: 'anthropic', input: 0.8, output: 4.0, cache_read: 0.08, cache_write: 1.0 }
+	},
+	{
+		family: 'Claude Fable',
+		test: /^claude-fable/i,
+		pricing: { provider: 'anthropic', input: 10.0, output: 50.0, cache_read: 1.0, cache_write: 12.5 }
+	},
+	// -- Google Gemini line --
+	{
+		family: 'Gemini Flash',
+		test: /^gemini.*flash/i,
+		pricing: { provider: 'gemini', input: 0.075, output: 0.3, cache_read: 0.01875, cache_write: 0.075 }
+	},
+	{
+		family: 'Gemini',
+		test: /^gemini/i,
+		pricing: { provider: 'gemini', input: 1.25, output: 5.0, cache_read: 0.3125, cache_write: 1.25 }
+	}
+];
+
+/** Whether a resolved price is an exact per-model rate or a family estimate. */
+export type PricingSource = 'exact' | 'family';
+
+export interface ResolvedPricing {
+	pricing: ModelPricing;
+	source: PricingSource;
+	/** Family label when `source === 'family'`. */
+	family?: string;
+}
+
+/**
+ * Resolve a model to a rate. Exact `PRICING` entries win; otherwise the first
+ * matching family lends a best-effort estimate. `null` only when nothing —
+ * exact or family — matches. This is the single lookup seam a future pricing
+ * service would replace.
+ */
+export function resolvePricing(model: string | null | undefined): ResolvedPricing | null {
 	if (!model) return null;
-	return PRICING[model] ?? null;
+	const exact = PRICING[model];
+	if (exact) return { pricing: exact, source: 'exact' };
+	for (const f of PRICING_FAMILIES) {
+		if (f.test.test(model)) return { pricing: f.pricing, source: 'family', family: f.family };
+	}
+	return null;
+}
+
+/**
+ * Look up pricing for a model, or `null` if neither an exact entry nor a family
+ * pattern matches. Family matches are best-effort estimates — use
+ * `resolvePricing` when you need to know which.
+ */
+export function pricingFor(model: string | null | undefined): ModelPricing | null {
+	return resolvePricing(model)?.pricing ?? null;
 }
 
 export interface TokenBreakdown {
@@ -242,6 +370,31 @@ export function estimateCostForPlan(sessions: PlanCostSession[]): PlanCostSummar
 		trackedSessions: tracked,
 		untrackedSessions: untracked
 	};
+}
+
+/**
+ * Convert a savings *ratio* (counterfactual ÷ actual, e.g. 4× means CTXone
+ * spend was a quarter of the flat-context spend) into a percentage reduction:
+ * the share of the counterfactual bill that CTXone avoided.
+ *
+ *   ratio 4 → 75%, ratio 5 → 80%, ratio 2 → 50%, ratio 1 → 0%.
+ *
+ * We show a percent rather than an "Nx" multiplier because a truthful 4× reads
+ * as unimpressive next to competitors' inflated "1000×" claims, while the same
+ * number stated as "75% saved" is both honest and clearer. Formula:
+ * `1 − 1/ratio`. Returns null when nothing was measured or there was no saving
+ * (ratio ≤ 1), so callers can hide the row instead of showing "0%".
+ */
+export function savingsPercent(ratio: number | null | undefined): number | null {
+	if (ratio == null || !Number.isFinite(ratio) || ratio <= 1) return null;
+	return (1 - 1 / ratio) * 100;
+}
+
+/** `savingsPercent` rendered as a whole-percent string (e.g. "75%"), or null. */
+export function formatSavingsPercent(ratio: number | null | undefined): string | null {
+	const p = savingsPercent(ratio);
+	if (p === null) return null;
+	return `${Math.round(p)}%`;
 }
 
 /**
