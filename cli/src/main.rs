@@ -3429,8 +3429,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let server = cli.server.clone();
             let branch = cli.branch.clone();
             let format = cli.format;
-            let agent_id =
-                std::env::var("CTX_AGENT_ID").unwrap_or_else(|_| "ctx-cli".to_string());
+            let agent_id = std::env::var("CTX_AGENT_ID").unwrap_or_else(|_| "ctx-cli".to_string());
             let mut body = serde_json::json!({
                 "path": path,
                 "to_namespace": to_namespace,
@@ -5804,8 +5803,7 @@ async fn run_session_action(
         }
         SessionAction::Move { session_id, to } => {
             let client = clients.build(None);
-            let agent_id =
-                std::env::var("CTX_AGENT_ID").unwrap_or_else(|_| "ctx-cli".to_string());
+            let agent_id = std::env::var("CTX_AGENT_ID").unwrap_or_else(|_| "ctx-cli".to_string());
             let body = serde_json::json!({ "to_namespace": to, "ref": "main" });
             let url = format!("{server}/api/sessions/{session_id}/move");
             let resp = match client

@@ -4741,6 +4741,7 @@ async fn derive_session_links(
 }
 
 /// Outcome of a guarded subtree move.
+#[derive(Debug)]
 struct MoveOutcome {
     src_leaves: usize,
     dst_leaves: usize,
@@ -4779,14 +4780,18 @@ fn move_subtree_verified(
     let subtree = src
         .get_tree(from_ref, path)
         .map_err(|_| (StatusCode::NOT_FOUND, format!("nothing to move at {path}")))?;
+    // A missing path lists as an error, not an empty vec — treat "no path" as
+    // zero leaves rather than a hard failure, so the verify logic below governs.
     let src_leaves = src
         .list_paths(from_ref, path, None)
-        .map_err(internal_error)?
-        .len();
+        .map(|v| v.len())
+        .unwrap_or(0);
     if src_leaves == 0 {
         return Err((
             StatusCode::CONFLICT,
-            format!("source subtree at {path} is empty — refusing to move (possible corruption); source left intact"),
+            format!(
+                "source subtree at {path} is empty — refusing to move (possible corruption); source left intact"
+            ),
         ));
     }
 
@@ -4806,10 +4811,12 @@ fn move_subtree_verified(
     };
 
     // 3. VERIFY the target actually holds the data before touching the source.
+    //    A missing path on the target lists as an error → treat as zero leaves,
+    //    which correctly fails the verification (rather than masking it).
     let dst_leaves = dst
         .list_paths(to_ref, path, None)
-        .map_err(internal_error)?
-        .len();
+        .map(|v| v.len())
+        .unwrap_or(0);
     let ok = if wrote_target {
         dst_leaves >= src_leaves
     } else {
@@ -5901,6 +5908,171 @@ async fn detect_project_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agentstategraph_storage::SqliteStorage;
+
+    // ── move_subtree_verified: the write→verify→delete guard ────────────────
+    fn move_test_repo() -> Arc<Repository> {
+        let r = Arc::new(Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        )));
+        r.init().expect("repo init");
+        r
+    }
+    fn move_test_ns(base: &Arc<Repository>, name: &str) -> Repository {
+        let r = base.fork_namespace(Namespace::new(name).expect("ns name"));
+        r.init().expect("ns init");
+        r
+    }
+    fn seed(repo: &Repository, path: &str, v: &str) {
+        repo.set_json(
+            "main",
+            path,
+            &serde_json::json!(v),
+            CommitOptions::new("t", IntentCategory::Custom("test".to_string()), "seed"),
+        )
+        .expect("seed");
+    }
+    fn leaves(repo: &Repository, path: &str) -> usize {
+        repo.list_paths("main", path, None)
+            .map(|v| v.len())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn move_subtree_relocates_and_deletes_source() {
+        let base = move_test_repo();
+        let dst = move_test_ns(&base, "target");
+        seed(&base, "/plans/p1/_meta/name", "p1");
+        seed(&base, "/plans/p1/t-001/title", "task one");
+
+        let out = move_subtree_verified(
+            &base,
+            &dst,
+            "main",
+            "main",
+            "/plans/p1",
+            "t",
+            "plan-move",
+            true,
+            false,
+        )
+        .expect("move ok");
+        assert!(out.wrote_target && out.deleted_source);
+        assert_eq!(out.src_leaves, 2);
+        assert!(out.dst_leaves >= 2);
+        assert_eq!(leaves(&base, "/plans/p1"), 0, "source removed");
+        assert!(leaves(&dst, "/plans/p1") >= 2, "landed on target");
+    }
+
+    #[test]
+    fn move_subtree_preserves_prefix_sibling() {
+        // Regression for the silent loss: moving `foo` must never disturb `foo2`,
+        // whose path is a string-prefix extension of `foo`.
+        let base = move_test_repo();
+        let dst = move_test_ns(&base, "target");
+        seed(&base, "/plans/foo/_meta/name", "foo");
+        seed(&base, "/plans/foo/t-001/title", "a");
+        seed(&base, "/plans/foo2/_meta/name", "foo2");
+        seed(&base, "/plans/foo2/t-001/title", "b");
+        let foo2_before = leaves(&base, "/plans/foo2");
+
+        move_subtree_verified(
+            &base,
+            &dst,
+            "main",
+            "main",
+            "/plans/foo",
+            "t",
+            "plan-move",
+            true,
+            false,
+        )
+        .expect("move foo");
+        assert_eq!(leaves(&base, "/plans/foo"), 0, "foo moved out");
+        assert_eq!(
+            leaves(&base, "/plans/foo2"),
+            foo2_before,
+            "prefix sibling foo2 untouched"
+        );
+    }
+
+    #[test]
+    fn move_subtree_skip_write_with_empty_target_refuses_delete() {
+        // THE data-loss regression: a caller that (wrongly) believes the target
+        // already holds the subtree passes skip_write=true. If the target is in
+        // fact empty, the guard must FAIL and leave the source intact — this is
+        // exactly the condition that silently ate a plan before the guard.
+        let base = move_test_repo();
+        let dst = move_test_ns(&base, "target"); // target has nothing at /plans/p
+        seed(&base, "/plans/orphan/_meta/name", "orphan");
+        seed(&base, "/plans/orphan/t-001/title", "task");
+        assert_eq!(leaves(&base, "/plans/orphan"), 2, "seed landed");
+
+        let err = move_subtree_verified(
+            &base,
+            &dst,
+            "main",
+            "main",
+            "/plans/orphan",
+            "t",
+            "plan-move",
+            true,
+            /*skip_write=*/ true,
+        )
+        .expect_err("verification must fail");
+        assert_eq!(
+            err.0,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "expected verify-failure (500), got: {}",
+            err.1
+        );
+        assert!(
+            leaves(&base, "/plans/orphan") > 0,
+            "source MUST be preserved when the target didn't receive the data"
+        );
+    }
+
+    #[test]
+    fn move_subtree_refuses_missing_source() {
+        let base = move_test_repo();
+        let dst = move_test_ns(&base, "target");
+        let err = move_subtree_verified(
+            &base,
+            &dst,
+            "main",
+            "main",
+            "/plans/nope",
+            "t",
+            "x",
+            true,
+            false,
+        )
+        .expect_err("missing source");
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn move_subtree_no_delete_keeps_source() {
+        let base = move_test_repo();
+        let dst = move_test_ns(&base, "target");
+        seed(&base, "/memory/m/body", "hello");
+
+        let out = move_subtree_verified(
+            &base,
+            &dst,
+            "main",
+            "main",
+            "/memory/m",
+            "t",
+            "subtree-move",
+            false,
+            false,
+        )
+        .expect("copy ok");
+        assert!(out.wrote_target && !out.deleted_source);
+        assert!(leaves(&base, "/memory/m") > 0, "source kept (copy)");
+        assert!(leaves(&dst, "/memory/m") > 0, "target populated");
+    }
 
     #[test]
     fn fallback_ratio_lent_only_to_spending_sessions_without_own_ratio() {
