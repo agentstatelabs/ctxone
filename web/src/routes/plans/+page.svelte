@@ -47,6 +47,10 @@
 	let selectedName: string | null = $state(null);
 	let selectedPlan = $state<Plan | null>(null);
 	let error: string | null = $state(null);
+	// True while a scope-change (workspace/branch) reload is in flight. Gates the
+	// "No plans on this branch yet" empty state so switching workspaces shows a
+	// loading placeholder instead of briefly claiming the new workspace is empty.
+	let loading = $state(true);
 
 	async function loadPlans() {
 		error = null;
@@ -55,6 +59,8 @@
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 			plans = [];
+		} finally {
+			loading = false;
 		}
 	}
 
@@ -116,6 +122,7 @@
 		selectedName = null;
 		selectedPlan = null;
 		plans = [];
+		loading = true;
 		panelTaskId = null;
 		panelIntent = null;
 		error = null;
@@ -524,7 +531,9 @@
 			</div>
 		{/key}
 	{:else if !error}
-		{#if plans.length === 0}
+		{#if loading}
+			<EmptyState icon="⏳" title="Loading plans…" description="Fetching this workspace's plans." />
+		{:else if plans.length === 0}
 			<EmptyState
 				icon="📋"
 				title="No plans on this branch yet"
