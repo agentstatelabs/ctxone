@@ -21,6 +21,12 @@
 	} = $props();
 
 	let paths: string[] = $state([]);
+	// Distinguishes "still loading the first path list" from "loaded and the
+	// branch really is empty" — otherwise the initial in-flight load (which can
+	// be slow; /paths returns the whole tree) renders the empty state and looks
+	// like the branch has no memory. Stays true after the first load completes
+	// so auto-refresh never flips back to the loading placeholder.
+	let loaded = $state(false);
 	let selectedPath: string | null = $state(null);
 	let selectedValue: unknown = $state(null);
 	let blame: unknown = $state(null);
@@ -99,6 +105,8 @@
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to load paths';
 			paths = [];
+		} finally {
+			loaded = true;
 		}
 	}
 
@@ -207,12 +215,18 @@
 
 <div class="browser">
 	<div class="path-list">
-		{#if paths.length === 0}
-			<EmptyState
-					icon="🧠"
-					title="No memory on this branch yet"
-					description="The memory graph is empty here. Capture a fact with `ctx remember` (or the Recall/Remember tools) to populate it."
-				/>
+		{#if !loaded}
+			<p class="loading">Loading memory…</p>
+		{:else if paths.length === 0}
+			{#if error}
+				<p class="loading">Couldn’t load memory on this branch.</p>
+			{:else}
+				<EmptyState
+						icon="🧠"
+						title="No memory on this branch yet"
+						description="The memory graph is empty here. Capture a fact with `ctx remember` (or the Recall/Remember tools) to populate it."
+					/>
+			{/if}
 		{:else if viewMode === 'flat'}
 			{#each paths as path}
 				<button
@@ -501,5 +515,10 @@
 	}
 	.hint {
 		color: var(--text-3);
+	}
+	.loading {
+		color: var(--text-3);
+		font-size: 0.85rem;
+		padding: 0.5rem 0.6rem;
 	}
 </style>
