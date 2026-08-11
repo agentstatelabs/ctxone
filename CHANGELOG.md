@@ -4,6 +4,22 @@ All notable changes to CTXone are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 the project's `0.9.x` series (incremented by 0.0.01 per release).
 
+## [v0.9.29] — 2026-08-10
+
+### Added
+- **Browse-with-search on Search, Recall, and Why.** The Lens Browse tree+detail panel is now embedded beside the results on the Search, Recall, and Why pages: clicking a result (or a Why trace path) reveals it in the in-page tree and loads its value/provenance without navigating away to `/browse`. The browser is extracted into a reusable `BrowsePane` component; `/browse` itself keeps its `?path=` deep link.
+
+### Fixed
+- `BrowsePane` no longer flashes "No memory on this branch yet" during its initial path load. The empty state was shown whenever the path list was empty — including the in-flight first fetch, which is slow because it returns the whole tree — so a cold load briefly and misleadingly claimed the branch had no memory. It now shows a "Loading memory…" placeholder until the first load completes.
+
+## [v0.9.28] — 2026-08-07
+
+### Changed
+- Split the Lens "Token economics" panel into distinct **Recall savings** and **LLM usage** views, and broke **Model efficiency** out into its own panel.
+
+### Fixed
+- Corrected inflated cost figures: `$/1M` now excludes cache reads, and the recall savings estimate no longer double-counts.
+
 ## [v0.9.27] — 2026-08-06
 
 ### Changed
