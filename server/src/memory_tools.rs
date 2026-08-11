@@ -2542,6 +2542,40 @@ impl CtxOneServer {
         ))
     }
 
+    /// On a *fallback* `default` session (no workspace could be derived and
+    /// none was given), annotate a read tool's JSON result with a one-line
+    /// notice so a near-empty `default` view isn't mistaken for "nothing
+    /// exists." No-op for any deliberately-chosen namespace (including an
+    /// explicit `default`), so normal sessions are unaffected. Reads are not
+    /// blocked — only labeled — mirroring the write guard's guidance.
+    fn annotate_read(&self, out: String) -> String {
+        if self.namespace_explicit || self.namespace != "default" {
+            return out;
+        }
+        const NOTICE: &str = "No workspace was derived for this directory, so this read is scoped \
+            to the shared `default` workspace (usually near-empty). If you expected results: set \
+            CTX_NAMESPACE=<ns> (or --namespace / ?namespace=), call `namespace_for_plan` / \
+            `namespace_for_task` to find the owning workspace, or pass --all-namespaces to search \
+            across every workspace.";
+        match serde_json::from_str::<serde_json::Value>(&out) {
+            Ok(serde_json::Value::Object(mut m)) => {
+                m.insert(
+                    "workspace_notice".to_string(),
+                    serde_json::Value::String(NOTICE.to_string()),
+                );
+                serde_json::to_string_pretty(&serde_json::Value::Object(m)).unwrap_or(out)
+            }
+            // Array or scalar: wrap so the notice rides alongside the payload.
+            Ok(other) => serde_json::to_string_pretty(&serde_json::json!({
+                "workspace_notice": NOTICE,
+                "results": other,
+            }))
+            .unwrap_or(out),
+            // Non-JSON text: prepend the notice as a visible line.
+            Err(_) => format!("⚠ {NOTICE}\n\n{out}"),
+        }
+    }
+
     /// Find which namespace(s) contain a given plan or task id, by scanning
     /// every workspace. Shared by the `namespace_for_plan`/`namespace_for_task`
     /// tools so a stranded agent can resolve the right workspace from an id.
@@ -2681,7 +2715,9 @@ impl CtxOneServer {
             &p.ref_name,
             p.scope.as_deref(),
         );
-        serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string())
+        self.annotate_read(
+            serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string()),
+        )
     }
 
     #[tool(
@@ -2723,7 +2759,7 @@ impl CtxOneServer {
         let flat_size = self.session.total_graph_size_chars.load(Ordering::Relaxed) as usize;
 
         let path = format!("/memory/projects/{}", p.project);
-        match self.repo.get_json(&p.ref_name, &path) {
+        self.annotate_read(match self.repo.get_json(&p.ref_name, &path) {
             Ok(value) => {
                 // Wrap the tree in an envelope so downstream LLMs see an
                 // explicit marker that this is stored data, not instructions.
@@ -2738,7 +2774,7 @@ impl CtxOneServer {
                 with_stats(&response, flat_size, &self.session)
             }
             Err(e) => format!("No context found for '{}': {}", p.project, e),
-        }
+        })
     }
 
     #[tool(
@@ -3101,7 +3137,7 @@ impl CtxOneServer {
                 .unwrap_or_default();
             out.push(pt::plan_to_json(&plan, &tasks, false));
         }
-        serde_json::to_string(&out).unwrap_or_else(|_| "[]".into())
+        self.annotate_read(serde_json::to_string(&out).unwrap_or_else(|_| "[]".into()))
     }
 
     #[tool(
@@ -3120,8 +3156,10 @@ impl CtxOneServer {
         let tasks = store
             .list_tasks(&p.ref_name, &p.plan_id)
             .unwrap_or_default();
-        serde_json::to_string(&pt::plan_to_json(&plan, &tasks, true))
-            .unwrap_or_else(|_| "{}".into())
+        self.annotate_read(
+            serde_json::to_string(&pt::plan_to_json(&plan, &tasks, true))
+                .unwrap_or_else(|_| "{}".into()),
+        )
     }
 
     #[tool(
@@ -3842,19 +3880,21 @@ impl CtxOneServer {
     async fn search(&self, params: Parameters<SearchValuesParams>) -> String {
         let p = params.0;
         let p = self.apply_default_ref(p);
-        match self
-            .repo
-            .search_values(&p.ref_name, &p.query, p.max_results)
-        {
-            Ok(results) => {
-                let out: Vec<serde_json::Value> = results
-                    .into_iter()
-                    .map(|(path, value)| serde_json::json!({ "path": path, "value": value }))
-                    .collect();
-                serde_json::to_string(&out).unwrap_or_else(|_| "[]".into())
-            }
-            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
-        }
+        self.annotate_read(
+            match self
+                .repo
+                .search_values(&p.ref_name, &p.query, p.max_results)
+            {
+                Ok(results) => {
+                    let out: Vec<serde_json::Value> = results
+                        .into_iter()
+                        .map(|(path, value)| serde_json::json!({ "path": path, "value": value }))
+                        .collect();
+                    serde_json::to_string(&out).unwrap_or_else(|_| "[]".into())
+                }
+                Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+            },
+        )
     }
 
     #[tool(
@@ -4649,6 +4689,27 @@ mod tests {
         // Any non-default namespace → allowed regardless of the flag.
         let named = CtxOneServer::new(fresh_repo()).with_namespace("proj".to_string());
         assert!(named.namespace_write_block().is_none());
+    }
+
+    #[test]
+    fn annotate_read_only_labels_fallback_default() {
+        // Fallback default → object gains a workspace_notice; array gets wrapped.
+        let fallback = CtxOneServer::new(fresh_repo());
+        let obj = fallback.annotate_read(r#"{"results":[]}"#.to_string());
+        assert!(obj.contains("workspace_notice"));
+        assert!(obj.contains("--all-namespaces"));
+        let arr = fallback.annotate_read(r#"[1,2,3]"#.to_string());
+        assert!(arr.contains("workspace_notice") && arr.contains("\"results\""));
+
+        // Explicit default → untouched.
+        let explicit = CtxOneServer::new(fresh_repo()).with_namespace_explicit(true);
+        assert_eq!(
+            explicit.annotate_read(r#"{"x":1}"#.to_string()),
+            r#"{"x":1}"#
+        );
+        // Named workspace → untouched.
+        let named = CtxOneServer::new(fresh_repo()).with_namespace("proj".to_string());
+        assert_eq!(named.annotate_read("[]".to_string()), "[]");
     }
 
     #[test]
