@@ -616,6 +616,7 @@ fn router_with_config_inner(
         .route("/api/plans/{name}/close", post(close_plan_handler))
         .route("/api/plans/{name}/move", post(move_plan_handler))
         .route("/api/plans/{name}/relocate", post(relocate_plan))
+        .route("/api/move", post(move_subtree))
         // Reminder endpoints
         .route(
             "/api/reminders",
@@ -4739,6 +4740,133 @@ async fn derive_session_links(
     })))
 }
 
+/// Outcome of a guarded subtree move.
+struct MoveOutcome {
+    src_leaves: usize,
+    dst_leaves: usize,
+    wrote_target: bool,
+    deleted_source: bool,
+}
+
+/// Move a subtree from `src` to `dst` with a **write → verify → delete** guard.
+///
+/// This is the single choke point for every cross-namespace move (plans,
+/// sessions, arbitrary paths). It exists because the old handlers deleted the
+/// source *unconditionally* after a conditional write: if the source read came
+/// back empty/corrupt (e.g. partial-tree corruption after many sequential
+/// deletes on a branch) or the write was skipped, the source was still deleted
+/// — silent data loss. Here the source delete is **gated on a fresh leaf count
+/// of the target**, so a move that didn't actually transfer the data can never
+/// destroy the source. Worst case is a harmless duplicate, never a loss.
+///
+/// `skip_write` lets a caller keep its own idempotency decision (target already
+/// holds an equal/newer copy); the verify then only requires the target to hold
+/// *some* content at `path` rather than a full leaf-count match.
+#[allow(clippy::too_many_arguments)]
+fn move_subtree_verified(
+    src: &agentstategraph::Repository,
+    dst: &agentstategraph::Repository,
+    from_ref: &str,
+    to_ref: &str,
+    path: &str,
+    agent: &str,
+    kind: &str,
+    delete_source: bool,
+    skip_write: bool,
+) -> Result<MoveOutcome, (StatusCode, String)> {
+    // 1. Read the source subtree and count its leaves. An empty/missing source
+    //    is a hard stop: never delete on the strength of a zero-leaf read.
+    let subtree = src
+        .get_tree(from_ref, path)
+        .map_err(|_| (StatusCode::NOT_FOUND, format!("nothing to move at {path}")))?;
+    let src_leaves = src
+        .list_paths(from_ref, path, None)
+        .map_err(internal_error)?
+        .len();
+    if src_leaves == 0 {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("source subtree at {path} is empty — refusing to move (possible corruption); source left intact"),
+        ));
+    }
+
+    // 2. Write to the target unless the caller already decided it's current.
+    let wrote_target = if skip_write {
+        false
+    } else {
+        let opts = CommitOptions::new(
+            agent,
+            IntentCategory::Custom("Migrate".to_string()),
+            format!("move {path} to {to_ref}"),
+        )
+        .with_tags(vec![format!("path:{path}"), format!("kind:{kind}")]);
+        dst.set_json(to_ref, path, &subtree, opts)
+            .map_err(internal_error)?;
+        true
+    };
+
+    // 3. VERIFY the target actually holds the data before touching the source.
+    let dst_leaves = dst
+        .list_paths(to_ref, path, None)
+        .map_err(internal_error)?
+        .len();
+    let ok = if wrote_target {
+        dst_leaves >= src_leaves
+    } else {
+        dst_leaves > 0
+    };
+    if !ok {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "move verification failed at {path}: target has {dst_leaves} leaf(s), source has {src_leaves}; source NOT deleted"
+            ),
+        ));
+    }
+
+    // 4. Only now is it safe to remove the source.
+    let deleted_source = if delete_source {
+        let del_opts = CommitOptions::new(
+            agent,
+            IntentCategory::Rollback,
+            format!("remove {path} after move"),
+        )
+        .with_tags(vec![format!("path:{path}"), format!("kind:{kind}-cleanup")]);
+        src.delete(from_ref, path, del_opts)
+            .map_err(internal_error)?;
+        true
+    } else {
+        false
+    };
+
+    Ok(MoveOutcome {
+        src_leaves,
+        dst_leaves,
+        wrote_target,
+        deleted_source,
+    })
+}
+
+#[derive(Deserialize)]
+struct MoveSubtreeRequest {
+    /// Source namespace. Defaults to the request's `X-CTXone-Namespace`.
+    #[serde(default)]
+    from_namespace: Option<String>,
+    #[serde(default = "default_ref", rename = "ref")]
+    ref_name: String,
+    to_namespace: String,
+    #[serde(default)]
+    to_ref: Option<String>,
+    /// Subtree to relocate, e.g. `/memory/<...>`, `/sessions/<id>`, `/plans/<slug>`.
+    path: String,
+    /// Move (default) vs copy: when false, the source is left in place.
+    #[serde(default = "default_true")]
+    delete_source: bool,
+    /// Report counts without mutating anything.
+    #[serde(default)]
+    dry_run: bool,
+}
+
 #[derive(Deserialize)]
 struct MoveSessionRequest {
     to_namespace: String,
@@ -4792,74 +4920,44 @@ async fn relocate_plan(
     let dst = s.repo_for(&NamespaceId(req.to_namespace.clone()))?;
     let plan_root = format!("{}/{}", plan_tools::PLANS_PREFIX, name);
 
-    // The plan subtree. Absent = 404: moving a plan that isn't here is a
-    // caller error, not a silent success.
-    let plan_tree = src.get_tree(&req.ref_name, &plan_root).map_err(|_| {
-        (
-            StatusCode::NOT_FOUND,
-            format!("no plan {} in {}", name, ns.0),
-        )
-    })?;
-
     // Destination ref — the source ref unless the caller consolidates onto a
     // different trunk (the migration passes "main").
     let dst_ref = req.to_ref.clone().unwrap_or_else(|| req.ref_name.clone());
 
-    // Idempotency on the plan's own `_meta.created_at` (plans are immutable in
-    // identity; created_at is the stable key). If the target already holds a
-    // plan by this name, don't overwrite.
+    // Idempotency: if the target already holds a plan by this name, don't
+    // overwrite it — but still verify + clean up the source (skip_write=true).
     let dst_has = dst.get_tree(&dst_ref, &plan_root).is_ok();
 
-    if !dst_has {
-        let opts = CommitOptions::new(
-            &agent_id.0,
-            IntentCategory::Custom("Migrate".to_string()),
-            format!("move plan {} to {}", name, req.to_namespace),
-        )
-        .with_tags(vec![format!("plan:{}", name), "kind:plan-move".to_string()]);
-        dst.set_json(&dst_ref, &plan_root, &plan_tree, opts)
-            .map_err(internal_error)?;
-
-        // Carry the cross-plan link sidecars, if any. Absent is fine — most
-        // plans have none.
-        let links_root = format!("/plan_links/{}", name);
-        if let Ok(links) = src.get_tree(&req.ref_name, &links_root) {
-            let link_opts = CommitOptions::new(
-                &agent_id.0,
-                IntentCategory::Custom("Migrate".to_string()),
-                format!("move plan links {} to {}", name, req.to_namespace),
-            )
-            .with_tags(vec![format!("plan:{}", name), "kind:plan-move".to_string()]);
-            dst.set_json(&dst_ref, &links_root, &links, link_opts)
-                .map_err(internal_error)?;
-        }
-    }
-
-    // Remove the originals — plan subtree and its links. This is what makes it
-    // a move and stops the migration leaving duplicates in `default`.
-    let del_opts = CommitOptions::new(
+    // Guarded move: the source is deleted ONLY after the target is confirmed to
+    // hold the plan's leaves. This is the fix for the silent-loss class where a
+    // corrupt/empty read (or a skipped write) still triggered the source delete.
+    let outcome = move_subtree_verified(
+        &src,
+        &dst,
+        &req.ref_name,
+        &dst_ref,
+        &plan_root,
         &agent_id.0,
-        IntentCategory::Rollback,
-        format!("remove plan {} after move to {}", name, req.to_namespace),
-    )
-    .with_tags(vec![
-        format!("plan:{}", name),
-        "kind:plan-move-cleanup".to_string(),
-    ]);
-    src.delete(&req.ref_name, &plan_root, del_opts)
-        .map_err(internal_error)?;
+        "plan-move",
+        true,
+        dst_has,
+    )?;
+
+    // Cross-plan link sidecars, if any — same guard, best-effort (absence is
+    // normal, and a link hiccup must not fail a move whose plan already landed).
     let links_root = format!("/plan_links/{}", name);
     if src.get_tree(&req.ref_name, &links_root).is_ok() {
-        let del_links = CommitOptions::new(
+        let _ = move_subtree_verified(
+            &src,
+            &dst,
+            &req.ref_name,
+            &dst_ref,
+            &links_root,
             &agent_id.0,
-            IntentCategory::Rollback,
-            format!("remove plan links {} after move", name),
-        )
-        .with_tags(vec![
-            format!("plan:{}", name),
-            "kind:plan-move-cleanup".to_string(),
-        ]);
-        let _ = src.delete(&req.ref_name, &links_root, del_links);
+            "plan-move",
+            true,
+            false,
+        );
     }
 
     Ok(Json(serde_json::json!({
@@ -4867,8 +4965,11 @@ async fn relocate_plan(
         "plan": name,
         "from": ns.0,
         "to": req.to_namespace,
-        "wrote_target": !dst_has,
+        "wrote_target": outcome.wrote_target,
         "target_already_had_it": dst_has,
+        "src_leaves": outcome.src_leaves,
+        "dst_leaves": outcome.dst_leaves,
+        "deleted_source": outcome.deleted_source,
     })))
 }
 
@@ -4929,33 +5030,20 @@ async fn move_session(
         _ => false,
     };
 
-    if !target_is_current {
-        let opts = CommitOptions::new(
-            &agent_id.0,
-            IntentCategory::Custom("Migrate".to_string()),
-            format!("move session {} to {}", sid, req.to_namespace),
-        )
-        .with_tags(vec![
-            format!("session:{}", sid),
-            "kind:session-move".to_string(),
-        ]);
-        dst.set_json(&req.ref_name, &root, &subtree, opts)
-            .map_err(internal_error)?;
-    }
-
-    // Remove the original. This is what makes the move a move rather than a
-    // copy, and what stops the migration leaving duplicates in `default`.
-    let del_opts = CommitOptions::new(
+    // Guarded move: the source is deleted only after the target is verified to
+    // hold the session's leaves; the write is skipped when the target copy is
+    // already current (idempotent re-run).
+    let outcome = move_subtree_verified(
+        &src,
+        &dst,
+        &req.ref_name,
+        &req.ref_name,
+        &root,
         &agent_id.0,
-        IntentCategory::Rollback,
-        format!("remove session {} after move to {}", sid, req.to_namespace),
-    )
-    .with_tags(vec![
-        format!("session:{}", sid),
-        "kind:session-move-cleanup".to_string(),
-    ]);
-    src.delete(&req.ref_name, &root, del_opts)
-        .map_err(internal_error)?;
+        "session-move",
+        true,
+        target_is_current,
+    )?;
 
     s.sessions.mark_all_dirty();
 
@@ -4964,8 +5052,87 @@ async fn move_session(
         "session_id": sid,
         "from": ns.0,
         "to": req.to_namespace,
-        "wrote_target": !target_is_current,
+        "wrote_target": outcome.wrote_target,
         "target_was_current": target_is_current,
+        "src_leaves": outcome.src_leaves,
+        "dst_leaves": outcome.dst_leaves,
+        "deleted_source": outcome.deleted_source,
+    })))
+}
+
+/// `POST /api/move` — relocate an arbitrary subtree of graph paths to another
+/// namespace (and/or ref) with the write→verify→delete guard.
+///
+/// The general primitive behind `ctx move`. `plan relocate` and session-move
+/// are typed wrappers over the same guarded core (`move_subtree_verified`), so
+/// every cross-namespace move shares the same no-data-loss guarantee.
+async fn move_subtree(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+    agent_id: AgentId,
+    Json(req): Json<MoveSubtreeRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let from_ns = req.from_namespace.clone().unwrap_or_else(|| ns.0.clone());
+    let to_ref = req.to_ref.clone().unwrap_or_else(|| req.ref_name.clone());
+
+    // Refuse whole-branch moves: that is `merge` territory, and set_json at "/"
+    // would overwrite the target root.
+    let path = req.path.trim_end_matches('/');
+    if path.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "path must name a subtree, not the whole branch (\"/\")".to_string(),
+        ));
+    }
+    if from_ns == req.to_namespace && req.ref_name == to_ref {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "source and target are identical; nothing to move".to_string(),
+        ));
+    }
+
+    let src = s.repo_for(&NamespaceId(from_ns.clone()))?;
+    let dst = s.repo_for(&NamespaceId(req.to_namespace.clone()))?;
+
+    if req.dry_run {
+        let src_leaves = src
+            .list_paths(&req.ref_name, path, None)
+            .map_err(internal_error)?
+            .len();
+        let dst_has = dst.get_tree(&to_ref, path).is_ok();
+        return Ok(Json(serde_json::json!({
+            "status": "dry_run",
+            "from": from_ns,
+            "to": req.to_namespace,
+            "path": path,
+            "src_leaves": src_leaves,
+            "target_has_path": dst_has,
+            "would_delete_source": req.delete_source && src_leaves > 0,
+        })));
+    }
+
+    let outcome = move_subtree_verified(
+        &src,
+        &dst,
+        &req.ref_name,
+        &to_ref,
+        path,
+        &agent_id.0,
+        "subtree-move",
+        req.delete_source,
+        false,
+    )?;
+    s.sessions.mark_all_dirty();
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "from": from_ns,
+        "to": req.to_namespace,
+        "path": path,
+        "wrote_target": outcome.wrote_target,
+        "deleted_source": outcome.deleted_source,
+        "src_leaves": outcome.src_leaves,
+        "dst_leaves": outcome.dst_leaves,
     })))
 }
 
