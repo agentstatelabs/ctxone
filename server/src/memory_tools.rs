@@ -3379,13 +3379,14 @@ impl CtxOneServer {
         ensure_flat_size(&self.repo, &self.session, "main");
         let flat_size = self.session.total_graph_size_chars.load(Ordering::Relaxed) as usize;
 
-        // Search for the decision
-        match self.repo.search_values("main", &p.decision, Some(5)) {
+        // Search for the decision. A match guard handles the empty case so the
+        // whole result can flow through annotate_read (which flags a fallback
+        // `default` session — see [`Self::annotate_read`]).
+        let out = match self.repo.search_values("main", &p.decision, Some(5)) {
+            Ok(results) if results.is_empty() => {
+                format!("No record found for decision: '{}'", p.decision)
+            }
             Ok(results) => {
-                if results.is_empty() {
-                    return format!("No record found for decision: '{}'", p.decision);
-                }
-
                 let mut output = String::new();
                 for (path, _value) in &results {
                     output.push_str(&format!("Path: {}\n", path));
@@ -3408,7 +3409,8 @@ impl CtxOneServer {
                 with_stats(&output, flat_size, &self.session)
             }
             Err(e) => format!("Error: {}", e),
-        }
+        };
+        self.annotate_read(out)
     }
 
     #[tool(
