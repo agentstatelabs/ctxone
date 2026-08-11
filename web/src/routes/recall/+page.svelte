@@ -4,12 +4,24 @@
 	import { branchStore } from '$lib/branchStore.svelte';
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
 	import ScopeBadge from '$lib/ScopeBadge.svelte';
+	import BrowsePane from '$lib/BrowsePane.svelte';
 
 	let topic = $state('');
 	let budget = $state(1500);
 	let response: RecallResponse | null = $state(null);
 	let searched = $state(false);
 	let error: string | null = $state(null);
+
+	// Selecting a result drives the embedded browse pane instead of navigating
+	// away. `target` is handed to the pane; `selected` mirrors its selection.
+	let target: string | null = $state(null);
+	let selected: string | null = $state(null);
+
+	function openInBrowser(path: string) {
+		// Reassign even when unchanged so re-clicking re-selects.
+		target = null;
+		target = path;
+	}
 
 	async function runRecall() {
 		const t = topic.trim();
@@ -68,53 +80,65 @@
 	<p class="error">{error}</p>
 {/if}
 
-{#if response}
-	<p class="count">
-		{response.results.length} result{response.results.length !== 1 ? 's' : ''}
-		({response.pinned_count} pinned, {response.topic_matches} topic match{response.topic_matches !==
-		1
-			? 'es'
-			: ''})
-		· {response.ctx_tokens_sent} tokens sent
-		{#if response.ctx_savings_ratio > 0}
-			· {response.ctx_savings_ratio.toFixed(1)}× smaller than the flat graph
-		{/if}
-	</p>
+<div class="split">
+	<div class="results-col">
+		{#if response}
+			<p class="count">
+				{response.results.length} result{response.results.length !== 1 ? 's' : ''}
+				({response.pinned_count} pinned, {response.topic_matches} topic match{response.topic_matches !==
+				1
+					? 'es'
+					: ''})
+				· {response.ctx_tokens_sent} tokens sent
+				{#if response.ctx_savings_ratio > 0}
+					· {response.ctx_savings_ratio.toFixed(1)}× smaller than the flat graph
+				{/if}
+			</p>
 
-	{#if response.results.length === 0}
-		<p class="muted">Nothing recalled for “{response.topic}”.</p>
-	{:else}
-		<div class="results">
-			{#each response.results as r}
-				<div class="result">
-					<div class="result-head">
-						<a class="result-path" href={`/browse?path=${encodeURIComponent(r.path)}`}>
-							{r.path}
-						</a>
-						{#if r.pinned}
-							<span class="tag pinned">pinned</span>
-						{:else}
-							{#if r.full_match}
-								<span class="tag full">exact phrase</span>
+			{#if response.results.length === 0}
+				<p class="muted">Nothing recalled for “{response.topic}”.</p>
+			{:else}
+				<div class="results">
+					{#each response.results as r}
+						<button
+							class="result"
+							class:selected={selected === r.path}
+							onclick={() => openInBrowser(r.path)}
+						>
+							<div class="result-head">
+								<span class="result-path">{r.path}</span>
+								{#if r.pinned}
+									<span class="tag pinned">pinned</span>
+								{:else}
+									{#if r.full_match}
+										<span class="tag full">exact phrase</span>
+									{/if}
+									{#if r.score !== undefined}
+										<span class="tag score" title="matched query tokens">score {r.score}</span>
+									{/if}
+								{/if}
+							</div>
+							{#if r.pinned}
+								{#if r.title}<div class="result-title">{r.title}</div>{/if}
+								<div class="result-value">{r.body}</div>
+							{:else}
+								<div class="result-value">{r.value}</div>
 							{/if}
-							{#if r.score !== undefined}
-								<span class="tag score" title="matched query tokens">score {r.score}</span>
-							{/if}
-						{/if}
-					</div>
-					{#if r.pinned}
-						{#if r.title}<div class="result-title">{r.title}</div>{/if}
-						<div class="result-value">{r.body}</div>
-					{:else}
-						<div class="result-value">{r.value}</div>
-					{/if}
+						</button>
+					{/each}
 				</div>
-			{/each}
-		</div>
-	{/if}
-{:else if searched && !error}
-	<p class="muted">Recalling…</p>
-{/if}
+			{/if}
+		{:else if searched && !error}
+			<p class="muted">Recalling…</p>
+		{:else}
+			<p class="muted">Recall a topic, then click a result to open it in the browser →</p>
+		{/if}
+	</div>
+
+	<div class="browse-col">
+		<BrowsePane bind:target onselect={(p) => (selected = p)} />
+	</div>
+</div>
 
 <style>
 	.hint {
@@ -192,6 +216,19 @@
 	}
 
 
+	.split {
+		display: grid;
+		grid-template-columns: minmax(240px, 360px) 1fr;
+		gap: 1.25rem;
+		align-items: start;
+	}
+
+	@media (max-width: 900px) {
+		.split {
+			grid-template-columns: 1fr;
+		}
+	}
+
 	.results {
 		background: var(--bg-1);
 		border: 1px solid var(--border);
@@ -200,8 +237,22 @@
 	}
 
 	.result {
-		padding: 0.75rem 1rem;
+		display: block;
+		width: 100%;
+		text-align: left;
+		background: none;
+		border: none;
 		border-bottom: 1px solid var(--bg-hover);
+		border-radius: 0;
+		padding: 0.75rem 1rem;
+		cursor: pointer;
+	}
+
+	.result:hover {
+		background: var(--bg-hover);
+	}
+	.result.selected {
+		background: var(--bg-active);
 	}
 
 	.result:last-child {
