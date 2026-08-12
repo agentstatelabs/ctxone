@@ -543,6 +543,7 @@ fn router_with_config_inner(
         .route("/api/stats/tokens", get(token_stats))
         .route("/api/stats/tokens/{session_id}", get(session_token_stats))
         .route("/api/stats/sessions", get(list_sessions))
+        .route("/api/sessions/imported", get(imported_session_ids))
         .route("/api/stats/backfill_by_model", post(backfill_by_model))
         .route("/api/stats/llm_usage", post(record_llm_usage))
         .route("/api/stats/plan/{plan}/cost", get(plan_cost))
@@ -1048,6 +1049,34 @@ fn session_ids_with_nodes(repo: &Repository) -> std::collections::HashSet<String
         .filter_map(|rest| rest.split('/').next())
         .map(str::to_string)
         .collect()
+}
+
+/// `GET /api/sessions/imported` — every session id that has a `/sessions/{id}`
+/// subtree in ANY namespace.
+///
+/// The CLI's `ctx session list` uses this to flag which discovered transcripts
+/// are already imported, regardless of which workspace they landed in. It is
+/// the cross-namespace union of [`session_ids_with_nodes`] — the same walk
+/// [`list_sessions`] does to compute "placed elsewhere", but returned whole
+/// rather than used as a filter. Namespace-agnostic by design, so the request's
+/// namespace header is ignored.
+async fn imported_session_ids(State(s): State<HubState>) -> impl IntoResponse {
+    let mut ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Ok(names) = s.repo.list_namespaces() {
+        for name in names {
+            if let Ok(repo) = s.repo_for(&NamespaceId(name.as_str().to_string())) {
+                ids.extend(session_ids_with_nodes(&repo));
+            }
+        }
+    }
+    // `list_namespaces` may omit the default namespace when it has no refs yet;
+    // fold it in explicitly so a default-only install still reports correctly.
+    if let Ok(repo) = s.repo_for(&NamespaceId(Namespace::DEFAULT.to_string())) {
+        ids.extend(session_ids_with_nodes(&repo));
+    }
+    let mut out: Vec<String> = ids.into_iter().collect();
+    out.sort();
+    Json(out)
 }
 
 /// `GET /api/stats/sessions` — the sessions that live in this workspace.
@@ -5307,10 +5336,22 @@ async fn put_session_meta(
 
 // -- Session sync (t-019) ----------------------------------------------
 
-/// Wall-clock cap on a full `ctx ingest-session --all` run before the
-/// endpoint gives up and returns 504. A whole-machine sync of many large
-/// transcripts is I/O bound but should never run for minutes.
-const SESSION_SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+/// Per-chunk wall-clock cap: the sweep runs one bounded ingest subprocess PER
+/// SOURCE, so a large history for one agent can't time out the whole sweep.
+/// Env-tunable via `CTXONE_SESSION_SYNC_TIMEOUT_SECS` (default 300).
+fn session_sync_timeout() -> std::time::Duration {
+    let secs = std::env::var("CTXONE_SESSION_SYNC_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(300);
+    std::time::Duration::from_secs(secs)
+}
+
+/// The agent sources the sweep chunks over, one bounded subprocess each. Kept
+/// in step with the CLI's `all_sources()`; an absent source ingests as a clean
+/// no-op, so listing one that isn't installed is harmless.
+const SYNC_SOURCES: &[&str] = &["claude", "codex", "cursor", "gemini"];
 
 /// `POST /api/sessions/sync` — re-pull ALL local Claude Code transcripts into
 /// this hub so the Sessions view reflects the latest turns, titles, and token
@@ -5336,22 +5377,21 @@ const SESSION_SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// agent tool *pushing* them via a per-tool Stop hook (no per-tool config, no
 /// hook-trust gates, resilient to harness changes). Ingest is incremental
 /// (fingerprint-skip), so repeated sweeps only touch new/changed sessions.
-pub async fn run_session_sync(
+/// Run one bounded ingest for a SINGLE source (`claude`, `codex`, …), the
+/// per-chunk unit of [`run_session_sync`]. Returns `(sessions, turns, tokens)`.
+async fn run_ingest_for_source(
     ctx_bin: &str,
     base_url: &str,
-) -> Result<(u64, u64, u64, u64), (StatusCode, String)> {
-    let start = std::time::Instant::now();
-
+    source: &str,
+) -> Result<(u64, u64, u64), (StatusCode, String)> {
     let mut cmd = tokio::process::Command::new(ctx_bin);
     cmd.arg("ingest-session")
         .arg("--all")
         .arg("--full-turn")
-        // Every installed agent, not just Claude Code. The CLI's `--source`
-        // default is `claude`, so omitting this silently skipped Codex —
-        // a fully implemented source — and any source added later. "Sync"
-        // that quietly covers one agent is worse than no sync at all.
+        // One source per chunk (see SYNC_SOURCES) so a large history for one
+        // agent can't time out the whole sweep.
         .arg("--source")
-        .arg("all")
+        .arg(source)
         .arg("--server")
         .arg(base_url)
         // NOT this request's namespace. `--all` walks every project on the
@@ -5400,20 +5440,21 @@ pub async fn run_session_sync(
         }
     };
 
-    let output = match tokio::time::timeout(SESSION_SYNC_TIMEOUT, child.wait_with_output()).await {
+    let timeout = session_sync_timeout();
+    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
         Ok(Ok(o)) => o,
         Ok(Err(e)) => {
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("ctx ingest-session failed: {e}"),
+                format!("ctx ingest-session ({source}) failed: {e}"),
             ));
         }
         Err(_) => {
             return Err((
                 StatusCode::GATEWAY_TIMEOUT,
                 format!(
-                    "session sync timed out after {}s (ctx ingest-session --all still running)",
-                    SESSION_SYNC_TIMEOUT.as_secs()
+                    "session sync for source '{source}' timed out after {}s",
+                    timeout.as_secs()
                 ),
             ));
         }
@@ -5456,8 +5497,48 @@ pub async fn run_session_sync(
         None => (0, 0, 0),
     };
 
-    let elapsed_ms = start.elapsed().as_millis() as u64;
-    Ok((sessions, turns, tokens, elapsed_ms))
+    Ok((sessions, turns, tokens))
+}
+
+/// Whole-machine session sweep, CHUNKED per source. Runs one bounded
+/// `ctx ingest-session` per [`SYNC_SOURCES`] entry and sums the results, so a
+/// large history for one agent can't time out the entire sweep. A missing `ctx`
+/// binary is fatal (surfaced once); any other per-source failure (a timeout, an
+/// unavailable source) is logged and skipped so the rest still runs. Returns
+/// `(sessions, turns, tokens, elapsed_ms)`.
+pub async fn run_session_sync(
+    ctx_bin: &str,
+    base_url: &str,
+) -> Result<(u64, u64, u64, u64), (StatusCode, String)> {
+    let start = std::time::Instant::now();
+    let (mut sessions, mut turns, mut tokens) = (0u64, 0u64, 0u64);
+    let mut fatal: Option<(StatusCode, String)> = None;
+    let mut any_ok = false;
+
+    for source in SYNC_SOURCES {
+        match run_ingest_for_source(ctx_bin, base_url, source).await {
+            Ok((s, t, k)) => {
+                sessions += s;
+                turns += t;
+                tokens += k;
+                any_ok = true;
+            }
+            // A missing ctx binary fails identically for every source — stop and
+            // surface it once rather than repeating the same error four times.
+            Err((code, msg)) if code == StatusCode::BAD_REQUEST => {
+                fatal = Some((code, msg));
+                break;
+            }
+            Err((code, msg)) => {
+                warn!(source = %source, %code, error = %msg, "session sweep: source chunk failed (continuing)");
+            }
+        }
+    }
+
+    if !any_ok && let Some(err) = fatal {
+        return Err(err);
+    }
+    Ok((sessions, turns, tokens, start.elapsed().as_millis() as u64))
 }
 
 async fn sync_sessions(

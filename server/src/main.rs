@@ -795,17 +795,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // recall/write ever serializes the whole graph (the -32001 cause).
                 memory_tools::spawn_flat_size_refresher(repo.clone(), 20);
 
-                // Background session-sweep: the hub PULLS agent transcripts from
-                // every source on a schedule (default 300s, env
-                // CTXONE_SESSION_SYNC_INTERVAL_SECS, 0 disables) instead of each
-                // tool PUSHING them via a per-tool Stop hook. No per-tool config,
-                // no hook-trust gates, resilient to harness changes; ingest is
-                // incremental so quiet sweeps are cheap. Only runs when a self URL
-                // is known (the real hub binary; library/test callers skip it).
+                // Background session-sweep (auto-sync): the hub can PULL agent
+                // transcripts from every source on a schedule. This is now
+                // **opt-in** — DEFAULT OFF (interval 0). A fresh hub must not
+                // silently ingest a machine's entire agent history: on a heavy
+                // machine that first cold sweep was slow, timed out, and imported
+                // sessions the user may want to keep private. Users choose what to
+                // import via `ctx session import` / the Lens, and enable ongoing
+                // auto-sync deliberately with CTXONE_SESSION_SYNC_INTERVAL_SECS=<secs>.
                 let sync_interval: u64 = std::env::var("CTXONE_SESSION_SYNC_INTERVAL_SECS")
                     .ok()
                     .and_then(|s| s.parse().ok())
-                    .unwrap_or(300);
+                    .unwrap_or(0);
                 if let Some(base_url) = sync_base_url.clone()
                     && sync_interval > 0
                 {

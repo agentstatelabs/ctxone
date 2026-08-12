@@ -7,6 +7,7 @@ mod metrics;
 mod onboarding;
 mod pricing;
 mod service;
+mod session_import;
 mod sources;
 mod workspace;
 mod worktree;
@@ -1217,6 +1218,69 @@ enum SessionAction {
         #[arg(long, default_value_t = 30)]
         gap: i64,
     },
+
+    /// List agent sessions found on this machine, newest first, as a stable
+    /// numbered list you can feed to `session import`.
+    ///
+    /// Nothing is imported — this only shows what exists, whether each is
+    /// already imported, and whether it's on the privacy skip-list.
+    List {
+        /// Only this source (claude|codex|cursor|gemini|generic).
+        #[arg(long)]
+        source: Option<String>,
+        /// Which page of 25 to show.
+        #[arg(long, default_value_t = 1)]
+        page: usize,
+        /// Show every session in one shot instead of paging.
+        #[arg(long)]
+        all: bool,
+    },
+
+    /// Import chosen sessions by their `list` number, a range, or `all`.
+    ///
+    /// With no selectors, opens an interactive picker (page through, select,
+    /// then `done`). Sessions on the privacy skip-list are never imported
+    /// unless `--include-ignored` is given. Each session routes to the
+    /// workspace of the repo it ran in (use `ctx session move` to change it).
+    Import {
+        /// Selectors: numbers (`7`), ranges (`1-10`), literal ids, or `all`.
+        /// Omit to pick interactively.
+        selectors: Vec<String>,
+        /// Only import from this source.
+        #[arg(long)]
+        source: Option<String>,
+        /// Import even sessions on the privacy skip-list.
+        #[arg(long)]
+        include_ignored: bool,
+        /// Skip the extraction-mode notice (for scripts).
+        #[arg(long)]
+        quiet: bool,
+        /// Show what would be imported without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Add sessions to the privacy skip-list so they're never imported.
+    ///
+    /// Takes `list` numbers, ranges, `all`, or literal ids. The skip-list lives
+    /// at `~/.ctxone/ignored-sessions.txt` and is honoured by both manual
+    /// imports and the hub's background sweep.
+    Ignore {
+        /// Selectors: numbers, ranges, literal ids, or `all`.
+        selectors: Vec<String>,
+        /// Resolve numbers against this source's slice of the list.
+        #[arg(long)]
+        source: Option<String>,
+    },
+
+    /// Remove sessions from the privacy skip-list.
+    Unignore {
+        /// Selectors: numbers, ranges, literal ids, or `all`.
+        selectors: Vec<String>,
+        /// Resolve numbers against this source's slice of the list.
+        #[arg(long)]
+        source: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -2393,7 +2457,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Commands::Session { action } => {
-            run_session_action(action, &cli.server, client_factory).await?;
+            run_session_action(action, &cli.server, &cli.branch, client_factory).await?;
         }
 
         Commands::IngestSession {
@@ -2491,6 +2555,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if all { None } else { namespace.clone() },
                 reingest,
                 dir_workspaces,
+                // The low-level `ingest-session` command imports everything it
+                // discovers; the numbered whitelist is `session import`'s job.
+                None,
             )
             .await?;
         }
@@ -5429,6 +5496,11 @@ async fn run_ingest_session(
     // Route non-git working directories to a directory-named workspace instead
     // of `default` (see the `--dir-workspaces` flag).
     dir_workspaces: bool,
+    // When set, import ONLY these namespaced session ids and skip everything
+    // else discovered. This is how `ctx session import <numbers>` turns a
+    // numbered selection into a targeted subset of a full-machine discovery
+    // without a second code path. `None` imports everything discovered.
+    only_ids: Option<std::collections::HashSet<String>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let extraction = crate::ingest::resolve_extraction_config();
     if extraction.is_none() && !tokens_only {
@@ -5476,62 +5548,89 @@ async fn run_ingest_session(
     };
 
     // (source-id, source-label, project-label, sessions)
-    let groups: Vec<(&'static str, &'static str, String, Vec<SessionRef>)> = if let Some(f) = file {
-        // An explicit --file is parsed by the named source; with `--source
-        // all` that is ambiguous, so require a concrete one.
-        let src = selected
-            .first()
-            .filter(|_| source != "all")
-            .ok_or("--file requires a concrete --source (not 'all')")?;
-        vec![(
-            src.id(),
-            src.label(),
-            String::new(),
-            vec![SessionRef {
-                label: String::new(),
-                // An explicit --file names a transcript, not a project, so the
-                // cwd is read from the file itself during routing rather than
-                // assumed from the caller's shell.
-                cwd: None,
-                path: std::path::PathBuf::from(f),
-                native_id: None,
-                precomputed_fp: None,
-            }],
-        )]
-    } else {
-        let cwd = if all {
-            None
+    let mut groups: Vec<(&'static str, &'static str, String, Vec<SessionRef>)> =
+        if let Some(f) = file {
+            // An explicit --file is parsed by the named source; with `--source
+            // all` that is ambiguous, so require a concrete one.
+            let src = selected
+                .first()
+                .filter(|_| source != "all")
+                .ok_or("--file requires a concrete --source (not 'all')")?;
+            vec![(
+                src.id(),
+                src.label(),
+                String::new(),
+                vec![SessionRef {
+                    label: String::new(),
+                    // An explicit --file names a transcript, not a project, so the
+                    // cwd is read from the file itself during routing rather than
+                    // assumed from the caller's shell.
+                    cwd: None,
+                    path: std::path::PathBuf::from(f),
+                    native_id: None,
+                    precomputed_fp: None,
+                }],
+            )]
         } else {
-            Some(std::env::current_dir()?)
-        };
-        let mut out = vec![];
-        for src in &selected {
-            let mut refs = match &cwd {
-                Some(dir) => src.discover_for_project(dir),
-                None => src.discover_all(),
+            let cwd = if all {
+                None
+            } else {
+                Some(std::env::current_dir()?)
             };
-            // User-specified extra directories, probed against this source's
-            // format. A dir that isn't this source's shape yields nothing.
-            for extra in &scan_dirs {
-                refs.extend(src.discover_in(std::path::Path::new(extra)));
-            }
-            // Keep same-label refs adjacent so the grouping below stays tidy
-            // even after mixing built-in and --scan-dir discovery.
-            refs.sort_by(|a, b| a.label.cmp(&b.label));
-            // Re-group by project label so per-project counts still print.
-            let mut by_label: Vec<(String, Vec<SessionRef>)> = vec![];
-            for r in refs {
-                match by_label.last_mut() {
-                    Some((l, v)) if *l == r.label => v.push(r),
-                    _ => by_label.push((r.label.clone(), vec![r])),
+            let mut out = vec![];
+            for src in &selected {
+                let mut refs = match &cwd {
+                    Some(dir) => src.discover_for_project(dir),
+                    None => src.discover_all(),
+                };
+                // User-specified extra directories, probed against this source's
+                // format. A dir that isn't this source's shape yields nothing.
+                for extra in &scan_dirs {
+                    refs.extend(src.discover_in(std::path::Path::new(extra)));
+                }
+                // Keep same-label refs adjacent so the grouping below stays tidy
+                // even after mixing built-in and --scan-dir discovery.
+                refs.sort_by(|a, b| a.label.cmp(&b.label));
+                // Re-group by project label so per-project counts still print.
+                let mut by_label: Vec<(String, Vec<SessionRef>)> = vec![];
+                for r in refs {
+                    match by_label.last_mut() {
+                        Some((l, v)) if *l == r.label => v.push(r),
+                        _ => by_label.push((r.label.clone(), vec![r])),
+                    }
+                }
+                for (label, refs) in by_label {
+                    out.push((src.id(), src.label(), label, refs));
                 }
             }
-            for (label, refs) in by_label {
-                out.push((src.id(), src.label(), label, refs));
-            }
-        }
-        out
+            out
+        };
+
+    // Whitelist (`session import <numbers>`) and privacy skip-list are applied
+    // here, before any per-project header prints, so the output only ever
+    // mentions sessions that will actually be touched.
+    //
+    // The skip-list is loaded ONLY on the unfiltered path — the background
+    // sweep and `ingest-session --all`. The `session import` path arrives with
+    // `only_ids` already resolved against the skip-list in the handler (which
+    // also honours `--include-ignored`), so re-applying it here would ignore
+    // that override. An explicit `--file`/`--session` likewise bypasses it:
+    // naming one transcript is an unambiguous request to import that one.
+    let ignored = if session.is_some() || only_ids.is_some() {
+        std::collections::HashSet::new()
+    } else {
+        crate::session_import::load_ignored()
     };
+    if only_ids.is_some() || !ignored.is_empty() {
+        for g in &mut groups {
+            let sid = g.0;
+            g.3.retain(|r| {
+                let id = r.namespaced_id(sid);
+                only_ids.as_ref().is_none_or(|w| w.contains(&id)) && !ignored.contains(&id)
+            });
+        }
+        groups.retain(|g| !g.3.is_empty());
+    }
 
     if groups.iter().all(|(_, _, _, f)| f.is_empty()) {
         if all {
@@ -5796,6 +5895,7 @@ async fn run_ingest_session(
 async fn run_session_action(
     action: SessionAction,
     server: &str,
+    branch: &str,
     clients: ClientFactory,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match action {
@@ -5876,8 +5976,194 @@ async fn run_session_action(
                 );
             }
         }
+
+        SessionAction::List { source, page, all } => {
+            use crate::session_import as si;
+            let rows = si::discover(source.as_deref());
+            if rows.is_empty() {
+                println!("No agent sessions found on this machine.");
+                return Ok(());
+            }
+            let imported = fetch_imported_ids(server, &clients).await;
+            let ignored = si::load_ignored();
+            if all {
+                let pages = rows.len().div_ceil(si::PAGE_SIZE).max(1);
+                for p in 1..=pages {
+                    si::print_page(&rows, p, &imported, &ignored);
+                }
+            } else {
+                si::print_page(&rows, page, &imported, &ignored);
+            }
+        }
+
+        SessionAction::Import {
+            selectors,
+            source,
+            include_ignored,
+            quiet,
+            dry_run,
+        } => {
+            use crate::session_import as si;
+            let rows = si::discover(source.as_deref());
+            if rows.is_empty() {
+                println!("No agent sessions found on this machine.");
+                return Ok(());
+            }
+            let imported = fetch_imported_ids(server, &clients).await;
+            let ignored = si::load_ignored();
+
+            // Interactive when no selectors are given; otherwise resolve the
+            // numbers/ranges/ids on the command line.
+            let mut ids: std::collections::HashSet<String> = if selectors.is_empty() {
+                match si::interactive_select(&rows, &imported, &ignored) {
+                    Some(set) => set,
+                    None => {
+                        println!("Aborted — nothing imported.");
+                        return Ok(());
+                    }
+                }
+            } else {
+                let (set, unmatched) = si::resolve_selectors(&rows, &selectors);
+                if !unmatched.is_empty() {
+                    eprintln!(
+                        "warn: unrecognized selectors ignored: {}",
+                        unmatched.join(", ")
+                    );
+                }
+                set
+            };
+
+            // Honour the privacy skip-list unless the user overrode it. Removed
+            // ids are reported so a skipped selection never looks like data loss.
+            if !include_ignored {
+                let before = ids.len();
+                ids.retain(|id| !ignored.contains(id));
+                let skipped = before - ids.len();
+                if skipped > 0 {
+                    println!(
+                        "Skipping {skipped} session{} on the privacy skip-list \
+                         (pass --include-ignored to import them).",
+                        if skipped == 1 { "" } else { "s" }
+                    );
+                }
+            }
+
+            if ids.is_empty() {
+                println!("Nothing selected to import.");
+                return Ok(());
+            }
+
+            println!(
+                "Selected {} session{} to import:",
+                ids.len(),
+                if ids.len() == 1 { "" } else { "s" }
+            );
+            {
+                let mut listed: Vec<&String> = ids.iter().collect();
+                listed.sort();
+                for id in listed {
+                    println!("  {id}");
+                }
+            }
+            if !quiet {
+                println!("{}", si::extraction_notice());
+            }
+
+            run_ingest_session(
+                server,
+                branch,
+                None,
+                None,
+                source.as_deref().unwrap_or("all"),
+                true, // fan out across sources + force turn/token capture
+                None,
+                vec![],
+                None,
+                false,
+                dry_run,
+                false,
+                clients,
+                true, // create workspaces for repos routed sessions belong to
+                None, // --all fallback: unroutable transcripts → default
+                false,
+                false,
+                Some(ids),
+            )
+            .await?;
+        }
+
+        SessionAction::Ignore { selectors, source } => {
+            use crate::session_import as si;
+            let rows = si::discover(source.as_deref());
+            let (ids, unmatched) = si::resolve_selectors(&rows, &selectors);
+            if !unmatched.is_empty() {
+                eprintln!(
+                    "warn: unrecognized selectors ignored: {}",
+                    unmatched.join(", ")
+                );
+            }
+            if ids.is_empty() {
+                println!("Nothing to ignore.");
+                return Ok(());
+            }
+            let mut ids: Vec<String> = ids.into_iter().collect();
+            ids.sort();
+            let added = si::add_ignored(&ids)?;
+            println!(
+                "Added {added} session{} to the privacy skip-list ({} already there). \
+                 They will not be imported by manual runs or the background sweep.",
+                if added == 1 { "" } else { "s" },
+                ids.len() - added,
+            );
+            for id in &ids {
+                println!("  ignored: {id}");
+            }
+        }
+
+        SessionAction::Unignore { selectors, source } => {
+            use crate::session_import as si;
+            let rows = si::discover(source.as_deref());
+            let (ids, unmatched) = si::resolve_selectors(&rows, &selectors);
+            if !unmatched.is_empty() {
+                eprintln!(
+                    "warn: unrecognized selectors ignored: {}",
+                    unmatched.join(", ")
+                );
+            }
+            if ids.is_empty() {
+                println!("Nothing to unignore.");
+                return Ok(());
+            }
+            let ids: Vec<String> = ids.into_iter().collect();
+            let removed = si::remove_ignored(&ids)?;
+            println!(
+                "Removed {removed} session{} from the privacy skip-list.",
+                if removed == 1 { "" } else { "s" }
+            );
+        }
     }
     Ok(())
+}
+
+/// Fetch the set of already-imported session ids from the hub (`GET
+/// /api/sessions/imported`, cross-namespace). Best-effort: an unreachable hub
+/// yields an empty set so `list`/`import` still work offline — every session
+/// simply shows as `new`.
+async fn fetch_imported_ids(
+    server: &str,
+    clients: &ClientFactory,
+) -> std::collections::HashSet<String> {
+    let client = clients.build(None);
+    let url = format!("{server}/api/sessions/imported");
+    match client.get(&url).send().await {
+        Ok(r) if r.status().is_success() => r
+            .json::<Vec<String>>()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect(),
+        _ => std::collections::HashSet::new(),
+    }
 }
 
 /// Move existing sessions into the workspace of the repo they ran in.
