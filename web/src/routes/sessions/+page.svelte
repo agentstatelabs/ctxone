@@ -1046,7 +1046,7 @@
 								{/if}
 							</div>
 							<div class="session-meta">
-								<span>{fmt(s.session_tokens_used)} tokens used</span>
+								<span title="Cumulative over the whole session">{fmt(s.session_tokens_used)} tokens used</span>
 								<span class="ratio" style="color: var(--success)" title="Estimated tokens saved (model, not measured)">
 									{fmt(s.session_tokens_saved)} saved
 								</span>
@@ -1085,8 +1085,8 @@
 
 					<div class="stat-grid">
 						<div class="stat">
-							<div class="stat-value" title={exact(selected.session_tokens_used)}>{fmt(selected.session_tokens_used)}</div>
-							<div class="stat-label">Tokens used</div>
+							<div class="stat-value" title="{exact(selected.session_tokens_used)} — cumulative over the whole session, not a single call">{fmt(selected.session_tokens_used)}</div>
+							<div class="stat-label">Tokens used (cumulative)</div>
 						</div>
 						<div class="stat">
 							<div class="stat-value" style="color: var(--success)" title="Estimated, not measured — a conservative model of reconstruction cost.">{fmt(selected.session_tokens_saved)}</div>

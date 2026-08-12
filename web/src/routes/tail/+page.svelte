@@ -12,7 +12,6 @@
 
 	let commits: CommitEntry[] = $state([]);
 	let error: string | null = $state(null);
-	let loaded = $state(false);
 	let lastPolled: Date | null = $state(null);
 	/** Hovering the feed pauses updates so a row can't move under the cursor. */
 	let hoverPaused = $state(false);
@@ -21,6 +20,19 @@
 
 	let seenIds = new Set<string>();
 	let feedEl: HTMLElement | undefined = $state();
+
+	/** Whether the tab is backgrounded. Polling is skipped while hidden, so this
+	 * distinguishes "paused because you're not looking" from a real connection
+	 * problem — the old page showed a misleading, permanent "Connecting…" for a
+	 * feed that had simply never polled because it mounted hidden. */
+	let tabHidden = $state(typeof document !== 'undefined' && document.hidden);
+
+	/** "Connecting…" means we have never completed a poll AND the tab is
+	 * foreground (so a poll is actually being attempted). Driven by
+	 * `lastPolled`, not a `loaded` flag that got stranded when the first poll
+	 * was skipped. Once a poll succeeds (even with zero commits) we are
+	 * connected, and an empty feed reads as "watching". */
+	let connecting = $derived(!lastPolled && !error && !tabHidden);
 
 	async function poll(reset = false) {
 		if (typeof document !== 'undefined' && document.hidden) return;
@@ -45,8 +57,6 @@
 			lastPolled = new Date();
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to load commits';
-		} finally {
-			loaded = true;
 		}
 	}
 
@@ -55,6 +65,7 @@
 		// Poll immediately when the tab becomes visible again (the interval
 		// skips ticks while document.hidden).
 		const onVisibility = () => {
+			tabHidden = document.hidden;
 			if (!document.hidden) void poll();
 		};
 		document.addEventListener('visibilitychange', onVisibility);
@@ -69,7 +80,7 @@
 	$effect(() => {
 		void branchStore.current;
 		void namespaceStore.current;
-		loaded = false;
+		lastPolled = null;
 		commits = [];
 		untrack(() => void poll(true));
 	});
@@ -84,7 +95,13 @@
 
 <h2>
 	Tail <ScopeBadge branch />
-	{#if hoverPaused}
+	{#if error}
+		<span class="live-pill paused">⚠ disconnected</span>
+	{:else if connecting}
+		<span class="live-pill paused">⋯ connecting</span>
+	{:else if tabHidden}
+		<span class="live-pill paused">⏸ paused (background)</span>
+	{:else if hoverPaused}
 		<span class="live-pill paused">⏸ paused</span>
 	{:else}
 		<span class="live-pill"><span class="pulse"></span> Live</span>
@@ -135,9 +152,13 @@
 		</div>
 	{/each}
 
-	{#if commits.length === 0 && loaded && !error}
-		<p class="empty">No commits yet on {branchStore.current}. They'll appear here live.</p>
-	{:else if !loaded && !error}
+	{#if commits.length === 0 && tabHidden && !lastPolled && !error}
+		<p class="empty">Paused while this tab is in the background — switch back to resume.</p>
+	{:else if commits.length === 0 && !connecting && !error}
+		<p class="empty">
+			No commits yet on {branchStore.current} — watching for new activity…
+		</p>
+	{:else if connecting}
 		<p class="empty">Connecting…</p>
 	{/if}
 </div>

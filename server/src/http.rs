@@ -2652,17 +2652,24 @@ async fn why_did_we(
     Query(q): Query<WhyDidWeQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
+    // Over-fetch, then drop session-transcript captures (full-turn / title /
+    // meta nodes under /sessions/). Their raw text matches decision queries and
+    // used to flood the results with an agent's own tool-call chatter, burying
+    // the actual recorded rationale. See `is_session_capture_path`.
     let results = repo
-        .search_values("main", &q.decision, Some(5))
+        .search_values("main", &q.decision, Some(WHY_DID_WE_SCAN))
         .map_err(internal_error)?;
 
     let mut traces = Vec::new();
-    for (path, _) in &results {
+    for (path, _) in results.iter().filter(|(p, _)| !is_session_capture_path(p)) {
         if let Ok(blame_info) = repo.blame("main", path) {
             traces.push(serde_json::json!({
                 "path": path,
                 "blame": serde_json::to_value(&blame_info).unwrap_or_default(),
             }));
+        }
+        if traces.len() >= WHY_DID_WE_LIMIT {
+            break;
         }
     }
 
@@ -2670,6 +2677,22 @@ async fn why_did_we(
         "decision": q.decision,
         "traces": traces,
     })))
+}
+
+/// Rationale-search tuning shared by the HTTP and MCP `why_did_we`.
+///
+/// We scan more candidates than we return so that filtering out session
+/// captures still leaves a full page of real decisions.
+pub const WHY_DID_WE_LIMIT: usize = 5;
+pub const WHY_DID_WE_SCAN: usize = 40;
+
+/// True for paths that are session-transcript plumbing (full-turn captures,
+/// session titles/meta), which live under `/sessions/` and are NOT decisions.
+/// `why_did_we` excludes them so it returns rationale, not an agent's own
+/// tool-call chatter. Mirrors the web `CAPTURE_KINDS` intent, but keyed on the
+/// path (which the value search already returns) rather than commit tags.
+pub fn is_session_capture_path(path: &str) -> bool {
+    path.starts_with("/sessions/")
 }
 
 // -- Prime / pinned context --

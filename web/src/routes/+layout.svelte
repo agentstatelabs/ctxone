@@ -163,9 +163,12 @@
 		// Auto-select: restore from localStorage, else pick first repo.
 		const saved = localStorage.getItem('ctxone_asd_repo');
 		const initial = repos.find((r) => r.name === saved) ?? repos[0];
-		if (initial) $selectedRepo = initial.name;
-		// Load health for the selected repo.
-		if ($selectedRepo) getAsdHealth($selectedRepo).then((h) => (asdHealth = h));
+		// Clear a stale selection when NO code repos are registered — otherwise a
+		// name persisted from another hub keeps firing /api/code/<repo>/health and
+		// /prefetch, which 404 on a hub with no code proxy (console-spam, eval #6).
+		// Health/prefetch for the selected repo is driven by the $effect below,
+		// which re-runs now that asdRepos is populated — no need to fetch here.
+		$selectedRepo = initial ? initial.name : '';
 	}
 
 	onMount(() => {
@@ -185,12 +188,20 @@
 	// Also fire a prefetch so pool-managed repos warm before /code is hit.
 	$effect(() => {
 		const repo = $selectedRepo;
+		// Depend on the registry too, so this re-runs once it loads (the repo is
+		// often selected from localStorage BEFORE the registry arrives). This
+		// effect must NOT write asdRepos — doing so would retrigger itself in an
+		// infinite prefetch loop; the status pill's initial value from
+		// loadAsdRepos is good enough.
+		const known = asdRepos.some((r) => r.name === repo);
 		if (!repo) return;
+		// Only touch the code proxy for a repo that is actually registered. A
+		// stale/unknown name (persisted from another hub) would otherwise 404 on
+		// prefetch + health every load. Skip until the registry has loaded.
+		if (!known) return;
 		localStorage.setItem('ctxone_asd_repo', repo);
 		asdHealth = null;
-		prefetchAsdRepo(repo)
-			.then(() => listAsdRepos())
-			.then((repos) => (asdRepos = repos));
+		prefetchAsdRepo(repo);
 		getAsdHealth(repo).then((h) => (asdHealth = h));
 	});
 

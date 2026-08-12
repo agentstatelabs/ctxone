@@ -1568,9 +1568,15 @@ enum PlanAction {
         #[arg(long)]
         reason: Option<String>,
     },
-    /// Mark a task done (requires proof)
+    /// Mark ONE task within a plan done (requires --proof).
+    ///
+    /// This closes a single task, not the plan. To finish a whole plan use
+    /// `plan close` (clean: refuses unless every task is done/abandoned) or
+    /// `plan complete` (force: abandons the rest and closes).
     Done {
+        /// Plan the task belongs to.
         plan_id: String,
+        /// Task id within that plan (see `plan show <plan>` / `plan tasks`).
         task_id: String,
         /// Proof spec: kind:value[:note]. Kind is commit|file|test|text.
         #[arg(long, short)]
@@ -1657,11 +1663,15 @@ enum PlanAction {
         #[arg(long, short)]
         summary: String,
     },
-    /// Force-complete a plan: abandon every still-open task with a fixed
+    /// Force-complete a whole PLAN: abandon every still-open task with a fixed
     /// reason, then close the plan. Requires a summary like `close`.
-    /// Idempotent on already-completed plans; rejected on archived or
-    /// empty plans. Prefer `close` when the work is genuinely finished.
+    ///
+    /// This acts on the entire plan, not a task — to close one task use
+    /// `plan done <plan> <task> --proof`. Idempotent on already-completed plans;
+    /// rejected on archived or empty plans. Prefer `close` when the work is
+    /// genuinely finished (it refuses to abandon unfinished tasks).
     Complete {
+        /// Plan to force-complete (not a task id — see `plan done` for tasks).
         plan_id: String,
         /// Required: a short summary of what the plan achieved.
         #[arg(long, short)]
@@ -4957,25 +4967,37 @@ async fn run_doctor(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // Check 7 (b): multiple ctxone.db files in dev locations. One is
-    // the canonical home; more than one means somebody (often us) ran
-    // the hub from the wrong cwd and birthed a stub.
-    let stray_paths: Vec<std::path::PathBuf> = candidate_paths
+    // Check 7 (b): stub ctxone.db files in dev locations. The canonical db
+    // (`~/.ctxone/memory.db`, the one the service points the hub at) is the
+    // legitimate one and must NEVER count as stray — the old check compared raw
+    // counts, so the moment a `./ctxone.db` stub existed alongside the real prod
+    // db it flagged BOTH, fingering the canonical db as a straggler. A stray is
+    // now specifically an *existing* candidate that is not the canonical db.
+    let existing_dbs: Vec<std::path::PathBuf> = candidate_paths
         .iter()
         .filter(|p| p.exists())
         .cloned()
         .collect();
-    let stray_ok = stray_paths.len() <= 1;
+    let canonical_key = std::path::Path::new(&db)
+        .canonicalize()
+        .unwrap_or_else(|_| std::path::PathBuf::from(&db));
+    let stray_dbs: Vec<std::path::PathBuf> = existing_dbs
+        .iter()
+        .filter(|p| p.canonicalize().unwrap_or_else(|_| (*p).clone()) != canonical_key)
+        .cloned()
+        .collect();
+    let stray_ok = stray_dbs.is_empty();
     checks.push((
         "stray db files".to_string(),
         stray_ok,
         if stray_ok {
-            format!("{} db file present", stray_paths.len())
+            format!("canonical db only ({})", db)
         } else {
             format!(
-                "{} db files in dev locations: {}",
-                stray_paths.len(),
-                stray_paths
+                "{} stub db file(s) beside the canonical {}: {}",
+                stray_dbs.len(),
+                db,
+                stray_dbs
                     .iter()
                     .map(|p| p.display().to_string())
                     .collect::<Vec<_>>()
@@ -4984,11 +5006,16 @@ async fn run_doctor(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         },
     ));
     if !stray_ok {
-        suggestions.push(
-            "Multiple ctxone.db files exist — confirm which one the hub is using \
-             (check the --path arg) and remove the stragglers"
-                .to_string(),
-        );
+        suggestions.push(format!(
+            "Stub db file(s) exist beside the canonical {} — the hub uses --path (the \
+             canonical one); remove the stragglers ({})",
+            db,
+            stray_dbs
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
 
     // Check 8 (c): at least one snapshot from the last 24h. Looks for
@@ -4996,7 +5023,7 @@ async fn run_doctor(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let now = std::time::SystemTime::now();
     let one_day = std::time::Duration::from_secs(86_400);
     let mut recent_count = 0usize;
-    for p in &stray_paths {
+    for p in &existing_dbs {
         let parent = p.parent().unwrap_or_else(|| std::path::Path::new("."));
         let basename = p
             .file_name()
@@ -5020,11 +5047,11 @@ async fn run_doctor(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    let backups_ok = !stray_paths.is_empty() && recent_count > 0;
+    let backups_ok = !existing_dbs.is_empty() && recent_count > 0;
     checks.push((
         "recent backups".to_string(),
-        backups_ok || stray_paths.is_empty(),
-        if stray_paths.is_empty() {
+        backups_ok || existing_dbs.is_empty(),
+        if existing_dbs.is_empty() {
             "no db files to back up".to_string()
         } else if backups_ok {
             format!("{} snapshot(s) within last 24h", recent_count)
@@ -5032,7 +5059,7 @@ async fn run_doctor(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             "no .bak.* siblings within last 24h".to_string()
         },
     ));
-    if !stray_paths.is_empty() && !backups_ok {
+    if !existing_dbs.is_empty() && !backups_ok {
         suggestions.push(
             "Take a snapshot now: ctx db backup  (or start the hub — startup snapshots are automatic)"
                 .to_string(),
