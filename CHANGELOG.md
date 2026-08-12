@@ -4,6 +4,14 @@ All notable changes to CTXone are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 the project's `0.9.x` series (incremented by 0.0.01 per release).
 
+## [v0.9.34] — 2026-08-12
+
+### Fixed
+- **ASD code proxy under launchd/systemd.** A Hub started by a service manager inherits a minimal `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`), so the code-proxy process pool's bare `asd-serve` spawn failed with *"No such file or directory"* — every `/api/code/<repo>/*` call errored and the whole ASD integration was down, even though an interactive `ctx serve` (with a full PATH) worked and hid the bug. The Hub now resolves an absolute `asd-serve` path up front: explicit override (`--asd-serve-binary` / `CTXONE_ASD_SERVE_BINARY`) → `$PATH` → a sibling of the Hub's own binary (Homebrew installs them together) → common install dirs. The resolved path is logged at startup.
+
+### Added
+- **`--asd-serve-binary <PATH>` / `CTXONE_ASD_SERVE_BINARY`.** Pin the `asd-serve` binary the pool spawns, for setups where auto-resolution can't find it.
+
 ## [v0.9.33] — 2026-08-12
 
 ### Added

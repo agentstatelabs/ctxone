@@ -17,6 +17,82 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
+/// Resolve the `asd-serve` binary path, robust to launchd's minimal PATH.
+///
+/// A hub started by a launchd/systemd unit inherits a bare
+/// `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, so the pool's `Command::new("asd-serve")`
+/// failed with "No such file or directory" even though `asd-serve` was installed
+/// in `/opt/homebrew/bin` — breaking the entire code proxy. This resolves an
+/// absolute path up front instead of trusting the runtime PATH.
+///
+/// Order (first hit wins):
+/// 1. `explicit` — from `--asd-serve-binary` / `CTXONE_ASD_SERVE_BINARY`. Used
+///    as-is even if missing, so a wrong override surfaces a clear spawn error
+///    naming the exact path the operator chose.
+/// 2. On `$PATH` — resolved to an absolute path (this is the case that already
+///    worked from an interactive shell with a full PATH).
+/// 3. A sibling of the hub's own invoked binary. Homebrew installs `ctxone-hub`
+///    and `asd-serve` side by side (`/opt/homebrew/bin`), and launchd invokes
+///    the hub by absolute path — so `dirname(argv0)/asd-serve` is the fix for
+///    the minimal-PATH case. `current_exe()` is also tried (covers other layouts).
+/// 4. Common install dirs (Homebrew, `/usr/local/bin`, Cargo/local bins).
+///
+/// Returns `None` only when nothing is found; the pool then falls back to the
+/// bare name, preserving the previous behaviour for a dev shell.
+pub fn resolve_asd_serve_binary(explicit: Option<String>) -> Option<String> {
+    const BIN: &str = "asd-serve";
+
+    if let Some(p) = explicit.filter(|s| !s.trim().is_empty()) {
+        return Some(p);
+    }
+
+    // 2. $PATH → absolute.
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            let cand = dir.join(BIN);
+            if cand.is_file() {
+                return Some(cand.to_string_lossy().into_owned());
+            }
+        }
+    }
+
+    // 3. Next to the hub's own binary (invoked path first, then the resolved
+    //    exe). The invoked path is what launchd passed — the dir that actually
+    //    contains the sibling asd-serve.
+    let self_dirs = [
+        std::env::args().next(),
+        std::env::current_exe()
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned()),
+    ];
+    for exe in self_dirs.into_iter().flatten() {
+        if let Some(dir) = PathBuf::from(exe).parent() {
+            let cand = dir.join(BIN);
+            if cand.is_file() {
+                return Some(cand.to_string_lossy().into_owned());
+            }
+        }
+    }
+
+    // 4. Common install locations.
+    let mut dirs = vec![
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+    ];
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        dirs.push(home.join(".cargo/bin"));
+        dirs.push(home.join(".local/bin"));
+    }
+    for d in dirs {
+        let cand = d.join(BIN);
+        if cand.is_file() {
+            return Some(cand.to_string_lossy().into_owned());
+        }
+    }
+
+    None
+}
+
 /// Default idle timeout if the caller passes `None`.
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(600); // 10 minutes
 
@@ -290,6 +366,45 @@ mod tests {
     fn extracts_real_resolved_port() {
         let line = "  INFO asd_serve: listening on 127.0.0.1:60647";
         assert_eq!(extract_listening_addr(line), Some("127.0.0.1:60647"));
+    }
+
+    #[test]
+    fn explicit_asd_serve_override_wins_even_if_absent() {
+        // An explicit path is honoured as-is (a wrong one should surface a clear
+        // spawn error rather than being silently swapped for a discovered one).
+        let got = resolve_asd_serve_binary(Some("/nowhere/custom/asd-serve".to_string()));
+        assert_eq!(got.as_deref(), Some("/nowhere/custom/asd-serve"));
+    }
+
+    #[test]
+    fn blank_override_falls_through_to_discovery() {
+        // A blank/whitespace override must not be returned verbatim; resolution
+        // continues (and, on any normal machine, finds nothing at that value).
+        let got = resolve_asd_serve_binary(Some("   ".to_string()));
+        assert_ne!(got.as_deref(), Some("   "));
+    }
+
+    #[test]
+    fn discovers_asd_serve_in_a_common_dir_when_placed_there() {
+        // Discovery must find an `asd-serve` file that sits in a directory it
+        // scans. We can't touch the real install dirs, but the resolver also
+        // checks the directory of the running test binary (`current_exe`),
+        // which is writable — drop an `asd-serve` beside it and expect a hit.
+        let Ok(exe) = std::env::current_exe() else {
+            return;
+        };
+        let Some(dir) = exe.parent() else { return };
+        let planted = dir.join("asd-serve");
+        // Don't clobber a real one if it somehow exists.
+        if planted.exists() {
+            return;
+        }
+        std::fs::write(&planted, b"#!/bin/sh\n").unwrap();
+        let got = resolve_asd_serve_binary(None);
+        let _ = std::fs::remove_file(&planted);
+        // Either PATH already had one (step 2) or ours beside the exe (step 3);
+        // both are valid absolute resolutions ending in the binary name.
+        assert!(got.as_deref().is_some_and(|p| p.ends_with("asd-serve")));
     }
 
     #[test]
