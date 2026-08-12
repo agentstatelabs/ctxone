@@ -192,6 +192,29 @@ export async function getNamespacesSummary(): Promise<WorkspaceSummary[]> {
 	return data.workspaces;
 }
 
+/** `GET /api/namespaces` — plain list of workspace (namespace) names. */
+export async function listNamespaces(): Promise<string[]> {
+	const data = await fetchJson<{ namespaces: { namespace: string }[] }>('/api/namespaces');
+	return data.namespaces.map((n) => n.namespace);
+}
+
+/** `POST /api/sessions/{id}/move` — relocate a session to another workspace.
+ * Reads from the current namespace (via the `X-CTXone-Namespace` header). */
+export async function moveSession(
+	sessionId: string,
+	toNamespace: string
+): Promise<{ to?: string; deleted_source?: boolean; dst_leaves?: number }> {
+	const resp = await hubFetch(`/api/sessions/${encodeURIComponent(sessionId)}/move`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json', 'X-CTXone-Agent': 'lens' },
+		body: JSON.stringify({ to_namespace: toNamespace, ref: 'main' })
+	});
+	if (!resp.ok) {
+		throw new Error(`session move failed (${resp.status}): ${await resp.text().catch(() => '')}`);
+	}
+	return resp.json();
+}
+
 export async function getSessionTokenStats(sessionId: string): Promise<SessionSnapshot> {
 	return fetchJson(`/api/stats/tokens/${encodeURIComponent(sessionId)}`);
 }
