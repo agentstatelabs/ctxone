@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { hubFetch, remember } from '$lib/api';
+	import { hubFetch, remember, listNamespaces, moveSession } from '$lib/api';
 	import { computeBurn } from '$lib/sessionBurn';
 	import { formatCompact } from '@agentstate/lens-core';
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
@@ -273,6 +273,43 @@
 		}
 	}
 
+	// ── Move a session to another workspace ──────────────────────────────
+	// Pins an imported session that landed in the wrong workspace (usually
+	// `default`) to the right one, via the guarded move_session endpoint.
+	let workspaces: string[] = $state([]);
+	let moveTarget = $state('');
+	let moveBusy = $state(false);
+	let moveMsg: string | null = $state(null);
+	let moveErr: string | null = $state(null);
+
+	async function loadWorkspaces() {
+		try {
+			workspaces = (await listNamespaces()).sort();
+		} catch {
+			workspaces = [];
+		}
+	}
+
+	async function handleMoveSession() {
+		if (!selected || !moveTarget) return;
+		const to = moveTarget;
+		moveBusy = true;
+		moveErr = null;
+		moveMsg = null;
+		try {
+			await moveSession(selected.session_id, to);
+			moveTarget = '';
+			selected = null;
+			await load();
+			moveMsg = `Moved to ${to}`;
+			setTimeout(() => (moveMsg = null), 4000);
+		} catch (e) {
+			moveErr = e instanceof Error ? e.message : 'move failed';
+		} finally {
+			moveBusy = false;
+		}
+	}
+
 	async function loadTurns(sessionId: string) {
 		turnsLoading = true;
 		turnsError = null;
@@ -463,7 +500,11 @@
 		// Re-load whenever the active namespace changes
 		void namespaceStore.current;
 		selected = null;
+		moveTarget = '';
+		moveMsg = null;
+		moveErr = null;
 		load();
+		loadWorkspaces();
 	});
 
 	const auto = useAutoRefresh(async () => {
@@ -868,6 +909,9 @@
 		{#if syncMsg}
 			<span class="sync-msg" class:err={syncErr}>{syncMsg}</span>
 		{/if}
+		{#if moveMsg}
+			<span class="sync-msg">✓ {moveMsg}</span>
+		{/if}
 		<span class="ago">refreshed {formatAgo(auto.lastRefreshed)}</span>
 	</div>
 
@@ -1012,6 +1056,20 @@
 					{#if detailTitle !== selected.session_id}
 						<div class="detail-id" title="session id">{selected.session_id}</div>
 					{/if}
+
+					<div class="detail-move" title="Pin this session to a workspace (guarded move — safe to re-run)">
+						<span class="mv-label">Workspace</span>
+						<select bind:value={moveTarget} disabled={moveBusy} aria-label="Move session to workspace">
+							<option value="">move to…</option>
+							{#each workspaces.filter((w) => w !== namespaceStore.current) as w (w)}
+								<option value={w}>{w}</option>
+							{/each}
+						</select>
+						<button class="mv-btn" onclick={handleMoveSession} disabled={!moveTarget || moveBusy}>
+							{moveBusy ? 'Moving…' : 'Move'}
+						</button>
+						{#if moveErr}<span class="mv-err">{moveErr}</span>{/if}
+					</div>
 
 					<div class="stat-grid">
 						<div class="stat">
@@ -2376,6 +2434,44 @@
 		font-size: var(--lens-font-size-2xs);
 		color: var(--lens-muted);
 		margin: -0.2rem 0 0.6rem;
+	}
+	.detail-move {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		flex-wrap: wrap;
+		margin: 0 0 0.9rem;
+	}
+	.detail-move .mv-label {
+		font-size: var(--lens-font-size-xs);
+		color: var(--lens-muted);
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+	}
+	.detail-move select {
+		background: var(--lens-surface);
+		border: 1px solid var(--lens-border);
+		border-radius: var(--lens-radius-sm);
+		color: var(--lens-text);
+		padding: 0.28rem 0.5rem;
+		font-size: var(--lens-font-size-xs);
+	}
+	.mv-btn {
+		background: var(--lens-accent-tint);
+		border: 1px solid var(--lens-accent);
+		color: var(--lens-accent);
+		border-radius: var(--lens-radius-sm);
+		padding: 0.28rem 0.7rem;
+		font-size: var(--lens-font-size-xs);
+		cursor: pointer;
+	}
+	.mv-btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+	.mv-err {
+		color: var(--lens-danger, var(--danger, #f85149));
+		font-size: var(--lens-font-size-xs);
 	}
 
 	.sync-btn {
