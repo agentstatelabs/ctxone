@@ -722,11 +722,11 @@
 		title="Estimated, not measured. Savings from a memory tool is a counterfactual, so this is a conservative model: a curated recall payload costs roughly a quarter of reconstructing the same context from source. Grows as sessions grow."
 	/>
 	<StatTile
-		label="Session tokens used"
+		label="Tokens used (cumulative)"
 		value={sessionsL.status === 'ready' ? formatCompact(wsUsed) : '—'}
-		unit={sessionsL.status === 'ready' ? 'tok' : undefined}
+		unit={sessionsL.status === 'ready' ? 'tok · cumulative' : undefined}
 		spark={usedSeries.length > 1 ? usedSeries : undefined}
-		title="Tokens sent across this workspace's sessions"
+		title="Running total of tokens across every session in this workspace, summed over their whole lifetimes — not a single call. Large numbers are expected."
 	/>
 	<StatTile
 		label="Plans in flight"
@@ -761,7 +761,7 @@
 	>
 		<div class="import-grid">
 			<div class="imp"><span class="imp-n">{sessionList.length}</span><span class="imp-l">sessions</span></div>
-			<div class="imp"><span class="imp-n">{formatCompact(wsUsed)}</span><span class="imp-l">tokens used</span></div>
+			<div class="imp"><span class="imp-n">{formatCompact(wsUsed)}</span><span class="imp-l">tokens used (cumulative)</span></div>
 			<div class="imp"><span class="imp-n">{formatCompact(wsSaved)}</span><span class="imp-l">tokens saved (est.)</span></div>
 			<div class="imp"><span class="imp-n">{distinctModels.length}</span><span class="imp-l">models</span></div>
 		</div>

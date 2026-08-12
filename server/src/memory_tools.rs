@@ -3382,34 +3382,54 @@ impl CtxOneServer {
         // Search for the decision. A match guard handles the empty case so the
         // whole result can flow through annotate_read (which flags a fallback
         // `default` session — see [`Self::annotate_read`]).
-        let out = match self.repo.search_values("main", &p.decision, Some(5)) {
-            Ok(results) if results.is_empty() => {
-                format!("No record found for decision: '{}'", p.decision)
-            }
-            Ok(results) => {
-                let mut output = String::new();
-                for (path, _value) in &results {
-                    output.push_str(&format!("Path: {}\n", path));
-                    // Get blame for this path
-                    match self.repo.blame("main", path) {
-                        Ok(blame) => {
-                            output.push_str(
-                                &serde_json::to_string_pretty(&blame)
-                                    .unwrap_or_default()
-                                    .to_string(),
-                            );
-                        }
-                        Err(e) => {
-                            output.push_str(&format!("  (blame unavailable: {})\n", e));
-                        }
-                    }
-                    output.push('\n');
+        // Over-fetch then drop session-transcript captures (full-turn / title /
+        // meta under /sessions/): their raw text matches decision queries and
+        // buried real rationale under an agent's own tool-call chatter. Shares
+        // the tuning + predicate with the HTTP `why_did_we`.
+        let out =
+            match self
+                .repo
+                .search_values("main", &p.decision, Some(crate::http::WHY_DID_WE_SCAN))
+            {
+                Ok(results)
+                    if results
+                        .iter()
+                        .all(|(path, _)| crate::http::is_session_capture_path(path)) =>
+                {
+                    format!("No record found for decision: '{}'", p.decision)
                 }
+                Ok(results) => {
+                    let mut output = String::new();
+                    let mut shown = 0usize;
+                    for (path, _value) in results
+                        .iter()
+                        .filter(|(path, _)| !crate::http::is_session_capture_path(path))
+                    {
+                        if shown >= crate::http::WHY_DID_WE_LIMIT {
+                            break;
+                        }
+                        shown += 1;
+                        output.push_str(&format!("Path: {}\n", path));
+                        // Get blame for this path
+                        match self.repo.blame("main", path) {
+                            Ok(blame) => {
+                                output.push_str(
+                                    &serde_json::to_string_pretty(&blame)
+                                        .unwrap_or_default()
+                                        .to_string(),
+                                );
+                            }
+                            Err(e) => {
+                                output.push_str(&format!("  (blame unavailable: {})\n", e));
+                            }
+                        }
+                        output.push('\n');
+                    }
 
-                with_stats(&output, flat_size, &self.session)
-            }
-            Err(e) => format!("Error: {}", e),
-        };
+                    with_stats(&output, flat_size, &self.session)
+                }
+                Err(e) => format!("Error: {}", e),
+            };
         self.annotate_read(out)
     }
 

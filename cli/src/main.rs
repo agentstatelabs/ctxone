@@ -7,6 +7,7 @@ mod metrics;
 mod onboarding;
 mod pricing;
 mod service;
+mod session_import;
 mod sources;
 mod workspace;
 mod worktree;
@@ -1217,6 +1218,77 @@ enum SessionAction {
         #[arg(long, default_value_t = 30)]
         gap: i64,
     },
+
+    /// List agent sessions found on this machine, newest first, as a stable
+    /// numbered list you can feed to `session import`.
+    ///
+    /// Nothing is imported — this only shows what exists, whether each is
+    /// already imported, and whether it's on the privacy skip-list.
+    List {
+        /// Only this source (claude|codex|cursor|gemini|generic).
+        #[arg(long)]
+        source: Option<String>,
+        /// Which page of 25 to show.
+        #[arg(long, default_value_t = 1)]
+        page: usize,
+        /// Show every session in one shot instead of paging.
+        #[arg(long)]
+        all: bool,
+        /// Emit the full list as JSON (one object per session). Machine-readable
+        /// surface the Lens import panel consumes; ignores paging.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Import chosen sessions by their `list` number, a range, or `all`.
+    ///
+    /// With no selectors, opens an interactive picker (page through, select,
+    /// then `done`). Sessions on the privacy skip-list are never imported
+    /// unless `--include-ignored` is given. Each session routes to the
+    /// workspace of the repo it ran in (use `ctx session move` to change it).
+    Import {
+        /// Selectors: numbers (`7`), ranges (`1-10`), literal ids, or `all`.
+        /// Omit to pick interactively.
+        selectors: Vec<String>,
+        /// Only import from this source.
+        #[arg(long)]
+        source: Option<String>,
+        /// Assign every imported session to this workspace, overriding the
+        /// default cwd-based routing. The workspace must already exist.
+        #[arg(long)]
+        to: Option<String>,
+        /// Import even sessions on the privacy skip-list.
+        #[arg(long)]
+        include_ignored: bool,
+        /// Skip the extraction-mode notice (for scripts).
+        #[arg(long)]
+        quiet: bool,
+        /// Show what would be imported without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Add sessions to the privacy skip-list so they're never imported.
+    ///
+    /// Takes `list` numbers, ranges, `all`, or literal ids. The skip-list lives
+    /// at `~/.ctxone/ignored-sessions.txt` and is honoured by both manual
+    /// imports and the hub's background sweep.
+    Ignore {
+        /// Selectors: numbers, ranges, literal ids, or `all`.
+        selectors: Vec<String>,
+        /// Resolve numbers against this source's slice of the list.
+        #[arg(long)]
+        source: Option<String>,
+    },
+
+    /// Remove sessions from the privacy skip-list.
+    Unignore {
+        /// Selectors: numbers, ranges, literal ids, or `all`.
+        selectors: Vec<String>,
+        /// Resolve numbers against this source's slice of the list.
+        #[arg(long)]
+        source: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1496,9 +1568,15 @@ enum PlanAction {
         #[arg(long)]
         reason: Option<String>,
     },
-    /// Mark a task done (requires proof)
+    /// Mark ONE task within a plan done (requires --proof).
+    ///
+    /// This closes a single task, not the plan. To finish a whole plan use
+    /// `plan close` (clean: refuses unless every task is done/abandoned) or
+    /// `plan complete` (force: abandons the rest and closes).
     Done {
+        /// Plan the task belongs to.
         plan_id: String,
+        /// Task id within that plan (see `plan show <plan>` / `plan tasks`).
         task_id: String,
         /// Proof spec: kind:value[:note]. Kind is commit|file|test|text.
         #[arg(long, short)]
@@ -1585,11 +1663,15 @@ enum PlanAction {
         #[arg(long, short)]
         summary: String,
     },
-    /// Force-complete a plan: abandon every still-open task with a fixed
+    /// Force-complete a whole PLAN: abandon every still-open task with a fixed
     /// reason, then close the plan. Requires a summary like `close`.
-    /// Idempotent on already-completed plans; rejected on archived or
-    /// empty plans. Prefer `close` when the work is genuinely finished.
+    ///
+    /// This acts on the entire plan, not a task — to close one task use
+    /// `plan done <plan> <task> --proof`. Idempotent on already-completed plans;
+    /// rejected on archived or empty plans. Prefer `close` when the work is
+    /// genuinely finished (it refuses to abandon unfinished tasks).
     Complete {
+        /// Plan to force-complete (not a task id — see `plan done` for tasks).
         plan_id: String,
         /// Required: a short summary of what the plan achieved.
         #[arg(long, short)]
@@ -2393,7 +2475,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Commands::Session { action } => {
-            run_session_action(action, &cli.server, client_factory).await?;
+            run_session_action(action, &cli.server, &cli.branch, client_factory).await?;
         }
 
         Commands::IngestSession {
@@ -2491,6 +2573,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if all { None } else { namespace.clone() },
                 reingest,
                 dir_workspaces,
+                // The low-level `ingest-session` command imports everything it
+                // discovers; the numbered whitelist is `session import`'s job.
+                None,
+                // cwd routing (or --namespace fallback) governs where these land.
+                None,
             )
             .await?;
         }
@@ -4880,25 +4967,37 @@ async fn run_doctor(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // Check 7 (b): multiple ctxone.db files in dev locations. One is
-    // the canonical home; more than one means somebody (often us) ran
-    // the hub from the wrong cwd and birthed a stub.
-    let stray_paths: Vec<std::path::PathBuf> = candidate_paths
+    // Check 7 (b): stub ctxone.db files in dev locations. The canonical db
+    // (`~/.ctxone/memory.db`, the one the service points the hub at) is the
+    // legitimate one and must NEVER count as stray — the old check compared raw
+    // counts, so the moment a `./ctxone.db` stub existed alongside the real prod
+    // db it flagged BOTH, fingering the canonical db as a straggler. A stray is
+    // now specifically an *existing* candidate that is not the canonical db.
+    let existing_dbs: Vec<std::path::PathBuf> = candidate_paths
         .iter()
         .filter(|p| p.exists())
         .cloned()
         .collect();
-    let stray_ok = stray_paths.len() <= 1;
+    let canonical_key = std::path::Path::new(&db)
+        .canonicalize()
+        .unwrap_or_else(|_| std::path::PathBuf::from(&db));
+    let stray_dbs: Vec<std::path::PathBuf> = existing_dbs
+        .iter()
+        .filter(|p| p.canonicalize().unwrap_or_else(|_| (*p).clone()) != canonical_key)
+        .cloned()
+        .collect();
+    let stray_ok = stray_dbs.is_empty();
     checks.push((
         "stray db files".to_string(),
         stray_ok,
         if stray_ok {
-            format!("{} db file present", stray_paths.len())
+            format!("canonical db only ({})", db)
         } else {
             format!(
-                "{} db files in dev locations: {}",
-                stray_paths.len(),
-                stray_paths
+                "{} stub db file(s) beside the canonical {}: {}",
+                stray_dbs.len(),
+                db,
+                stray_dbs
                     .iter()
                     .map(|p| p.display().to_string())
                     .collect::<Vec<_>>()
@@ -4907,11 +5006,16 @@ async fn run_doctor(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         },
     ));
     if !stray_ok {
-        suggestions.push(
-            "Multiple ctxone.db files exist — confirm which one the hub is using \
-             (check the --path arg) and remove the stragglers"
-                .to_string(),
-        );
+        suggestions.push(format!(
+            "Stub db file(s) exist beside the canonical {} — the hub uses --path (the \
+             canonical one); remove the stragglers ({})",
+            db,
+            stray_dbs
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
 
     // Check 8 (c): at least one snapshot from the last 24h. Looks for
@@ -4919,7 +5023,7 @@ async fn run_doctor(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let now = std::time::SystemTime::now();
     let one_day = std::time::Duration::from_secs(86_400);
     let mut recent_count = 0usize;
-    for p in &stray_paths {
+    for p in &existing_dbs {
         let parent = p.parent().unwrap_or_else(|| std::path::Path::new("."));
         let basename = p
             .file_name()
@@ -4943,11 +5047,11 @@ async fn run_doctor(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    let backups_ok = !stray_paths.is_empty() && recent_count > 0;
+    let backups_ok = !existing_dbs.is_empty() && recent_count > 0;
     checks.push((
         "recent backups".to_string(),
-        backups_ok || stray_paths.is_empty(),
-        if stray_paths.is_empty() {
+        backups_ok || existing_dbs.is_empty(),
+        if existing_dbs.is_empty() {
             "no db files to back up".to_string()
         } else if backups_ok {
             format!("{} snapshot(s) within last 24h", recent_count)
@@ -4955,7 +5059,7 @@ async fn run_doctor(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             "no .bak.* siblings within last 24h".to_string()
         },
     ));
-    if !stray_paths.is_empty() && !backups_ok {
+    if !existing_dbs.is_empty() && !backups_ok {
         suggestions.push(
             "Take a snapshot now: ctx db backup  (or start the hub — startup snapshots are automatic)"
                 .to_string(),
@@ -5429,6 +5533,16 @@ async fn run_ingest_session(
     // Route non-git working directories to a directory-named workspace instead
     // of `default` (see the `--dir-workspaces` flag).
     dir_workspaces: bool,
+    // When set, import ONLY these namespaced session ids and skip everything
+    // else discovered. This is how `ctx session import <numbers>` turns a
+    // numbered selection into a targeted subset of a full-machine discovery
+    // without a second code path. `None` imports everything discovered.
+    only_ids: Option<std::collections::HashSet<String>>,
+    // When set, route EVERY imported session into this workspace, overriding
+    // per-transcript cwd routing. Backs `session import --to <ns>` and the Lens
+    // "assign to workspace" control. The namespace must already exist (the Lens
+    // only offers existing ones); a write to a missing namespace 404s.
+    force_namespace: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let extraction = crate::ingest::resolve_extraction_config();
     if extraction.is_none() && !tokens_only {
@@ -5476,62 +5590,89 @@ async fn run_ingest_session(
     };
 
     // (source-id, source-label, project-label, sessions)
-    let groups: Vec<(&'static str, &'static str, String, Vec<SessionRef>)> = if let Some(f) = file {
-        // An explicit --file is parsed by the named source; with `--source
-        // all` that is ambiguous, so require a concrete one.
-        let src = selected
-            .first()
-            .filter(|_| source != "all")
-            .ok_or("--file requires a concrete --source (not 'all')")?;
-        vec![(
-            src.id(),
-            src.label(),
-            String::new(),
-            vec![SessionRef {
-                label: String::new(),
-                // An explicit --file names a transcript, not a project, so the
-                // cwd is read from the file itself during routing rather than
-                // assumed from the caller's shell.
-                cwd: None,
-                path: std::path::PathBuf::from(f),
-                native_id: None,
-                precomputed_fp: None,
-            }],
-        )]
-    } else {
-        let cwd = if all {
-            None
+    let mut groups: Vec<(&'static str, &'static str, String, Vec<SessionRef>)> =
+        if let Some(f) = file {
+            // An explicit --file is parsed by the named source; with `--source
+            // all` that is ambiguous, so require a concrete one.
+            let src = selected
+                .first()
+                .filter(|_| source != "all")
+                .ok_or("--file requires a concrete --source (not 'all')")?;
+            vec![(
+                src.id(),
+                src.label(),
+                String::new(),
+                vec![SessionRef {
+                    label: String::new(),
+                    // An explicit --file names a transcript, not a project, so the
+                    // cwd is read from the file itself during routing rather than
+                    // assumed from the caller's shell.
+                    cwd: None,
+                    path: std::path::PathBuf::from(f),
+                    native_id: None,
+                    precomputed_fp: None,
+                }],
+            )]
         } else {
-            Some(std::env::current_dir()?)
-        };
-        let mut out = vec![];
-        for src in &selected {
-            let mut refs = match &cwd {
-                Some(dir) => src.discover_for_project(dir),
-                None => src.discover_all(),
+            let cwd = if all {
+                None
+            } else {
+                Some(std::env::current_dir()?)
             };
-            // User-specified extra directories, probed against this source's
-            // format. A dir that isn't this source's shape yields nothing.
-            for extra in &scan_dirs {
-                refs.extend(src.discover_in(std::path::Path::new(extra)));
-            }
-            // Keep same-label refs adjacent so the grouping below stays tidy
-            // even after mixing built-in and --scan-dir discovery.
-            refs.sort_by(|a, b| a.label.cmp(&b.label));
-            // Re-group by project label so per-project counts still print.
-            let mut by_label: Vec<(String, Vec<SessionRef>)> = vec![];
-            for r in refs {
-                match by_label.last_mut() {
-                    Some((l, v)) if *l == r.label => v.push(r),
-                    _ => by_label.push((r.label.clone(), vec![r])),
+            let mut out = vec![];
+            for src in &selected {
+                let mut refs = match &cwd {
+                    Some(dir) => src.discover_for_project(dir),
+                    None => src.discover_all(),
+                };
+                // User-specified extra directories, probed against this source's
+                // format. A dir that isn't this source's shape yields nothing.
+                for extra in &scan_dirs {
+                    refs.extend(src.discover_in(std::path::Path::new(extra)));
+                }
+                // Keep same-label refs adjacent so the grouping below stays tidy
+                // even after mixing built-in and --scan-dir discovery.
+                refs.sort_by(|a, b| a.label.cmp(&b.label));
+                // Re-group by project label so per-project counts still print.
+                let mut by_label: Vec<(String, Vec<SessionRef>)> = vec![];
+                for r in refs {
+                    match by_label.last_mut() {
+                        Some((l, v)) if *l == r.label => v.push(r),
+                        _ => by_label.push((r.label.clone(), vec![r])),
+                    }
+                }
+                for (label, refs) in by_label {
+                    out.push((src.id(), src.label(), label, refs));
                 }
             }
-            for (label, refs) in by_label {
-                out.push((src.id(), src.label(), label, refs));
-            }
-        }
-        out
+            out
+        };
+
+    // Whitelist (`session import <numbers>`) and privacy skip-list are applied
+    // here, before any per-project header prints, so the output only ever
+    // mentions sessions that will actually be touched.
+    //
+    // The skip-list is loaded ONLY on the unfiltered path — the background
+    // sweep and `ingest-session --all`. The `session import` path arrives with
+    // `only_ids` already resolved against the skip-list in the handler (which
+    // also honours `--include-ignored`), so re-applying it here would ignore
+    // that override. An explicit `--file`/`--session` likewise bypasses it:
+    // naming one transcript is an unambiguous request to import that one.
+    let ignored = if session.is_some() || only_ids.is_some() {
+        std::collections::HashSet::new()
+    } else {
+        crate::session_import::load_ignored()
     };
+    if only_ids.is_some() || !ignored.is_empty() {
+        for g in &mut groups {
+            let sid = g.0;
+            g.3.retain(|r| {
+                let id = r.namespaced_id(sid);
+                only_ids.as_ref().is_none_or(|w| w.contains(&id)) && !ignored.contains(&id)
+            });
+        }
+        groups.retain(|g| !g.3.is_empty());
+    }
 
     if groups.iter().all(|(_, _, _, f)| f.is_empty()) {
         if all {
@@ -5624,7 +5765,12 @@ async fn run_ingest_session(
                 Some(s) => Some(s.to_string()),
                 None => Some(session_ref.namespaced_id(source_id)),
             };
-            let routed = router.route(session_ref.cwd.as_deref()).await;
+            let routed = match &force_namespace {
+                // An explicit workspace overrides cwd routing entirely — the
+                // session lands where the user asked, not where it ran.
+                Some(ns) => crate::workspace::Routed::Existing(ns.clone()),
+                None => router.route(session_ref.cwd.as_deref()).await,
+            };
 
             // A deleted session must stay deleted. Its transcript is still on
             // disk, so without this the next sync would faithfully restore
@@ -5796,6 +5942,7 @@ async fn run_ingest_session(
 async fn run_session_action(
     action: SessionAction,
     server: &str,
+    branch: &str,
     clients: ClientFactory,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match action {
@@ -5876,8 +6023,224 @@ async fn run_session_action(
                 );
             }
         }
+
+        SessionAction::List {
+            source,
+            page,
+            all,
+            json,
+        } => {
+            use crate::session_import as si;
+            let rows = si::discover(source.as_deref());
+            let imported = fetch_imported_ids(server, &clients).await;
+            let ignored = si::load_ignored();
+            if json {
+                // One object per session, in the same stable order as the text
+                // list. This is the surface the Lens import panel consumes.
+                let out: Vec<serde_json::Value> = rows
+                    .iter()
+                    .map(|r| {
+                        let status = si::status_for(&r.id, &imported, &ignored);
+                        serde_json::json!({
+                            "number": r.number,
+                            "id": r.id,
+                            "source": r.source_id,
+                            "project": r.project,
+                            "last_activity": r.last_activity,
+                            "status": status.as_str(),
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string(&out)?);
+                return Ok(());
+            }
+            if rows.is_empty() {
+                println!("No agent sessions found on this machine.");
+                return Ok(());
+            }
+            if all {
+                let pages = rows.len().div_ceil(si::PAGE_SIZE).max(1);
+                for p in 1..=pages {
+                    si::print_page(&rows, p, &imported, &ignored);
+                }
+            } else {
+                si::print_page(&rows, page, &imported, &ignored);
+            }
+        }
+
+        SessionAction::Import {
+            selectors,
+            source,
+            to,
+            include_ignored,
+            quiet,
+            dry_run,
+        } => {
+            use crate::session_import as si;
+            let rows = si::discover(source.as_deref());
+            if rows.is_empty() {
+                println!("No agent sessions found on this machine.");
+                return Ok(());
+            }
+            let imported = fetch_imported_ids(server, &clients).await;
+            let ignored = si::load_ignored();
+
+            // Interactive when no selectors are given; otherwise resolve the
+            // numbers/ranges/ids on the command line.
+            let mut ids: std::collections::HashSet<String> = if selectors.is_empty() {
+                match si::interactive_select(&rows, &imported, &ignored) {
+                    Some(set) => set,
+                    None => {
+                        println!("Aborted — nothing imported.");
+                        return Ok(());
+                    }
+                }
+            } else {
+                let (set, unmatched) = si::resolve_selectors(&rows, &selectors);
+                if !unmatched.is_empty() {
+                    eprintln!(
+                        "warn: unrecognized selectors ignored: {}",
+                        unmatched.join(", ")
+                    );
+                }
+                set
+            };
+
+            // Honour the privacy skip-list unless the user overrode it. Removed
+            // ids are reported so a skipped selection never looks like data loss.
+            if !include_ignored {
+                let before = ids.len();
+                ids.retain(|id| !ignored.contains(id));
+                let skipped = before - ids.len();
+                if skipped > 0 {
+                    println!(
+                        "Skipping {skipped} session{} on the privacy skip-list \
+                         (pass --include-ignored to import them).",
+                        if skipped == 1 { "" } else { "s" }
+                    );
+                }
+            }
+
+            if ids.is_empty() {
+                println!("Nothing selected to import.");
+                return Ok(());
+            }
+
+            println!(
+                "Selected {} session{} to import:",
+                ids.len(),
+                if ids.len() == 1 { "" } else { "s" }
+            );
+            {
+                let mut listed: Vec<&String> = ids.iter().collect();
+                listed.sort();
+                for id in listed {
+                    println!("  {id}");
+                }
+            }
+            if let Some(ns) = &to {
+                println!("Assigning all imported sessions to workspace '{ns}'.");
+            }
+            if !quiet {
+                println!("{}", si::extraction_notice());
+            }
+
+            run_ingest_session(
+                server,
+                branch,
+                None,
+                None,
+                source.as_deref().unwrap_or("all"),
+                true, // fan out across sources + force turn/token capture
+                None,
+                vec![],
+                None,
+                false,
+                dry_run,
+                false,
+                clients,
+                true, // create workspaces for repos routed sessions belong to
+                None, // --all fallback: unroutable transcripts → default
+                false,
+                false,
+                Some(ids),
+                to, // explicit workspace override, when given
+            )
+            .await?;
+        }
+
+        SessionAction::Ignore { selectors, source } => {
+            use crate::session_import as si;
+            let rows = si::discover(source.as_deref());
+            let (ids, unmatched) = si::resolve_selectors(&rows, &selectors);
+            if !unmatched.is_empty() {
+                eprintln!(
+                    "warn: unrecognized selectors ignored: {}",
+                    unmatched.join(", ")
+                );
+            }
+            if ids.is_empty() {
+                println!("Nothing to ignore.");
+                return Ok(());
+            }
+            let mut ids: Vec<String> = ids.into_iter().collect();
+            ids.sort();
+            let added = si::add_ignored(&ids)?;
+            println!(
+                "Added {added} session{} to the privacy skip-list ({} already there). \
+                 They will not be imported by manual runs or the background sweep.",
+                if added == 1 { "" } else { "s" },
+                ids.len() - added,
+            );
+            for id in &ids {
+                println!("  ignored: {id}");
+            }
+        }
+
+        SessionAction::Unignore { selectors, source } => {
+            use crate::session_import as si;
+            let rows = si::discover(source.as_deref());
+            let (ids, unmatched) = si::resolve_selectors(&rows, &selectors);
+            if !unmatched.is_empty() {
+                eprintln!(
+                    "warn: unrecognized selectors ignored: {}",
+                    unmatched.join(", ")
+                );
+            }
+            if ids.is_empty() {
+                println!("Nothing to unignore.");
+                return Ok(());
+            }
+            let ids: Vec<String> = ids.into_iter().collect();
+            let removed = si::remove_ignored(&ids)?;
+            println!(
+                "Removed {removed} session{} from the privacy skip-list.",
+                if removed == 1 { "" } else { "s" }
+            );
+        }
     }
     Ok(())
+}
+
+/// Fetch the set of already-imported session ids from the hub (`GET
+/// /api/sessions/imported`, cross-namespace). Best-effort: an unreachable hub
+/// yields an empty set so `list`/`import` still work offline — every session
+/// simply shows as `new`.
+async fn fetch_imported_ids(
+    server: &str,
+    clients: &ClientFactory,
+) -> std::collections::HashSet<String> {
+    let client = clients.build(None);
+    let url = format!("{server}/api/sessions/imported");
+    match client.get(&url).send().await {
+        Ok(r) if r.status().is_success() => r
+            .json::<Vec<String>>()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect(),
+        _ => std::collections::HashSet::new(),
+    }
 }
 
 /// Move existing sessions into the workspace of the repo they ran in.

@@ -88,12 +88,95 @@ pub struct HubConfig {
     /// into this hub. `None` on library/test callers (session-sync then targets
     /// the default port). Built from the bind addr by the binary.
     pub self_base_url: Option<String>,
+    /// Shared background-sweep toggle. `None` on library/test callers (the
+    /// builder substitutes a disabled, non-persisted one). The Hub binary
+    /// constructs it from the persisted preference + env seed and keeps a clone
+    /// for the sweep loop.
+    pub autosync: Option<Autosync>,
+}
+
+/// Runtime state of the background session sweep, shared between the HTTP
+/// handlers (which toggle it) and the sweep loop (which reads it each tick).
+///
+/// Cheap to clone — everything is behind an `Arc` — so it travels inside the
+/// cloned-per-request `HubState` and still refers to one shared switch. The
+/// preference is persisted to `path` (JSON) so a toggle survives a restart; the
+/// env var only seeds the very first run.
+#[derive(Clone, Debug)]
+pub struct Autosync {
+    enabled: Arc<std::sync::atomic::AtomicBool>,
+    interval: Arc<std::sync::atomic::AtomicU64>,
+    path: Arc<Option<std::path::PathBuf>>,
+}
+
+impl Autosync {
+    /// Smallest cadence we let a caller set — a runaway toggle at 1s would peg
+    /// the machine re-walking every transcript.
+    pub const MIN_INTERVAL: u64 = 30;
+
+    /// Build from the persisted file if present, else from the env seed
+    /// (`CTXONE_SESSION_SYNC_INTERVAL_SECS` > 0 → enabled at that cadence).
+    pub fn new(path: Option<std::path::PathBuf>, env_interval: u64) -> Self {
+        let (mut enabled, mut interval) = (env_interval > 0, env_interval.max(Self::MIN_INTERVAL));
+        if let Some(p) = &path
+            && let Ok(text) = std::fs::read_to_string(p)
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
+        {
+            enabled = v
+                .get("enabled")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(enabled);
+            interval = v
+                .get("interval_secs")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(interval)
+                .max(Self::MIN_INTERVAL);
+        }
+        Self {
+            enabled: Arc::new(std::sync::atomic::AtomicBool::new(enabled)),
+            interval: Arc::new(std::sync::atomic::AtomicU64::new(interval)),
+            path: Arc::new(path),
+        }
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    pub fn interval_secs(&self) -> u64 {
+        self.interval.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    pub fn set_enabled(&self, on: bool) {
+        self.enabled.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+    pub fn set_interval_secs(&self, secs: u64) {
+        self.interval.store(
+            secs.max(Self::MIN_INTERVAL),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    /// Write the current preference to disk (best-effort; a failure only means
+    /// the toggle won't survive a restart, never a request error).
+    pub fn persist(&self) {
+        if let Some(p) = self.path.as_ref() {
+            if let Some(dir) = p.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let body = serde_json::json!({
+                "enabled": self.enabled(),
+                "interval_secs": self.interval_secs(),
+            });
+            let _ = std::fs::write(p, body.to_string());
+        }
+    }
 }
 
 #[derive(Clone)]
 pub struct HubState {
     pub repo: Arc<Repository>,
     pub sessions: Arc<SessionRegistry>,
+    /// Background session-sweep toggle (Lens autosync).
+    pub autosync: Autosync,
     /// Path to the live sqlite db file, or None for memory/postgres.
     pub db_path: Option<String>,
     /// Named ASD repos with pre-known base URLs (static, no pool).
@@ -535,6 +618,10 @@ fn router_with_config_inner(
         asd_pool,
         ctx_binary: config.ctx_binary.clone(),
         self_base_url: config.self_base_url.clone(),
+        autosync: config
+            .autosync
+            .clone()
+            .unwrap_or_else(|| Autosync::new(None, 0)),
     };
 
     let mut router = Router::new()
@@ -543,6 +630,15 @@ fn router_with_config_inner(
         .route("/api/stats/tokens", get(token_stats))
         .route("/api/stats/tokens/{session_id}", get(session_token_stats))
         .route("/api/stats/sessions", get(list_sessions))
+        .route("/api/sessions/imported", get(imported_session_ids))
+        .route("/api/sessions/discoverable", get(discoverable_sessions))
+        .route("/api/sessions/import", post(import_sessions))
+        .route("/api/sessions/ignore", post(ignore_sessions))
+        .route("/api/sessions/unignore", post(unignore_sessions))
+        .route(
+            "/api/sessions/autosync",
+            get(get_autosync).post(set_autosync),
+        )
         .route("/api/stats/backfill_by_model", post(backfill_by_model))
         .route("/api/stats/llm_usage", post(record_llm_usage))
         .route("/api/stats/plan/{plan}/cost", get(plan_cost))
@@ -1048,6 +1144,34 @@ fn session_ids_with_nodes(repo: &Repository) -> std::collections::HashSet<String
         .filter_map(|rest| rest.split('/').next())
         .map(str::to_string)
         .collect()
+}
+
+/// `GET /api/sessions/imported` — every session id that has a `/sessions/{id}`
+/// subtree in ANY namespace.
+///
+/// The CLI's `ctx session list` uses this to flag which discovered transcripts
+/// are already imported, regardless of which workspace they landed in. It is
+/// the cross-namespace union of [`session_ids_with_nodes`] — the same walk
+/// [`list_sessions`] does to compute "placed elsewhere", but returned whole
+/// rather than used as a filter. Namespace-agnostic by design, so the request's
+/// namespace header is ignored.
+async fn imported_session_ids(State(s): State<HubState>) -> impl IntoResponse {
+    let mut ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Ok(names) = s.repo.list_namespaces() {
+        for name in names {
+            if let Ok(repo) = s.repo_for(&NamespaceId(name.as_str().to_string())) {
+                ids.extend(session_ids_with_nodes(&repo));
+            }
+        }
+    }
+    // `list_namespaces` may omit the default namespace when it has no refs yet;
+    // fold it in explicitly so a default-only install still reports correctly.
+    if let Ok(repo) = s.repo_for(&NamespaceId(Namespace::DEFAULT.to_string())) {
+        ids.extend(session_ids_with_nodes(&repo));
+    }
+    let mut out: Vec<String> = ids.into_iter().collect();
+    out.sort();
+    Json(out)
 }
 
 /// `GET /api/stats/sessions` — the sessions that live in this workspace.
@@ -2528,17 +2652,24 @@ async fn why_did_we(
     Query(q): Query<WhyDidWeQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
+    // Over-fetch, then drop session-transcript captures (full-turn / title /
+    // meta nodes under /sessions/). Their raw text matches decision queries and
+    // used to flood the results with an agent's own tool-call chatter, burying
+    // the actual recorded rationale. See `is_session_capture_path`.
     let results = repo
-        .search_values("main", &q.decision, Some(5))
+        .search_values("main", &q.decision, Some(WHY_DID_WE_SCAN))
         .map_err(internal_error)?;
 
     let mut traces = Vec::new();
-    for (path, _) in &results {
+    for (path, _) in results.iter().filter(|(p, _)| !is_session_capture_path(p)) {
         if let Ok(blame_info) = repo.blame("main", path) {
             traces.push(serde_json::json!({
                 "path": path,
                 "blame": serde_json::to_value(&blame_info).unwrap_or_default(),
             }));
+        }
+        if traces.len() >= WHY_DID_WE_LIMIT {
+            break;
         }
     }
 
@@ -2546,6 +2677,22 @@ async fn why_did_we(
         "decision": q.decision,
         "traces": traces,
     })))
+}
+
+/// Rationale-search tuning shared by the HTTP and MCP `why_did_we`.
+///
+/// We scan more candidates than we return so that filtering out session
+/// captures still leaves a full page of real decisions.
+pub const WHY_DID_WE_LIMIT: usize = 5;
+pub const WHY_DID_WE_SCAN: usize = 40;
+
+/// True for paths that are session-transcript plumbing (full-turn captures,
+/// session titles/meta), which live under `/sessions/` and are NOT decisions.
+/// `why_did_we` excludes them so it returns rationale, not an agent's own
+/// tool-call chatter. Mirrors the web `CAPTURE_KINDS` intent, but keyed on the
+/// path (which the value search already returns) rather than commit tags.
+pub fn is_session_capture_path(path: &str) -> bool {
+    path.starts_with("/sessions/")
 }
 
 // -- Prime / pinned context --
@@ -5307,10 +5454,22 @@ async fn put_session_meta(
 
 // -- Session sync (t-019) ----------------------------------------------
 
-/// Wall-clock cap on a full `ctx ingest-session --all` run before the
-/// endpoint gives up and returns 504. A whole-machine sync of many large
-/// transcripts is I/O bound but should never run for minutes.
-const SESSION_SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+/// Per-chunk wall-clock cap: the sweep runs one bounded ingest subprocess PER
+/// SOURCE, so a large history for one agent can't time out the whole sweep.
+/// Env-tunable via `CTXONE_SESSION_SYNC_TIMEOUT_SECS` (default 300).
+fn session_sync_timeout() -> std::time::Duration {
+    let secs = std::env::var("CTXONE_SESSION_SYNC_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(300);
+    std::time::Duration::from_secs(secs)
+}
+
+/// The agent sources the sweep chunks over, one bounded subprocess each. Kept
+/// in step with the CLI's `all_sources()`; an absent source ingests as a clean
+/// no-op, so listing one that isn't installed is harmless.
+const SYNC_SOURCES: &[&str] = &["claude", "codex", "cursor", "gemini"];
 
 /// `POST /api/sessions/sync` — re-pull ALL local Claude Code transcripts into
 /// this hub so the Sessions view reflects the latest turns, titles, and token
@@ -5336,22 +5495,21 @@ const SESSION_SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// agent tool *pushing* them via a per-tool Stop hook (no per-tool config, no
 /// hook-trust gates, resilient to harness changes). Ingest is incremental
 /// (fingerprint-skip), so repeated sweeps only touch new/changed sessions.
-pub async fn run_session_sync(
+/// Run one bounded ingest for a SINGLE source (`claude`, `codex`, …), the
+/// per-chunk unit of [`run_session_sync`]. Returns `(sessions, turns, tokens)`.
+async fn run_ingest_for_source(
     ctx_bin: &str,
     base_url: &str,
-) -> Result<(u64, u64, u64, u64), (StatusCode, String)> {
-    let start = std::time::Instant::now();
-
+    source: &str,
+) -> Result<(u64, u64, u64), (StatusCode, String)> {
     let mut cmd = tokio::process::Command::new(ctx_bin);
     cmd.arg("ingest-session")
         .arg("--all")
         .arg("--full-turn")
-        // Every installed agent, not just Claude Code. The CLI's `--source`
-        // default is `claude`, so omitting this silently skipped Codex —
-        // a fully implemented source — and any source added later. "Sync"
-        // that quietly covers one agent is worse than no sync at all.
+        // One source per chunk (see SYNC_SOURCES) so a large history for one
+        // agent can't time out the whole sweep.
         .arg("--source")
-        .arg("all")
+        .arg(source)
         .arg("--server")
         .arg(base_url)
         // NOT this request's namespace. `--all` walks every project on the
@@ -5400,20 +5558,21 @@ pub async fn run_session_sync(
         }
     };
 
-    let output = match tokio::time::timeout(SESSION_SYNC_TIMEOUT, child.wait_with_output()).await {
+    let timeout = session_sync_timeout();
+    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
         Ok(Ok(o)) => o,
         Ok(Err(e)) => {
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("ctx ingest-session failed: {e}"),
+                format!("ctx ingest-session ({source}) failed: {e}"),
             ));
         }
         Err(_) => {
             return Err((
                 StatusCode::GATEWAY_TIMEOUT,
                 format!(
-                    "session sync timed out after {}s (ctx ingest-session --all still running)",
-                    SESSION_SYNC_TIMEOUT.as_secs()
+                    "session sync for source '{source}' timed out after {}s",
+                    timeout.as_secs()
                 ),
             ));
         }
@@ -5456,8 +5615,48 @@ pub async fn run_session_sync(
         None => (0, 0, 0),
     };
 
-    let elapsed_ms = start.elapsed().as_millis() as u64;
-    Ok((sessions, turns, tokens, elapsed_ms))
+    Ok((sessions, turns, tokens))
+}
+
+/// Whole-machine session sweep, CHUNKED per source. Runs one bounded
+/// `ctx ingest-session` per [`SYNC_SOURCES`] entry and sums the results, so a
+/// large history for one agent can't time out the entire sweep. A missing `ctx`
+/// binary is fatal (surfaced once); any other per-source failure (a timeout, an
+/// unavailable source) is logged and skipped so the rest still runs. Returns
+/// `(sessions, turns, tokens, elapsed_ms)`.
+pub async fn run_session_sync(
+    ctx_bin: &str,
+    base_url: &str,
+) -> Result<(u64, u64, u64, u64), (StatusCode, String)> {
+    let start = std::time::Instant::now();
+    let (mut sessions, mut turns, mut tokens) = (0u64, 0u64, 0u64);
+    let mut fatal: Option<(StatusCode, String)> = None;
+    let mut any_ok = false;
+
+    for source in SYNC_SOURCES {
+        match run_ingest_for_source(ctx_bin, base_url, source).await {
+            Ok((s, t, k)) => {
+                sessions += s;
+                turns += t;
+                tokens += k;
+                any_ok = true;
+            }
+            // A missing ctx binary fails identically for every source — stop and
+            // surface it once rather than repeating the same error four times.
+            Err((code, msg)) if code == StatusCode::BAD_REQUEST => {
+                fatal = Some((code, msg));
+                break;
+            }
+            Err((code, msg)) => {
+                warn!(source = %source, %code, error = %msg, "session sweep: source chunk failed (continuing)");
+            }
+        }
+    }
+
+    if !any_ok && let Some(err) = fatal {
+        return Err(err);
+    }
+    Ok((sessions, turns, tokens, start.elapsed().as_millis() as u64))
 }
 
 async fn sync_sessions(
@@ -5494,6 +5693,251 @@ async fn sync_sessions(
         "tokens": tokens,
         "elapsed_ms": elapsed_ms,
     })))
+}
+
+// -- Graphical session import (Lens) ------------------------------------
+//
+// These endpoints back the Lens import panel. They shell the co-located `ctx`
+// binary — the same trust model as `sync_sessions` — because discovery is a
+// filesystem walk the CLI already implements (`ctx session list`), and reusing
+// it keeps one source of truth for what "importable" means. The hub never
+// parses transcripts itself.
+
+/// Run `ctx <args>` to completion with the sweep timeout, returning stdout.
+/// Centralises the spawn / not-found / timeout / non-zero-exit handling shared
+/// by discover/import/ignore so each handler is just its argument list.
+async fn run_ctx(ctx_bin: &str, args: &[String]) -> Result<String, (StatusCode, String)> {
+    let mut cmd = tokio::process::Command::new(ctx_bin);
+    cmd.args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "ctx binary not found ('{ctx_bin}'); set --ctx-binary. Session import runs \
+                     the local CLI and requires a co-located hub."
+                ),
+            ));
+        }
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to spawn ctx: {e}"),
+            ));
+        }
+    };
+    let timeout = session_sync_timeout();
+    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("ctx failed: {e}"),
+            ));
+        }
+        Err(_) => {
+            return Err((
+                StatusCode::GATEWAY_TIMEOUT,
+                format!("ctx timed out after {}s", timeout.as_secs()),
+            ));
+        }
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let tail: String = stderr.lines().rev().take(5).collect::<Vec<_>>().join(" | ");
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "ctx exited {}: {}",
+                output
+                    .status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "signal".to_string()),
+                tail
+            ),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn ctx_bin_and_base(s: &HubState) -> (String, String) {
+    let ctx_bin = s.ctx_binary.clone().unwrap_or_else(|| "ctx".to_string());
+    let base_url = s
+        .self_base_url
+        .clone()
+        .unwrap_or_else(|| "http://127.0.0.1:3001".to_string());
+    (ctx_bin, base_url)
+}
+
+/// `GET /api/sessions/discoverable` — every importable transcript on this
+/// machine, with its already-imported / privacy-skip status. Shells
+/// `ctx session list --json`; the CLI is the single source of truth for
+/// discovery, so the Lens panel and the terminal agree on what exists.
+async fn discoverable_sessions(
+    State(s): State<HubState>,
+    _ns: NamespaceId,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let (ctx_bin, base_url) = ctx_bin_and_base(&s);
+    let args = vec![
+        "session".into(),
+        "list".into(),
+        "--json".into(),
+        "--server".into(),
+        base_url,
+    ];
+    let stdout = run_ctx(&ctx_bin, &args).await?;
+    // The list is the last JSON array line (a "no sessions" run prints prose).
+    let items: serde_json::Value = stdout
+        .lines()
+        .rev()
+        .find_map(|l| serde_json::from_str::<serde_json::Value>(l.trim()).ok())
+        .filter(|v| v.is_array())
+        .unwrap_or_else(|| serde_json::json!([]));
+    Ok(Json(items))
+}
+
+#[derive(serde::Deserialize)]
+struct SessionIdsBody {
+    /// Namespaced session ids (as returned by `discoverable`).
+    ids: Vec<String>,
+    /// Import even ids on the privacy skip-list. Ignored by ignore/unignore.
+    #[serde(default)]
+    include_ignored: bool,
+    /// Assign every imported session to this existing workspace, overriding cwd
+    /// routing. The Lens calls import once per distinct target group. Ignored by
+    /// ignore/unignore.
+    #[serde(default)]
+    to: Option<String>,
+}
+
+/// `POST /api/sessions/import` — import a chosen set of sessions by id. Shells
+/// `ctx session import <ids…>`, which routes each to the workspace of the repo
+/// it ran in. Per-session workspace reassignment is the caller's job (the Lens
+/// follows up with `POST /api/sessions/{id}/move`), keeping this endpoint a thin
+/// pass-through to the engine.
+async fn import_sessions(
+    State(s): State<HubState>,
+    _ns: NamespaceId,
+    Json(body): Json<SessionIdsBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if body.ids.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "no session ids given".to_string()));
+    }
+    let (ctx_bin, base_url) = ctx_bin_and_base(&s);
+    let mut args: Vec<String> = vec!["session".into(), "import".into()];
+    args.extend(body.ids.iter().cloned());
+    if body.include_ignored {
+        args.push("--include-ignored".into());
+    }
+    if let Some(ns) = body.to.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        args.push("--to".into());
+        args.push(ns.to_string());
+    }
+    args.push("--quiet".into()); // suppress the extraction notice prose
+    // Same ref pinning as the sweep: read/write session nodes on `main`, and an
+    // explicit --branch suppresses git-branch mirroring of these writes.
+    args.push("--server".into());
+    args.push(base_url);
+    args.push("--branch".into());
+    args.push("main".into());
+    let stdout = run_ctx(&ctx_bin, &args).await?;
+    // `session import` fans out with --all semantics, so its final stdout line is
+    // the machine-readable `{sessions,turns,tokens}` object.
+    let summary = stdout
+        .lines()
+        .rev()
+        .find_map(|l| {
+            serde_json::from_str::<serde_json::Value>(l.trim())
+                .ok()
+                .filter(|v| v.get("sessions").is_some())
+        })
+        .unwrap_or_else(|| serde_json::json!({ "sessions": 0, "turns": 0, "tokens": 0 }));
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "requested": body.ids.len(),
+        "sessions": summary.get("sessions").and_then(|v| v.as_u64()).unwrap_or(0),
+        "turns": summary.get("turns").and_then(|v| v.as_u64()).unwrap_or(0),
+        "tokens": summary.get("tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+    })))
+}
+
+/// `POST /api/sessions/ignore` — add ids to the privacy skip-list so neither a
+/// manual import nor the background sweep will ingest them.
+async fn ignore_sessions(
+    State(s): State<HubState>,
+    _ns: NamespaceId,
+    Json(body): Json<SessionIdsBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    session_skiplist_edit(&s, "ignore", &body.ids).await
+}
+
+/// `POST /api/sessions/unignore` — remove ids from the privacy skip-list.
+async fn unignore_sessions(
+    State(s): State<HubState>,
+    _ns: NamespaceId,
+    Json(body): Json<SessionIdsBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    session_skiplist_edit(&s, "unignore", &body.ids).await
+}
+
+async fn session_skiplist_edit(
+    s: &HubState,
+    verb: &str,
+    ids: &[String],
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if ids.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "no session ids given".to_string()));
+    }
+    let (ctx_bin, _base) = ctx_bin_and_base(s);
+    let mut args: Vec<String> = vec!["session".into(), verb.into()];
+    args.extend(ids.iter().cloned());
+    let stdout = run_ctx(&ctx_bin, &args).await?;
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "verb": verb,
+        "count": ids.len(),
+        "detail": stdout.trim(),
+    })))
+}
+
+/// `GET /api/sessions/autosync` — current background-sweep state.
+async fn get_autosync(State(s): State<HubState>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "enabled": s.autosync.enabled(),
+        "interval_secs": s.autosync.interval_secs(),
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct AutosyncBody {
+    enabled: bool,
+    /// Sweep cadence when enabled. Clamped to a sane floor; omitted keeps the
+    /// current value.
+    interval_secs: Option<u64>,
+}
+
+/// `POST /api/sessions/autosync` — enable/disable the background sweep and set
+/// its cadence at runtime. Persisted (survives restart) and honoured by the
+/// running sweep loop without a bounce.
+async fn set_autosync(
+    State(s): State<HubState>,
+    _ns: NamespaceId,
+    Json(body): Json<AutosyncBody>,
+) -> Json<serde_json::Value> {
+    if let Some(secs) = body.interval_secs {
+        s.autosync.set_interval_secs(secs);
+    }
+    s.autosync.set_enabled(body.enabled);
+    s.autosync.persist();
+    Json(serde_json::json!({
+        "status": "ok",
+        "enabled": s.autosync.enabled(),
+        "interval_secs": s.autosync.interval_secs(),
+    }))
 }
 
 // -- Reminder endpoints -------------------------------------------------
