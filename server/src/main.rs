@@ -682,6 +682,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // target, so we always dial back over 127.0.0.1 on the same port.
         let self_base_url = format!("http://127.0.0.1:{}", http_port);
 
+        // Background-sweep toggle, shared between the HTTP handlers (which the
+        // Lens autosync switch calls) and the sweep loop below. The env var
+        // seeds the FIRST run; after that the persisted preference wins, so a
+        // toggle in the UI survives a restart. Persisted beside the CLI's own
+        // config under ~/.ctxone so wiping the graph db never loses it.
+        let autosync_env: u64 = std::env::var("CTXONE_SESSION_SYNC_INTERVAL_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        // Persist beside the CLI's config (~/.ctxone). No `dirs` dep in the hub
+        // crate, so resolve HOME directly; None disables persistence (the
+        // toggle then lives only for the process lifetime).
+        let autosync_path = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .map(|h| h.join(".ctxone").join("hub-autosync.json"));
+        let autosync = http::Autosync::new(autosync_path, autosync_env);
+
         let hub_config = http::HubConfig {
             rate_limit_rpm,
             asd_repos: asd_repos.clone(),
@@ -695,12 +712,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             allowed_origins: allowed_origins.clone(),
             ctx_binary: ctx_binary.clone(),
             self_base_url: Some(self_base_url),
+            autosync: Some(autosync.clone()),
         };
 
         // Values for the background session-sweep task (below). Cloned before
         // `hub_config` is moved into the router.
         let sync_ctx_bin = hub_config.ctx_binary.clone();
         let sync_base_url = hub_config.self_base_url.clone();
+        let sync_autosync = autosync.clone();
 
         // Capture db_path for background flush tasks.
         let flush_db_path = if storage_type == "sqlite" {
@@ -796,27 +815,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 memory_tools::spawn_flat_size_refresher(repo.clone(), 20);
 
                 // Background session-sweep (auto-sync): the hub can PULL agent
-                // transcripts from every source on a schedule. This is now
-                // **opt-in** — DEFAULT OFF (interval 0). A fresh hub must not
-                // silently ingest a machine's entire agent history: on a heavy
-                // machine that first cold sweep was slow, timed out, and imported
-                // sessions the user may want to keep private. Users choose what to
-                // import via `ctx session import` / the Lens, and enable ongoing
-                // auto-sync deliberately with CTXONE_SESSION_SYNC_INTERVAL_SECS=<secs>.
-                let sync_interval: u64 = std::env::var("CTXONE_SESSION_SYNC_INTERVAL_SECS")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
-                if let Some(base_url) = sync_base_url.clone()
-                    && sync_interval > 0
-                {
+                // transcripts from every source on a schedule. This is **opt-in**
+                // and DEFAULT OFF — a fresh hub must not silently ingest a
+                // machine's entire agent history (that first cold sweep was slow,
+                // timed out, and imported sessions the user may want private).
+                //
+                // The loop always spawns but is gated on the shared `Autosync`
+                // switch, which the Lens toggle flips at runtime (no restart) and
+                // persists. It wakes on a fixed cadence and only sweeps when
+                // enabled and at least the configured interval has elapsed, so a
+                // cadence change takes effect within one probe tick.
+                if let Some(base_url) = sync_base_url.clone() {
                     let ctx_bin = sync_ctx_bin.clone().unwrap_or_else(|| "ctx".to_string());
+                    let autosync = sync_autosync.clone();
                     tokio::spawn(async move {
-                        let mut interval =
-                            tokio::time::interval(std::time::Duration::from_secs(sync_interval));
+                        // Probe often enough that a newly-enabled sweep starts
+                        // promptly, but never busier than the floor cadence.
+                        let probe = std::time::Duration::from_secs(http::Autosync::MIN_INTERVAL);
+                        let mut interval = tokio::time::interval(probe);
                         interval.tick().await; // skip the immediate first tick
+                        let mut last_sweep: Option<std::time::Instant> = None;
                         loop {
                             interval.tick().await;
+                            if !autosync.enabled() {
+                                continue;
+                            }
+                            let due = last_sweep
+                                .is_none_or(|t| t.elapsed().as_secs() >= autosync.interval_secs());
+                            if !due {
+                                continue;
+                            }
+                            last_sweep = Some(std::time::Instant::now());
                             // Awaiting to completion before the next tick means
                             // sweeps never overlap even if one runs long.
                             match http::run_session_sync(&ctx_bin, &base_url).await {
@@ -831,8 +860,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     });
                     info!(
-                        interval_secs = sync_interval,
-                        "background session sweep scheduled"
+                        enabled = sync_autosync.enabled(),
+                        interval_secs = sync_autosync.interval_secs(),
+                        "background session sweep loop spawned (runtime-toggled)"
                     );
                 }
 

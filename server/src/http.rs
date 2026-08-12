@@ -88,12 +88,95 @@ pub struct HubConfig {
     /// into this hub. `None` on library/test callers (session-sync then targets
     /// the default port). Built from the bind addr by the binary.
     pub self_base_url: Option<String>,
+    /// Shared background-sweep toggle. `None` on library/test callers (the
+    /// builder substitutes a disabled, non-persisted one). The Hub binary
+    /// constructs it from the persisted preference + env seed and keeps a clone
+    /// for the sweep loop.
+    pub autosync: Option<Autosync>,
+}
+
+/// Runtime state of the background session sweep, shared between the HTTP
+/// handlers (which toggle it) and the sweep loop (which reads it each tick).
+///
+/// Cheap to clone — everything is behind an `Arc` — so it travels inside the
+/// cloned-per-request `HubState` and still refers to one shared switch. The
+/// preference is persisted to `path` (JSON) so a toggle survives a restart; the
+/// env var only seeds the very first run.
+#[derive(Clone, Debug)]
+pub struct Autosync {
+    enabled: Arc<std::sync::atomic::AtomicBool>,
+    interval: Arc<std::sync::atomic::AtomicU64>,
+    path: Arc<Option<std::path::PathBuf>>,
+}
+
+impl Autosync {
+    /// Smallest cadence we let a caller set — a runaway toggle at 1s would peg
+    /// the machine re-walking every transcript.
+    pub const MIN_INTERVAL: u64 = 30;
+
+    /// Build from the persisted file if present, else from the env seed
+    /// (`CTXONE_SESSION_SYNC_INTERVAL_SECS` > 0 → enabled at that cadence).
+    pub fn new(path: Option<std::path::PathBuf>, env_interval: u64) -> Self {
+        let (mut enabled, mut interval) = (env_interval > 0, env_interval.max(Self::MIN_INTERVAL));
+        if let Some(p) = &path
+            && let Ok(text) = std::fs::read_to_string(p)
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
+        {
+            enabled = v
+                .get("enabled")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(enabled);
+            interval = v
+                .get("interval_secs")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(interval)
+                .max(Self::MIN_INTERVAL);
+        }
+        Self {
+            enabled: Arc::new(std::sync::atomic::AtomicBool::new(enabled)),
+            interval: Arc::new(std::sync::atomic::AtomicU64::new(interval)),
+            path: Arc::new(path),
+        }
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    pub fn interval_secs(&self) -> u64 {
+        self.interval.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    pub fn set_enabled(&self, on: bool) {
+        self.enabled.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+    pub fn set_interval_secs(&self, secs: u64) {
+        self.interval.store(
+            secs.max(Self::MIN_INTERVAL),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    /// Write the current preference to disk (best-effort; a failure only means
+    /// the toggle won't survive a restart, never a request error).
+    pub fn persist(&self) {
+        if let Some(p) = self.path.as_ref() {
+            if let Some(dir) = p.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let body = serde_json::json!({
+                "enabled": self.enabled(),
+                "interval_secs": self.interval_secs(),
+            });
+            let _ = std::fs::write(p, body.to_string());
+        }
+    }
 }
 
 #[derive(Clone)]
 pub struct HubState {
     pub repo: Arc<Repository>,
     pub sessions: Arc<SessionRegistry>,
+    /// Background session-sweep toggle (Lens autosync).
+    pub autosync: Autosync,
     /// Path to the live sqlite db file, or None for memory/postgres.
     pub db_path: Option<String>,
     /// Named ASD repos with pre-known base URLs (static, no pool).
@@ -535,6 +618,10 @@ fn router_with_config_inner(
         asd_pool,
         ctx_binary: config.ctx_binary.clone(),
         self_base_url: config.self_base_url.clone(),
+        autosync: config
+            .autosync
+            .clone()
+            .unwrap_or_else(|| Autosync::new(None, 0)),
     };
 
     let mut router = Router::new()
@@ -544,6 +631,14 @@ fn router_with_config_inner(
         .route("/api/stats/tokens/{session_id}", get(session_token_stats))
         .route("/api/stats/sessions", get(list_sessions))
         .route("/api/sessions/imported", get(imported_session_ids))
+        .route("/api/sessions/discoverable", get(discoverable_sessions))
+        .route("/api/sessions/import", post(import_sessions))
+        .route("/api/sessions/ignore", post(ignore_sessions))
+        .route("/api/sessions/unignore", post(unignore_sessions))
+        .route(
+            "/api/sessions/autosync",
+            get(get_autosync).post(set_autosync),
+        )
         .route("/api/stats/backfill_by_model", post(backfill_by_model))
         .route("/api/stats/llm_usage", post(record_llm_usage))
         .route("/api/stats/plan/{plan}/cost", get(plan_cost))
@@ -5575,6 +5670,251 @@ async fn sync_sessions(
         "tokens": tokens,
         "elapsed_ms": elapsed_ms,
     })))
+}
+
+// -- Graphical session import (Lens) ------------------------------------
+//
+// These endpoints back the Lens import panel. They shell the co-located `ctx`
+// binary — the same trust model as `sync_sessions` — because discovery is a
+// filesystem walk the CLI already implements (`ctx session list`), and reusing
+// it keeps one source of truth for what "importable" means. The hub never
+// parses transcripts itself.
+
+/// Run `ctx <args>` to completion with the sweep timeout, returning stdout.
+/// Centralises the spawn / not-found / timeout / non-zero-exit handling shared
+/// by discover/import/ignore so each handler is just its argument list.
+async fn run_ctx(ctx_bin: &str, args: &[String]) -> Result<String, (StatusCode, String)> {
+    let mut cmd = tokio::process::Command::new(ctx_bin);
+    cmd.args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "ctx binary not found ('{ctx_bin}'); set --ctx-binary. Session import runs \
+                     the local CLI and requires a co-located hub."
+                ),
+            ));
+        }
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to spawn ctx: {e}"),
+            ));
+        }
+    };
+    let timeout = session_sync_timeout();
+    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("ctx failed: {e}"),
+            ));
+        }
+        Err(_) => {
+            return Err((
+                StatusCode::GATEWAY_TIMEOUT,
+                format!("ctx timed out after {}s", timeout.as_secs()),
+            ));
+        }
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let tail: String = stderr.lines().rev().take(5).collect::<Vec<_>>().join(" | ");
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "ctx exited {}: {}",
+                output
+                    .status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "signal".to_string()),
+                tail
+            ),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn ctx_bin_and_base(s: &HubState) -> (String, String) {
+    let ctx_bin = s.ctx_binary.clone().unwrap_or_else(|| "ctx".to_string());
+    let base_url = s
+        .self_base_url
+        .clone()
+        .unwrap_or_else(|| "http://127.0.0.1:3001".to_string());
+    (ctx_bin, base_url)
+}
+
+/// `GET /api/sessions/discoverable` — every importable transcript on this
+/// machine, with its already-imported / privacy-skip status. Shells
+/// `ctx session list --json`; the CLI is the single source of truth for
+/// discovery, so the Lens panel and the terminal agree on what exists.
+async fn discoverable_sessions(
+    State(s): State<HubState>,
+    _ns: NamespaceId,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let (ctx_bin, base_url) = ctx_bin_and_base(&s);
+    let args = vec![
+        "session".into(),
+        "list".into(),
+        "--json".into(),
+        "--server".into(),
+        base_url,
+    ];
+    let stdout = run_ctx(&ctx_bin, &args).await?;
+    // The list is the last JSON array line (a "no sessions" run prints prose).
+    let items: serde_json::Value = stdout
+        .lines()
+        .rev()
+        .find_map(|l| serde_json::from_str::<serde_json::Value>(l.trim()).ok())
+        .filter(|v| v.is_array())
+        .unwrap_or_else(|| serde_json::json!([]));
+    Ok(Json(items))
+}
+
+#[derive(serde::Deserialize)]
+struct SessionIdsBody {
+    /// Namespaced session ids (as returned by `discoverable`).
+    ids: Vec<String>,
+    /// Import even ids on the privacy skip-list. Ignored by ignore/unignore.
+    #[serde(default)]
+    include_ignored: bool,
+    /// Assign every imported session to this existing workspace, overriding cwd
+    /// routing. The Lens calls import once per distinct target group. Ignored by
+    /// ignore/unignore.
+    #[serde(default)]
+    to: Option<String>,
+}
+
+/// `POST /api/sessions/import` — import a chosen set of sessions by id. Shells
+/// `ctx session import <ids…>`, which routes each to the workspace of the repo
+/// it ran in. Per-session workspace reassignment is the caller's job (the Lens
+/// follows up with `POST /api/sessions/{id}/move`), keeping this endpoint a thin
+/// pass-through to the engine.
+async fn import_sessions(
+    State(s): State<HubState>,
+    _ns: NamespaceId,
+    Json(body): Json<SessionIdsBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if body.ids.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "no session ids given".to_string()));
+    }
+    let (ctx_bin, base_url) = ctx_bin_and_base(&s);
+    let mut args: Vec<String> = vec!["session".into(), "import".into()];
+    args.extend(body.ids.iter().cloned());
+    if body.include_ignored {
+        args.push("--include-ignored".into());
+    }
+    if let Some(ns) = body.to.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        args.push("--to".into());
+        args.push(ns.to_string());
+    }
+    args.push("--quiet".into()); // suppress the extraction notice prose
+    // Same ref pinning as the sweep: read/write session nodes on `main`, and an
+    // explicit --branch suppresses git-branch mirroring of these writes.
+    args.push("--server".into());
+    args.push(base_url);
+    args.push("--branch".into());
+    args.push("main".into());
+    let stdout = run_ctx(&ctx_bin, &args).await?;
+    // `session import` fans out with --all semantics, so its final stdout line is
+    // the machine-readable `{sessions,turns,tokens}` object.
+    let summary = stdout
+        .lines()
+        .rev()
+        .find_map(|l| {
+            serde_json::from_str::<serde_json::Value>(l.trim())
+                .ok()
+                .filter(|v| v.get("sessions").is_some())
+        })
+        .unwrap_or_else(|| serde_json::json!({ "sessions": 0, "turns": 0, "tokens": 0 }));
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "requested": body.ids.len(),
+        "sessions": summary.get("sessions").and_then(|v| v.as_u64()).unwrap_or(0),
+        "turns": summary.get("turns").and_then(|v| v.as_u64()).unwrap_or(0),
+        "tokens": summary.get("tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+    })))
+}
+
+/// `POST /api/sessions/ignore` — add ids to the privacy skip-list so neither a
+/// manual import nor the background sweep will ingest them.
+async fn ignore_sessions(
+    State(s): State<HubState>,
+    _ns: NamespaceId,
+    Json(body): Json<SessionIdsBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    session_skiplist_edit(&s, "ignore", &body.ids).await
+}
+
+/// `POST /api/sessions/unignore` — remove ids from the privacy skip-list.
+async fn unignore_sessions(
+    State(s): State<HubState>,
+    _ns: NamespaceId,
+    Json(body): Json<SessionIdsBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    session_skiplist_edit(&s, "unignore", &body.ids).await
+}
+
+async fn session_skiplist_edit(
+    s: &HubState,
+    verb: &str,
+    ids: &[String],
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if ids.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "no session ids given".to_string()));
+    }
+    let (ctx_bin, _base) = ctx_bin_and_base(s);
+    let mut args: Vec<String> = vec!["session".into(), verb.into()];
+    args.extend(ids.iter().cloned());
+    let stdout = run_ctx(&ctx_bin, &args).await?;
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "verb": verb,
+        "count": ids.len(),
+        "detail": stdout.trim(),
+    })))
+}
+
+/// `GET /api/sessions/autosync` — current background-sweep state.
+async fn get_autosync(State(s): State<HubState>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "enabled": s.autosync.enabled(),
+        "interval_secs": s.autosync.interval_secs(),
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct AutosyncBody {
+    enabled: bool,
+    /// Sweep cadence when enabled. Clamped to a sane floor; omitted keeps the
+    /// current value.
+    interval_secs: Option<u64>,
+}
+
+/// `POST /api/sessions/autosync` — enable/disable the background sweep and set
+/// its cadence at runtime. Persisted (survives restart) and honoured by the
+/// running sweep loop without a bounce.
+async fn set_autosync(
+    State(s): State<HubState>,
+    _ns: NamespaceId,
+    Json(body): Json<AutosyncBody>,
+) -> Json<serde_json::Value> {
+    if let Some(secs) = body.interval_secs {
+        s.autosync.set_interval_secs(secs);
+    }
+    s.autosync.set_enabled(body.enabled);
+    s.autosync.persist();
+    Json(serde_json::json!({
+        "status": "ok",
+        "enabled": s.autosync.enabled(),
+        "interval_secs": s.autosync.interval_secs(),
+    }))
 }
 
 // -- Reminder endpoints -------------------------------------------------

@@ -11,6 +11,11 @@
 	import { tick } from 'svelte';
 	import SessionArcs from './SessionArcs.svelte';
 	import RecallLogTimeline from './RecallLogTimeline.svelte';
+	import SessionImport from './SessionImport.svelte';
+
+	// Graphical import panel (PR-B): discover on-disk transcripts, pick which to
+	// import, assign a workspace, toggle background auto-sync.
+	let showImport = $state(false);
 
 	/** Scroll a turn into view when an arc is clicked. Turns render with
 	 * id="turn-{turn_index}"; briefly highlight the target. `tick()` (not
@@ -900,6 +905,13 @@
 		</button>
 		<button
 			class="sync-btn"
+			onclick={() => (showImport = true)}
+			title="Discover agent sessions on this machine and choose which to import"
+		>
+			＋ Import sessions
+		</button>
+		<button
+			class="sync-btn"
 			onclick={syncSessions}
 			disabled={syncing}
 			title="Re-scan Claude Code transcripts on this machine and pull them into the hub (local hub only)"
@@ -923,9 +935,9 @@
 		<EmptyState
 			icon="🗂️"
 			title="No sessions in this workspace yet"
-			description="Sessions appear as agents run recall/remember here, or after you sync local transcripts."
-			actionLabel={syncing ? 'Syncing…' : 'Sync transcripts'}
-			onAction={syncSessions}
+			description="Sessions appear as agents run recall/remember here, or import existing ones from this machine."
+			actionLabel="Import sessions"
+			onAction={() => (showImport = true)}
 		/>
 	{:else}
 		<div class="layout">
@@ -1455,6 +1467,14 @@
 		</div>
 	{/if}
 </div>
+
+<SessionImport
+	bind:open={showImport}
+	onimported={() => {
+		derivedMeta = {};
+		void load();
+	}}
+/>
 
 {#if openMemory}
 	<!-- svelte-ignore a11y_click_events_have_key_events -->

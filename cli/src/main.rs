@@ -1234,6 +1234,10 @@ enum SessionAction {
         /// Show every session in one shot instead of paging.
         #[arg(long)]
         all: bool,
+        /// Emit the full list as JSON (one object per session). Machine-readable
+        /// surface the Lens import panel consumes; ignores paging.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Import chosen sessions by their `list` number, a range, or `all`.
@@ -1249,6 +1253,10 @@ enum SessionAction {
         /// Only import from this source.
         #[arg(long)]
         source: Option<String>,
+        /// Assign every imported session to this workspace, overriding the
+        /// default cwd-based routing. The workspace must already exist.
+        #[arg(long)]
+        to: Option<String>,
         /// Import even sessions on the privacy skip-list.
         #[arg(long)]
         include_ignored: bool,
@@ -2557,6 +2565,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 dir_workspaces,
                 // The low-level `ingest-session` command imports everything it
                 // discovers; the numbered whitelist is `session import`'s job.
+                None,
+                // cwd routing (or --namespace fallback) governs where these land.
                 None,
             )
             .await?;
@@ -5501,6 +5511,11 @@ async fn run_ingest_session(
     // numbered selection into a targeted subset of a full-machine discovery
     // without a second code path. `None` imports everything discovered.
     only_ids: Option<std::collections::HashSet<String>>,
+    // When set, route EVERY imported session into this workspace, overriding
+    // per-transcript cwd routing. Backs `session import --to <ns>` and the Lens
+    // "assign to workspace" control. The namespace must already exist (the Lens
+    // only offers existing ones); a write to a missing namespace 404s.
+    force_namespace: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let extraction = crate::ingest::resolve_extraction_config();
     if extraction.is_none() && !tokens_only {
@@ -5723,7 +5738,12 @@ async fn run_ingest_session(
                 Some(s) => Some(s.to_string()),
                 None => Some(session_ref.namespaced_id(source_id)),
             };
-            let routed = router.route(session_ref.cwd.as_deref()).await;
+            let routed = match &force_namespace {
+                // An explicit workspace overrides cwd routing entirely — the
+                // session lands where the user asked, not where it ran.
+                Some(ns) => crate::workspace::Routed::Existing(ns.clone()),
+                None => router.route(session_ref.cwd.as_deref()).await,
+            };
 
             // A deleted session must stay deleted. Its transcript is still on
             // disk, so without this the next sync would faithfully restore
@@ -5977,15 +5997,40 @@ async fn run_session_action(
             }
         }
 
-        SessionAction::List { source, page, all } => {
+        SessionAction::List {
+            source,
+            page,
+            all,
+            json,
+        } => {
             use crate::session_import as si;
             let rows = si::discover(source.as_deref());
+            let imported = fetch_imported_ids(server, &clients).await;
+            let ignored = si::load_ignored();
+            if json {
+                // One object per session, in the same stable order as the text
+                // list. This is the surface the Lens import panel consumes.
+                let out: Vec<serde_json::Value> = rows
+                    .iter()
+                    .map(|r| {
+                        let status = si::status_for(&r.id, &imported, &ignored);
+                        serde_json::json!({
+                            "number": r.number,
+                            "id": r.id,
+                            "source": r.source_id,
+                            "project": r.project,
+                            "last_activity": r.last_activity,
+                            "status": status.as_str(),
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string(&out)?);
+                return Ok(());
+            }
             if rows.is_empty() {
                 println!("No agent sessions found on this machine.");
                 return Ok(());
             }
-            let imported = fetch_imported_ids(server, &clients).await;
-            let ignored = si::load_ignored();
             if all {
                 let pages = rows.len().div_ceil(si::PAGE_SIZE).max(1);
                 for p in 1..=pages {
@@ -5999,6 +6044,7 @@ async fn run_session_action(
         SessionAction::Import {
             selectors,
             source,
+            to,
             include_ignored,
             quiet,
             dry_run,
@@ -6065,6 +6111,9 @@ async fn run_session_action(
                     println!("  {id}");
                 }
             }
+            if let Some(ns) = &to {
+                println!("Assigning all imported sessions to workspace '{ns}'.");
+            }
             if !quiet {
                 println!("{}", si::extraction_notice());
             }
@@ -6088,6 +6137,7 @@ async fn run_session_action(
                 false,
                 false,
                 Some(ids),
+                to, // explicit workspace override, when given
             )
             .await?;
         }

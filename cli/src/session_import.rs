@@ -23,7 +23,7 @@
 //! session is skipped by BOTH a manual `import` and the hub's background sweep —
 //! the transcript stays on disk and simply never enters the graph.
 
-use crate::sources::{SessionSource, all_sources};
+use crate::sources::all_sources;
 use std::collections::HashSet;
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -183,7 +183,7 @@ pub enum Status {
 }
 
 impl Status {
-    fn label(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Status::New => "new",
             Status::Imported => "imported",
@@ -230,7 +230,7 @@ pub fn print_page(
             fmt_date(row.last_activity),
             short_id(&row.id),
             row.source_id,
-            st.label(),
+            st.as_str(),
             row.project,
         );
     }
