@@ -4,6 +4,23 @@ All notable changes to CTXone are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 the project's `0.9.x` series (incremented by 0.0.01 per release).
 
+## [v0.9.33] — 2026-08-12
+
+### Added
+- **Opt-in session import onboarding.** The background sweep that pulled every transcript on the machine into the hub is now **off by default** — a fresh hub no longer silently ingests a machine's entire agent history. When enabled (`CTXONE_SESSION_SYNC_INTERVAL_SECS`), the sweep is **chunked per source** (claude/codex/cursor/gemini) with an env-tunable per-chunk timeout, so one large/slow source can't time out the whole run.
+- **`ctx session list | import | ignore | unignore`.** Discover agent sessions on this machine as a stable, newest-first, **numbered** list (paged 25, with new/imported/ignored status), then import a chosen subset by number/range/`all` or via an interactive picker. Import is **key-aware** (prints a RICH-vs-PLAIN notice read from env/config — never prompts for or stores a secret) and routes each session to the workspace of the repo it ran in. `session ignore`/`unignore` maintain a **privacy skip-list** (`~/.ctxone/ignored-sessions.txt`) honoured by both manual imports and the background sweep. `session import --to <ns>` forces a workspace.
+- **Graphical import in Lens.** The Sessions view gains an **Import sessions** panel: a checkable, filterable list of discovered transcripts with per-row and bulk **workspace assignment**, Import selected / Import all new, Mark private / Unmark, an **auto-sync toggle** (enable/disable the background sweep and its cadence at runtime — no restart, persisted across restarts), and a plain-language extraction-key note. New endpoints: `GET /api/sessions/discoverable`, `POST /api/sessions/import`, `POST /api/sessions/ignore|unignore`, `GET|POST /api/sessions/autosync`, and `GET /api/sessions/imported`.
+
+### Fixed
+- **`ctx doctor` no longer flags the canonical database as "stray."** The check compared raw file counts, so a `./ctxone.db` stub existing beside the real `~/.ctxone/memory.db` fingered *both* as strays. A stray is now specifically a stub that is not the canonical db; the message and suggestion name only the actual stragglers.
+- **`why_did_we` returns rationale, not transcript chatter.** Session-transcript captures (full-turn / title / meta nodes under `/sessions/`) matched decision queries and buried the recorded rationale under an agent's own tool-call output. Both the HTTP and MCP paths now over-fetch and drop those paths.
+- **Code-proxy 404 spam.** The Lens sidebar fired `/api/code/<repo>/health` + `/prefetch` for a repo that wasn't registered (a name persisted from another hub), 404-ing on every load; the calls are now gated on registry membership and a stale selection is cleared.
+- **Live Tail stuck on "Connecting…".** A backgrounded tab skips polling, which left the feed on a permanent, misleading "Connecting…". The status is now driven by whether a poll has actually completed plus tab visibility: a hidden tab reads "paused (background)", an idle foreground feed reads "watching", and only a never-completed foreground poll reads "connecting".
+- **`plan complete` vs `plan done` disambiguated in `--help`.** `plan done` now states it closes a single *task* (and points to `close`/`complete` for a whole plan); `plan complete` states it force-completes the whole *plan* (and points to `plan done` for one task).
+
+### Changed
+- **Cumulative token labels.** The workspace dashboard and per-session tiles relabel their token totals as **cumulative** ("Tokens used (cumulative)" / "tok · cumulative", with tooltips), so large running totals read as expected rather than as a single call.
+
 ## [v0.9.32] — 2026-08-11
 
 ### Added
