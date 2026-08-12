@@ -4,6 +4,11 @@ All notable changes to CTXone are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 the project's `0.9.x` series (incremented by 0.0.01 per release).
 
+## [v0.9.32] — 2026-08-11
+
+### Added
+- **`ctx ingest-session --dir-workspaces`.** Sessions imported from a working directory that isn't a git repo now route to a workspace named after the directory (kebab-cased basename) instead of the `default` namespace — grouping sessions by working directory the way Claude Code / Codex do. Opt-in: bare directory names are less canonical than a git remote (they can collide and proliferate), so it's off by default; git repos still key on their remote's `owner/repo`. This also makes a manually-moved non-git-dir session durable against a future re-sync (it routes back to its named workspace, not `default`).
+
 ## [v0.9.31] — 2026-08-11
 
 ### Added
