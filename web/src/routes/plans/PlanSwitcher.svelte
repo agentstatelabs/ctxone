@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { Plan } from '$lib/plansApi';
+	import { makeMatcher } from '$lib/glob';
 	import {
 		EFFECTIVE_STATUS_LABELS,
 		EFFECTIVE_STATUS_ORDER,
@@ -105,15 +106,11 @@
 	}
 
 	let filtered = $derived.by(() => {
-		const q = search.trim().toLowerCase();
+		const m = makeMatcher(search);
 		return plans
 			.filter((p) => {
 				if (statusFilter !== 'all' && effectivePlanStatus(p) !== statusFilter) return false;
-				if (!q) return true;
-				return (
-					p.name.toLowerCase().includes(q) ||
-					(p.description ?? '').toLowerCase().includes(q)
-				);
+				return m(p.name) || m(p.description ?? '');
 			})
 			.sort(compare);
 	});

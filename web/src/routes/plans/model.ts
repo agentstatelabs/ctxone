@@ -5,6 +5,7 @@
  */
 
 import type { Plan, Priority, ProofKind, Task, TaskStatus } from '$lib/plansApi';
+import { makeMatcher } from '$lib/glob';
 
 /* ------------------------------------------------------------------ *
  *  Status + priority metadata                                        *
@@ -304,12 +305,9 @@ export function hashString(s: string): number {
 /** Case-insensitive match over title, id, assignee and description. */
 export function taskMatches(t: Task, q: string): boolean {
 	if (!q) return true;
-	const needle = q.toLowerCase();
+	const m = makeMatcher(q);
 	return (
-		t.title.toLowerCase().includes(needle) ||
-		t.id.toLowerCase().includes(needle) ||
-		(t.assigned_to ?? '').toLowerCase().includes(needle) ||
-		(t.description ?? '').toLowerCase().includes(needle)
+		m(t.title) || m(t.id) || m(t.assigned_to ?? '') || m(t.description ?? '')
 	);
 }
 

@@ -23,6 +23,7 @@
 		type Task
 	} from '$lib/plansApi';
 	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
+	import { makeMatcher } from '$lib/glob';
 	import { buildGraph, effectivePlanStatus as effStatus, taskMatches } from './model';
 	import PlanSwitcher from './PlanSwitcher.svelte';
 	import BoardView from './BoardView.svelte';
@@ -127,13 +128,23 @@
 		panelIntent = null;
 		error = null;
 		loadPlans();
+		if (scope !== 'plan') void loadAggregate();
 	});
 
 	// Land somewhere useful: when nothing is selected, auto-open the
 	// most relevant plan (in-progress first — same rank the switcher uses).
+	// A pending selection (from the aggregate list) wins over the auto-rank.
 	const AUTO_RANK: Record<string, number> = { in_progress: 0, active: 1, completed: 2, archived: 3 };
 	$effect(() => {
 		if (selectedName !== null || plans.length === 0) return;
+		if (pendingSelect) {
+			const want = pendingSelect;
+			if (plans.some((p) => p.name === want)) {
+				pendingSelect = null;
+				void selectPlan(want);
+				return;
+			}
+		}
 		const best = [...plans].sort((a, b) => {
 			const ra = AUTO_RANK[effStatus(a)] ?? 99;
 			const rb = AUTO_RANK[effStatus(b)] ?? 99;
@@ -158,6 +169,89 @@
 	function setView(v: ViewMode) {
 		viewMode = v;
 		if (typeof localStorage !== 'undefined') localStorage.setItem(VIEW_KEY, v);
+	}
+
+	/* ---------------------------------------------------------------- *
+	 *  Scope — how wide the view/search reaches WITHIN the workspace:   *
+	 *    plan      → one selected plan (default)                        *
+	 *    branch    → every plan on the current branch  ("All Plans")    *
+	 *    workspace → every plan across every branch    ("All Branches") *
+	 * ---------------------------------------------------------------- */
+	type Scope = 'plan' | 'branch' | 'workspace';
+	const SCOPE_KEY = 'lens.plans.scope';
+	const SCOPES: Scope[] = ['plan', 'branch', 'workspace'];
+	const SCOPE_LABELS: Record<Scope, string> = {
+		plan: 'Plan',
+		branch: 'All Plans',
+		workspace: 'All Branches'
+	};
+	function loadScope(): Scope {
+		if (typeof localStorage === 'undefined') return 'plan';
+		const v = localStorage.getItem(SCOPE_KEY) as Scope | null;
+		return v === 'branch' || v === 'workspace' ? v : 'plan';
+	}
+	let scope = $state<Scope>(loadScope());
+	function setScope(s: Scope) {
+		scope = s;
+		if (typeof localStorage !== 'undefined') localStorage.setItem(SCOPE_KEY, s);
+		if (s !== 'plan') void loadAggregate();
+	}
+
+	// Aggregate plan list for branch/workspace scope. Each row carries its branch.
+	type AggRow = { plan: Plan; branch: string };
+	let aggRows = $state<AggRow[]>([]);
+	let aggLoading = $state(false);
+	// When set, the next completed plan load selects this plan (used when opening
+	// a plan from another branch out of the aggregate list).
+	let pendingSelect: string | null = null;
+
+	async function loadAggregate() {
+		aggLoading = true;
+		error = null;
+		try {
+			if (scope === 'branch') {
+				const ps = await listPlans(branchStore.current);
+				aggRows = ps.map((p) => ({ plan: p, branch: branchStore.current }));
+			} else if (scope === 'workspace') {
+				const branches = await getBranches();
+				const per = await Promise.all(
+					branches.map(async (b) => {
+						try {
+							return (await listPlans(b.name)).map((p) => ({ plan: p, branch: b.name }));
+						} catch {
+							return [] as AggRow[];
+						}
+					})
+				);
+				aggRows = per.flat();
+			}
+		} catch (e) {
+			error = e instanceof Error ? e.message : String(e);
+			aggRows = [];
+		} finally {
+			aggLoading = false;
+		}
+	}
+
+	// Filter the aggregate by the search box (glob-aware), across name +
+	// description + branch. Sorted by branch then name.
+	let aggFiltered = $derived.by(() => {
+		const m = makeMatcher(search);
+		return aggRows
+			.filter(({ plan, branch }) => m(plan.name) || m(plan.description ?? '') || m(branch))
+			.sort((a, b) => a.branch.localeCompare(b.branch) || a.plan.name.localeCompare(b.plan.name));
+	});
+
+	// Open a plan from the aggregate: drop to plan scope, switching branch first
+	// when the plan lives on a different one.
+	function openFromAggregate(row: AggRow) {
+		setScope('plan');
+		if (row.branch !== branchStore.current) {
+			pendingSelect = row.plan.name;
+			branchStore.current = row.branch; // scope-change effect reloads + auto-selects pending
+		} else {
+			void selectPlan(row.plan.name);
+		}
 	}
 
 	/* ---------------------------------------------------------------- *
@@ -385,10 +479,27 @@
 	<header class="topbar">
 		<h2>Plans</h2>
 		<PlanSwitcher {plans} {selectedName} onSelect={selectPlan} onCreate={handleCreatePlan} />
+		<span class="scope-group" role="tablist" aria-label="Scope">
+			{#each SCOPES as s (s)}
+				<button
+					type="button"
+					class="seg"
+					class:active={scope === s}
+					role="tab"
+					aria-selected={scope === s}
+					title={s === 'plan'
+						? 'One plan'
+						: s === 'branch'
+							? 'Every plan on this branch'
+							: 'Every plan across every branch in this workspace'}
+					onclick={() => setScope(s)}
+				>{SCOPE_LABELS[s]}</button>
+			{/each}
+		</span>
 		<ScopeBadge branch />
 		<span class="ago">refreshed {formatAgo(auto.lastRefreshed)}</span>
 		<span class="top-spacer"></span>
-		{#if selectedPlan}
+		{#if scope === 'plan' && selectedPlan}
 			<button type="button" class="tbtn" onclick={handleNextUp} title="Open the engine's next eligible task">
 				▶ Next up
 			</button>
@@ -453,7 +564,46 @@
 		<p class="error">{error}</p>
 	{/if}
 
-	{#if selectedPlan}
+	{#if scope !== 'plan'}
+		<div class="toolbar">
+			<input
+				type="search"
+				class="task-search"
+				placeholder={scope === 'workspace'
+					? 'Search plans across all branches…  (glob: asd-m5*, *budget*)'
+					: 'Search plans on this branch…  (glob: asd-m5*, *budget*)'}
+				bind:value={search}
+				aria-label="Search plans"
+			/>
+			<span class="tool-spacer"></span>
+			<span class="agg-count">
+				{aggFiltered.length} plan{aggFiltered.length !== 1 ? 's' : ''}{aggLoading ? ' …' : ''}
+			</span>
+		</div>
+		{#if aggLoading && aggRows.length === 0}
+			<EmptyState icon="⏳" title="Loading plans…" description="Gathering plans in this scope." />
+		{:else if aggFiltered.length === 0}
+			<EmptyState
+				icon="🔎"
+				title={aggRows.length === 0 ? 'No plans in this scope' : 'No matching plans'}
+				description={aggRows.length === 0
+					? 'Nothing here yet in this scope.'
+					: 'No plans match your search. Wildcards: * (any run), ? (one char).'}
+			/>
+		{:else}
+			<div class="agg-list">
+				{#each aggFiltered as row (row.branch + '/' + row.plan.name)}
+					<button class="agg-row" onclick={() => openFromAggregate(row)}>
+						<span class="agg-name">{row.plan.name}</span>
+						<span class="agg-status s-{effStatus(row.plan)}">{effStatus(row.plan).replace('_', ' ')}</span>
+						{#if scope === 'workspace'}<span class="agg-branch" title="branch">⑂ {row.branch}</span>{/if}
+						{#if row.plan.description}<span class="agg-desc" title={row.plan.description}>{row.plan.description}</span>{/if}
+						<span class="agg-counts" title="done / total tasks">{row.plan.task_counts.done}/{row.plan.task_counts.total}</span>
+					</button>
+				{/each}
+			</div>
+		{/if}
+	{:else if selectedPlan}
 		<div class="toolbar">
 			<div class="seg-group" role="tablist" aria-label="View">
 				{#each VIEWS as v (v)}
@@ -718,6 +868,85 @@
 	.seg.active {
 		background: var(--lens-accent-tint);
 		color: var(--lens-accent);
+	}
+	.scope-group {
+		display: inline-flex;
+		border: 1px solid var(--lens-border);
+		border-radius: var(--lens-radius-sm);
+		overflow: hidden;
+	}
+	.agg-count {
+		color: var(--lens-muted);
+		font-size: var(--lens-font-size-xs);
+		font-family: var(--lens-font-mono);
+	}
+	.agg-list {
+		display: flex;
+		flex-direction: column;
+		border: 1px solid var(--lens-border);
+		border-radius: var(--lens-radius-md);
+		overflow: hidden;
+	}
+	.agg-row {
+		display: flex;
+		align-items: center;
+		gap: var(--lens-space-3);
+		width: 100%;
+		text-align: left;
+		background: none;
+		border: none;
+		border-bottom: 1px solid var(--lens-border);
+		color: var(--lens-text);
+		padding: 0.5rem 0.75rem;
+		cursor: pointer;
+	}
+	.agg-row:last-child {
+		border-bottom: none;
+	}
+	.agg-row:hover {
+		background: var(--lens-surface);
+	}
+	.agg-name {
+		font-family: var(--lens-font-mono);
+		font-size: var(--lens-font-size-sm);
+		color: var(--lens-text);
+		flex-shrink: 0;
+	}
+	.agg-status {
+		font-size: var(--lens-font-size-xs);
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		padding: 0.05rem 0.4rem;
+		border-radius: var(--lens-radius-sm);
+		border: 1px solid var(--lens-border);
+		color: var(--lens-text-secondary);
+		flex-shrink: 0;
+	}
+	.agg-status.s-in_progress {
+		color: var(--lens-accent);
+		border-color: var(--lens-accent);
+	}
+	.agg-branch {
+		font-family: var(--lens-font-mono);
+		font-size: var(--lens-font-size-xs);
+		color: var(--lens-muted);
+		flex-shrink: 0;
+	}
+	.agg-desc {
+		color: var(--lens-muted);
+		font-size: var(--lens-font-size-xs);
+		flex: 1;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.agg-counts {
+		font-family: var(--lens-font-mono);
+		font-size: var(--lens-font-size-xs);
+		color: var(--lens-text-secondary);
+		margin-left: auto;
+		flex-shrink: 0;
 	}
 	.task-search {
 		background: var(--lens-surface);
