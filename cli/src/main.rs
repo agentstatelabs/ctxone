@@ -641,6 +641,15 @@ enum Commands {
         #[arg(long)]
         no_auto_register: bool,
 
+        /// Route sessions from NON-git working directories to a workspace named
+        /// after the directory, instead of the `default` namespace. Off by
+        /// default: bare directory names are less canonical than a git remote
+        /// (`/a/app` and `/b/app` both become `app`, and scratch dirs each mint
+        /// a workspace). Git repos are unaffected — they still key on their
+        /// remote's `owner/repo`.
+        #[arg(long)]
+        dir_workspaces: bool,
+
         /// Re-ingest every session even if its transcript is unchanged.
         ///
         /// By default a session whose fingerprint matches the one stored on
@@ -2399,6 +2408,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             full_turn,
             no_full_turn,
             no_auto_register,
+            dir_workspaces,
             reingest,
         } => {
             // `--full-turn` forces on; `--no-full-turn` forces off; default is on.
@@ -2480,6 +2490,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // (or detected project) instead of silently forcing `default`.
                 if all { None } else { namespace.clone() },
                 reingest,
+                dir_workspaces,
             )
             .await?;
         }
@@ -5415,6 +5426,9 @@ async fn run_ingest_session(
     fallback_namespace: Option<String>,
     // Force a full re-ingest, ignoring the unchanged-fingerprint skip.
     reingest: bool,
+    // Route non-git working directories to a directory-named workspace instead
+    // of `default` (see the `--dir-workspaces` flag).
+    dir_workspaces: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let extraction = crate::ingest::resolve_extraction_config();
     if extraction.is_none() && !tokens_only {
@@ -5561,7 +5575,8 @@ async fn run_ingest_session(
     // Routes each transcript to the workspace its `cwd` belongs to. Memoized
     // per directory, so ~350 transcripts cost a few dozen probes.
     let mut router =
-        crate::workspace::Router::new(server, auto_register, dry_run, fallback_namespace);
+        crate::workspace::Router::new(server, auto_register, dry_run, fallback_namespace)
+            .with_dir_workspaces(dir_workspaces);
 
     for (source_id, source_label, label, files) in &groups {
         if files.is_empty() {

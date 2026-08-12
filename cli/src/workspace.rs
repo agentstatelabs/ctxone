@@ -70,6 +70,13 @@ pub struct Router {
     /// honoured instead of being silently overridden to `default` — the bug
     /// that let a `--file` re-ingest land a duplicate in `default`.
     fallback: Option<String>,
+    /// When set, a working directory that is **not** a git repo still becomes a
+    /// workspace — keyed on the directory's own basename — instead of dropping
+    /// to the fallback/`default`. Opt-in (`ctx ingest-session --dir-workspaces`)
+    /// because bare directory names are less canonical than git-remote identity:
+    /// they can collide (`/a/app` and `/b/app`) and proliferate. Git repos still
+    /// prefer their remote's `owner/repo` identity.
+    dir_workspaces: bool,
     /// cwd → routing outcome. Includes negative results so a directory that
     /// cannot be resolved is not re-probed once per transcript.
     memo: HashMap<String, Routed>,
@@ -94,9 +101,27 @@ impl Router {
                 .build()
                 .unwrap_or_default(),
             auto_register,
+            dir_workspaces: false,
             memo: HashMap::new(),
             clients: HashMap::new(),
             tombstones: HashMap::new(),
+        }
+    }
+
+    /// Enable directory-as-workspace routing (see [`Self::dir_workspaces`]).
+    pub fn with_dir_workspaces(mut self, on: bool) -> Self {
+        self.dir_workspaces = on;
+        self
+    }
+
+    /// The repo/workspace root for a cwd: the git root when the directory is in
+    /// a repo, else — only under `--dir-workspaces` — the directory itself, so a
+    /// non-git working directory keys a workspace on its own name.
+    fn resolve_root(&self, dir: &std::path::Path) -> Option<std::path::PathBuf> {
+        match crate::find_git_root(dir) {
+            Some(root) => Some(root),
+            None if self.dir_workspaces => Some(dir.to_path_buf()),
+            None => None,
         }
     }
 
@@ -169,7 +194,7 @@ impl Router {
         if !dir.is_dir() {
             return None;
         }
-        let root = crate::find_git_root(dir)?;
+        let root = self.resolve_root(dir)?;
         project_id_for(&root, crate::read_git_remote(&root).as_deref())
     }
 
@@ -200,7 +225,9 @@ impl Router {
         if !dir.is_dir() {
             return None; // deleted worktree or moved checkout
         }
-        let root = crate::find_git_root(dir)?;
+        let root = self.resolve_root(dir)?;
+        // A non-git directory has no remote; project_id_for then keys on the
+        // directory basename.
         let remote = crate::read_git_remote(&root);
         let id = project_id_for(&root, remote.as_deref())?;
 
@@ -377,5 +404,29 @@ mod tests {
         // default namespace, as `--all` sync intends.
         let mut without = Router::new("http://127.0.0.1:0", false, true, None);
         assert_eq!(without.route(None).await.namespace(), None);
+    }
+
+    #[test]
+    fn dir_workspaces_routes_a_non_git_dir_to_its_basename() {
+        // A non-git working directory with a distinctive name.
+        let base = std::env::temp_dir().join(format!("ctxone-dw-{}", std::process::id()));
+        let dir = base.join("My Scratch_App");
+        std::fs::create_dir_all(&dir).expect("mkdir temp");
+
+        // Off (default): a non-git directory has no workspace identity → routes
+        // nowhere (falls to the caller's fallback / `default`).
+        let off = Router::new("http://127.0.0.1:0", true, true, None);
+        assert!(off.resolve_root(&dir).is_none());
+        assert!(off.would_register(&dir.to_string_lossy()).is_none());
+
+        // On: the directory itself is the root, keyed on its kebab-cased basename.
+        let on = Router::new("http://127.0.0.1:0", true, true, None).with_dir_workspaces(true);
+        assert_eq!(on.resolve_root(&dir).as_deref(), Some(dir.as_path()));
+        assert_eq!(
+            on.would_register(&dir.to_string_lossy()).as_deref(),
+            Some("my-scratch-app")
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
