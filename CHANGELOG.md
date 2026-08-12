@@ -4,6 +4,19 @@ All notable changes to CTXone are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 the project's `0.9.x` series (incremented by 0.0.01 per release).
 
+## [v0.9.30] — 2026-08-11
+
+### Added
+- **Safe cross-namespace move.** New `ctx move <path> --to-namespace <ns>` (with `--dry-run`, `--no-delete`, `--from-namespace`, `--to-branch`) and `POST /api/move` relocate an arbitrary subtree of graph paths to another workspace. Plus `ctx session move <id> --to <ns>` for CLI parity with `ctx plan relocate`. A new "Moving data between workspaces" section in the CLI reference documents all three and clarifies they are *not* the deny-by-default cross-namespace merge.
+- **MCP namespace lookup tools.** `namespace_for_plan` and `namespace_for_task` scan every workspace to resolve which one owns a given plan/task id.
+- **Lens plan scope selector.** The Plans view gains a scope control — **Plan** (one plan) → **All Plans** (every plan on the branch) → **All Branches** (every plan across the workspace) — with a filterable aggregate list (status, task counts, branch tag) and cross-branch open.
+- **Glob search in Lens.** The plan switcher, task search, and aggregate list accept `*` (any run) and `?` (one char); a bare term stays a substring match.
+
+### Fixed
+- **Silent data-loss in cross-namespace moves.** `relocate_plan`/`move_session` deleted the source subtree *unconditionally* after a conditional write, so a corrupt/empty read (e.g. partial-tree corruption after many sequential deletes) or a skipped write could destroy the source. All moves now route through a single **write → verify (leaf-count) → delete** guard: the source is never deleted unless the target provably received the same leaves.
+- **MCP fail-closed on an underivable namespace.** The stdio MCP server silently fell back to the `default` namespace when it couldn't derive a workspace from the cwd, mis-filing writes. Write tools now refuse with actionable guidance (reads still work; an explicit `default` is honored), and read tools annotate results with a workspace notice on a fallback-`default` session.
+- **Lens Plans loading state.** Switching workspaces briefly rendered "No plans on this branch yet" during the in-flight reload; it now shows a loading placeholder.
+
 ## [v0.9.29] — 2026-08-10
 
 ### Added
