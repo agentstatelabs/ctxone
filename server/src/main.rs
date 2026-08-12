@@ -17,7 +17,7 @@
 //!     RUST_LOG=ctxone_hub=trace ctxone-hub --http
 //! All logs go to stderr so they never corrupt the MCP stdio JSON stream.
 
-use ctxone_hub::{backup, http, lockfile, memory_tools, migrations};
+use ctxone_hub::{asd_pool, backup, http, lockfile, memory_tools, migrations};
 
 use std::sync::Arc;
 
@@ -167,6 +167,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ctx_binary: Option<String> = std::env::var("CTXONE_CTX_BINARY")
         .ok()
         .filter(|s| !s.is_empty());
+    // Explicit path to the `asd-serve` binary the code-proxy pool spawns.
+    // From --asd-serve-binary or CTXONE_ASD_SERVE_BINARY. When unset, the pool
+    // path is resolved robustly (see `asd_pool::resolve_asd_serve_binary`) so a
+    // launchd-spawned hub with a minimal PATH still finds the Homebrew install.
+    let mut asd_serve_binary: Option<String> = std::env::var("CTXONE_ASD_SERVE_BINARY")
+        .ok()
+        .filter(|s| !s.is_empty());
 
     let mut i = 1;
     while i < args.len() {
@@ -248,6 +255,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 i += 1;
                 if i < args.len() {
                     ctx_binary = Some(args[i].clone()).filter(|s| !s.is_empty());
+                }
+            }
+            "--asd-serve-binary" => {
+                i += 1;
+                if i < args.len() {
+                    asd_serve_binary = Some(args[i].clone()).filter(|s| !s.is_empty());
                 }
             }
             "--asd-url" => {
@@ -376,6 +389,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 eprintln!(
                     "                            (--asd-repo is accepted as a legacy alias.)"
+                );
+                eprintln!(
+                    "      --asd-serve-binary <PATH>  Path to the asd-serve binary the pool spawns."
+                );
+                eprintln!(
+                    "                            Default: resolved automatically (PATH, next to the"
+                );
+                eprintln!(
+                    "                            hub, or a common install dir). Set this (or"
+                );
+                eprintln!(
+                    "                            CTXONE_ASD_SERVE_BINARY) if the hub runs under a"
+                );
+                eprintln!(
+                    "                            minimal PATH (launchd/systemd) and can't find it."
                 );
                 eprintln!(
                     "      --asd-idle-timeout <SECS>  Pool idle timeout before killing an asd-serve"
@@ -699,11 +727,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|h| h.join(".ctxone").join("hub-autosync.json"));
         let autosync = http::Autosync::new(autosync_path, autosync_env);
 
+        // Resolve the `asd-serve` path once, robust to launchd's minimal PATH
+        // (the failure mode where a plist-launched hub couldn't find the
+        // Homebrew install and every code-proxy call errored "No such file").
+        let resolved_asd_serve = asd_pool::resolve_asd_serve_binary(asd_serve_binary.clone());
+        match &resolved_asd_serve {
+            Some(p) => info!(path = %p, "resolved asd-serve binary for code proxy"),
+            None => warn!(
+                "could not resolve an asd-serve binary; the code proxy will try 'asd-serve' on \
+                 $PATH and fail under a minimal PATH — install asd or pass --asd-serve-binary"
+            ),
+        }
+
         let hub_config = http::HubConfig {
             rate_limit_rpm,
             asd_repos: asd_repos.clone(),
             asd_pool_repos: asd_pool_repos.clone(),
-            asd_serve_binary: None, // use PATH
+            asd_serve_binary: resolved_asd_serve,
             asd_idle_timeout_secs,
             // Serve MCP at /mcp so this one daemon covers MCP + REST + Lens.
             mcp_http: true,
