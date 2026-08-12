@@ -4,6 +4,11 @@ All notable changes to CTXone are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 the project's `0.9.x` series (incremented by 0.0.01 per release).
 
+## [v0.9.31] — 2026-08-11
+
+### Added
+- **Move a session to a workspace from the Lens Sessions view.** The selected session's detail header gains a `Workspace → [move to…] → Move` control that pins an imported session (one that landed in the wrong workspace, usually `default`) to the right one — a one-click UI over the guarded `move_session` endpoint. On success the list reloads and a "✓ Moved to `<ns>`" banner shows; errors render inline; the current workspace is excluded from the target list.
+
 ## [v0.9.30] — 2026-08-11
 
 ### Added
