@@ -863,35 +863,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
              summarize_session, what_changed_since, why_did_we)"
         );
 
-        // Resolve the namespace this MCP session operates in: an explicit
-        // --namespace / CTX_NAMESPACE wins; otherwise run the project
-        // detection chain from the process cwd (.ctxproject walk-up, then
-        // git remote lookup in the registry). No match → "default".
-        let namespace: String = namespace_flag.clone().or_else(|| {
-            if storage_type != "sqlite" {
-                return None;
-            }
-            let cwd = std::env::current_dir().ok()?;
-            match ctxone_hub::project::detect_project(&cwd, Some(&db_path)) {
-                ctxone_hub::project::DetectResult::FoundByFile {
-                    project_id,
-                    namespace_id,
-                } => {
-                    info!(project = %project_id, namespace = %namespace_id, via = "ctxproject", "project detected");
-                    Some(namespace_id)
+        // Resolve the namespace this MCP session operates in, and whether it
+        // was chosen *deliberately*: an explicit --namespace / CTX_NAMESPACE, or
+        // a successful project detection (.ctxproject walk-up, then git remote).
+        // Falling through to "default" is NOT deliberate — write tools refuse a
+        // fallback default so data can't silently pile up in the shared
+        // workspace (an explicit `default` is still honored).
+        let (namespace, namespace_explicit): (String, bool) = match namespace_flag.clone() {
+            Some(ns) => (ns, true),
+            None => {
+                let detected = if storage_type == "sqlite" {
+                    std::env::current_dir().ok().and_then(|cwd| {
+                        match ctxone_hub::project::detect_project(&cwd, Some(&db_path)) {
+                            ctxone_hub::project::DetectResult::FoundByFile {
+                                project_id,
+                                namespace_id,
+                            } => {
+                                info!(project = %project_id, namespace = %namespace_id, via = "ctxproject", "project detected");
+                                Some(namespace_id)
+                            }
+                            ctxone_hub::project::DetectResult::FoundByRemote {
+                                project_id,
+                                namespace_id,
+                                ..
+                            } => {
+                                info!(project = %project_id, namespace = %namespace_id, via = "git-remote", "project detected");
+                                Some(namespace_id)
+                            }
+                            _ => None,
+                        }
+                    })
+                } else {
+                    None
+                };
+                match detected {
+                    Some(ns) => (ns, true),
+                    None => {
+                        warn!(
+                            "no workspace derived for this directory — MCP writes to `default` \
+                             will be refused; set CTX_NAMESPACE=<ns> or run `ctx project add`"
+                        );
+                        (agentstategraph_core::Namespace::DEFAULT.to_string(), false)
+                    }
                 }
-                ctxone_hub::project::DetectResult::FoundByRemote {
-                    project_id,
-                    namespace_id,
-                    ..
-                } => {
-                    info!(project = %project_id, namespace = %namespace_id, via = "git-remote", "project detected");
-                    Some(namespace_id)
-                }
-                _ => None,
             }
-        })
-        .unwrap_or_else(|| agentstategraph_core::Namespace::DEFAULT.to_string());
+        };
 
         // Fork the repository into the resolved namespace so every tool
         // call in this session is scoped without further plumbing. init()
@@ -1011,6 +1027,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     asd_repos.clone(),
                 )
                 .with_namespace(namespace.clone())
+                .with_namespace_explicit(namespace_explicit)
                 .with_default_ref(default_ref.clone());
                 // Share the persisted session Arc so MCP savings land in the
                 // same counters the registry flushes.

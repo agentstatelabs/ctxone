@@ -1799,6 +1799,20 @@ pub struct WhyDidWeParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct NamespaceForPlanParams {
+    /// The plan id/slug to locate (e.g., "asd-m52-classification-quality").
+    pub plan_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct NamespaceForTaskParams {
+    /// The plan the task belongs to.
+    pub plan_id: String,
+    /// The task id (e.g., "t-001").
+    pub task_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct PrimeSectionParam {
     /// Section title (used as a stable path slug).
     pub title: String,
@@ -2407,6 +2421,12 @@ pub struct CtxOneServer {
     /// here so tools can report where writes land. "default" when no
     /// project matched.
     pub namespace: String,
+    /// Whether the namespace was chosen deliberately (an explicit
+    /// `--namespace`/`CTX_NAMESPACE`, or a successful project detection) rather
+    /// than falling back to `default` because nothing could be derived. When
+    /// false and the namespace is `default`, write tools refuse and return
+    /// guidance instead of silently mis-filing into the shared workspace.
+    pub namespace_explicit: bool,
     /// Registered ASD repos with pre-known base URLs: (name, base_url).
     /// Populated from --asd-url flags. Code tools route by name.
     pub asd_repos: Arc<Vec<(String, String)>>,
@@ -2443,6 +2463,7 @@ impl CtxOneServer {
             agent_id,
             default_ref: "main".to_string(),
             namespace: "default".to_string(),
+            namespace_explicit: false,
             asd_repos: Arc::new(asd_repos),
             asd_pool: None,
             tool_router: Self::tool_router(),
@@ -2474,6 +2495,101 @@ impl CtxOneServer {
     pub fn with_namespace(mut self, namespace: String) -> Self {
         self.namespace = namespace;
         self
+    }
+
+    /// Record whether the namespace was chosen deliberately (explicit flag/env
+    /// or a successful project detection). See [`Self::namespace_explicit`].
+    pub fn with_namespace_explicit(mut self, explicit: bool) -> Self {
+        self.namespace_explicit = explicit;
+        self
+    }
+
+    /// Guard for write tools. Returns `Some(guidance)` when this session fell
+    /// back to the `default` namespace because none could be derived — in which
+    /// case the write is refused and the agent is handed actionable next steps
+    /// instead of silently mis-filing data into the shared workspace. Returns
+    /// `None` (writes allowed) for any explicitly-chosen namespace, including an
+    /// explicit `default`.
+    fn namespace_write_block(&self) -> Option<String> {
+        if self.namespace_explicit || self.namespace != "default" {
+            return None;
+        }
+        let mut names: Vec<String> = self
+            .repo
+            .list_namespaces()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|n| n.to_string())
+            .filter(|n| n != "default")
+            .collect();
+        names.sort();
+        let list = if names.is_empty() {
+            "(none registered yet — `ctx project add` in the repo to create one)".to_string()
+        } else {
+            names.join(", ")
+        };
+        Some(format!(
+            "⛔ Write refused: no workspace could be derived for this directory and none was \
+             specified, so this would be mis-filed into the shared `default` workspace.\n\n\
+             Choose the right workspace, then retry the write:\n\
+             • stdio MCP: set CTX_NAMESPACE=<ns> (or pass ctxone-hub --namespace <ns>)\n\
+             • HTTP MCP: add ?namespace=<ns> to the /mcp URL (or the X-CTXone-Namespace header)\n\
+             • CLI: ctx <cmd> --namespace <ns>\n\n\
+             Known workspaces: {list}\n\n\
+             Don't know which one? If you have a plan or task id, call `namespace_for_plan` \
+             (or `namespace_for_task`) to find its workspace. If you genuinely mean the shared \
+             `default` workspace, request it explicitly (CTX_NAMESPACE=default)."
+        ))
+    }
+
+    /// On a *fallback* `default` session (no workspace could be derived and
+    /// none was given), annotate a read tool's JSON result with a one-line
+    /// notice so a near-empty `default` view isn't mistaken for "nothing
+    /// exists." No-op for any deliberately-chosen namespace (including an
+    /// explicit `default`), so normal sessions are unaffected. Reads are not
+    /// blocked — only labeled — mirroring the write guard's guidance.
+    fn annotate_read(&self, out: String) -> String {
+        if self.namespace_explicit || self.namespace != "default" {
+            return out;
+        }
+        const NOTICE: &str = "No workspace was derived for this directory, so this read is scoped \
+            to the shared `default` workspace (usually near-empty). If you expected results: set \
+            CTX_NAMESPACE=<ns> (or --namespace / ?namespace=), call `namespace_for_plan` / \
+            `namespace_for_task` to find the owning workspace, or pass --all-namespaces to search \
+            across every workspace.";
+        match serde_json::from_str::<serde_json::Value>(&out) {
+            Ok(serde_json::Value::Object(mut m)) => {
+                m.insert(
+                    "workspace_notice".to_string(),
+                    serde_json::Value::String(NOTICE.to_string()),
+                );
+                serde_json::to_string_pretty(&serde_json::Value::Object(m)).unwrap_or(out)
+            }
+            // Array or scalar: wrap so the notice rides alongside the payload.
+            Ok(other) => serde_json::to_string_pretty(&serde_json::json!({
+                "workspace_notice": NOTICE,
+                "results": other,
+            }))
+            .unwrap_or(out),
+            // Non-JSON text: prepend the notice as a visible line.
+            Err(_) => format!("⚠ {NOTICE}\n\n{out}"),
+        }
+    }
+
+    /// Find which namespace(s) contain a given plan or task id, by scanning
+    /// every workspace. Shared by the `namespace_for_plan`/`namespace_for_task`
+    /// tools so a stranded agent can resolve the right workspace from an id.
+    fn find_namespaces_with_path(&self, subpath: &str) -> Vec<String> {
+        let mut hits = Vec::new();
+        for ns in self.repo.list_namespaces().unwrap_or_default() {
+            let ns_name = ns.to_string();
+            let forked = self.repo.fork_namespace(ns);
+            if forked.get_tree("main", subpath).is_ok() {
+                hits.push(ns_name);
+            }
+        }
+        hits.sort();
+        hits
     }
 
     /// Set the session default ref (branch mirroring). Tools that receive
@@ -2520,6 +2636,9 @@ impl CtxOneServer {
         Importance maps to confidence: 'high' (0.95) for explicit decisions and policies, 'medium' (0.7, default) for conventions and preferences, 'low' (0.4) for trivia and speculation. When unsure, save it. `remember` is cheap; forgetting something the user already told you is expensive. To import a whole markdown doc's sections at once, use `prime`, not repeated `remember` calls."
     )]
     async fn remember(&self, params: Parameters<RememberParams>) -> String {
+        if let Some(msg) = self.namespace_write_block() {
+            return msg;
+        }
         let p = params.0;
         let p = self.apply_default_ref(p);
 
@@ -2596,7 +2715,9 @@ impl CtxOneServer {
             &p.ref_name,
             p.scope.as_deref(),
         );
-        serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string())
+        self.annotate_read(
+            serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string()),
+        )
     }
 
     #[tool(
@@ -2638,7 +2759,7 @@ impl CtxOneServer {
         let flat_size = self.session.total_graph_size_chars.load(Ordering::Relaxed) as usize;
 
         let path = format!("/memory/projects/{}", p.project);
-        match self.repo.get_json(&p.ref_name, &path) {
+        self.annotate_read(match self.repo.get_json(&p.ref_name, &path) {
             Ok(value) => {
                 // Wrap the tree in an envelope so downstream LLMs see an
                 // explicit marker that this is stored data, not instructions.
@@ -2653,7 +2774,7 @@ impl CtxOneServer {
                 with_stats(&response, flat_size, &self.session)
             }
             Err(e) => format!("No context found for '{}': {}", p.project, e),
-        }
+        })
     }
 
     #[tool(
@@ -2675,6 +2796,9 @@ impl CtxOneServer {
         CALL THIS AT THE END of any real working session where the user and you figured something out together — a debugging run, an architectural discussion, a multi-step refactor. Don't call it for quick Q&A or trivial lookups; only for sessions where genuine learning happened. Unlike individual `remember` calls, this produces a single cohesive snapshot that a future session can `recall` as a unit. If you skip this, the detailed context evaporates when the session ends."
     )]
     async fn summarize_session(&self, params: Parameters<SummarizeSessionParams>) -> String {
+        if let Some(msg) = self.namespace_write_block() {
+            return msg;
+        }
         let p = params.0;
 
         // Write summary
@@ -2834,6 +2958,9 @@ impl CtxOneServer {
         CALL THIS WHEN the user describes a multi-step task to break down. Plans persist in the state graph, so work survives session boundaries — the same plan can be picked up by another agent or by you tomorrow. Name should be kebab-case (e.g. 'website-v2'). Returns the created Plan object. Fails if a plan with that name already exists on the branch."
     )]
     async fn plan_new(&self, params: Parameters<crate::plan_tools::PlanNewParams>) -> String {
+        if let Some(msg) = self.namespace_write_block() {
+            return msg;
+        }
         use crate::plan_tools as pt;
         let p = params.0;
         let store = pt::make_store(self.repo.clone(), &self.agent_id);
@@ -2853,6 +2980,9 @@ impl CtxOneServer {
         \
         If the Hub has `CTXONE_PLAN_LOCK_RATIO` set and the plan's (done+abandoned)/total ratio meets the threshold, this tool refuses with a `plan locked` error — pass `force=true` to override or start a new plan instead.")]
     async fn plan_add(&self, params: Parameters<crate::plan_tools::PlanAddParams>) -> String {
+        if let Some(msg) = self.namespace_write_block() {
+            return msg;
+        }
         use crate::plan_tools as pt;
         let p = params.0;
         let store = pt::make_store(self.repo.clone(), &self.agent_id);
@@ -2882,6 +3012,9 @@ impl CtxOneServer {
         \
         CALL THIS WHEN you begin working on a task. Refuses with an error listing the blockers if any entry in `blocked_by` is not yet `done`. The task's `started_at` and `started_by` are stamped automatically from the session's agent id. Non-blocking: if OTHER tasks in the plan are already `in_progress`, the result includes a `warning` field naming them — parallel work is allowed, but finish or abandon stale tasks so plan state doesn't drift.")]
     async fn plan_start(&self, params: Parameters<crate::plan_tools::PlanStartParams>) -> String {
+        if let Some(msg) = self.namespace_write_block() {
+            return msg;
+        }
         use crate::plan_tools as pt;
         use agentstategraph_tasks::TaskId;
         let p = params.0;
@@ -3004,7 +3137,7 @@ impl CtxOneServer {
                 .unwrap_or_default();
             out.push(pt::plan_to_json(&plan, &tasks, false));
         }
-        serde_json::to_string(&out).unwrap_or_else(|_| "[]".into())
+        self.annotate_read(serde_json::to_string(&out).unwrap_or_else(|_| "[]".into()))
     }
 
     #[tool(
@@ -3023,8 +3156,10 @@ impl CtxOneServer {
         let tasks = store
             .list_tasks(&p.ref_name, &p.plan_id)
             .unwrap_or_default();
-        serde_json::to_string(&pt::plan_to_json(&plan, &tasks, true))
-            .unwrap_or_else(|_| "{}".into())
+        self.annotate_read(
+            serde_json::to_string(&pt::plan_to_json(&plan, &tasks, true))
+                .unwrap_or_else(|_| "{}".into()),
+        )
     }
 
     #[tool(
@@ -3166,6 +3301,9 @@ impl CtxOneServer {
         &self,
         params: Parameters<crate::plan_tools::PlanForceCompleteParams>,
     ) -> String {
+        if let Some(msg) = self.namespace_write_block() {
+            return msg;
+        }
         use crate::plan_tools as pt;
         let p = params.0;
         let store = pt::make_store(self.repo.clone(), &self.agent_id);
@@ -3241,13 +3379,14 @@ impl CtxOneServer {
         ensure_flat_size(&self.repo, &self.session, "main");
         let flat_size = self.session.total_graph_size_chars.load(Ordering::Relaxed) as usize;
 
-        // Search for the decision
-        match self.repo.search_values("main", &p.decision, Some(5)) {
+        // Search for the decision. A match guard handles the empty case so the
+        // whole result can flow through annotate_read (which flags a fallback
+        // `default` session — see [`Self::annotate_read`]).
+        let out = match self.repo.search_values("main", &p.decision, Some(5)) {
+            Ok(results) if results.is_empty() => {
+                format!("No record found for decision: '{}'", p.decision)
+            }
             Ok(results) => {
-                if results.is_empty() {
-                    return format!("No record found for decision: '{}'", p.decision);
-                }
-
                 let mut output = String::new();
                 for (path, _value) in &results {
                     output.push_str(&format!("Path: {}\n", path));
@@ -3270,7 +3409,8 @@ impl CtxOneServer {
                 with_stats(&output, flat_size, &self.session)
             }
             Err(e) => format!("Error: {}", e),
-        }
+        };
+        self.annotate_read(out)
     }
 
     #[tool(
@@ -3279,6 +3419,9 @@ impl CtxOneServer {
         CALL THIS WHEN the user asks to forget, retract, or revoke a stored memory; or when a stored fact is wrong and you've replaced it with a corrected one. The reason becomes part of the rollback's blame trail."
     )]
     async fn forget(&self, params: Parameters<ForgetParams>) -> String {
+        if let Some(msg) = self.namespace_write_block() {
+            return msg;
+        }
         let p = params.0;
         let p = self.apply_default_ref(p);
         let opts = CommitOptions::new(&self.agent_id, IntentCategory::Rollback, &p.reason);
@@ -3295,6 +3438,47 @@ impl CtxOneServer {
             }
             Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
         }
+    }
+
+    #[tool(
+        description = "Find which workspace (namespace) contains a given plan, by scanning every workspace. \
+        \
+        CALL THIS when you have a plan id but don't know its workspace — e.g. a write was refused because no workspace could be derived, or you resumed with a plan id from another session. Returns the owning workspace(s); pass it as CTX_NAMESPACE / --namespace / ?namespace= to operate on that plan."
+    )]
+    async fn namespace_for_plan(&self, params: Parameters<NamespaceForPlanParams>) -> String {
+        let p = params.0;
+        let hits = self.find_namespaces_with_path(&format!("/plans/{}", p.plan_id));
+        serde_json::json!({
+            "plan_id": p.plan_id,
+            "namespaces": hits,
+            "hint": match hits.len() {
+                0 => "No workspace holds this plan. Check the id, or list plans per workspace.",
+                1 => "Use this workspace: set CTX_NAMESPACE / --namespace / ?namespace= to it.",
+                _ => "Multiple workspaces hold a plan by this name — disambiguate before writing.",
+            },
+        })
+        .to_string()
+    }
+
+    #[tool(
+        description = "Find which workspace (namespace) contains a given task, by scanning every workspace for the task under its plan. \
+        \
+        CALL THIS when you have a plan id + task id but don't know the workspace. Returns the owning workspace(s)."
+    )]
+    async fn namespace_for_task(&self, params: Parameters<NamespaceForTaskParams>) -> String {
+        let p = params.0;
+        let hits = self.find_namespaces_with_path(&format!("/plans/{}/{}", p.plan_id, p.task_id));
+        serde_json::json!({
+            "plan_id": p.plan_id,
+            "task_id": p.task_id,
+            "namespaces": hits,
+            "hint": if hits.is_empty() {
+                "No workspace holds this task under that plan."
+            } else {
+                "Use one of these workspaces to operate on the task."
+            },
+        })
+        .to_string()
     }
 
     #[tool(
@@ -3698,19 +3882,21 @@ impl CtxOneServer {
     async fn search(&self, params: Parameters<SearchValuesParams>) -> String {
         let p = params.0;
         let p = self.apply_default_ref(p);
-        match self
-            .repo
-            .search_values(&p.ref_name, &p.query, p.max_results)
-        {
-            Ok(results) => {
-                let out: Vec<serde_json::Value> = results
-                    .into_iter()
-                    .map(|(path, value)| serde_json::json!({ "path": path, "value": value }))
-                    .collect();
-                serde_json::to_string(&out).unwrap_or_else(|_| "[]".into())
-            }
-            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
-        }
+        self.annotate_read(
+            match self
+                .repo
+                .search_values(&p.ref_name, &p.query, p.max_results)
+            {
+                Ok(results) => {
+                    let out: Vec<serde_json::Value> = results
+                        .into_iter()
+                        .map(|(path, value)| serde_json::json!({ "path": path, "value": value }))
+                        .collect();
+                    serde_json::to_string(&out).unwrap_or_else(|_| "[]".into())
+                }
+                Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+            },
+        )
     }
 
     #[tool(
@@ -4486,6 +4672,75 @@ mod tests {
         )));
         repo.init().expect("repo init");
         repo
+    }
+
+    #[test]
+    fn fallback_default_blocks_writes_but_explicit_or_named_allows() {
+        // Fallback default (nothing derived) → writes refused with guidance.
+        let fallback = CtxOneServer::new(fresh_repo());
+        let block = fallback
+            .namespace_write_block()
+            .expect("fallback default must block writes");
+        assert!(block.contains("Write refused"));
+        assert!(block.contains("namespace_for_plan"));
+
+        // Explicit default (caller asked for it) → allowed.
+        let explicit_default = CtxOneServer::new(fresh_repo()).with_namespace_explicit(true);
+        assert!(explicit_default.namespace_write_block().is_none());
+
+        // Any non-default namespace → allowed regardless of the flag.
+        let named = CtxOneServer::new(fresh_repo()).with_namespace("proj".to_string());
+        assert!(named.namespace_write_block().is_none());
+    }
+
+    #[test]
+    fn annotate_read_only_labels_fallback_default() {
+        // Fallback default → object gains a workspace_notice; array gets wrapped.
+        let fallback = CtxOneServer::new(fresh_repo());
+        let obj = fallback.annotate_read(r#"{"results":[]}"#.to_string());
+        assert!(obj.contains("workspace_notice"));
+        assert!(obj.contains("--all-namespaces"));
+        let arr = fallback.annotate_read(r#"[1,2,3]"#.to_string());
+        assert!(arr.contains("workspace_notice") && arr.contains("\"results\""));
+
+        // Explicit default → untouched.
+        let explicit = CtxOneServer::new(fresh_repo()).with_namespace_explicit(true);
+        assert_eq!(
+            explicit.annotate_read(r#"{"x":1}"#.to_string()),
+            r#"{"x":1}"#
+        );
+        // Named workspace → untouched.
+        let named = CtxOneServer::new(fresh_repo()).with_namespace("proj".to_string());
+        assert_eq!(named.annotate_read("[]".to_string()), "[]");
+    }
+
+    #[test]
+    fn find_namespaces_with_path_locates_the_owning_workspace() {
+        let base = fresh_repo();
+        // Seed a plan into namespace "proj" only.
+        let proj = base.fork_namespace(agentstategraph_core::Namespace::new("proj").unwrap());
+        proj.init().unwrap();
+        proj.set_json(
+            "main",
+            "/plans/mine/_meta/name",
+            &serde_json::json!("mine"),
+            CommitOptions::new("t", IntentCategory::Custom("test".to_string()), "seed"),
+        )
+        .unwrap();
+        proj.set_json(
+            "main",
+            "/plans/mine/t-001/title",
+            &serde_json::json!("task"),
+            CommitOptions::new("t", IntentCategory::Custom("test".to_string()), "seed"),
+        )
+        .unwrap();
+
+        let server = CtxOneServer::new(base);
+        assert_eq!(
+            server.find_namespaces_with_path("/plans/mine"),
+            vec!["proj".to_string()]
+        );
+        assert!(server.find_namespaces_with_path("/plans/nope").is_empty());
     }
 
     // -------- honest savings estimate --------
