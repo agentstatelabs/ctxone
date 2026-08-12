@@ -985,6 +985,32 @@ enum Commands {
         #[command(subcommand)]
         action: ReminderAction,
     },
+    /// Move a subtree of graph paths to another workspace (and/or branch).
+    ///
+    /// The general cross-namespace move: reads the subtree at `<path>`, writes
+    /// it into the target workspace, verifies it landed, then removes the
+    /// original. The source is NEVER deleted unless the target is confirmed to
+    /// hold the same leaves, so an interrupted or corrupt move can't lose data.
+    /// `plan relocate` and `session move` are typed shortcuts over this.
+    Move {
+        /// Subtree to relocate, e.g. /memory/<...>, /sessions/<id>, /plans/<slug>.
+        path: String,
+        /// Target workspace (namespace) to move it into.
+        #[arg(long)]
+        to_namespace: String,
+        /// Source workspace (default: the resolved namespace for this cwd).
+        #[arg(long)]
+        from_namespace: Option<String>,
+        /// Target branch in the destination (default: the source branch).
+        #[arg(long)]
+        to_branch: Option<String>,
+        /// Copy instead of move: leave the source subtree in place.
+        #[arg(long)]
+        no_delete: bool,
+        /// Report what would move (leaf count, target state) without mutating.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1119,6 +1145,18 @@ enum WorkspaceAction {
 
 #[derive(clap::Subcommand)]
 enum SessionAction {
+    /// Move a single session's `/sessions/<id>` subtree to another workspace.
+    ///
+    /// The guarded, cross-namespace counterpart to `session reattribute` (which
+    /// bulk-routes by transcript cwd). Reads from the resolved namespace unless
+    /// `--namespace <src>` is given.
+    Move {
+        /// Session id (transcript id) to move.
+        session_id: String,
+        /// Target workspace (namespace).
+        #[arg(long)]
+        to: String,
+    },
     /// Show token usage metrics for Claude Code sessions in this project.
     Metrics {
         /// Project directory to analyze (default: current directory)
@@ -3379,6 +3417,73 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let server = cli.server.clone();
             let format = cli.format;
             handle_reminder(action, &server, format, client.clone()).await?;
+        }
+        Commands::Move {
+            path,
+            to_namespace,
+            from_namespace,
+            to_branch,
+            no_delete,
+            dry_run,
+        } => {
+            let server = cli.server.clone();
+            let branch = cli.branch.clone();
+            let format = cli.format;
+            let agent_id = std::env::var("CTX_AGENT_ID").unwrap_or_else(|_| "ctx-cli".to_string());
+            let mut body = serde_json::json!({
+                "path": path,
+                "to_namespace": to_namespace,
+                "ref": branch,
+                "delete_source": !no_delete,
+                "dry_run": dry_run,
+            });
+            if let Some(fns) = &from_namespace {
+                body["from_namespace"] = serde_json::json!(fns);
+            }
+            if let Some(tb) = &to_branch {
+                body["to_ref"] = serde_json::json!(tb);
+            }
+            let resp = match client
+                .post(format!("{}/api/move", server))
+                .header("X-CTXone-Agent", &agent_id)
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(&server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "move failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(format, &parsed, |v| {
+                if v["status"] == "dry_run" {
+                    println!(
+                        "dry run: {} leaf(s) at {} would move → {} ({})",
+                        v["src_leaves"],
+                        v["path"].as_str().unwrap_or(&path),
+                        v["to"].as_str().unwrap_or(&to_namespace),
+                        if v["would_delete_source"].as_bool().unwrap_or(false) {
+                            "source deleted"
+                        } else {
+                            "copy"
+                        },
+                    );
+                } else {
+                    println!(
+                        "Moved {} ({} leaves) → {}{}",
+                        v["path"].as_str().unwrap_or(&path),
+                        v["dst_leaves"],
+                        v["to"].as_str().unwrap_or(&to_namespace),
+                        if v["deleted_source"].as_bool().unwrap_or(false) {
+                            ""
+                        } else {
+                            " (copy; source kept)"
+                        },
+                    );
+                }
+            });
         }
     }
 
@@ -5695,6 +5800,38 @@ async fn run_session_action(
             auto_register,
         } => {
             run_reattribute(server, &clients, dry_run, auto_register).await?;
+        }
+        SessionAction::Move { session_id, to } => {
+            let client = clients.build(None);
+            let agent_id = std::env::var("CTX_AGENT_ID").unwrap_or_else(|_| "ctx-cli".to_string());
+            let body = serde_json::json!({ "to_namespace": to, "ref": "main" });
+            let url = format!("{server}/api/sessions/{session_id}/move");
+            let resp = match client
+                .post(&url)
+                .header("X-CTXone-Agent", &agent_id)
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => return Err(format!("session move failed: {e}").into()),
+            };
+            if !resp.status().is_success() {
+                let st = resp.status();
+                let msg = resp.text().await.unwrap_or_default();
+                return Err(format!("session move failed: {st} — {msg}").into());
+            }
+            let v: Value = resp.json().await?;
+            println!(
+                "Moved session {session_id} → {} ({} leaves){}",
+                v["to"].as_str().unwrap_or(&to),
+                v["dst_leaves"].as_u64().unwrap_or(0),
+                if v["deleted_source"].as_bool().unwrap_or(false) {
+                    ""
+                } else {
+                    " (source kept)"
+                },
+            );
         }
         SessionAction::Segments { session_id, gap } => {
             let client = clients.build(None);

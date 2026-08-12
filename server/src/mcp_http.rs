@@ -126,7 +126,13 @@ impl McpHttpState {
                 agent_id.clone(),
                 asd_repos.clone(),
             )
-            .with_namespace(ns_label.clone());
+            // HTTP MCP callers select their workspace via ?namespace= / the
+            // X-CTXone-Namespace header (baked in by `ctx init --transport
+            // http`), so treat it as explicit — the fallback-default write
+            // block is a stdio-only concern (that transport auto-detects from
+            // cwd and can silently miss). TODO: per-request block for a bare
+            // /mcp hit with no namespace once services aren't cached per-ns.
+            .with_namespace_explicit(true);
             if let Some(pool) = asd_pool.clone() {
                 server = server.with_pool(pool);
             }

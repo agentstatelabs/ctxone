@@ -269,6 +269,52 @@ OPTIONS:
 ```
 
 Merging across namespaces is denied by default (the Hub returns 403).
+That restriction is about **merging branches** — to *relocate* data (a plan,
+a session, or any subtree) into another workspace, use the move commands
+below, which are allowed and safe.
+
+---
+
+## Moving data between workspaces
+
+Data written before per-workspace routing existed (or written from an
+unregistered directory) lands in the reserved `default` namespace. These
+commands relocate it into the correct workspace. All three share one guarded
+core: the subtree is written to the target and **verified** there before the
+original is removed — the source is never deleted unless the target provably
+holds the same leaves, so an interrupted or corrupt move cannot lose data.
+
+### `ctx move <path> --to-namespace <ns>`
+
+The general primitive: move an arbitrary subtree of graph paths to another
+workspace (and/or branch).
+
+```
+USAGE: ctx move <PATH> --to-namespace <NS> [OPTIONS]
+
+ARGS:
+  <PATH>                 Subtree to relocate, e.g. /memory/<...>, /sessions/<id>, /plans/<slug>
+
+OPTIONS:
+      --to-namespace <NS>       Target workspace (required)
+      --from-namespace <NS>     Source workspace  [default: resolved from cwd]
+      --to-branch <REF>         Target branch     [default: source branch]
+      --no-delete               Copy instead of move (leave the source in place)
+      --dry-run                 Report leaf count + target state without mutating
+```
+
+Refuses a whole-branch move (`/`) — that is `ctx merge` territory.
+
+### `ctx plan relocate <name> --to <ns>`
+
+Typed shortcut for plans, carrying tasks and cross-plan links. See
+[`ctx plan`](#ctx-plan--durable-task-lists).
+
+### `ctx session move <id> --to <ns>`
+
+Typed shortcut for a single session's `/sessions/<id>` subtree. To bulk-route
+every mis-filed session by the directory it ran in, use
+`ctx session reattribute` instead.
 
 ---
 
