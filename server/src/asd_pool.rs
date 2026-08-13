@@ -99,8 +99,19 @@ const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(600); // 10 minutes
 /// How often the eviction task wakes up to reap idle processes.
 const EVICTION_INTERVAL: Duration = Duration::from_secs(60);
 
-/// How long to wait for `asd-serve` to print its listening port and pass /health.
-const SPAWN_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long to wait for `asd-serve` to print its listening port AND pass its
+/// first `/api/v1/health`. The health gate warms the db (a symbol count over a
+/// cold, possibly multi-GB store), so a large repo can legitimately need far
+/// more than the original 10s — that timeout made big iOS repos (20+GB) fail on
+/// first touch. Default 45s, tunable via `CTXONE_ASD_SPAWN_TIMEOUT_SECS`.
+fn spawn_timeout() -> Duration {
+    let secs = std::env::var("CTXONE_ASD_SPAWN_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(45);
+    Duration::from_secs(secs)
+}
 
 /// Interval between /health polls after capturing the port.
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -336,7 +347,8 @@ async fn spawn_asd_serve(
         .ok_or_else(|| "asd-serve stdout not captured".to_string())?;
     let mut lines = BufReader::new(stdout).lines();
 
-    let base_url = tokio::time::timeout(SPAWN_TIMEOUT, async {
+    let timeout = spawn_timeout();
+    let base_url = tokio::time::timeout(timeout, async {
         // Phase 1: capture the resolved bind address.
         let mut url = None;
         while let Ok(Some(line)) = lines.next_line().await {
@@ -362,7 +374,7 @@ async fn spawn_asd_serve(
     .map_err(|_| {
         format!(
             "timed out waiting for asd-serve to start ({}s)",
-            SPAWN_TIMEOUT.as_secs()
+            timeout.as_secs()
         )
     })??;
 
