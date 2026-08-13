@@ -124,6 +124,13 @@ struct PoolInner {
     binary: String,
     /// Idle eviction threshold.
     idle_timeout: Duration,
+    /// Per-repo spawn lock, so concurrent first-touch callers single-flight one
+    /// `asd-serve` spawn instead of racing. Without this, the Lens code page —
+    /// which fires health + symbols + files + overview at once on a cold repo —
+    /// spawned N processes; each later store overwrote (and killed) an earlier
+    /// child, so callers holding a killed process's URL got "ASD server
+    /// unreachable". Kept out of the fast path (per-repo, not the pool mutex).
+    spawn_locks: HashMap<String, Arc<Mutex<()>>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -158,6 +165,7 @@ impl AsdProcessPool {
                 entries,
                 binary: binary.unwrap_or_else(|| "asd-serve".to_string()),
                 idle_timeout: idle_timeout.unwrap_or(DEFAULT_IDLE_TIMEOUT),
+                spawn_locks: HashMap::new(),
             })),
         };
 
@@ -177,7 +185,7 @@ impl AsdProcessPool {
     /// Return the base URL (`http://127.0.0.1:<port>`) for the named repo,
     /// spawning `asd-serve` if it isn't already running.
     pub async fn base_url(&self, name: &str) -> Result<String, String> {
-        // Fast path — process already live
+        // Fast path — process already live.
         {
             let mut guard = self.inner.lock().await;
             if let Some((_, Some(entry))) = guard.entries.get_mut(name) {
@@ -186,15 +194,36 @@ impl AsdProcessPool {
             }
         }
 
-        // Slow path — spawn (lock released while we do async I/O)
-        let (db_path, binary) = {
-            let guard = self.inner.lock().await;
-            let (db, _) = guard
-                .entries
-                .get(name)
-                .ok_or_else(|| format!("repo '{name}' is not registered in the pool"))?;
-            (db.clone(), guard.binary.clone())
+        // Grab this repo's db path, the binary, and its per-repo spawn lock, then
+        // release the pool mutex. The spawn lock is what makes spawns
+        // single-flight: concurrent first-touch callers serialize HERE (per
+        // repo), not on the pool mutex, so a slow spawn never blocks other repos.
+        let (db_path, binary, spawn_lock) = {
+            let mut guard = self.inner.lock().await;
+            let db_path = match guard.entries.get(name) {
+                Some((db, _)) => db.clone(),
+                None => return Err(format!("repo '{name}' is not registered in the pool")),
+            };
+            let binary = guard.binary.clone();
+            let spawn_lock = guard
+                .spawn_locks
+                .entry(name.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone();
+            (db_path, binary, spawn_lock)
         };
+
+        let _spawn_guard = spawn_lock.lock().await;
+
+        // Double-checked: a concurrent caller may have spawned while we waited on
+        // the spawn lock — reuse its process instead of spawning a duplicate.
+        {
+            let mut guard = self.inner.lock().await;
+            if let Some((_, Some(entry))) = guard.entries.get_mut(name) {
+                entry.last_used = Instant::now();
+                return Ok(entry.base_url.clone());
+            }
+        }
 
         let (child, base_url) = spawn_asd_serve(&binary, name, &db_path).await?;
 
