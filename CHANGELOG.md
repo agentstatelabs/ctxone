@@ -4,6 +4,11 @@ All notable changes to CTXone are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 the project's `0.9.x` series (incremented by 0.0.01 per release).
 
+## [v0.9.36] — 2026-08-13
+
+### Fixed
+- **Large ASD repos timed out on first load in the code proxy.** The pool's startup budget (10s) gated both binding *and* the first `/api/v1/health`, which warms the db with a symbol count over a possibly multi-GB store. A large repo (e.g. a 22GB iOS `.asd-state.db`) bound in ~1s but only passed health at ~10s, so it failed on first touch and only worked on a retry. The budget is now **45s**, tunable via `CTXONE_ASD_SPAWN_TIMEOUT_SECS`. (A pathologically bloated db whose health takes minutes still needs its store rebuilt — a longer wait won't save it.)
+
 ## [v0.9.35] — 2026-08-13
 
 ### Fixed
