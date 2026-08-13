@@ -4,6 +4,11 @@ All notable changes to CTXone are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 the project's `0.9.x` series (incremented by 0.0.01 per release).
 
+## [v0.9.35] — 2026-08-13
+
+### Fixed
+- **Intermittent "ASD server unreachable" on a cold repo.** The code-proxy process pool released its lock before spawning `asd-serve` and re-acquired it after, so concurrent first-touch requests each spawned a process; later stores overwrote and killed earlier children, and any request holding a killed process's URL failed. The Lens code page fires health + symbols + files + overview at once, so opening a cold repo reliably tripped this. Spawns are now single-flighted per repo (concurrent callers share one spawn), verified with 8 concurrent cold requests producing exactly one process.
+
 ## [v0.9.34] — 2026-08-12
 
 ### Fixed
