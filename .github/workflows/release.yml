@@ -178,3 +178,101 @@ jobs:
             dist/ctx-*
             dist/ctxone-hub-*
           fail_on_unmatched_files: true
+
+  homebrew:
+    name: render + push homebrew formula
+    needs: publish
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-22.04
+    env:
+      TAP_PROJECT: agentstategroup/homebrew-ctxone
+      GITLAB_HOST: gitlab.agentstatelabs.com
+    steps:
+      # Fail fast and loudly rather than skipping: a silently-absent token
+      # would leave the tap pinned to the PREVIOUS release with a green
+      # pipeline, which is how `brew install asd` broke at asd v0.9.38.
+      - name: require GITLAB_TAP_TOKEN
+        env:
+          TOKEN: ${{ secrets.GITLAB_TAP_TOKEN }}
+        run: |
+          set -eu
+          if [ -z "${TOKEN}" ]; then
+            echo "::error::GITLAB_TAP_TOKEN is not set. Add a GitLab PAT with"
+            echo "::error::write_repository scope on ${TAP_PROJECT} as a repo secret."
+            exit 1
+          fi
+
+      - name: download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: clone tap from GitLab
+        env:
+          TOKEN: ${{ secrets.GITLAB_TAP_TOKEN }}
+        run: |
+          set -eu
+          git clone --depth 1 \
+            "https://oauth2:${TOKEN}@${GITLAB_HOST}/${TAP_PROJECT}.git" tap
+
+      # sha256 is computed from the SAME tarballs that were just published,
+      # not re-downloaded from the release, so the formula cannot drift from
+      # the assets even if a later run clobbers them.
+      - name: render formula
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+          python3 - <<'PY'
+          import hashlib, os, re, sys
+
+          tag = os.environ["TAG"]
+          ver = tag.lstrip("v")
+          # Homebrew has no Windows support — the msvc tarball is published
+          # for direct download only and is deliberately absent here.
+          targets = [
+              "aarch64-apple-darwin",
+              "x86_64-apple-darwin",
+              "x86_64-unknown-linux-gnu",
+              "aarch64-unknown-linux-gnu",
+          ]
+
+          path = "tap/Formula/ctxone.rb"
+          src  = open(path).read()
+          src  = re.sub(r'^(\s*version\s+)"[^"]*"', rf'\1"{ver}"', src, count=1, flags=re.M)
+
+          for t in targets:
+              tarball = f"dist/ctxone-{tag}-{t}.tar.gz"
+              if not os.path.exists(tarball):
+                  sys.exit(f"missing built artifact: {tarball}")
+              sha = hashlib.sha256(open(tarball, "rb").read()).hexdigest()
+              pat = re.compile(
+                  r'(url "https://github\.com/agentstatelabs/ctxone-releases'
+                  r'/releases/download/)[^/]+/(ctxone-)[^"]+(-' + re.escape(t) +
+                  r'\.tar\.gz"\s+sha256 ")[^"]*(")')
+              src, n = pat.subn(
+                  lambda m: m.group(1) + tag + "/" + m.group(2) + tag + m.group(3) + sha + m.group(4),
+                  src, count=1)
+              if n != 1:
+                  sys.exit(f"could not find url+sha256 pair for {t} in {path}")
+              print(f"  {t:28s} {sha}")
+
+          open(path, "w").write(src)
+          PY
+
+      - name: commit + push to GitLab tap
+        env:
+          TAG: ${{ github.ref_name }}
+        working-directory: tap
+        run: |
+          set -eu
+          if [ -z "$(git status --porcelain Formula/ctxone.rb)" ]; then
+            echo "formula already current for ${TAG} — nothing to push"
+            exit 0
+          fi
+          git -c user.email="ci@agentstatelabs.com" \
+              -c user.name="agentstatelabs-ci" \
+              commit -m "ctxone ${TAG#v}: bump version + sha256s" Formula/ctxone.rb
+          git push origin HEAD:main
+          echo "pushed — GitLab mirror replicates to the GitHub tap that brew consumes"
