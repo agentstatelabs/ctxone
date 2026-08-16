@@ -138,3 +138,38 @@ publish-github:
   script:
     - printf '%s' "${LEAKSCAN_LOCAL:-}" > .leakscan.local
     - bash scripts/publish-to-github.sh
+
+# homebrew: render Formula/ctxone.rb from the published release assets and commit
+# it to the tap on GitLab. Runs on tag pipelines only, AFTER publish-github has
+# mirrored the tag to GitHub and GitHub Actions has built and published it.
+#
+# `when: delayed` covers the bulk of that build (~8-11 min) without holding a
+# runner; scripts/publish-homebrew.sh then polls, bounded, for the assets.
+#
+# Direction is GitLab -> GitHub throughout: this job reads public release
+# assets over HTTPS and writes to a GitLab project. Nothing reaches back into
+# GitLab from GitHub Actions, and the tap URL is built from $CI_SERVER_URL so
+# no internal hostname lands in a mirrored file.
+homebrew:
+  stage: .post
+  image: rust:1-bookworm
+  before_script: []   # no cargo needed; the default before_script is rust setup
+  # Explicit dependency: if publish-github failed the tag never reached
+  # GitHub, so there is nothing to build a formula from — skip rather than
+  # poll for 20 minutes and fail.
+  needs:
+    - job: publish-github
+      artifacts: false
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: delayed
+      start_in: 10 minutes
+  variables:
+    RELEASES_REPO: agentstatelabs/ctxone-releases
+    TAP_PATH: agentstategroup/homebrew-ctxone
+    FORMULA_PATH: Formula/ctxone.rb
+    ARTIFACT_PREFIX: ctxone
+  script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git curl ca-certificates python3
+    - chmod +x scripts/publish-homebrew.sh
+    - ./scripts/publish-homebrew.sh
