@@ -83,12 +83,38 @@
 	{:else if loading}
 		<p class="muted">loading…</p>
 	{:else if error || !health}
+		<!-- Report what actually failed. This used to assert a single cause — a
+		     missing .asd-state.db — which sent people to check a path that was
+		     usually fine. The most common real cause is the hub being unable to
+		     resolve the asd-serve binary it spawns: under launchd it inherits a
+		     bare PATH, and `next to the hub` lands in the ctxone Cellar dir,
+		     where asd-serve does not live. -->
 		<EmptyState
 			icon="🔌"
 			tone="error"
-			title="ASD server unreachable"
-			description="The hub's process pool couldn't open {$selectedRepo}'s .asd-state.db. Check the path in ~/.config/asd/repos.toml still exists, then reload."
-		/>
+			title="Can't reach asd-serve for {$selectedRepo}"
+			description={error ?? 'The hub returned no health for this repo.'}
+		>
+			<p class="hint-lead">Usual causes, most common first:</p>
+			<ul class="hint-list">
+				<li>
+					The hub can't find <code>asd-serve</code> to spawn. Check
+					<code>resolved asd-serve binary</code> in <code>~/.ctxone/hub.log</code>;
+					if it's absent, set <code>--asd-serve-binary</code> (or
+					<code>CTXONE_ASD_SERVE_BINARY</code>) — launchd starts the hub with a
+					bare PATH.
+				</li>
+				<li>
+					The repo's <code>.asd-state.db</code> moved or was deleted. Verify the
+					path in <code>~/.config/asd/repos.toml</code>, then
+					<code>asd repo add --activate</code> in the project.
+				</li>
+				<li>
+					The db won't open — try <code>asd status</code> against it directly to
+					see the underlying error.
+				</li>
+			</ul>
+		</EmptyState>
 	{:else}
 		<div class="status-row">
 			<span class="dot connected"></span>
@@ -176,6 +202,25 @@
 </div>
 
 <style>
+	.hint-lead {
+		margin: 0 0 0.4rem;
+		font-size: 0.85rem;
+		color: var(--text-3);
+	}
+
+	.hint-list {
+		margin: 0;
+		padding-left: 1.1rem;
+		text-align: left;
+		font-size: 0.85rem;
+		line-height: 1.55;
+		color: var(--text-2);
+	}
+
+	.hint-list li + li {
+		margin-top: 0.4rem;
+	}
+
 	.page {
 		max-width: 900px;
 	}
