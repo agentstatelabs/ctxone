@@ -123,7 +123,8 @@ const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(50);
 struct AsdEntry {
     /// Resolved base URL, e.g. `http://127.0.0.1:54321`.
     base_url: String,
-    /// Child process — dropped here kills it (SIGKILL via tokio).
+    /// Child process. Spawned with `kill_on_drop(true)`, so dropping this
+    /// entry is what stops the process — see spawn_asd_serve.
     _child: Child,
     last_used: Instant,
 }
@@ -338,6 +339,13 @@ async fn spawn_asd_serve(
         // "listening on …" line.
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
+        // Without this, tokio DETACHES the child on drop. Every place the pool
+        // "kills" a process — evict_idle setting the slot to None, upsert
+        // replacing an entry, remove() — only drops the handle, so the
+        // asd-serve survived, kept its db open, and the next base_url() call
+        // spawned a second one against the same repo. Observed as two live
+        // asd-serve for one repo while the pool listed it "idle".
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| format!("failed to spawn asd-serve: {e}"))?;
 
