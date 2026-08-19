@@ -1320,6 +1320,42 @@ pub fn run_recall(
     run_recall_scoped(repo, session, topic, budget, ref_name, None)
 }
 
+/// The (path, value) candidates recall's topic search matches against, read
+/// from the MEMORY subtree in ONE `get_json` rather than scanning the whole
+/// graph. `scope` (default `/memory`) is the subtree root; every recallable
+/// memory — facts, primed and pinned sections — lives under `/memory`, so this
+/// never reads the cold `/sessions` archive. Returns leaf `(path, string)` pairs
+/// flattened from the nested subtree; empty if the subtree is absent.
+fn memory_scoped_candidates(
+    repo: &Repository,
+    ref_name: &str,
+    scope: &Option<String>,
+) -> Vec<(String, String)> {
+    let root = scope.as_deref().unwrap_or(MEMORY_SCOPE);
+    let Ok(tree) = repo.get_json(ref_name, root) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    flatten_leaves(&tree, root, &mut out);
+    out
+}
+
+/// Depth-first flatten of a nested JSON subtree into `(leaf_path, value)` pairs.
+/// String leaves pass through verbatim (facts/sections are stored as strings);
+/// other scalars are stringified so they stay searchable; nulls are skipped.
+fn flatten_leaves(v: &serde_json::Value, path: &str, out: &mut Vec<(String, String)>) {
+    match v {
+        serde_json::Value::Object(map) => {
+            for (k, child) in map {
+                flatten_leaves(child, &format!("{path}/{k}"), out);
+            }
+        }
+        serde_json::Value::String(s) => out.push((path.to_string(), s.clone())),
+        serde_json::Value::Null => {}
+        other => out.push((path.to_string(), other.to_string())),
+    }
+}
+
 /// Scoped variant: if `scope` is `Some("/prefix")`, only entries whose
 /// path starts with the prefix are returned. Advisory — a cooperating
 /// agent that sets its own scope can reduce its exposure to memories
@@ -1406,46 +1442,45 @@ pub fn run_recall_scoped(
     let mut scored: std::collections::HashMap<String, (String, usize, bool)> =
         std::collections::HashMap::new();
 
-    // Build the DISTINCT set of search queries once, then run them. Each
-    // `search_values` is an un-indexed tree walk that only early-exits at the
-    // result cap, so a rare/zero-match term scans much of the graph. The old
-    // code ran the full-phrase search AND a per-token search even when the topic
-    // was a single word — two identical full scans for one word. Deduping
-    // collapses that to one (measured: a single rare term went ~6s -> ~3s).
-    //
-    // Note: these searches are NOT parallelised. The ASG storage layer
-    // serialises concurrent reads (a shared connection), so running the scans on
-    // separate threads gave no speedup in testing — a 3-rare-token miss stayed
-    // ~sum, not ~max. The durable fix for the multi-rare-term worst case is an
-    // indexed value search in the engine (plan perf-slow-endpoints t-006), not
-    // client-side concurrency.
-    //
     // `want`: query string -> (acts_as_phrase, token_weight). The full phrase
     // sets `full_phrase_hit`; each token occurrence adds one to the score. A
-    // single-token topic collapses phrase and token into one search that does
+    // single-token topic collapses phrase and token into one entry that does
     // both, preserving the old (full=true, count=1) ranking.
     let mut want: std::collections::HashMap<String, (bool, usize)> =
         std::collections::HashMap::new();
-    let phrase = topic.trim();
+    let phrase = topic.trim().to_lowercase();
     if !phrase.is_empty() {
-        want.entry(phrase.to_string()).or_default().0 = true;
+        want.entry(phrase).or_default().0 = true;
     }
     for token in &tokens {
+        // tokens are already lowercased by tokenize_query.
         want.entry(token.clone()).or_default().1 += 1;
     }
 
-    // Merge each distinct query's hits, preserving the original scoring: phrase
-    // matches flip full_phrase_hit, token matches add `weight` to the score.
-    for (query, (is_phrase, weight)) in &want {
-        let Ok(results) = repo.search_values(ref_name, query, Some(50)) else {
-            continue;
-        };
-        for (path, value) in results {
-            let entry = scored.entry(path).or_insert((value, 0, false));
-            if *is_phrase {
-                entry.2 = true;
+    // Match against the MEMORY subtree only, not the whole graph. `search_values`
+    // is an un-indexed scan over EVERY node value — including the cold
+    // `/sessions/**/turns` transcript archive that dominates a mature graph
+    // (10k+ paths, hundreds of MB) — so a rare/zero-match term used to walk all
+    // of it (seconds). Recall is only ever meant to surface memory, so we read
+    // the scoped subtree (default `/memory`, ~a couple thousand small nodes) in
+    // ONE `get_json` and match in memory. Bounded regardless of term rarity, and
+    // it never touches `/sessions`.
+    for (path, value) in memory_scoped_candidates(repo, ref_name, &scope_normalized) {
+        let hay = value.to_lowercase();
+        let mut count = 0usize;
+        let mut full = false;
+        for (query, (is_phrase, weight)) in &want {
+            if hay.contains(query) {
+                if *is_phrase {
+                    full = true;
+                }
+                count += *weight;
             }
-            entry.1 += weight;
+        }
+        if full || count > 0 {
+            let entry = scored.entry(path).or_insert((value, 0, false));
+            entry.1 += count;
+            entry.2 |= full;
         }
     }
 
@@ -6099,6 +6134,46 @@ mod tests {
         // A second recall appends; the log preserves order.
         let _ = run_recall_scoped(&repo, &session, "postgres", 1500, "main", None);
         assert_eq!(session.recall_log_snapshot().len(), 2);
+    }
+
+    #[test]
+    fn recall_scoped_to_memory_ignores_cold_archive() {
+        let repo = Arc::new(Repository::new(Box::new(
+            agentstategraph_storage::SqliteStorage::in_memory().expect("in-memory sqlite"),
+        )));
+        repo.init().unwrap();
+        // A recallable fact under /memory ...
+        repo.set_json(
+            "main",
+            "/memory/db/f1",
+            &serde_json::json!("we use sqlite here for the hub"),
+            CommitOptions::new("t", IntentCategory::Custom("Observe".to_string()), "seed"),
+        )
+        .unwrap();
+        // ... and a matching value OUTSIDE /memory (the kind of cold archive the
+        // old whole-graph scan would waste time on). Even with the DEFAULT (None)
+        // scope, recall now reads only /memory, so this must never surface.
+        repo.set_json(
+            "main",
+            "/archive/turns/t0",
+            &serde_json::json!("transcript chatter mentioning sqlite in passing"),
+            CommitOptions::new("t", IntentCategory::Custom("Observe".to_string()), "seed"),
+        )
+        .unwrap();
+
+        let session = SessionStats::new();
+        let r = run_recall_scoped(&repo, &session, "sqlite", 1500, "main", None);
+        let paths: Vec<&str> = r["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|x| x["path"].as_str())
+            .collect();
+        assert!(paths.iter().any(|p| p.contains("/memory/db/f1")));
+        assert!(
+            !paths.iter().any(|p| p.contains("/archive/")),
+            "recall must not read outside /memory: {paths:?}"
+        );
     }
 
     #[test]
