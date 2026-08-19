@@ -42,14 +42,35 @@
 	// Fresh install: no registered projects and nothing ingested anywhere.
 	let firstRun = $derived(!loading && projects.length === 0 && totalSessions === 0);
 
-	/** Rough (≈) cost for a workspace, priced from its representative model. */
-	function wsCost(w: WorkspaceSummary): number | null {
-		return estimateCost(w.representative_model ?? null, {
+	/**
+	 * The four LLM-usage counters, as one basis for BOTH the token figure and
+	 * the cost on a workspace card.
+	 *
+	 * The card used to print `tokens.used` beside a cost priced from these
+	 * fields, which are unrelated measures: `used` is session context tokens
+	 * and is 0 for 29 of 30 workspaces here, while the cost came from real
+	 * llm_* usage records. The card therefore read "0 tok ≈ $49520.76". Even
+	 * where `used` is populated it is not a smaller version of the same thing —
+	 * default reports 384K used against 24.8B llm_input.
+	 */
+	function llmCounters(w: WorkspaceSummary) {
+		return {
 			input: w.tokens.llm_input,
 			output: w.tokens.llm_output,
 			cache_read: w.tokens.llm_cache_read,
 			cache_create: w.tokens.llm_cache_create
-		});
+		};
+	}
+
+	/** Rough (≈) cost for a workspace, priced from its representative model. */
+	function wsCost(w: WorkspaceSummary): number | null {
+		return estimateCost(w.representative_model ?? null, llmCounters(w));
+	}
+
+	/** Total LLM tokens — the same counters the cost is priced from. */
+	function wsTokens(w: WorkspaceSummary): number {
+		const t = llmCounters(w);
+		return t.input + t.output + t.cache_read + t.cache_create;
 	}
 
 	let wsSort = $state<'sessions' | 'saved' | 'commits' | 'cost'>('sessions');
@@ -228,8 +249,11 @@
 
 						<div class="card-stats">
 							<span class="stat"><strong>{w.session_count}</strong> sessions</span>
-							<span class="stat" title="{w.tokens.used} used / {w.tokens.saved} saved">
-								<strong>{formatCompact(w.tokens.used)}</strong> tok
+							<span
+								class="stat"
+								title="{w.tokens.llm_input} in / {w.tokens.llm_output} out / {w.tokens.llm_cache_read} cache read / {w.tokens.llm_cache_create} cache write — the same counters the cost is priced from. Session context tokens: {w.tokens.used} used, {w.tokens.saved} saved."
+							>
+								<strong>{formatCompact(wsTokens(w))}</strong> tok
 								{#if w.tokens.saved > 0}
 									<span class="saved">· {formatCompact(w.tokens.saved)} saved</span>
 								{/if}
