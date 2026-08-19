@@ -11,6 +11,8 @@
 	let files = $state<FileEntry[]>([]);
 	let error = $state<string | null>(null);
 	let loading = $state(true);
+	/** Names of optional panels whose fetch failed; the page still renders. */
+	let degraded = $state<string[]>([]);
 
 	$effect(() => {
 		const repo = $selectedRepo;
@@ -22,21 +24,35 @@
 			symbols = [];
 			files = [];
 			error = null;
+			degraded = [];
 			return;
 		}
 		loading = true;
 		error = null;
-		Promise.all([getAsdHealth(repo), getSymbols(repo), listFiles(repo)])
-			.then(([h, s, f]) => {
-				health = h;
-				symbols = s;
-				files = f;
+		degraded = [];
+		// allSettled, not all: only /health decides whether asd is reachable.
+		// /symbols and /files enrich the view, and a failure in either used to
+		// reject the whole batch and render "server unreachable" even though
+		// asd was answering fine — which is exactly what a missing /files route
+		// did to every repo.
+		Promise.allSettled([getAsdHealth(repo), getSymbols(repo), listFiles(repo)]).then(
+			([h, s, f]) => {
+				if (h.status === 'fulfilled') {
+					health = h.value;
+					error = null;
+				} else {
+					health = null;
+					error = h.reason instanceof Error ? h.reason.message : String(h.reason);
+				}
+				symbols = s.status === 'fulfilled' ? s.value : [];
+				files = f.status === 'fulfilled' ? f.value : [];
+				degraded = [
+					...(s.status === 'rejected' ? ['symbols'] : []),
+					...(f.status === 'rejected' ? ['files'] : [])
+				];
 				loading = false;
-			})
-			.catch((e) => {
-				error = e instanceof Error ? e.message : String(e);
-				loading = false;
-			});
+			}
+		);
 	});
 
 	type KindCounts = Record<string, number>;
@@ -116,6 +132,13 @@
 			</ul>
 		</EmptyState>
 	{:else}
+		{#if degraded.length}
+			<div class="degraded" role="status">
+				Connected, but {degraded.join(' and ')} failed to load — those panels are
+				empty. See <code>~/.ctxone/hub.log</code> for the proxy error.
+			</div>
+		{/if}
+
 		<div class="status-row">
 			<span class="dot connected"></span>
 			<span class="status-text">Connected · <code>{health.db_path}</code></span>
@@ -202,6 +225,15 @@
 </div>
 
 <style>
+	.degraded {
+		margin: 0 0 1rem;
+		padding: 0.6rem 0.8rem;
+		border-radius: 6px;
+		background: var(--warn-bg, rgba(255, 190, 80, 0.1));
+		color: var(--text-2);
+		font-size: 0.85rem;
+	}
+
 	.hint-lead {
 		margin: 0 0 0.4rem;
 		font-size: 0.85rem;
