@@ -607,6 +607,9 @@ fn router_with_config_inner(
             // real gate, so relax rmcp's loopback-only Host allow-list to let
             // authenticated remote clients reach /mcp.
             config.auth_token.is_some(),
+            // Share the REST hub's session registry so MCP recall/savings land in
+            // the same rows the process flushes to SQLite.
+            sessions.clone(),
         )
     });
 

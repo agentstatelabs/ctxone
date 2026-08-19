@@ -7177,6 +7177,7 @@ fn mcp_server_entry(
     namespace: Option<&str>,
     auth_token: Option<&str>,
     auth_token_env: Option<&str>,
+    session_id: &str,
 ) -> Value {
     match transport {
         McpTransport::Http => {
@@ -7197,6 +7198,11 @@ fn mcp_server_entry(
                     "--transport".to_string(),
                     "http-only".to_string(),
                 ];
+                // Session identity: recall/savings on the shared daemon persist
+                // under this project's session id instead of the anonymous
+                // "default" row. mcp-remote forwards a literal --header.
+                args.push("--header".to_string());
+                args.push(format!("X-CTXone-Session: {session_id}"));
                 // mcp-remote forwards a literal --header; it does not expand
                 // env vars, so only a literal token works for the bridge.
                 if let Some(tok) = auth_token {
@@ -7207,14 +7213,22 @@ fn mcp_server_entry(
             } else {
                 // Native URL transport (Claude Code, Cursor, VS Code).
                 let mut entry = serde_json::json!({ "type": "http", "url": url });
+                let mut headers = serde_json::Map::new();
+                // Session identity so recall/savings on the shared daemon land
+                // under this project's session, not the anonymous default row.
+                headers.insert(
+                    "X-CTXone-Session".to_string(),
+                    serde_json::Value::String(session_id.to_string()),
+                );
                 // Prefer a literal header; else reference an env var (clients
                 // that support `${VAR}` expansion in config values resolve it).
                 let auth_value = auth_token
                     .map(|t| format!("Bearer {t}"))
                     .or_else(|| auth_token_env.map(|v| format!("Bearer ${{{v}}}")));
                 if let Some(v) = auth_value {
-                    entry["headers"] = serde_json::json!({ "Authorization": v });
+                    headers.insert("Authorization".to_string(), serde_json::Value::String(v));
                 }
+                entry["headers"] = serde_json::Value::Object(headers);
                 entry
             }
         }
@@ -7565,6 +7579,7 @@ fn init_mcp(
             namespace.as_deref(),
             auth_token,
             auth_token_env,
+            &session_id,
         );
 
         // Inject CTX_SESSION into the stdio server's env (t-015) so its
@@ -9774,6 +9789,7 @@ args = ["--path", "/old/db"]
             None,
             None,
             None,
+            "sess-test",
         );
         let args = entry
             .get("args")
@@ -9794,6 +9810,7 @@ args = ["--path", "/old/db"]
             Some("proj-ns"),
             None,
             None,
+            "sess-test",
         );
         assert_eq!(entry.get("type").and_then(|v| v.as_str()), Some("http"));
         assert_eq!(
@@ -9801,7 +9818,16 @@ args = ["--path", "/old/db"]
             Some("http://localhost:3001/mcp?namespace=proj-ns")
         );
         assert!(entry.get("command").is_none(), "native http has no command");
-        assert!(entry.get("headers").is_none(), "no token → no headers");
+        // The session header is always written now (recall/savings attribution),
+        // even without an auth token; the auth header is absent.
+        assert_eq!(
+            entry["headers"]["X-CTXone-Session"].as_str(),
+            Some("sess-test")
+        );
+        assert!(
+            entry["headers"].get("Authorization").is_none(),
+            "no token → no auth header"
+        );
     }
 
     #[test]
@@ -9814,6 +9840,7 @@ args = ["--path", "/old/db"]
             None,
             Some("s3cret"),
             None,
+            "sess-test",
         );
         assert_eq!(
             entry["headers"]["Authorization"].as_str(),
@@ -9831,6 +9858,7 @@ args = ["--path", "/old/db"]
             None,
             None,
             Some("CTXONE_AUTH_TOKEN"),
+            "sess-test",
         );
         assert_eq!(
             entry["headers"]["Authorization"].as_str(),
@@ -9848,6 +9876,7 @@ args = ["--path", "/old/db"]
             Some("proj-ns"),
             None,
             None,
+            "sess-test",
         );
         // Claude Desktop can't read {type:http,url}; must get the mcp-remote bridge.
         assert!(
@@ -9865,7 +9894,14 @@ args = ["--path", "/old/db"]
         assert!(args.contains(&"mcp-remote"));
         assert!(args.contains(&"http://localhost:3001/mcp?namespace=proj-ns"));
         assert!(args.contains(&"http-only"));
-        assert!(!args.contains(&"--header"), "no token → no --header");
+        // The session header is always forwarded now (recall/savings attribution).
+        assert!(args.contains(&"--header"));
+        assert!(args.contains(&"X-CTXone-Session: sess-test"));
+        // ...but no Authorization header without a token.
+        assert!(
+            !args.iter().any(|a| a.starts_with("Authorization:")),
+            "no token → no Authorization header"
+        );
     }
 
     #[test]
@@ -9878,6 +9914,7 @@ args = ["--path", "/old/db"]
             None,
             Some("s3cret"),
             None,
+            "sess-test",
         );
         let args: Vec<String> = entry["args"]
             .as_array()

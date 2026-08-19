@@ -6238,4 +6238,3 @@ mod tests {
         assert_eq!(r.capacity(), MAX_SESSIONS_DEFAULT);
     }
 }
-
