@@ -6132,6 +6132,63 @@ mod tests {
         assert_eq!(server.session.recall_log_snapshot().len(), 1);
     }
 
+    #[tokio::test]
+    async fn plan_start_gate_injects_recalled_memory_end_to_end() {
+        use crate::plan_tools as pt;
+        use crate::plan_tools::PlanStartParams;
+        let repo = Arc::new(Repository::new(Box::new(
+            agentstategraph_storage::SqliteStorage::in_memory().expect("in-memory sqlite"),
+        )));
+        repo.init().unwrap();
+        // A recallable memory whose terms match the task title.
+        repo.set_json(
+            "main",
+            "/memory/db/f1",
+            &serde_json::json!("we chose sqlite over postgres for the hub"),
+            CommitOptions::new("t", IntentCategory::Custom("Observe".to_string()), "seed"),
+        )
+        .unwrap();
+
+        // Mirror the MCP-over-HTTP path, which marks the namespace explicit so
+        // writes aren't blocked by the stdio-only default-namespace guard.
+        let server = CtxOneServer::new(repo.clone()).with_namespace_explicit(true);
+        let store = pt::make_store(repo.clone(), "tester");
+        pt::create_plan(&store, "main", "p1", None).unwrap();
+        let task = pt::add_task(
+            &store,
+            "main",
+            "p1",
+            "choose the sqlite database backend",
+            None,
+            None,
+            None,
+            None,
+            vec![],
+        )
+        .unwrap();
+
+        let out = server
+            .plan_start(Parameters(PlanStartParams {
+                plan_id: "p1".to_string(),
+                task_id: task.id.as_str().to_string(),
+                reason: None,
+                ref_name: "main".to_string(),
+            }))
+            .await;
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+
+        // The task started AND memory relevant to its title was injected inline —
+        // proving the per-task gate fires through the real tool, not just the helper.
+        assert_eq!(v["status"].as_str(), Some("in_progress"));
+        let hits = v["recalled_memory"]["results"].as_array();
+        assert!(
+            hits.map(|a| !a.is_empty()).unwrap_or(false),
+            "plan_start must inline recalled_memory: {v}"
+        );
+        // And the injection was recorded on the session (savings show up).
+        assert_eq!(server.session.recall_log_snapshot().len(), 1);
+    }
+
     #[test]
     fn recall_gate_none_when_empty_or_trivial() {
         let repo = Arc::new(Repository::new(Box::new(

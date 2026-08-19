@@ -234,3 +234,50 @@ pub fn mcp_router(state: McpHttpState) -> Router {
         .route("/mcp", any(mcp_handler))
         .with_state(state)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agentstategraph_storage::SqliteStorage;
+
+    // Part B: a session named in the request must be registered in the SHARED
+    // registry (the one the process flushes), so MCP recall/savings persist
+    // instead of dying on an ephemeral per-connection counter.
+    #[tokio::test]
+    async fn mcp_service_backs_session_with_shared_registry() {
+        let repo = Arc::new(Repository::new(Box::new(
+            SqliteStorage::in_memory().expect("in-memory sqlite"),
+        )));
+        repo.init().unwrap();
+        let registry = Arc::new(SessionRegistry::new());
+        let state = McpHttpState::new(
+            repo,
+            "agent".to_string(),
+            Arc::new(Vec::new()),
+            None,
+            false,
+            registry.clone(),
+        );
+
+        assert!(registry.snapshot("proj-sess").is_none());
+        // Building the service for this (ns, session) must get_or_create the
+        // session in the shared registry.
+        let _svc = state.service_for("default", "proj-sess").await;
+        assert!(
+            registry.snapshot("proj-sess").is_some(),
+            "MCP service must back its session with the shared, flushed registry"
+        );
+    }
+
+    #[test]
+    fn resolve_session_reads_header_else_default() {
+        let with = Request::builder()
+            .header("x-ctxone-session", "abc123")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert_eq!(resolve_session(&with), "abc123");
+
+        let without = Request::builder().body(axum::body::Body::empty()).unwrap();
+        assert_eq!(resolve_session(&without), DEFAULT_SESSION_ID);
+    }
+}
