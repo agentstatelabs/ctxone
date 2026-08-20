@@ -1150,6 +1150,34 @@ pub async fn record_turn_tokens(
     let _ = req.send().await;
 }
 
+/// After a session's turns are written, ask the hub to recompute that session's
+/// per-model LLM usage from those turns (`POST /api/stats/backfill_by_model?
+/// session=<id>`). The recompute REPLACES the split, so re-ingesting the same
+/// session is idempotent — unlike the old additive `record_llm_usage` post,
+/// which re-added the whole session total on every ingest and inflated the
+/// counters N×. Best-effort: a failure just leaves the split as it was.
+pub async fn trigger_session_by_model_backfill(
+    hub: &str,
+    session: Option<&str>,
+    client: &reqwest::Client,
+) {
+    let Some(sid) = session else {
+        return;
+    };
+    let url = format!(
+        "{}/api/stats/backfill_by_model?session={}",
+        hub,
+        crate::urlencoding(sid)
+    );
+    // The client already carries X-CTXone-Namespace (workspace-scoped); add the
+    // session header for parity with the rest of the ingest posts.
+    let _ = client
+        .post(url)
+        .header("X-CTXone-Session", sid)
+        .send()
+        .await;
+}
+
 /// Persist the full turn (request, assistant response, tool calls with
 /// real arguments, token usage, model, timestamp) as a memory at a
 /// deterministic per-session path. This complements the Haiku-extracted

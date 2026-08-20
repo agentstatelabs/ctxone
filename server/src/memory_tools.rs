@@ -671,6 +671,37 @@ impl SessionSnapshot {
         } else {
             0.0
         };
+        // LLM usage is reported from the per-model split (`by_model`), NOT the
+        // flat `llm_*` atomics. The atomics are RE-ADDED on every re-ingest: the
+        // ingest posts one aggregated `record_llm_usage` per session, and
+        // `record_llm_usage` fetch_adds — so a session ingested N times shows N×
+        // its true usage (session 019c005a: 8× = 6.5B vs the true 817M). The
+        // per-model map is idempotent (per-turn backfill replaces; per-call live
+        // adds once), so it's the source of truth. Fall back to the raw atomics
+        // only when `by_model` is empty (pre-t-023 data with no split yet).
+        let by_model = stats.by_model();
+        let (llm_input, llm_output, llm_cache_read, llm_cache_create, llm_calls) =
+            if by_model.is_empty() {
+                (
+                    stats.llm_input_tokens.load(Ordering::Relaxed),
+                    stats.llm_output_tokens.load(Ordering::Relaxed),
+                    stats.llm_cache_read_tokens.load(Ordering::Relaxed),
+                    stats.llm_cache_create_tokens.load(Ordering::Relaxed),
+                    stats.llm_call_count.load(Ordering::Relaxed),
+                )
+            } else {
+                by_model
+                    .values()
+                    .fold((0, 0, 0, 0, 0), |(i, o, cr, cc, n), u| {
+                        (
+                            i + u.input_tokens,
+                            o + u.output_tokens,
+                            cr + u.cache_read_tokens,
+                            cc + u.cache_create_tokens,
+                            n + u.call_count,
+                        )
+                    })
+            };
         Self {
             session_id: session_id.to_string(),
             session_tokens_used: used,
@@ -679,11 +710,11 @@ impl SessionSnapshot {
             total_graph_size_chars: graph_chars,
             total_graph_size_tokens: graph_tokens,
             cumulative_ratio: ratio,
-            llm_input_tokens: stats.llm_input_tokens.load(Ordering::Relaxed),
-            llm_output_tokens: stats.llm_output_tokens.load(Ordering::Relaxed),
-            llm_cache_read_tokens: stats.llm_cache_read_tokens.load(Ordering::Relaxed),
-            llm_cache_create_tokens: stats.llm_cache_create_tokens.load(Ordering::Relaxed),
-            llm_call_count: stats.llm_call_count.load(Ordering::Relaxed),
+            llm_input_tokens: llm_input,
+            llm_output_tokens: llm_output,
+            llm_cache_read_tokens: llm_cache_read,
+            llm_cache_create_tokens: llm_cache_create,
+            llm_call_count: llm_calls,
             last_model: stats.last_model(),
             last_provider: stats.last_provider(),
             extra_tokens: stats.extra_tokens(),
@@ -694,7 +725,7 @@ impl SessionSnapshot {
             updated_at: None,
             models_used: Vec::new(),
             fallback_ratio: None,
-            llm_by_model: stats.by_model(),
+            llm_by_model: by_model,
         }
     }
 }
@@ -879,18 +910,32 @@ impl SessionRegistry {
             for (k, v) in s.extra_tokens() {
                 *extra.entry(k).or_insert(0) += v;
             }
-            for (m, u) in s.by_model() {
-                by_model.entry(m).or_default().merge(&u);
+            let sbm = s.by_model();
+            for (m, u) in &sbm {
+                by_model.entry(m.clone()).or_default().merge(u);
             }
             total_used += s.tokens_sent.load(Ordering::Relaxed);
             total_saved += s.tokens_saved.load(Ordering::Relaxed);
             total_startup += s.first_recall_tokens.load(Ordering::Relaxed);
             graph_chars = graph_chars.max(s.total_graph_size_chars.load(Ordering::Relaxed));
-            llm_input += s.llm_input_tokens.load(Ordering::Relaxed);
-            llm_output += s.llm_output_tokens.load(Ordering::Relaxed);
-            llm_cache_read += s.llm_cache_read_tokens.load(Ordering::Relaxed);
-            llm_cache_create += s.llm_cache_create_tokens.load(Ordering::Relaxed);
-            llm_calls += s.llm_call_count.load(Ordering::Relaxed);
+            // Per-session LLM usage from the idempotent per-model split, falling
+            // back to the raw (additively-inflated) atomics only when no split
+            // exists — same source-of-truth rule as `from_session`.
+            if sbm.is_empty() {
+                llm_input += s.llm_input_tokens.load(Ordering::Relaxed);
+                llm_output += s.llm_output_tokens.load(Ordering::Relaxed);
+                llm_cache_read += s.llm_cache_read_tokens.load(Ordering::Relaxed);
+                llm_cache_create += s.llm_cache_create_tokens.load(Ordering::Relaxed);
+                llm_calls += s.llm_call_count.load(Ordering::Relaxed);
+            } else {
+                for u in sbm.values() {
+                    llm_input += u.input_tokens;
+                    llm_output += u.output_tokens;
+                    llm_cache_read += u.cache_read_tokens;
+                    llm_cache_create += u.cache_create_tokens;
+                    llm_calls += u.call_count;
+                }
+            }
             if let Some(m) = s.last_model() {
                 *model_counts.entry(m).or_insert(0) += 1;
             }
@@ -5782,6 +5827,77 @@ mod tests {
         assert_eq!(by.get("gpt-5.2").unwrap().input_tokens, 300);
         assert_eq!(by.get("gpt-5.2").unwrap().call_count, 2);
         assert_eq!(by.get("claude-opus-4-8").unwrap().call_count, 1);
+    }
+
+    #[test]
+    fn snapshot_llm_derives_from_by_model_not_inflated_raw() {
+        let s = SessionStats::new();
+        // Simulate the re-ingest inflation: the same session usage recorded 8×.
+        // record_llm_usage fetch_adds BOTH the raw atomics and by_model, so both
+        // now read 8× (raw input 800, by_model[m] 800).
+        for _ in 0..8 {
+            s.record_llm_usage(100, 10, 5, 0, Some("m".into()), None);
+        }
+        assert_eq!(s.llm_input_tokens.load(Ordering::Relaxed), 800);
+        // The per-session backfill REPLACES by_model with the true, single-copy
+        // value computed from the (idempotent) stored turns.
+        let mut clean = BTreeMap::new();
+        clean.insert(
+            "m".to_string(),
+            ModelUsage {
+                input_tokens: 100,
+                output_tokens: 10,
+                cache_read_tokens: 5,
+                cache_create_tokens: 0,
+                call_count: 1,
+            },
+        );
+        s.set_by_model(clean);
+
+        // The snapshot reports the CLEAN by_model value, not the inflated raw 800.
+        let snap = SessionSnapshot::from_session("x", &s);
+        assert_eq!(snap.llm_input_tokens, 100);
+        assert_eq!(snap.llm_output_tokens, 10);
+        assert_eq!(snap.llm_cache_read_tokens, 5);
+        assert_eq!(snap.llm_call_count, 1);
+    }
+
+    #[test]
+    fn snapshot_llm_falls_back_to_raw_when_no_by_model() {
+        let s = SessionStats::new();
+        // Model omitted → raw atomics populated, by_model stays empty (old data).
+        s.record_llm_usage(500, 50, 0, 0, None, None);
+        assert!(s.by_model().is_empty());
+        let snap = SessionSnapshot::from_session("x", &s);
+        assert_eq!(snap.llm_input_tokens, 500);
+        assert_eq!(snap.llm_call_count, 1);
+    }
+
+    #[test]
+    fn aggregate_llm_derives_from_by_model_not_inflated_raw() {
+        let registry = SessionRegistry::new();
+        let s = registry.get_or_create("s1");
+        for _ in 0..5 {
+            s.record_llm_usage(100, 10, 0, 0, Some("m".into()), None);
+        }
+        // Backfill collapses by_model to the true single-copy value.
+        let mut clean = BTreeMap::new();
+        clean.insert(
+            "m".to_string(),
+            ModelUsage {
+                input_tokens: 100,
+                output_tokens: 10,
+                cache_read_tokens: 0,
+                cache_create_tokens: 0,
+                call_count: 1,
+            },
+        );
+        s.set_by_model(clean);
+
+        let agg = registry.aggregate();
+        // Aggregate reflects the clean 100, not the 5× raw 500.
+        assert_eq!(agg.llm_input_tokens, 100);
+        assert_eq!(agg.llm_call_count, 1);
     }
 
     #[test]

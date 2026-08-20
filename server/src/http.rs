@@ -1252,12 +1252,25 @@ async fn list_sessions(State(s): State<HubState>, ns: NamespaceId) -> impl IntoR
 /// the flat totals) and no graph writes (so no memory loss). Idempotent:
 /// re-running recomputes the same replacement. Scoped to the request namespace;
 /// call once per workspace whose sessions you want backfilled.
+#[derive(Deserialize)]
+struct BackfillByModelQuery {
+    /// Backfill just this one session (idempotent recompute from its stored
+    /// turns). The ingest calls this per session so a re-ingest never inflates
+    /// the per-model split. Omit to backfill every session in the namespace.
+    #[serde(default)]
+    session: Option<String>,
+}
+
 async fn backfill_by_model(
     State(s): State<HubState>,
     ns: NamespaceId,
+    Query(q): Query<BackfillByModelQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
-    let ids = session_ids_with_nodes(&repo);
+    let ids: Vec<String> = match q.session.as_deref() {
+        Some(sid) if !sid.is_empty() => vec![sid.to_string()],
+        _ => session_ids_with_nodes(&repo).into_iter().collect(),
+    };
     let mut sessions_updated = 0usize;
     let mut turns_scanned = 0usize;
     let mut models_seen: std::collections::BTreeSet<String> = Default::default();

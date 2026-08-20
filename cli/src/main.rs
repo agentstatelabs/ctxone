@@ -5372,34 +5372,15 @@ async fn ingest_one_session(
         .to_string_lossy()
         .to_string();
 
-    // One bulk write for all full turns, and one aggregated token record —
-    // instead of two HTTP round-trips + two graph commits per turn. Memory
-    // extraction stays per-turn (an LLM call each) and is gated on an API key,
-    // so it is off during a whole-machine `--all` sync.
-    let mut session_tokens = crate::ingest::TurnTokens::default();
-    let mut last_model = String::new();
+    // One bulk write for all full turns. LLM usage is NOT posted via
+    // record_llm_usage here: that endpoint fetch_adds, so re-ingesting a session
+    // re-added its whole total every time (session 019c005a showed 8× = 6.5B vs
+    // the true 817M). Instead, after the turns are written we ask the hub to
+    // recompute the session's per-model split from those (idempotent) turns —
+    // see the trigger_session_by_model_backfill call below the bulk write.
     for turn in turns.iter() {
         out.turns += 1;
         out.tokens.add(&turn.tokens);
-        session_tokens.add(&turn.tokens);
-        let m = turn.model.trim();
-        if !m.is_empty() && !m.starts_with('<') {
-            last_model = m.to_string();
-        }
-    }
-
-    if !session_tokens.is_empty() && !dry_run {
-        // Server-side these counters are summed, so one record with the session
-        // total and its last real model is equivalent to N per-turn records.
-        crate::ingest::record_turn_tokens(
-            &session_tokens,
-            &last_model,
-            crate::ingest::provider_for_model(&last_model),
-            server,
-            effective_session,
-            client,
-        )
-        .await;
     }
 
     if full_turn && !turns.is_empty() {
@@ -5420,6 +5401,11 @@ async fn ingest_one_session(
                 client,
             )
             .await;
+            // Turns are now on the graph — recompute this session's per-model LLM
+            // usage from them (idempotent REPLACE), so re-ingesting never inflates
+            // the counters. This replaces the old additive record_llm_usage post.
+            crate::ingest::trigger_session_by_model_backfill(server, effective_session, client)
+                .await;
         }
     }
 
