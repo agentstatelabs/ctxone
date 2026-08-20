@@ -1252,6 +1252,14 @@ async fn list_sessions(State(s): State<HubState>, ns: NamespaceId) -> impl IntoR
 /// the flat totals) and no graph writes (so no memory loss). Idempotent:
 /// re-running recomputes the same replacement. Scoped to the request namespace;
 /// call once per workspace whose sessions you want backfilled.
+///
+/// **Bounded per request.** The whole-namespace walk is capped by a wall-clock
+/// budget (`max_secs`, default 20s) and an optional `limit`, and returns a
+/// `next_offset` cursor plus a `done` flag. A namespace whose db is too large
+/// to drain in one request is paged: loop, passing back `offset=next_offset`
+/// until `done` is true. This is why the earlier one-shot version timed out on
+/// very large dbs. The single-session form (`?session=`, the ingest hot path)
+/// ignores the cursor and always processes exactly that session.
 #[derive(Deserialize)]
 struct BackfillByModelQuery {
     /// Backfill just this one session (idempotent recompute from its stored
@@ -1259,6 +1267,82 @@ struct BackfillByModelQuery {
     /// the per-model split. Omit to backfill every session in the namespace.
     #[serde(default)]
     session: Option<String>,
+    /// Resume cursor for the whole-namespace path: skip this many sessions (in
+    /// sorted order) before processing. Callers loop, passing back the
+    /// `next_offset` from the previous response until `done` is true.
+    #[serde(default)]
+    offset: usize,
+    /// Optional hard cap on how many sessions this request processes, on top of
+    /// the wall-clock budget below.
+    #[serde(default)]
+    limit: Option<usize>,
+    /// Soft wall-clock budget in seconds. The whole-namespace walk stops once
+    /// this elapses (after finishing the in-flight session) and returns a
+    /// cursor, so a single request can never exceed the HTTP timeout no matter
+    /// how large the namespace's db is. `0` is treated as 1.
+    #[serde(default = "default_backfill_max_secs")]
+    max_secs: u64,
+}
+
+fn default_backfill_max_secs() -> u64 {
+    20
+}
+
+/// Recompute one session's `by_model` split from its stored turns and write it
+/// into the registry. Returns `(updated, turns_scanned)`; `updated` is false
+/// when the session has no usable turns (its existing split is left untouched —
+/// callers that need such sessions zeroed must delete them, since the display
+/// falls back to the raw atomics when `by_model` is empty).
+fn backfill_one_session(
+    repo: &Repository,
+    sessions: &crate::memory_tools::SessionRegistry,
+    sid: &str,
+    models_seen: &mut std::collections::BTreeSet<String>,
+) -> (bool, usize) {
+    // One read per session: the whole turns subtree as an object keyed by
+    // zero-padded index. Missing/non-object subtrees are simply skipped.
+    let turns = match repo.get_json("main", &format!("/sessions/{sid}/turns")) {
+        Ok(v) => v,
+        Err(_) => return (false, 0),
+    };
+    let Some(obj) = turns.as_object() else {
+        return (false, 0);
+    };
+
+    let mut by_model: std::collections::BTreeMap<String, crate::memory_tools::ModelUsage> =
+        Default::default();
+    let mut scanned = 0usize;
+    for turn in obj.values() {
+        let model = turn.get("model").and_then(|v| v.as_str()).unwrap_or("");
+        // Skip placeholders: empty, "unknown", and angle-bracket sentinels
+        // like "<synthetic>" that some stored turns carry.
+        if model.is_empty() || model == "unknown" || model.starts_with('<') {
+            continue;
+        }
+        let tok = turn.get("tokens");
+        let field = |k: &str| {
+            tok.and_then(|t| t.get(k))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+        };
+        let entry = by_model.entry(model.to_string()).or_default();
+        entry.input_tokens += field("input");
+        entry.output_tokens += field("output");
+        entry.cache_read_tokens += field("cache_read");
+        // Stored turns use the provider's field name `cache_creation`;
+        // ModelUsage calls it cache_create.
+        entry.cache_create_tokens += field("cache_creation");
+        entry.call_count += 1;
+        scanned += 1;
+        models_seen.insert(model.to_string());
+    }
+
+    if !by_model.is_empty() {
+        sessions.get_or_create(sid).set_by_model(by_model);
+        (true, scanned)
+    } else {
+        (false, scanned)
+    }
 }
 
 async fn backfill_by_model(
@@ -1267,57 +1351,33 @@ async fn backfill_by_model(
     Query(q): Query<BackfillByModelQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
-    let ids: Vec<String> = match q.session.as_deref() {
-        Some(sid) if !sid.is_empty() => vec![sid.to_string()],
-        _ => session_ids_with_nodes(&repo).into_iter().collect(),
-    };
-    let mut sessions_updated = 0usize;
-    let mut turns_scanned = 0usize;
-    let mut models_seen: std::collections::BTreeSet<String> = Default::default();
 
-    for sid in ids {
-        // One read per session: the whole turns subtree as an object keyed by
-        // zero-padded index. Missing/non-object subtrees are simply skipped.
-        let turns = match repo.get_json("main", &format!("/sessions/{sid}/turns")) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let Some(obj) = turns.as_object() else {
-            continue;
-        };
-
-        let mut by_model: std::collections::BTreeMap<String, crate::memory_tools::ModelUsage> =
-            Default::default();
-        for turn in obj.values() {
-            let model = turn.get("model").and_then(|v| v.as_str()).unwrap_or("");
-            // Skip placeholders: empty, "unknown", and angle-bracket sentinels
-            // like "<synthetic>" that some stored turns carry.
-            if model.is_empty() || model == "unknown" || model.starts_with('<') {
-                continue;
-            }
-            let tok = turn.get("tokens");
-            let field = |k: &str| {
-                tok.and_then(|t| t.get(k))
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0)
-            };
-            let entry = by_model.entry(model.to_string()).or_default();
-            entry.input_tokens += field("input");
-            entry.output_tokens += field("output");
-            entry.cache_read_tokens += field("cache_read");
-            // Stored turns use the provider's field name `cache_creation`;
-            // ModelUsage calls it cache_create.
-            entry.cache_create_tokens += field("cache_creation");
-            entry.call_count += 1;
-            turns_scanned += 1;
-            models_seen.insert(model.to_string());
+    // Single-session path (the ingest hot path): always process just that one
+    // session — one turns read is fast enough that no budget is needed.
+    if let Some(sid) = q.session.as_deref().filter(|s| !s.is_empty()) {
+        let mut models_seen: std::collections::BTreeSet<String> = Default::default();
+        let (updated, turns) = backfill_one_session(&repo, &s.sessions, sid, &mut models_seen);
+        let sessions_updated = usize::from(updated);
+        let turns_scanned = turns;
+        if let Some(path) = &s.db_path {
+            s.sessions.flush_to_db(path);
         }
-
-        if !by_model.is_empty() {
-            s.sessions.get_or_create(&sid).set_by_model(by_model);
-            sessions_updated += 1;
-        }
+        return Ok(Json(serde_json::json!({
+            "status": "ok",
+            "namespace": ns.0,
+            "sessions_updated": sessions_updated,
+            "turns_scanned": turns_scanned,
+            "models": models_seen,
+            "total": 1,
+            "processed": 1,
+            "next_offset": serde_json::Value::Null,
+            "done": true,
+        })));
     }
+
+    // Whole-namespace path: bounded per request, resumable via a cursor.
+    let budget = std::time::Duration::from_secs(q.max_secs.max(1));
+    let p = run_namespace_backfill(&repo, &s.sessions, q.offset, q.limit, budget);
 
     // Persist so the backfill survives a restart (it's a REPLACE, so flushing
     // the same result again is harmless).
@@ -1328,10 +1388,74 @@ async fn backfill_by_model(
     Ok(Json(serde_json::json!({
         "status": "ok",
         "namespace": ns.0,
-        "sessions_updated": sessions_updated,
-        "turns_scanned": turns_scanned,
-        "models": models_seen,
+        "sessions_updated": p.sessions_updated,
+        "turns_scanned": p.turns_scanned,
+        "models": p.models_seen,
+        "total": p.total,
+        "processed": p.processed,
+        "next_offset": match p.next_offset {
+            Some(v) => serde_json::json!(v),
+            None => serde_json::Value::Null,
+        },
+        "done": p.next_offset.is_none(),
     })))
+}
+
+/// Progress of one whole-namespace backfill request.
+struct NsBackfillProgress {
+    sessions_updated: usize,
+    turns_scanned: usize,
+    models_seen: std::collections::BTreeSet<String>,
+    processed: usize,
+    /// Where to resume from next (`None` once every session has been processed).
+    next_offset: Option<usize>,
+    total: usize,
+}
+
+/// Backfill a slice of a namespace's sessions, stopping at `limit` sessions or
+/// when `budget` elapses (whichever first), and report where to resume. Session
+/// ids are sorted so the cursor is stable across requests.
+fn run_namespace_backfill(
+    repo: &Repository,
+    sessions: &crate::memory_tools::SessionRegistry,
+    offset: usize,
+    limit: Option<usize>,
+    budget: std::time::Duration,
+) -> NsBackfillProgress {
+    let mut ids: Vec<String> = session_ids_with_nodes(repo).into_iter().collect();
+    ids.sort();
+    let total = ids.len();
+
+    let start = std::time::Instant::now();
+    let hard_cap = limit.unwrap_or(usize::MAX);
+    let mut models_seen: std::collections::BTreeSet<String> = Default::default();
+    let mut sessions_updated = 0usize;
+    let mut turns_scanned = 0usize;
+
+    let mut idx = offset.min(total);
+    let mut processed = 0usize;
+    while idx < total && processed < hard_cap {
+        let (updated, turns) = backfill_one_session(repo, sessions, &ids[idx], &mut models_seen);
+        if updated {
+            sessions_updated += 1;
+        }
+        turns_scanned += turns;
+        idx += 1;
+        processed += 1;
+        // Always make at least one session of progress, then honour the budget.
+        if start.elapsed() >= budget {
+            break;
+        }
+    }
+
+    NsBackfillProgress {
+        sessions_updated,
+        turns_scanned,
+        models_seen,
+        processed,
+        next_offset: if idx >= total { None } else { Some(idx) },
+        total,
+    }
 }
 
 #[derive(Deserialize)]
@@ -6396,6 +6520,116 @@ mod tests {
         repo.list_paths("main", path, None)
             .map(|v| v.len())
             .unwrap_or(0)
+    }
+
+    // ── backfill_by_model pagination: a big namespace can't time out ────────
+    /// Seed a session's whole `/turns` subtree the way ingest stores it: one
+    /// object keyed by zero-padded index, each value a turn with `model` and
+    /// `tokens`. `turns` is `(model, input_tokens)` pairs.
+    fn seed_turns(repo: &Repository, sid: &str, turns: &[(&str, u64)]) {
+        let mut obj = serde_json::Map::new();
+        for (i, (model, input)) in turns.iter().enumerate() {
+            obj.insert(
+                format!("{i:04}"),
+                serde_json::json!({ "model": model, "tokens": { "input": input } }),
+            );
+        }
+        repo.set_json(
+            "main",
+            &format!("/sessions/{sid}/turns"),
+            &serde_json::Value::Object(obj),
+            CommitOptions::new(
+                "t",
+                IntentCategory::Custom("test".to_string()),
+                "seed-turns",
+            ),
+        )
+        .expect("seed turns");
+        // A shallow leaf so `session_ids_with_nodes` (depth-2 scan) enumerates
+        // the session, exactly as real sessions carry `name`/`started_at`.
+        repo.set_json(
+            "main",
+            &format!("/sessions/{sid}/name"),
+            &serde_json::json!(sid),
+            CommitOptions::new("t", IntentCategory::Custom("test".to_string()), "seed-name"),
+        )
+        .expect("seed name");
+    }
+
+    #[test]
+    fn backfill_one_session_recomputes_and_reports_turnless() {
+        let repo = move_test_repo();
+        let sessions = crate::memory_tools::SessionRegistry::new();
+        seed_turns(
+            &repo,
+            "s1",
+            &[("claude-opus-4-8", 100), ("claude-opus-4-8", 50)],
+        );
+
+        let mut models = std::collections::BTreeSet::new();
+        let (updated, turns) = backfill_one_session(&repo, &sessions, "s1", &mut models);
+        assert!(updated, "session with turns is updated");
+        assert_eq!(turns, 2);
+        assert!(models.contains("claude-opus-4-8"));
+        let snap = sessions.snapshot("s1").expect("snapshot");
+        assert_eq!(snap.llm_input_tokens, 150, "derives from stored turns");
+
+        // A session with no /turns subtree is left untouched (caller must delete
+        // it to zero the counters — this is why the residual sweep deletes).
+        let (updated2, turns2) = backfill_one_session(&repo, &sessions, "missing", &mut models);
+        assert!(!updated2);
+        assert_eq!(turns2, 0);
+    }
+
+    #[test]
+    fn namespace_backfill_pages_through_all_sessions_via_cursor() {
+        let repo = move_test_repo();
+        let sessions = crate::memory_tools::SessionRegistry::new();
+        for i in 0..5 {
+            seed_turns(&repo, &format!("s{i}"), &[("claude-opus-4-8", 10)]);
+        }
+        // Generous time budget so only the `limit` bounds each page: proves the
+        // cursor mechanics independent of wall-clock timing.
+        let budget = std::time::Duration::from_secs(3600);
+
+        // Page 1: two sessions, resume at offset 2.
+        let p1 = run_namespace_backfill(&repo, &sessions, 0, Some(2), budget);
+        assert_eq!(p1.total, 5);
+        assert_eq!(p1.processed, 2);
+        assert_eq!(p1.next_offset, Some(2));
+
+        // Page 2.
+        let p2 = run_namespace_backfill(&repo, &sessions, 2, Some(2), budget);
+        assert_eq!(p2.processed, 2);
+        assert_eq!(p2.next_offset, Some(4));
+
+        // Final page: one session left, cursor clears.
+        let p3 = run_namespace_backfill(&repo, &sessions, 4, Some(2), budget);
+        assert_eq!(p3.processed, 1);
+        assert_eq!(p3.next_offset, None, "done once every session is processed");
+
+        // Offset past the end is a clean no-op, not a panic.
+        let past = run_namespace_backfill(&repo, &sessions, 99, Some(2), budget);
+        assert_eq!(past.processed, 0);
+        assert_eq!(past.next_offset, None);
+    }
+
+    #[test]
+    fn namespace_backfill_zero_budget_still_advances_one_session() {
+        // A zero/expired budget must not livelock: at least one session per
+        // request guarantees forward progress and eventual completion.
+        let repo = move_test_repo();
+        let sessions = crate::memory_tools::SessionRegistry::new();
+        for i in 0..3 {
+            seed_turns(&repo, &format!("s{i}"), &[("claude-opus-4-8", 10)]);
+        }
+        let p =
+            run_namespace_backfill(&repo, &sessions, 0, None, std::time::Duration::from_secs(0));
+        assert_eq!(
+            p.processed, 1,
+            "one session of progress even under a spent budget"
+        );
+        assert_eq!(p.next_offset, Some(1));
     }
 
     #[test]
