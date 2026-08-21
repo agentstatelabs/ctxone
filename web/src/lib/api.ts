@@ -176,6 +176,9 @@ export interface WorkspaceSummary {
 		llm_output: number;
 		llm_cache_read: number;
 		llm_cache_create: number;
+		/** Per-model token split, summed across the workspace's sessions. Lets the
+		 * Hub Home price each model at its own rate. Absent on older hubs. */
+		by_model?: Record<string, ModelUsage>;
 	};
 	/** Graph counts for `main`; shape matches StatsResponse (extra fields ignored). */
 	graph: {

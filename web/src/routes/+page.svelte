@@ -62,8 +62,29 @@
 		};
 	}
 
-	/** Rough (≈) cost for a workspace, priced from its representative model. */
+	/**
+	 * Cost for a workspace, summed per model at each model's own rate — the same
+	 * exact method the workspace LLM-usage panel uses. A workspace is usually one
+	 * model but sometimes several, and pricing the whole thing at the single
+	 * most-common model mis-prices the mix (an opus-heavy workspace whose
+	 * most-common model is a cheap Codex read ~4× low). Falls back to the
+	 * representative-model estimate only when an older hub sends no `by_model`.
+	 */
 	function wsCost(w: WorkspaceSummary): number | null {
+		const byModel = w.tokens.by_model;
+		if (byModel && Object.keys(byModel).length > 0) {
+			let total = 0;
+			for (const [model, u] of Object.entries(byModel)) {
+				const c = estimateCost(model, {
+					input: u.input_tokens,
+					output: u.output_tokens,
+					cache_read: u.cache_read_tokens,
+					cache_create: u.cache_create_tokens
+				});
+				if (c != null) total += c;
+			}
+			return total;
+		}
 		return estimateCost(w.representative_model ?? null, llmCounters(w));
 	}
 
@@ -259,7 +280,7 @@
 								{/if}
 							</span>
 							{#if cost !== null}
-								<span class="stat cost" title="Rough estimate from the workspace's most-common model ({w.representative_model})">
+								<span class="stat cost" title="Summed per model at each model's own rate, from the exact per-turn token split — the same basis as the workspace's LLM-usage panel.">
 									≈ {formatUsd(cost)}
 								</span>
 							{/if}

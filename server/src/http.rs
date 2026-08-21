@@ -4660,6 +4660,12 @@ struct WorkspaceTokens {
     llm_output: u64,
     llm_cache_read: u64,
     llm_cache_create: u64,
+    /// Per-model token split, summed across the workspace's sessions. Lets the
+    /// Hub Home price each model at its own rate instead of applying a single
+    /// representative model's price to the whole workspace (which mis-prices
+    /// mixed-model workspaces — an opus-heavy workspace whose most-common model
+    /// is a cheap Codex, say).
+    by_model: std::collections::BTreeMap<String, crate::memory_tools::ModelUsage>,
 }
 
 /// Sum token counters across the snapshots belonging to one workspace. `ids` is
@@ -4682,6 +4688,14 @@ fn sum_workspace_tokens(
             t.llm_output += snap.llm_output_tokens;
             t.llm_cache_read += snap.llm_cache_read_tokens;
             t.llm_cache_create += snap.llm_cache_create_tokens;
+            for (model, u) in &snap.llm_by_model {
+                let e = t.by_model.entry(model.clone()).or_default();
+                e.input_tokens += u.input_tokens;
+                e.output_tokens += u.output_tokens;
+                e.cache_read_tokens += u.cache_read_tokens;
+                e.cache_create_tokens += u.cache_create_tokens;
+                e.call_count += u.call_count;
+            }
         }
     }
     t
@@ -4804,6 +4818,9 @@ async fn namespaces_summary(State(s): State<HubState>) -> impl IntoResponse {
                 "llm_output": tokens.llm_output,
                 "llm_cache_read": tokens.llm_cache_read,
                 "llm_cache_create": tokens.llm_cache_create,
+                // Per-model split so the Hub Home prices each model at its own
+                // rate; `representative_model` above is kept for the label.
+                "by_model": tokens.by_model,
             },
             "graph": graph,
         }));
@@ -6838,6 +6855,51 @@ mod tests {
         let def = sum_workspace_tokens(&snaps, &placed, true);
         assert_eq!(def.session_count, 1);
         assert_eq!(def.used, 1);
+    }
+
+    #[test]
+    fn sum_workspace_tokens_aggregates_by_model_across_sessions() {
+        use crate::memory_tools::ModelUsage;
+        let mu = |i: u64, cr: u64, calls: u64| ModelUsage {
+            input_tokens: i,
+            cache_read_tokens: cr,
+            call_count: calls,
+            ..Default::default()
+        };
+        let with_models = |id: &str, models: &[(&str, ModelUsage)]| -> SessionSnapshot {
+            SessionSnapshot {
+                session_id: id.to_string(),
+                llm_by_model: models
+                    .iter()
+                    .map(|(m, u)| (m.to_string(), u.clone()))
+                    .collect(),
+                ..Default::default()
+            }
+        };
+        // Two sessions in the workspace, each mixing models; opus appears in both.
+        let snaps = vec![
+            with_models(
+                "a",
+                &[
+                    ("claude-opus-4-8", mu(100, 900, 3)),
+                    ("gpt-5.5", mu(10, 5, 1)),
+                ],
+            ),
+            with_models("b", &[("claude-opus-4-8", mu(50, 400, 2))]),
+        ];
+        let ids: std::collections::HashSet<String> =
+            ["a".to_string(), "b".to_string()].into_iter().collect();
+        let t = sum_workspace_tokens(&snaps, &ids, false);
+
+        // opus summed across a+b; gpt-5.5 only from a.
+        let opus = t.by_model.get("claude-opus-4-8").expect("opus present");
+        assert_eq!(opus.input_tokens, 150);
+        assert_eq!(opus.cache_read_tokens, 1300);
+        assert_eq!(opus.call_count, 5);
+        let gpt = t.by_model.get("gpt-5.5").expect("gpt present");
+        assert_eq!(gpt.input_tokens, 10);
+        assert_eq!(gpt.call_count, 1);
+        assert_eq!(t.by_model.len(), 2);
     }
 
     #[test]
