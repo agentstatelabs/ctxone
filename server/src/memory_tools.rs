@@ -658,6 +658,13 @@ pub struct SessionSnapshot {
     /// aggregate. Empty for sessions ingested before per-model capture.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub llm_by_model: BTreeMap<String, ModelUsage>,
+
+    /// Whether this session has a stored `/turns` subtree in the workspace being
+    /// listed. The Sessions view uses it to skip the first-turn title probe for
+    /// turn-less sessions — otherwise every one of them logged a 404 to the
+    /// console. Set by the HTTP layer at list time; never persisted.
+    #[serde(default)]
+    pub has_turns: bool,
 }
 
 impl SessionSnapshot {
@@ -726,6 +733,9 @@ impl SessionSnapshot {
             models_used: Vec::new(),
             fallback_ratio: None,
             llm_by_model: by_model,
+            // Set per-session by the HTTP list layer; the snapshot itself is
+            // registry-derived and has no graph view here.
+            has_turns: false,
         }
     }
 }
@@ -984,6 +994,9 @@ impl SessionRegistry {
             models_used: Vec::new(),
             fallback_ratio: None,
             llm_by_model: by_model,
+            // Set per-session by the HTTP list layer; the snapshot itself is
+            // registry-derived and has no graph view here.
+            has_turns: false,
         }
     }
 

@@ -58,6 +58,10 @@
 		/** Optional ISO timestamps on newer hubs. Absent → derived client-side. */
 		started_at?: string | null;
 		updated_at?: string | null;
+		/** Whether the session has a stored `/turns` subtree (newer hubs). When
+		 * explicitly `false` we skip the first-turn title probe, which would only
+		 * 404. `undefined` (older hubs) still probes, preserving prior behaviour. */
+		has_turns?: boolean;
 	}
 
 	interface MemoryCommit {
@@ -451,7 +455,12 @@
 		// Only sessions we haven't derived yet (cache by id). We still derive
 		// dates for server-named sessions, so the gate is purely "not seen".
 		// The auto-refresh reuses this cache and only fetches genuinely-new ids.
-		const todo = sessions.filter((s) => !(s.session_id in derivedMeta));
+		// Skip sessions the hub says have no stored turns: their first-turn probe
+		// can only 404. `has_turns === false` is the explicit signal; `undefined`
+		// (older hubs) still probes, preserving prior behaviour.
+		const todo = sessions.filter(
+			(s) => !(s.session_id in derivedMeta) && s.has_turns !== false
+		);
 		const CONCURRENCY = 8;
 		for (let i = 0; i < todo.length; i += CONCURRENCY) {
 			await Promise.all(

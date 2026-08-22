@@ -81,6 +81,11 @@ export interface SessionSnapshot extends TokenStats {
 	 * onto `last_model`. Summed across sessions on the aggregate snapshot.
 	 * Absent for sessions ingested before per-model capture. */
 	llm_by_model?: Record<string, ModelUsage>;
+	/** Whether the session has a stored `/turns` subtree in the listed workspace.
+	 * The Sessions view gates its first-turn title probe on this so turn-less
+	 * sessions don't each log a 404. Absent on older hubs (treated as unknown →
+	 * the probe still runs, preserving prior behaviour). */
+	has_turns?: boolean;
 }
 
 /** One model's share of a session's LLM usage. Mirrors the server's ModelUsage. */

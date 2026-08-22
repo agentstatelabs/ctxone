@@ -1229,6 +1229,17 @@ async fn list_sessions(State(s): State<HubState>, ns: NamespaceId) -> impl IntoR
             snap.started_at = meta.started_at;
             snap.updated_at = meta.updated_at;
             snap.models_used = meta.models_used;
+            // Cheap existence check (depth 1 returns an empty list for a present
+            // turns node — the leaves are one level deeper — and an error when
+            // the node is absent). Lets the Sessions view skip the first-turn
+            // title probe for turn-less sessions instead of 404-ing on each.
+            snap.has_turns = repo
+                .list_paths(
+                    "main",
+                    &format!("/sessions/{}/turns", snap.session_id),
+                    Some(1),
+                )
+                .is_ok();
         }
     }
     // Lend the workspace-aggregate ratio to sessions that spent tokens but have
