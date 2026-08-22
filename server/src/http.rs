@@ -1299,6 +1299,20 @@ fn default_backfill_max_secs() -> u64 {
     20
 }
 
+/// Whether a model id belongs to the OpenAI/Codex family, whose usage records
+/// count cached tokens INSIDE `input_tokens` (unlike Anthropic, which reports
+/// input disjoint from cache_read). Matches `gpt-*`, `codex*` (incl.
+/// `codex-auto-review`), and the `o1/o3/o4` reasoning line. Kept in lockstep
+/// with the frontend pricing families in `web/src/lib/pricing.ts`.
+fn is_openai_family(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    m.starts_with("gpt-")
+        || m.starts_with("codex")
+        || m.starts_with("o1")
+        || m.starts_with("o3")
+        || m.starts_with("o4")
+}
+
 /// Recompute one session's `by_model` split from its stored turns and write it
 /// into the registry. Returns `(updated, turns_scanned)`; `updated` is false
 /// when the session has no usable turns (its existing split is left untouched —
@@ -1336,10 +1350,25 @@ fn backfill_one_session(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0)
         };
+        let cache_read = field("cache_read");
+        // OpenAI/Codex report `input_tokens` INCLUDING the cached portion
+        // (`cached_input_tokens` → cache_read is a subset of input), whereas
+        // Anthropic reports input DISJOINT from cache_read. Summing input +
+        // cache_read as-is therefore double-counts the cached tokens for
+        // OpenAI-family models — ~2x on cache-heavy sessions. Subtract the
+        // cached portion so input means "fresh input" for every provider, the
+        // Anthropic convention every downstream sum and cost calc assumes.
+        // Idempotent: stored turns keep the provider-native format, so this
+        // recomputes the same corrected split however often backfill runs.
+        let input = if is_openai_family(model) {
+            field("input").saturating_sub(cache_read)
+        } else {
+            field("input")
+        };
         let entry = by_model.entry(model.to_string()).or_default();
-        entry.input_tokens += field("input");
+        entry.input_tokens += input;
         entry.output_tokens += field("output");
-        entry.cache_read_tokens += field("cache_read");
+        entry.cache_read_tokens += cache_read;
         // Stored turns use the provider's field name `cache_creation`;
         // ModelUsage calls it cache_create.
         entry.cache_create_tokens += field("cache_creation");
@@ -6582,6 +6611,83 @@ mod tests {
             CommitOptions::new("t", IntentCategory::Custom("test".to_string()), "seed-name"),
         )
         .expect("seed name");
+    }
+
+    /// Seed one turn carrying input + cache_read for a specific model, to
+    /// exercise the OpenAI cached-token normalization.
+    fn seed_turn_full(repo: &Repository, sid: &str, model: &str, input: u64, cache_read: u64) {
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "0000".to_string(),
+            serde_json::json!({
+                "model": model,
+                "tokens": { "input": input, "output": 10, "cache_read": cache_read }
+            }),
+        );
+        repo.set_json(
+            "main",
+            &format!("/sessions/{sid}/turns"),
+            &serde_json::Value::Object(obj),
+            CommitOptions::new("t", IntentCategory::Custom("test".to_string()), "seed"),
+        )
+        .expect("seed turns");
+        repo.set_json(
+            "main",
+            &format!("/sessions/{sid}/name"),
+            &serde_json::json!(sid),
+            CommitOptions::new("t", IntentCategory::Custom("test".to_string()), "seed-name"),
+        )
+        .expect("seed name");
+    }
+
+    #[test]
+    fn is_openai_family_matches_gpt_codex_and_o_series_only() {
+        for m in [
+            "gpt-5.4",
+            "gpt-5-codex",
+            "codex-auto-review",
+            "o1-preview",
+            "o3",
+            "O4-MINI",
+        ] {
+            assert!(is_openai_family(m), "{m} should be OpenAI family");
+        }
+        for m in [
+            "claude-opus-4-8",
+            "claude-sonnet-4-6",
+            "gemini-3-flash",
+            "unknown",
+        ] {
+            assert!(!is_openai_family(m), "{m} should NOT be OpenAI family");
+        }
+    }
+
+    #[test]
+    fn backfill_subtracts_cached_from_input_for_openai_only() {
+        let repo = move_test_repo();
+        let sessions = crate::memory_tools::SessionRegistry::new();
+        // OpenAI: input_tokens (1000) INCLUDES the cached 900 → fresh input 100.
+        seed_turn_full(&repo, "gpt", "gpt-5.4", 1000, 900);
+        // Anthropic: input (1000) is disjoint from cache_read (900) → unchanged.
+        seed_turn_full(&repo, "cla", "claude-opus-4-8", 1000, 900);
+
+        let mut models = std::collections::BTreeSet::new();
+        backfill_one_session(&repo, &sessions, "gpt", &mut models);
+        backfill_one_session(&repo, &sessions, "cla", &mut models);
+
+        let g = sessions.snapshot("gpt").expect("gpt snap");
+        assert_eq!(g.llm_input_tokens, 100, "openai input = 1000 - 900 cached");
+        assert_eq!(g.llm_cache_read_tokens, 900);
+        // Total is now input_full + output (matches the provider's total_tokens).
+        assert_eq!(g.llm_input_tokens + g.llm_cache_read_tokens, 1000);
+
+        let c = sessions.snapshot("cla").expect("cla snap");
+        assert_eq!(c.llm_input_tokens, 1000, "anthropic input untouched");
+        assert_eq!(c.llm_cache_read_tokens, 900);
+
+        // Idempotent: a second backfill (turns unchanged) yields the same split.
+        backfill_one_session(&repo, &sessions, "gpt", &mut models);
+        assert_eq!(sessions.snapshot("gpt").unwrap().llm_input_tokens, 100);
     }
 
     #[test]
