@@ -6,6 +6,8 @@ CTXone records every agent and user interaction — decisions, plans, code chang
 
 Agents are brilliant and amnesiac. Each session starts from zero, re-derives what was already settled, and evaporates when the window closes — the reasoning, the decisions, and the cost all lost. CTXone is the durable record that fixes that: work happens, CTXone captures it, and the next agent (or the next teammate, or you in three weeks) inherits it instead of rediscovering it.
 
+![CTXone Lens — Hub overview: every workspace with sessions, token totals, and per-model cost](docs/img/lens-hub.png)
+
 ## What CTXone gives you
 
 - **Durable memory** — `remember` / `recall` decisions, conventions, and gotchas across sessions; token-budgeted recall injects the right prior context instead of re-reading docs (typically thousands-fold cheaper than re-deriving it).
@@ -31,6 +33,17 @@ Agents are brilliant and amnesiac. Each session starts from zero, re-derives wha
 | **CTXone Lens** | `web/` | Web UI: dashboard, plans, sessions, browse, history, branches, taint, diff. ⌘K palette, 15s auto-refresh, multi-theme |
 | **ctx** | `cli/` | CLI for memory, plans, branches, taint, and team operations |
 | **ctxone (Python)** | `bindings/python/` | Python client library (`pip install ctxone`) |
+
+## CTXone Lens
+
+The web UI over everything CTXone records — dashboards, sessions, code intelligence, and memory, with per-model token and cost accounting throughout.
+
+| | |
+|---|---|
+| [![Workspace dashboard — import stats, recall savings, and per-model LLM usage and cost](docs/img/lens-workspace.png)](docs/img/lens-workspace.png) | [![Code intelligence — symbols, files, and call graphs indexed per repo via AgentStateDeveloper](docs/img/lens-code.png)](docs/img/lens-code.png) |
+| **Workspace dashboard** — import stats, recall savings, and LLM usage costed per model from the exact per-turn token split. | **Code intelligence** — symbols, files, and call graphs indexed per repo through AgentStateDeveloper. |
+| [![Sessions — every ingested transcript with model, tokens, and derived title](docs/img/lens-sessions.png)](docs/img/lens-sessions.png) | |
+| **Sessions** — every ingested transcript, filterable by agent and model, each with its token spend and savings. | |
 
 ## Pairs with AgentStateDeveloper
 
