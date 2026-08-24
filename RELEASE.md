@@ -60,6 +60,25 @@ The script:
 
 About ~7 minutes wall-clock the first time; less on incremental rebuilds.
 
+## After the release: bump the site footer
+
+The marketing site carries a hardcoded version string that nothing derives
+from this repo. It will not update itself.
+
+In `CTXone-site`, `website/src/components/SiteFooter.astro`:
+
+```html
+<div class="version">CTXone v1.0.0</div>
+```
+
+Bump it, commit, push. The site deploys in two hops (GitLab CI mirrors to
+GitHub, GitHub Actions builds Pages), so confirm the live page rather than
+the pipeline — a green pipeline only means the mirror landed.
+
+This is not hypothetical: agentstategraph.dev advertised `0.9.21` while the
+real release was `0.9.24`, stale by three patches, because this step had no
+home in a checklist.
+
 ## Partial / recovery flags
 
 | env var | effect |
