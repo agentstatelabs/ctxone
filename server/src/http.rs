@@ -4904,7 +4904,10 @@ async fn namespaces_summary(State(s): State<HubState>) -> impl IntoResponse {
         // the `plan:<ns>:` prefix `seal_plan_epoch` writes.
         if let Some(obj) = graph.as_object_mut() {
             let prefix = plan_tools::epoch_id_prefix(name);
-            let count = all_epoch_ids.iter().filter(|id| id.starts_with(&prefix)).count();
+            let count = all_epoch_ids
+                .iter()
+                .filter(|id| id.starts_with(&prefix))
+                .count();
             obj.insert("epoch_count".to_string(), serde_json::json!(count));
         }
         out.push(serde_json::json!({
