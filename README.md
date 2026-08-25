@@ -15,7 +15,8 @@ Agents are brilliant and amnesiac. Each session starts from zero, re-derives wha
 - **Plans & tasks that survive sessions** — shared plans with a task state machine, **required proof to close a task and a required summary to close a plan**, agent assignment, and cross-plan links.
 - **Full session capture** — a Stop-hook scraper ingests whole transcripts from **Claude Code, Codex, Gemini, and Cursor** into one timeline: every turn, tool call, model, token count, and cost — turning throwaway sessions into a searchable record.
 - **Token & cost accounting** — per-session and per-workspace spend, savings, and cache metrics, surfaced live.
-- **CTXone Lens** — a web UI over all of it: dashboard, plans, sessions, memory browse, history, branches, taint, and diff.
+- **Sealed checkpoints** — completing a plan automatically seals a per-workspace **epoch**: a point-in-time snapshot of that workspace's memory graph, viewable and downloadable as a JSON audit bundle. Zero extra work — finish a plan, get a checkpoint.
+- **CTXone Lens** — a web UI over all of it: dashboard, plans, sessions, memory browse, history, branches, taint, diff, and sealed checkpoints.
 - **Team-shared, branchable, multi-repo** — one workspace per repo in a central Hub; isolated agent worktrees, one shared mind. Branches, merges, and taint/quarantine carry through.
 - **Connect anything** — a broad MCP tool surface plus an HTTP API, a `ctx` CLI, and a Python client (`pip install ctxone`).
 
