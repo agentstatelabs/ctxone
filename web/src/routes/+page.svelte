@@ -88,10 +88,24 @@
 		return estimateCost(w.representative_model ?? null, llmCounters(w));
 	}
 
-	/** Total LLM tokens — the same counters the cost is priced from. */
+	/**
+	 * "New work" tokens: input + output — the tokens the models actually read
+	 * fresh and generated. This is the headline number because the raw total is
+	 * swamped by cache reads: agentic tools (Codex especially) re-send the whole
+	 * context on every tool step, so cache_read is often >95% of the count while
+	 * costing ~a tenth per token. Headlining the total made a workspace read
+	 * "5.5B tok" when the real work was ~200M. Cache reads are shown alongside.
+	 */
 	function wsTokens(w: WorkspaceSummary): number {
 		const t = llmCounters(w);
-		return t.input + t.output + t.cache_read + t.cache_create;
+		return t.input + t.output;
+	}
+
+	/** Cache reads (+ cache writes) — context re-reads, shown as a secondary
+	 * figure so the headline isn't dominated by them. */
+	function wsCacheReads(w: WorkspaceSummary): number {
+		const t = llmCounters(w);
+		return t.cache_read + t.cache_create;
 	}
 
 	let wsSort = $state<'sessions' | 'saved' | 'commits' | 'cost'>('sessions');
@@ -272,9 +286,12 @@
 							<span class="stat"><strong>{w.session_count}</strong> sessions</span>
 							<span
 								class="stat"
-								title="{w.tokens.llm_input} in / {w.tokens.llm_output} out / {w.tokens.llm_cache_read} cache read / {w.tokens.llm_cache_create} cache write — the same counters the cost is priced from. Session context tokens: {w.tokens.used} used, {w.tokens.saved} saved."
+								title="New-work tokens = input + output ({w.tokens.llm_input} in / {w.tokens.llm_output} out). Cache reads ({w.tokens.llm_cache_read}) and cache writes ({w.tokens.llm_cache_create}) are context re-reads — often >95% of the raw total but a fraction of the cost, so they're shown separately. All four are the counters the cost is priced from."
 							>
 								<strong>{formatCompact(wsTokens(w))}</strong> tok
+								{#if wsCacheReads(w) > 0}
+									<span class="cache-reads">· {formatCompact(wsCacheReads(w))} cache</span>
+								{/if}
 								{#if w.tokens.saved > 0}
 									<span class="saved">· {formatCompact(w.tokens.saved)} saved</span>
 								{/if}
@@ -431,6 +448,9 @@
 	}
 	.saved {
 		color: var(--lens-ok);
+	}
+	.cache-reads {
+		color: var(--lens-text-faint, var(--lens-text-secondary));
 	}
 	.stat.cost {
 		color: var(--lens-text-secondary);

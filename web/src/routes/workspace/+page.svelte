@@ -886,8 +886,12 @@
 		emptyText="Import a session (ctx ingest-session) or let agent usage flow through the hub."
 	>
 		<dl class="usage-rows">
-			<div class="u-row"><dt>Input tokens</dt><dd>{formatCompact(usage.input)}</dd></div>
-			<div class="u-row"><dt>Output tokens</dt><dd>{formatCompact(usage.output)}</dd></div>
+			<div class="u-row u-lead">
+				<dt>New work <span class="u-muted">(input + output)</span></dt>
+				<dd>{formatCompact(usage.input + usage.output)}</dd>
+			</div>
+			<div class="u-row u-sub"><dt>Input tokens</dt><dd>{formatCompact(usage.input)}</dd></div>
+			<div class="u-row u-sub"><dt>Output tokens</dt><dd>{formatCompact(usage.output)}</dd></div>
 			<div class="u-row">
 				<dt>Cache read {#if usage.cacheHit !== null}<span class="u-muted">({(usage.cacheHit * 100).toFixed(0)}% hit)</span>{/if}</dt>
 				<dd>{formatCompact(usage.cacheRead)}</dd>
@@ -1482,6 +1486,27 @@
 	.u-muted {
 		color: var(--lens-muted);
 		font-size: 0.85em;
+	}
+
+	/* "New work" leads; input/output are its indented breakdown. */
+	.u-row.u-lead dt {
+		color: var(--lens-fg, #e6e6e6);
+		font-weight: 600;
+		font-size: var(--lens-font-size-sm, var(--lens-font-size-xs));
+	}
+	.u-row.u-lead dd {
+		font-weight: 600;
+	}
+	.u-row.u-sub {
+		border-bottom: none;
+		padding: 0 0 0 var(--lens-space-3);
+	}
+	.u-row.u-sub dt {
+		color: var(--lens-muted);
+		opacity: 0.8;
+	}
+	.u-row.u-sub dd {
+		color: var(--lens-text-secondary, var(--lens-muted));
 	}
 
 	.u-row.u-cost {
