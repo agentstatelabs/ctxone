@@ -169,7 +169,6 @@ export interface Epoch {
 	created_at: string;
 	sealed_at: string | null;
 	commit_count: number;
-	seal_hash: string | null;
 }
 
 /** Sealed per-plan epoch checkpoints for the current workspace, or every

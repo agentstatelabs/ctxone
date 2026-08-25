@@ -1139,8 +1139,7 @@
 					<div class="ep-main">
 						<span class="ep-plan">{e.plan}</span>
 						<span class="ep-meta">
-							sealed {epochSealDate(e.sealed_at)} · {formatCompact(e.commit_count)} commits
-							{#if e.seal_hash}· <code class="ep-hash" title="Merkle seal hash">{e.seal_hash}</code>{/if}
+							sealed {epochSealDate(e.sealed_at)} · {formatCompact(e.commit_count)} commits sealed
 						</span>
 					</div>
 					<a class="ep-dl" href={epochExportUrl(e.id, e.namespace)} download title="Download audit bundle (JSON)">
@@ -1787,10 +1786,6 @@
 		margin-top: 2px;
 		font-size: var(--lens-font-size-2xs, 0.72rem);
 		color: var(--lens-muted);
-	}
-	.ep-hash {
-		font-family: var(--lens-font-mono, monospace);
-		color: var(--lens-text-secondary, var(--lens-muted));
 	}
 	.ep-dl {
 		flex: none;

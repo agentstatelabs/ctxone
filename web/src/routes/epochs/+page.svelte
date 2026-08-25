@@ -62,8 +62,7 @@
 						<th>Workspace</th>
 						<th>Plan</th>
 						<th>Sealed</th>
-						<th class="num">Commits</th>
-						<th>Seal hash</th>
+						<th class="num">Commits sealed</th>
 						<th></th>
 					</tr>
 				</thead>
@@ -74,7 +73,6 @@
 							<td class="plan">{e.plan}</td>
 							<td>{shortDate(e.sealed_at)}</td>
 							<td class="num">{formatCompact(e.commit_count)}</td>
-							<td>{#if e.seal_hash}<code>{e.seal_hash}</code>{:else}—{/if}</td>
 							<td class="dl-cell">
 								<a
 									class="dl"

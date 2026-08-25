@@ -3298,6 +3298,15 @@ async fn list_epochs(
     for e in &all {
         if let Some((ns_name, prefix)) = prefixes.iter().find(|(_, p)| e.id.starts_with(p)) {
             let plan = e.id.strip_prefix(prefix).unwrap_or(&e.id);
+            // ASG's `EpochEntry.commit_count` (and the sqlite column) reflect the
+            // empty `commits` field at create time, NOT the sealed set — seal
+            // stores the real commits in `sealed_commits` and never updates the
+            // count. Read the full epoch to report the true sealed-commit count.
+            // (seal_hash is not persisted on sqlite at all, so it is omitted.)
+            let sealed = repo
+                .get_epoch(&e.id)
+                .map(|full| full.sealed_commits.len())
+                .unwrap_or(e.commit_count);
             out.push(serde_json::json!({
                 "id": e.id,
                 "namespace": ns_name,
@@ -3305,8 +3314,7 @@ async fn list_epochs(
                 "status": format!("{:?}", e.status),
                 "created_at": e.created_at,
                 "sealed_at": e.sealed_at,
-                "commit_count": e.commit_count,
-                "seal_hash": e.seal_hash.as_ref().map(|h| h.short().to_string()),
+                "commit_count": sealed,
             }));
         }
     }
