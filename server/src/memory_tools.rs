@@ -3533,6 +3533,7 @@ impl CtxOneServer {
             return;
         }
         let repo = self.repo.clone();
+        let ns = self.namespace.clone();
         let pid = plan_id.to_string();
         let name = plan.name.clone();
         let summary = plan
@@ -3540,7 +3541,7 @@ impl CtxOneServer {
             .clone()
             .unwrap_or_else(|| format!("Plan {pid} completed"));
         tokio::task::spawn_blocking(move || {
-            match pt::seal_plan_epoch(&repo, &pid, &name, &summary) {
+            match pt::seal_plan_epoch(&repo, &ns, &pid, &name, &summary) {
                 Ok(true) => tracing::info!(plan = %pid, "sealed per-plan epoch checkpoint"),
                 Ok(false) => {} // already sealed — idempotent
                 Err(e) => tracing::warn!(plan = %pid, error = ?e, "per-plan epoch seal failed"),

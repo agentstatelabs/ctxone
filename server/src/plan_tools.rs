@@ -266,21 +266,27 @@ pub fn promote_completed_plans(
 /// returns `Ok(false)`, so re-completing an already-completed plan never
 /// double-seals. Returns `Ok(true)` when it sealed a fresh epoch.
 ///
-/// The epoch id is `plan:<plan_id>`. `root_intents` is left empty: this is a
-/// whole-workspace checkpoint keyed to the plan, not a per-intent slice (the
-/// seal captures reachable-from-`main` regardless). Seal enforcement stays in
-/// warn mode — we never set `ASG_EPOCH_SEAL_STRICT` — so a seal can never block
-/// later memory writes to the workspace.
+/// The epoch id is `plan:<namespace>:<plan_id>`. ASG epochs live in a single
+/// global table keyed by id (no namespace column), so the id MUST carry the
+/// workspace — otherwise two workspaces with a same-named plan collide on one
+/// global epoch. `epoch_id_prefix` builds the matching `plan:<namespace>:`
+/// prefix the Hub uses to count a workspace's own epochs out of the global list.
+///
+/// `root_intents` is left empty: this is a whole-workspace checkpoint keyed to
+/// the plan, not a per-intent slice (the seal captures reachable-from-`main`
+/// regardless). Seal enforcement stays in warn mode — we never set
+/// `ASG_EPOCH_SEAL_STRICT` — so a seal can never block later memory writes.
 ///
 /// Runs a `reachable_commits_from(main)` walk (~1–2s on a 10k-commit graph),
 /// so callers should invoke it off the request path (a background task).
 pub fn seal_plan_epoch(
     repo: &Repository,
+    namespace: &str,
     plan_id: &str,
     plan_name: &str,
     summary: &str,
 ) -> Result<bool, PlanToolError> {
-    let epoch_id = format!("plan:{plan_id}");
+    let epoch_id = format!("plan:{namespace}:{plan_id}");
     // `get_epoch` errors only when the epoch is absent, so an Ok means it
     // already exists — the idempotent skip.
     if repo.get_epoch(&epoch_id).is_ok() {
@@ -290,6 +296,14 @@ pub fn seal_plan_epoch(
     repo.create_epoch(&epoch_id, &description, Vec::new())?;
     repo.seal_epoch(&epoch_id, summary)?;
     Ok(true)
+}
+
+/// The id prefix identifying epochs that belong to `namespace` — `plan:<ns>:`.
+/// ASG's `list_epochs()` is global (no namespace column), so the Hub counts a
+/// workspace's own epochs by matching this prefix rather than trusting the
+/// global `stats().epoch_count`.
+pub fn epoch_id_prefix(namespace: &str) -> String {
+    format!("plan:{namespace}:")
 }
 
 pub fn task_status_label(s: TaskStatus) -> &'static str {
@@ -1303,10 +1317,11 @@ mod tests {
             .expect("create plan");
 
         // First call: creates + seals a fresh epoch.
-        let sealed = seal_plan_epoch(&repo, "p1", "first plan", "wrapped up").expect("seal ok");
+        let sealed =
+            seal_plan_epoch(&repo, "wsA", "p1", "first plan", "wrapped up").expect("seal ok");
         assert!(sealed, "first call seals a fresh epoch");
 
-        let epoch = repo.get_epoch("plan:p1").expect("epoch exists");
+        let epoch = repo.get_epoch("plan:wsA:p1").expect("epoch exists");
         assert_eq!(epoch.status, agentstategraph_core::EpochStatus::Sealed);
         assert!(
             epoch.sealed_at.is_some(),
@@ -1316,13 +1331,41 @@ mod tests {
         assert_eq!(epoch.description, "Plan: first plan");
 
         // Second call: idempotent no-op (does not re-seal or error).
-        let again = seal_plan_epoch(&repo, "p1", "first plan", "again").expect("idempotent ok");
+        let again =
+            seal_plan_epoch(&repo, "wsA", "p1", "first plan", "again").expect("idempotent ok");
         assert!(!again, "an already-sealed plan is not re-sealed");
         // The original seal summary is untouched.
         assert_eq!(
-            repo.get_epoch("plan:p1").unwrap().seal_summary.as_deref(),
+            repo.get_epoch("plan:wsA:p1")
+                .unwrap()
+                .seal_summary
+                .as_deref(),
             Some("wrapped up")
         );
+    }
+
+    #[test]
+    fn seal_plan_epoch_namespaces_id_so_same_plan_id_across_workspaces_is_distinct() {
+        let (repo, store) = fresh_store();
+        store
+            .create_plan("main", "shared", Some("s".into()))
+            .expect("create plan");
+        // Same plan id in two workspaces → two DISTINCT sealed epochs (the bug
+        // was a single global `plan:shared` that the second workspace collided
+        // on and silently skipped).
+        assert!(seal_plan_epoch(&repo, "wsA", "shared", "shared", "a").unwrap());
+        assert!(seal_plan_epoch(&repo, "wsB", "shared", "shared", "b").unwrap());
+        assert!(repo.get_epoch("plan:wsA:shared").is_ok());
+        assert!(repo.get_epoch("plan:wsB:shared").is_ok());
+        // The Hub counts a workspace's own epochs by this prefix.
+        assert_eq!(epoch_id_prefix("wsA"), "plan:wsA:");
+        let a = repo
+            .list_epochs()
+            .unwrap()
+            .iter()
+            .filter(|e| e.id.starts_with(&epoch_id_prefix("wsA")))
+            .count();
+        assert_eq!(a, 1, "wsA sees exactly its own epoch, not wsB's");
     }
 
     #[test]

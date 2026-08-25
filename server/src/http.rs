@@ -3228,7 +3228,7 @@ async fn backfill_plan_epochs(
             .summary
             .clone()
             .unwrap_or_else(|| format!("Plan {} completed", plan.name));
-        match plan_tools::seal_plan_epoch(&repo, &plan.name, &plan.name, &summary) {
+        match plan_tools::seal_plan_epoch(&repo, &ns.0, &plan.name, &plan.name, &summary) {
             Ok(true) => sealed += 1,
             Ok(false) => already += 1,
             Err(e) => {
@@ -4875,6 +4875,13 @@ async fn namespaces_summary(State(s): State<HubState>) -> impl IntoResponse {
     }
 
     let empty = std::collections::HashSet::new();
+    // ASG epochs are one global table, so list them ONCE and count per-workspace
+    // by id prefix below — not once per namespace, which made the rollup crawl.
+    let all_epoch_ids: Vec<String> = s
+        .repo
+        .list_epochs()
+        .map(|es| es.into_iter().map(|e| e.id).collect())
+        .unwrap_or_default();
     let mut out = Vec::new();
     for name in &names {
         let Ok(repo) = s.repo_for(&NamespaceId(name.clone())) else {
@@ -4890,7 +4897,16 @@ async fn namespaces_summary(State(s): State<HubState>) -> impl IntoResponse {
         let model = representative_model(&snaps, ids, is_default);
         // Same graph counts the per-ns `stats` handler returns
         // (commit_count / path_count / branch_count / epoch_count).
-        let graph = repo.stats("main").unwrap_or(serde_json::Value::Null);
+        let mut graph = repo.stats("main").unwrap_or(serde_json::Value::Null);
+        // ASG epochs are stored in one global table (no namespace column), so
+        // `stats().epoch_count` is the hub-wide total — the same on every card.
+        // Override it with THIS workspace's own count: epochs whose id carries
+        // the `plan:<ns>:` prefix `seal_plan_epoch` writes.
+        if let Some(obj) = graph.as_object_mut() {
+            let prefix = plan_tools::epoch_id_prefix(name);
+            let count = all_epoch_ids.iter().filter(|id| id.starts_with(&prefix)).count();
+            obj.insert("epoch_count".to_string(), serde_json::json!(count));
+        }
         out.push(serde_json::json!({
             "namespace": name,
             "session_count": tokens.session_count,
