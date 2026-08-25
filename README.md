@@ -269,16 +269,10 @@ ctxone/
 
 ## License & editions
 
-CTXone is **open source, commercially supported**, and ships in three editions:
-
-- **OSS** (this repo) — the full self-hosted Hub: memory, plans, recall,
-  branches, token-savings accounting, and Lens UI. No account required.
-- **Team** — a shared team Hub as the collaboration layer (shared memory,
-  plans, and decisions across the team), paired with
-  **[AgentStateDeveloper](https://github.com/agentstatelabs/AgentStateDeveloper)**
-  as the suite's code-context half.
-- **Enterprise** — org-scale operation: multi-tenancy, RBAC/SSO, audit, and
-  compliance controls.
+CTXone is open source: the full self-hosted Hub — memory, plans, recall,
+branches, token-savings accounting, and Lens UI. No account required. It pairs
+with **[AgentStateDeveloper](https://github.com/agentstatelabs/AgentStateDeveloper)**
+as the suite's code-context half.
 
 The code is licensed under the **Business Source License 1.1 (BSL 1.1)**.
 **You can** use CTXone in production, self-host it, modify it, and build on top
@@ -286,10 +280,8 @@ of it — all without a commercial license. **You cannot** offer CTXone itself a
 a competing managed service or redistribute it inside a product you sell. Each
 version converts to **Apache License 2.0** four years after release.
 
-Full plain-English summary and the edition breakdown:
-[LICENSING.md](LICENSING.md) ([LICENSE](LICENSE) is the legal text).
-Team/Enterprise or commercial questions:
-[licensing@agentstatelabs.com](mailto:licensing@agentstatelabs.com).
+Full plain-English summary: [LICENSING.md](LICENSING.md) ([LICENSE](LICENSE)
+is the legal text).
 
 ## Contributing
 
