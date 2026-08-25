@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ctxone"
-version = "1.0.6"
+version = "1.0.7"
 description = "Python client for CtxOne — persistent, searchable, accountable memory for AI agents"
 readme = "README.md"
 license = { text = "BUSL-1.1" }
