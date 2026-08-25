@@ -683,6 +683,7 @@ fn router_with_config_inner(
         .route("/api/plans", get(list_plans).post(create_plan))
         // Static path registered before `/api/plans/{name}` so it wins the match.
         .route("/api/plans/stale", get(stale_plan_tasks))
+        .route("/api/plans/backfill_epochs", post(backfill_plan_epochs))
         .route("/api/plans/{name}", get(get_plan).delete(delete_plan))
         .route(
             "/api/plans/{name}/tasks",
@@ -3200,6 +3201,49 @@ async fn stale_plan_tasks(
             .cmp(&a["age_days"].as_i64().unwrap_or(0))
     });
     Ok(Json(out))
+}
+
+/// `POST /api/plans/backfill_epochs` — one-time retroactive seal of a per-plan
+/// epoch for every already-`Completed` plan in the workspace, so existing
+/// workspaces show meaningful epoch counts without waiting to re-close plans.
+///
+/// Idempotent (reuses `seal_plan_epoch`, which skips plans already sealed), so
+/// it's safe to re-run. Each seal walks reachable-from-`main` (~1–2s on a large
+/// graph); a workspace has only a handful of plans, so this stays well under
+/// the request timeout. Scoped to the request namespace (`X-CTXone-Namespace`).
+async fn backfill_plan_epochs(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
+    let store = plan_tools::make_store(repo.clone(), DEFAULT_AGENT_ID);
+    let completed_filter = plan_tools::plan_status_from_str("completed");
+    let plans = store
+        .list_plans_by_status("main", completed_filter)
+        .map_err(substrate_error_to_response)?;
+
+    let (mut sealed, mut already, mut failed) = (0usize, 0usize, 0usize);
+    for plan in plans {
+        let summary = plan
+            .summary
+            .clone()
+            .unwrap_or_else(|| format!("Plan {} completed", plan.name));
+        match plan_tools::seal_plan_epoch(&repo, &plan.name, &plan.name, &summary) {
+            Ok(true) => sealed += 1,
+            Ok(false) => already += 1,
+            Err(e) => {
+                failed += 1;
+                tracing::warn!(plan = %plan.name, error = ?e, "backfill epoch seal failed");
+            }
+        }
+    }
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "namespace": ns.0,
+        "sealed": sealed,
+        "already_sealed": already,
+        "failed": failed,
+    })))
 }
 
 #[instrument(skip_all, fields(ref_name = %q.ref_name, status = q.status.as_deref().unwrap_or("")))]

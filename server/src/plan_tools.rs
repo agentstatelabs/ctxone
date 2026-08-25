@@ -256,6 +256,42 @@ pub fn promote_completed_plans(
     Vec::new()
 }
 
+/// Create + seal a per-plan **epoch**: a tamper-evident, exportable checkpoint
+/// of the workspace's graph at the moment a plan closed. Sealing captures every
+/// commit reachable from `main` at seal time (ASG V8 `sealed_commits`) and
+/// records a Merkle seal hash, so a finished plan yields an audit bundle the
+/// user can view and `export_epoch` — with zero extra work on their part.
+///
+/// **Idempotent.** If an epoch for this plan already exists it does nothing and
+/// returns `Ok(false)`, so re-completing an already-completed plan never
+/// double-seals. Returns `Ok(true)` when it sealed a fresh epoch.
+///
+/// The epoch id is `plan:<plan_id>`. `root_intents` is left empty: this is a
+/// whole-workspace checkpoint keyed to the plan, not a per-intent slice (the
+/// seal captures reachable-from-`main` regardless). Seal enforcement stays in
+/// warn mode — we never set `ASG_EPOCH_SEAL_STRICT` — so a seal can never block
+/// later memory writes to the workspace.
+///
+/// Runs a `reachable_commits_from(main)` walk (~1–2s on a 10k-commit graph),
+/// so callers should invoke it off the request path (a background task).
+pub fn seal_plan_epoch(
+    repo: &Repository,
+    plan_id: &str,
+    plan_name: &str,
+    summary: &str,
+) -> Result<bool, PlanToolError> {
+    let epoch_id = format!("plan:{plan_id}");
+    // `get_epoch` errors only when the epoch is absent, so an Ok means it
+    // already exists — the idempotent skip.
+    if repo.get_epoch(&epoch_id).is_ok() {
+        return Ok(false);
+    }
+    let description = format!("Plan: {plan_name}");
+    repo.create_epoch(&epoch_id, &description, Vec::new())?;
+    repo.seal_epoch(&epoch_id, summary)?;
+    Ok(true)
+}
+
 pub fn task_status_label(s: TaskStatus) -> &'static str {
     match s {
         TaskStatus::Pending => "pending",
@@ -1256,6 +1292,37 @@ mod tests {
         assert_eq!(p.kind, ProofKind::Commit);
         assert_eq!(p.value, "abc123");
         assert!(p.note.is_none());
+    }
+
+    #[test]
+    fn seal_plan_epoch_seals_and_is_idempotent() {
+        let (repo, store) = fresh_store();
+        // Commit some work on main so the seal has commits to capture.
+        store
+            .create_plan("main", "p1", Some("first plan".to_string()))
+            .expect("create plan");
+
+        // First call: creates + seals a fresh epoch.
+        let sealed = seal_plan_epoch(&repo, "p1", "first plan", "wrapped up").expect("seal ok");
+        assert!(sealed, "first call seals a fresh epoch");
+
+        let epoch = repo.get_epoch("plan:p1").expect("epoch exists");
+        assert_eq!(epoch.status, agentstategraph_core::EpochStatus::Sealed);
+        assert!(
+            epoch.sealed_at.is_some(),
+            "sealed epoch carries a timestamp"
+        );
+        assert_eq!(epoch.seal_summary.as_deref(), Some("wrapped up"));
+        assert_eq!(epoch.description, "Plan: first plan");
+
+        // Second call: idempotent no-op (does not re-seal or error).
+        let again = seal_plan_epoch(&repo, "p1", "first plan", "again").expect("idempotent ok");
+        assert!(!again, "an already-sealed plan is not re-sealed");
+        // The original seal summary is untouched.
+        assert_eq!(
+            repo.get_epoch("plan:p1").unwrap().seal_summary.as_deref(),
+            Some("wrapped up")
+        );
     }
 
     #[test]

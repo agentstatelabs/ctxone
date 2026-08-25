@@ -3207,6 +3207,9 @@ impl CtxOneServer {
         match store.complete_task(&p.ref_name, &p.plan_id, &id, proof) {
             Ok(task) => {
                 self.session.mark_dirty();
+                // Completing the last task auto-promotes the plan; seal a
+                // checkpoint if that just happened (no-op otherwise).
+                self.spawn_epoch_seal_if_completed(&p.ref_name, &p.plan_id);
                 serde_json::to_string(&pt::task_to_json(&task)).unwrap_or_else(|_| "{}".into())
             }
             Err(e) => pt::err_json(e),
@@ -3469,6 +3472,7 @@ impl CtxOneServer {
         match pt::force_complete_plan(&store, &p.ref_name, &p.plan_id, &p.summary, p.reason) {
             Ok(result) => {
                 self.session.mark_dirty();
+                self.spawn_epoch_seal_if_completed(&p.ref_name, &p.plan_id);
                 let tasks = store
                     .list_tasks(&p.ref_name, &p.plan_id)
                     .unwrap_or_default();
@@ -3501,6 +3505,7 @@ impl CtxOneServer {
                 let tasks = store
                     .list_tasks(&p.ref_name, &p.plan_id)
                     .unwrap_or_default();
+                self.spawn_epoch_seal_if_completed(&p.ref_name, &p.plan_id);
                 serde_json::to_string(&serde_json::json!({
                     "plan": pt::plan_to_json(&plan, &tasks, true),
                     "reminder": pt::CLOSE_REMINDER,
@@ -3509,6 +3514,38 @@ impl CtxOneServer {
             }
             Err(e) => pt::err_json(e),
         }
+    }
+
+    /// Seal a per-plan **epoch** checkpoint in the background once a plan is
+    /// `Completed`. Idempotent (skips if already sealed) and non-blocking — the
+    /// `reachable_commits_from(main)` walk runs on a blocking task so the tool
+    /// call returns immediately, with the sealed epoch appearing a second or two
+    /// later. Called from every path that can close a plan (`plan_close`,
+    /// `plan_complete`, and `plan_done` completing the last task).
+    fn spawn_epoch_seal_if_completed(&self, ref_name: &str, plan_id: &str) {
+        use crate::plan_tools as pt;
+        let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        let plan = match store.get_plan(ref_name, plan_id) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        if !matches!(plan.status, agentstategraph_tasks::PlanStatus::Completed) {
+            return;
+        }
+        let repo = self.repo.clone();
+        let pid = plan_id.to_string();
+        let name = plan.name.clone();
+        let summary = plan
+            .summary
+            .clone()
+            .unwrap_or_else(|| format!("Plan {pid} completed"));
+        tokio::task::spawn_blocking(move || {
+            match pt::seal_plan_epoch(&repo, &pid, &name, &summary) {
+                Ok(true) => tracing::info!(plan = %pid, "sealed per-plan epoch checkpoint"),
+                Ok(false) => {} // already sealed — idempotent
+                Err(e) => tracing::warn!(plan = %pid, error = ?e, "per-plan epoch seal failed"),
+            }
+        });
     }
 
     #[tool(
