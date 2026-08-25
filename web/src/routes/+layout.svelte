@@ -55,7 +55,8 @@
 			items: [
 				{ href: '/history', label: 'History' },
 				{ href: '/tail', label: 'Live Tail' },
-				{ href: '/diff', label: 'Diff' }
+				{ href: '/diff', label: 'Diff' },
+				{ href: '/epochs', label: 'Checkpoints' }
 			]
 		},
 		{

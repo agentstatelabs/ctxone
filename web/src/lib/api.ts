@@ -160,6 +160,32 @@ export async function getSessions(): Promise<SessionSnapshot[]> {
 	return fetchJson('/api/stats/sessions');
 }
 
+/** A sealed per-plan epoch checkpoint (audit bundle). */
+export interface Epoch {
+	id: string;
+	namespace: string;
+	plan: string;
+	status: string;
+	created_at: string;
+	sealed_at: string | null;
+	commit_count: number;
+	seal_hash: string | null;
+}
+
+/** Sealed per-plan epoch checkpoints for the current workspace, or every
+ * workspace with `all=true` (the hub-level view). Newest-sealed first. */
+export async function getEpochs(all = false): Promise<Epoch[]> {
+	const data = await fetchJson<{ epochs: Epoch[] }>(`/api/epochs${all ? '?all=true' : ''}`);
+	return data.epochs;
+}
+
+/** Download URL for one epoch's audit bundle. Uses `?namespace=` (not the
+ * `X-CTXone-Namespace` header) so a plain `<a download>` works; pass the
+ * epoch's own namespace. */
+export function epochExportUrl(id: string, namespace: string): string {
+	return `/api/epochs/${encodeURIComponent(id)}/export?namespace=${encodeURIComponent(namespace)}`;
+}
+
 /**
  * One workspace's aggregate stats from `GET /api/namespaces/summary` — the
  * hub-global rollup that feeds the Hub Home. Token totals are summed from the

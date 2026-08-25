@@ -684,6 +684,10 @@ fn router_with_config_inner(
         // Static path registered before `/api/plans/{name}` so it wins the match.
         .route("/api/plans/stale", get(stale_plan_tasks))
         .route("/api/plans/backfill_epochs", post(backfill_plan_epochs))
+        // Epoch view + download (per-plan sealed checkpoints). `{id}/export`
+        // registered before the bare list so path matching is unambiguous.
+        .route("/api/epochs/{id}/export", get(export_epoch))
+        .route("/api/epochs", get(list_epochs))
         .route("/api/plans/{name}", get(get_plan).delete(delete_plan))
         .route(
             "/api/plans/{name}/tasks",
@@ -3244,6 +3248,109 @@ async fn backfill_plan_epochs(
         "already_sealed": already,
         "failed": failed,
     })))
+}
+
+#[derive(Deserialize)]
+struct EpochListQuery {
+    /// List epochs across EVERY workspace (the hub-level view), each tagged
+    /// with its namespace. Default: just the request namespace.
+    #[serde(default)]
+    all: bool,
+}
+
+/// `GET /api/epochs` — the sealed per-plan epoch checkpoints for this workspace
+/// (or all workspaces with `?all=true`). Each entry is a viewable summary;
+/// `GET /api/epochs/{id}/export` downloads the full audit bundle.
+///
+/// ASG epochs live in one global table, so we list once and attribute each to
+/// its workspace by the `plan:<ns>:` id prefix (the same scheme the hub count
+/// uses). Newest-sealed first.
+async fn list_epochs(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+    Query(q): Query<EpochListQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
+    let all = repo
+        .list_epochs()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let namespaces: Vec<String> = if q.all {
+        let mut n: Vec<String> = s
+            .repo
+            .list_namespaces()
+            .map(|v| v.iter().map(|x| x.as_str().to_string()).collect())
+            .unwrap_or_default();
+        let default = Namespace::DEFAULT.to_string();
+        if !n.iter().any(|x| x == &default) {
+            n.push(default);
+        }
+        n
+    } else {
+        vec![ns.0.clone()]
+    };
+    let prefixes: Vec<(String, String)> = namespaces
+        .iter()
+        .map(|name| (name.clone(), plan_tools::epoch_id_prefix(name)))
+        .collect();
+
+    let mut out = Vec::new();
+    for e in &all {
+        if let Some((ns_name, prefix)) = prefixes.iter().find(|(_, p)| e.id.starts_with(p)) {
+            let plan = e.id.strip_prefix(prefix).unwrap_or(&e.id);
+            out.push(serde_json::json!({
+                "id": e.id,
+                "namespace": ns_name,
+                "plan": plan,
+                "status": format!("{:?}", e.status),
+                "created_at": e.created_at,
+                "sealed_at": e.sealed_at,
+                "commit_count": e.commit_count,
+                "seal_hash": e.seal_hash.as_ref().map(|h| h.short().to_string()),
+            }));
+        }
+    }
+    out.sort_by(|a, b| {
+        b["sealed_at"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(a["sealed_at"].as_str().unwrap_or(""))
+    });
+    Ok(Json(serde_json::json!({ "epochs": out })))
+}
+
+/// `GET /api/epochs/{id}/export` — download one sealed epoch's self-contained,
+/// independently-verifiable audit bundle (epoch metadata + full commit records)
+/// as a JSON attachment.
+async fn export_epoch(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+    Path(id): Path<String>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    if !id.starts_with("plan:") {
+        return Err((StatusCode::BAD_REQUEST, "not a plan epoch".to_string()));
+    }
+    let repo = s.repo_for(&ns)?;
+    let bundle = repo
+        .export_epoch(&id)
+        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+    let body = serde_json::to_vec_pretty(&bundle)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let filename = format!("{}.json", id.replace(':', "_"));
+    Ok((
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/json".to_string(),
+            ),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{filename}\""),
+            ),
+        ],
+        body,
+    )
+        .into_response())
 }
 
 #[instrument(skip_all, fields(ref_name = %q.ref_name, status = q.status.as_deref().unwrap_or("")))]

@@ -6,7 +6,9 @@
 		getLog,
 		getActivity,
 		getDueReminders,
-		listProjects
+		listProjects,
+		getEpochs,
+		epochExportUrl
 	} from '$lib/api';
 	import type {
 		StatsResponse,
@@ -14,7 +16,8 @@
 		CommitEntry,
 		Reminder,
 		ActivityResponse,
-		Project
+		Project,
+		Epoch
 	} from '$lib/api';
 	import { listPlans, listPlanTasks, type Plan, type Task } from '$lib/plansApi';
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
@@ -72,6 +75,7 @@
 	let plansL = $state<Load<PlansData>>(pending());
 	let remindersL = $state<Load<Reminder[]>>(pending());
 	let activityL = $state<Load<ActivityResponse>>(pending());
+	let epochsL = $state<Load<Epoch[]>>(pending());
 	// Project metadata (display name, remote) for the workspace identity header —
 	// global registry, joined by the current namespace. Best-effort, non-blocking.
 	let project = $state<Project | null>(null);
@@ -115,6 +119,7 @@
 			plansL = pending();
 			remindersL = pending();
 			activityL = pending();
+			epochsL = pending();
 		}
 		connected = await getHealth();
 		// Workspace identity — cheap global registry lookup, joined by namespace.
@@ -127,7 +132,8 @@
 			track(() => getLog(branch, 1000), (l) => (logL = l)),
 			track(() => loadPlans(branch), (l) => (plansL = l)),
 			track(() => getDueReminders(), (l) => (remindersL = l)),
-			track(() => getActivity(branch, 120), (l) => (activityL = l))
+			track(() => getActivity(branch, 120), (l) => (activityL = l)),
+			track(() => getEpochs(), (l) => (epochsL = l))
 		]);
 	}
 
@@ -665,6 +671,14 @@
 	const econStatus = $derived(statusOf(sessionsL, () => !hasEconTraffic));
 	const effStatus = $derived(statusOf(sessionsL, () => modelEfficiency.length === 0));
 	const planStatus = $derived(statusOf(plansL, () => activePlans.length === 0));
+	const epochStatus = $derived(statusOf(epochsL, (d) => d.length === 0));
+	const epochs = $derived(epochsL.data ?? []);
+	/** Format an ISO seal timestamp (distinct from `shortDate`, which takes ms). */
+	function epochSealDate(iso: string | null): string {
+		if (!iso) return '—';
+		const d = new Date(iso);
+		return Number.isNaN(d.getTime()) ? '—' : d.toISOString().slice(0, 10);
+	}
 	// Follows the activity load: the heatmap is the panel's primary content
 	// now, so an activity failure must surface rather than being masked by a
 	// healthy log fetch.
@@ -1103,6 +1117,38 @@
 				</div>
 			{/if}
 		</div>
+	</Panel>
+
+	<!-- ── Sealed checkpoints (epochs) ──────────────────────────────────── -->
+	<Panel
+		title="Sealed checkpoints"
+		scope="all branches"
+		links={[{ href: '/epochs', label: 'All workspaces' }]}
+		status={epochStatus}
+		errorText={epochsL.error}
+		emptyTitle="No sealed checkpoints yet"
+		emptyText="Each completed plan seals a tamper-evident epoch of this workspace. Close a plan to create one."
+	>
+		<p class="ep-lede">
+			A tamper-evident, exportable snapshot of this workspace's memory graph
+			at each completed plan — download the audit bundle to verify or archive it.
+		</p>
+		<ul class="ep-list">
+			{#each epochs as e (e.id)}
+				<li class="ep-row">
+					<div class="ep-main">
+						<span class="ep-plan">{e.plan}</span>
+						<span class="ep-meta">
+							sealed {epochSealDate(e.sealed_at)} · {formatCompact(e.commit_count)} commits
+							{#if e.seal_hash}· <code class="ep-hash" title="Merkle seal hash">{e.seal_hash}</code>{/if}
+						</span>
+					</div>
+					<a class="ep-dl" href={epochExportUrl(e.id, e.namespace)} download title="Download audit bundle (JSON)">
+						Download
+					</a>
+				</li>
+			{/each}
+		</ul>
 	</Panel>
 
 	<!-- ── 6 · Least efficient sessions ─────────────────────────────────── -->
@@ -1708,5 +1754,56 @@
 		margin: var(--lens-space-2, 0.5rem) 0 0;
 		font-size: var(--lens-font-size-2xs, 0.7rem);
 		color: var(--lens-muted, #667089);
+	}
+	.ep-lede {
+		margin: 0 0 var(--lens-space-3);
+		font-size: var(--lens-font-size-xs);
+		color: var(--lens-muted);
+		line-height: 1.5;
+	}
+	.ep-list {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+	}
+	.ep-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--lens-space-3);
+		padding: var(--lens-space-2) 0;
+		border-bottom: 1px solid var(--lens-border-subtle, var(--lens-border));
+	}
+	.ep-row:last-child {
+		border-bottom: none;
+	}
+	.ep-plan {
+		font-weight: 600;
+		font-family: var(--lens-font-mono, monospace);
+		font-size: var(--lens-font-size-xs);
+	}
+	.ep-meta {
+		display: block;
+		margin-top: 2px;
+		font-size: var(--lens-font-size-2xs, 0.72rem);
+		color: var(--lens-muted);
+	}
+	.ep-hash {
+		font-family: var(--lens-font-mono, monospace);
+		color: var(--lens-text-secondary, var(--lens-muted));
+	}
+	.ep-dl {
+		flex: none;
+		font-size: var(--lens-font-size-2xs, 0.72rem);
+		font-weight: 600;
+		text-decoration: none;
+		color: var(--lens-accent, #6ea8fe);
+		border: 1px solid var(--lens-border);
+		border-radius: var(--lens-radius-sm, 6px);
+		padding: 3px 10px;
+		white-space: nowrap;
+	}
+	.ep-dl:hover {
+		background: var(--lens-surface-raised, rgba(255, 255, 255, 0.04));
 	}
 </style>
