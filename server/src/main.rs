@@ -480,12 +480,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Epoch seals are AUDIT CHECKPOINTS here, never write barriers. ASG
+    // defaults `epoch_seal_strict` to true, which hard-rejects any ref update
+    // that would orphan a sealed commit — and because the epoch store is global
+    // (not per-namespace), a sealed epoch in one workspace would then block
+    // writes in EVERY other workspace. The per-plan epochs CTXone seals on plan
+    // close (see plan_tools::seal_plan_epoch) exist to be viewed and exported,
+    // not to freeze history, so we opt out. `fork_namespace` inherits this, so
+    // every workspace repo is non-strict too.
     let repo: Arc<Repository> = match storage_type {
         "memory" => {
             info!(storage = "memory", "Storage: in-memory SQLite (ephemeral)");
-            Arc::new(Repository::new(Box::new(
-                SqliteStorage::in_memory().expect("in-memory sqlite"),
-            )))
+            Arc::new(
+                Repository::new(Box::new(
+                    SqliteStorage::in_memory().expect("in-memory sqlite"),
+                ))
+                .with_epoch_seal_strict(false),
+            )
         }
         "postgres" => {
             if database_url.is_empty() {
@@ -502,7 +513,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 agentstategraph_storage::PostgresStorage::connect_tenant(&database_url, &tenant_id)
                     .await
             })?;
-            Arc::new(Repository::new(Box::new(storage)))
+            Arc::new(Repository::new(Box::new(storage)).with_epoch_seal_strict(false))
         }
         _ => {
             // Refuse to silently create a fresh db when the operator
@@ -539,7 +550,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // SqliteStorage::open itself (agentstategraph-storage >= v0.9.4), so
             // every consumer of the crate gets the faster write path.
             let storage = SqliteStorage::open(&db_path)?;
-            Arc::new(Repository::new(Box::new(storage)))
+            Arc::new(Repository::new(Box::new(storage)).with_epoch_seal_strict(false))
         }
     };
 
