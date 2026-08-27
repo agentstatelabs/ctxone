@@ -2,7 +2,21 @@
 
 All notable changes to CTXone are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
-the project's `0.9.x` series (incremented by 0.0.01 per release).
+the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
+
+## [v1.0.8] — 2026-08-26
+
+### Fixed
+- **Recall savings were credited to the wrong workspace — every workspace card read zero.** Three independent faults compounded. (1) An MCP request naming no namespace and no session fell back to a shared `"default"` bucket, so every agent on a machine read and wrote one anonymous workspace and per-project memory was unreachable. (2) An explicitly named but *invalid* namespace was silently rewritten to `"default"`, so a typo leaked one project's memory into the shared bucket with no error. (3) A workspace only claims a session's tokens when its graph holds a node for that session, and session nodes were written solely by transcript import and `summarize_session` — both keyed on a per-conversation UUID that a live MCP session's id never matches, so live savings fell into the `default` complement bucket. Live MCP sessions now mint their own session node the first time they accrue savings, so the invariant holds by construction.
+- **`ctx init --tool claude` also rewrote the global Claude Desktop config** with a single project's namespace, re-pointing every other project's agent. `--tool` now matches canonical tool slugs instead of substrings (`claude` → Claude Code; use `claude-desktop` for the other).
+- **`ctx init --session <id>` was accepted and then silently ignored.** It now overrides the derived id.
+- **Renaming or moving a repo orphaned its accrued savings.** The session id hashed the absolute path, so it changed with the directory. Identity now lives in a `.ctxproject.local` token at the worktree root and moves with the checkout.
+- **One session row per workspace merged unrelated agents.** Session ids are now `<namespace>:<agent>:<checkout-token>`, so Claude, Codex and Gemini — and separate worktrees of one workspace — are each attributable.
+
+### Added
+- **`CTXONE_REQUIRE_IDENTITY`** (default **off**). When on, an MCP request that names no namespace or no session is refused with a 400 naming the remedy, instead of silently joining the shared workspace. An explicitly named *invalid* namespace is refused whether or not this is set — that path is the leak itself.
+- **`?session=` on the MCP URL**, mirroring `?namespace=`. Clients that cannot send headers (Codex's `config.toml` accepts only a `url`) can carry a real identity instead of sharing the anonymous row.
+- **`ctx init` locally excludes the configs it writes** (`.mcp.json`, `.gemini/`, `.cursor/`, `.vscode/`) via `.git/info/exclude`, never the tracked `.gitignore`. They embed a machine-local token, so committing one hands every clone the same identity.
 
 ## [v0.9.36] — 2026-08-13
 
