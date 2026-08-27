@@ -6514,14 +6514,19 @@ mod tests {
         let sid = "ctxone:claude-code:15aacf35";
         let server = CtxOneServer::new(repo.clone()).with_session_id(sid.to_string());
         // An absent `/sessions` prefix errors rather than returning empty.
-        assert!(repo.list_paths("main", "/sessions", Some(2)).unwrap_or_default().is_empty());
+        assert!(
+            repo.list_paths("main", "/sessions", Some(2))
+                .unwrap_or_default()
+                .is_empty()
+        );
 
         server
             .recall_gate("main", "sqlite database choice")
             .expect("gate should hit the /memory fact");
 
         assert!(
-            repo.get_json("main", &format!("/sessions/{sid}/agent")).is_ok(),
+            repo.get_json("main", &format!("/sessions/{sid}/agent"))
+                .is_ok(),
             "recall must leave a discoverable node behind"
         );
     }
@@ -6562,11 +6567,13 @@ mod tests {
         server.ensure_session_node();
 
         assert_eq!(
-            repo.get_json("main", &format!("/sessions/{sid}/title")).unwrap(),
+            repo.get_json("main", &format!("/sessions/{sid}/title"))
+                .unwrap(),
             serde_json::json!("a real imported transcript"),
         );
         assert!(
-            repo.get_json("main", &format!("/sessions/{sid}/meta")).is_err(),
+            repo.get_json("main", &format!("/sessions/{sid}/meta"))
+                .is_err(),
             "must not add live-MCP meta over an imported session"
         );
     }

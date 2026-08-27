@@ -7240,7 +7240,11 @@ fn exclude_locally(root: &std::path::Path, entry: &str) -> std::io::Result<()> {
     if body.lines().any(|l| l.trim() == entry) {
         return Ok(());
     }
-    let sep = if body.is_empty() || body.ends_with('\n') { "" } else { "\n" };
+    let sep = if body.is_empty() || body.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
     std::fs::write(&exclude, format!("{body}{sep}{entry}\n"))
 }
 
@@ -7279,7 +7283,11 @@ fn exclude_written_config(config_path: &std::path::Path) {
         1 => rel.to_string_lossy().to_string(),
         _ => format!(
             "{}/",
-            rel.components().next().unwrap().as_os_str().to_string_lossy()
+            rel.components()
+                .next()
+                .unwrap()
+                .as_os_str()
+                .to_string_lossy()
         ),
     };
     let _ = exclude_locally(&root, &entry);

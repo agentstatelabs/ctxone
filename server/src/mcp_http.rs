@@ -486,7 +486,10 @@ mod tests {
     #[test]
     fn explicit_default_namespace_is_allowed_under_policy() {
         with_require_identity(true, || {
-            let r = req(&[("x-ctxone-session", "codex:default")], "/mcp?namespace=default");
+            let r = req(
+                &[("x-ctxone-session", "codex:default")],
+                "/mcp?namespace=default",
+            );
             assert_eq!(resolve_namespace(&r).unwrap(), Namespace::DEFAULT);
             assert_eq!(resolve_session(&r).unwrap(), "codex:default");
         });
@@ -517,7 +520,10 @@ mod tests {
     #[test]
     fn session_query_beats_header() {
         with_require_identity(true, || {
-            let r = req(&[("x-ctxone-session", "from-header")], "/mcp?session=from-query");
+            let r = req(
+                &[("x-ctxone-session", "from-header")],
+                "/mcp?session=from-query",
+            );
             assert_eq!(resolve_session(&r).unwrap(), "from-query");
         });
     }
@@ -541,7 +547,11 @@ mod tests {
             IdentityError::MissingNamespace,
             IdentityError::MissingSession,
         ] {
-            assert!(e.message().contains("ctx init"), "remedy missing: {}", e.message());
+            assert!(
+                e.message().contains("ctx init"),
+                "remedy missing: {}",
+                e.message()
+            );
         }
     }
 }
