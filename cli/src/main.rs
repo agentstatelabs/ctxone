@@ -3436,6 +3436,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     namespace.clone(),
                     auth_token.as_deref(),
                     auth_token_env.as_deref(),
+                    cli.session.as_deref(),
                 )?;
             }
             // After MCP configs are written, prime the AGENTS.md guidance into
@@ -7137,22 +7138,164 @@ fn tool_slug(name: &str) -> String {
 /// conversation id into CTX_SESSION, which is out of scope here. So `ctx
 /// ingest-session` rows (per conversation) and live MCP rows (per project) live
 /// side by side rather than merging.
-fn init_session_id(namespace: Option<&str>) -> String {
-    if let Some(ns) = namespace {
-        let ns = ns.trim();
-        if !ns.is_empty() && ns != "default" {
-            return ns.to_string();
+/// Match a `--tool` filter against a detected tool's display name.
+///
+/// Compares canonical slugs (`"Claude Code"` -> `"claude-code"`), NOT substrings:
+/// `--tool claude` used to also match "Claude Desktop", so initialising a single
+/// project silently rewrote the GLOBAL Claude Desktop config with that project's
+/// namespace — one repo's `ctx init` re-pointing every other repo's agent.
+///
+/// Short aliases map to exactly one tool; use the full slug (e.g.
+/// `--tool claude-desktop`) to target the others.
+fn tool_filter_matches(filter: &str, tool_name: &str) -> bool {
+    let f = tool_slug(filter);
+    let slug = tool_slug(tool_name);
+    let canonical = match f.as_str() {
+        "claude" => "claude-code",
+        "vscode" | "vs" | "code" => "vs-code",
+        "desktop" => "claude-desktop",
+        other => other,
+    };
+    slug == canonical
+}
+
+/// File holding this checkout's stable identity token. Sits beside
+/// `.ctxproject` (which records the WORKSPACE) and records the CHECKOUT.
+///
+/// Deliberately NOT committed: a clone or a second worktree is a genuinely
+/// different working context and should get its own token, not inherit one.
+pub const CHECKOUT_TOKEN_FILE: &str = ".ctxproject.local";
+
+/// Read (or mint) this checkout's stable identity token.
+///
+/// Replaces hashing the absolute cwd, which made the session id a function of
+/// the FILESYSTEM PATH: renaming or moving a repo silently minted a new session
+/// and orphaned every token the old one had accrued. A token on disk moves with
+/// the directory, so the identity survives.
+///
+/// Per-checkout by construction: `find_git_root` resolves to the WORKTREE root,
+/// so two worktrees of one repo hold two tokens and never merge their stats.
+///
+/// Falls back to a path hash when the token cannot be persisted (read-only
+/// checkout, not a git repo) — degraded but never fatal.
+fn checkout_token(start: &std::path::Path) -> String {
+    let root = find_git_root(start).unwrap_or_else(|| start.to_path_buf());
+    let token_path = root.join(CHECKOUT_TOKEN_FILE);
+
+    if let Ok(existing) = std::fs::read_to_string(&token_path) {
+        let t = existing.trim();
+        if !t.is_empty() {
+            return t.to_string();
         }
     }
+
+    // Mint: 8 hex chars from the system RNG, matching the old hash's shape.
+    let token = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+            .hash(&mut h);
+        root.hash(&mut h);
+        std::process::id().hash(&mut h);
+        format!("{:08x}", h.finish() as u32)
+    };
+
+    if std::fs::write(&token_path, format!("{token}\n")).is_ok() {
+        // Keep it out of commits without touching the repo's tracked
+        // .gitignore — the token is machine-local, like .mcp.json itself.
+        let _ = exclude_locally(&root, CHECKOUT_TOKEN_FILE);
+        return token;
+    }
+
+    // Could not persist — fall back to the old path-derived value so the id is
+    // at least stable for as long as the directory keeps its name.
     use std::hash::{Hash, Hasher};
-    let cwd = std::env::current_dir()
-        .ok()
-        .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_default();
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    cwd.hash(&mut h);
-    format!("proj-{:016x}", h.finish())
+    root.to_string_lossy().hash(&mut h);
+    format!("{:08x}", h.finish() as u32)
+}
+
+/// Append `entry` to the repo's `.git/info/exclude` (idempotent).
+///
+/// `--path-format=absolute` matters: the plain `--git-common-dir` is RELATIVE
+/// to the repo, so resolving it against the process cwd writes the rule into
+/// whatever repo the shell happened to be in.
+fn exclude_locally(root: &std::path::Path, entry: &str) -> std::io::Result<()> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .current_dir(root)
+        .output()?;
+    if !out.status.success() {
+        return Ok(());
+    }
+    let common = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
+    let exclude = common.join("info").join("exclude");
+    if !exclude.exists() {
+        return Ok(());
+    }
+    let body = std::fs::read_to_string(&exclude).unwrap_or_default();
+    if body.lines().any(|l| l.trim() == entry) {
+        return Ok(());
+    }
+    let sep = if body.is_empty() || body.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    std::fs::write(&exclude, format!("{body}{sep}{entry}\n"))
+}
+
+/// Assemble the session id from its three parts. Split out from
+/// [`init_session_id`] so it is testable without touching the process cwd.
+fn compose_session_id(namespace: Option<&str>, agent_slug: &str, token: &str) -> String {
+    match namespace.map(str::trim).filter(|n| !n.is_empty()) {
+        Some(ns) => format!("{ns}:{agent_slug}:{token}"),
+        None => format!("proj-{agent_slug}-{token}"),
+    }
+}
+
+/// Locally exclude a project-scoped MCP config that `ctx init` just wrote.
+///
+/// These files embed a machine-local session token, so committing one hands
+/// every clone the same identity and merges their stats. Uses
+/// `.git/info/exclude` rather than the repo's tracked `.gitignore` so setting
+/// up a checkout never shows up as a repo change.
+///
+/// No-op for global configs (outside any repo) and for paths outside the
+/// checkout root.
+fn exclude_written_config(config_path: &std::path::Path) {
+    let Some(dir) = config_path.parent() else {
+        return;
+    };
+    let Some(root) = find_git_root(dir) else {
+        return;
+    };
+    let Ok(rel) = config_path.strip_prefix(&root) else {
+        return;
+    };
+    // Exclude the whole tool directory (`.gemini/`, `.cursor/`, `.vscode/`)
+    // rather than the single file: these dirs hold only generated MCP config.
+    let entry = match rel.components().count() {
+        0 => return,
+        1 => rel.to_string_lossy().to_string(),
+        _ => format!(
+            "{}/",
+            rel.components()
+                .next()
+                .unwrap()
+                .as_os_str()
+                .to_string_lossy()
+        ),
+    };
+    let _ = exclude_locally(&root, &entry);
+}
+
+fn init_session_id(namespace: Option<&str>, agent_slug: &str) -> String {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    compose_session_id(namespace, agent_slug, &checkout_token(&cwd))
 }
 
 fn mcp_server_entry(
@@ -7495,15 +7638,9 @@ fn init_mcp(
     namespace: Option<String>,
     auth_token: Option<&str>,
     auth_token_env: Option<&str>,
+    session_override: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut tools = detect_tools(global);
-
-    // Stable per-project CTX_SESSION id for the stdio MCP server (t-015).
-    // Injected as `env.CTX_SESSION` below so the spawned hub attributes and
-    // PERSISTS its recall/remember savings under one id instead of losing them
-    // to a never-flushed default session. See `init_session_id` for the
-    // per-project (not per-conversation) limitation.
-    let session_id = init_session_id(namespace.as_deref());
 
     // Generic fallback: if the user passed --config-path, add a synthetic
     // tool entry pointing at that path. Treated as McpJson (the de-facto
@@ -7540,7 +7677,7 @@ fn init_mcp(
         .iter()
         .filter(|t| {
             if let Some(f) = effective_filter.as_ref() {
-                t.name.to_lowercase().contains(&f.to_lowercase())
+                tool_filter_matches(f, t.name)
             } else {
                 t.detected
             }
@@ -7557,6 +7694,14 @@ fn init_mcp(
         // (e.g. "Claude Code" → "claude-code"). This makes
         // `ctx blame` show the originating tool for every commit.
         let agent_id = tool_slug(t.name);
+        // Session id is per (workspace, TOOL, checkout) — derived inside the
+        // loop so Claude and Codex in the same repo, and two checkouts of the
+        // same workspace, never merge their savings into one row. An explicit
+        // `--session` overrides for all targeted tools (documented on the flag).
+        let session_id = match session_override {
+            Some(s) => s.to_string(),
+            None => init_session_id(namespace.as_deref(), &agent_id),
+        };
         let mut entry = mcp_server_entry(
             &agent_id,
             t.name,
@@ -7653,6 +7798,7 @@ fn init_mcp(
                         std::fs::create_dir_all(parent)?;
                     }
                     std::fs::write(&t.config_path, pretty)?;
+                    exclude_written_config(&t.config_path);
                     println!(
                         "  \u{2192} {}: wrote {} \u{2713}",
                         t.name,
@@ -7709,6 +7855,7 @@ fn init_mcp(
                         std::fs::create_dir_all(parent)?;
                     }
                     std::fs::write(&t.config_path, new_content)?;
+                    exclude_written_config(&t.config_path);
                     println!(
                         "  \u{2192} {}: wrote {} \u{2713}",
                         t.name,
@@ -9739,6 +9886,140 @@ args = ["--path", "/old/db"]
     }
 
     // -------- tool_slug --------
+
+    // -------- --tool filter: exact slug, not substring --------
+
+    /// The regression that made `ctx init --tool claude` in ONE project rewrite
+    /// the GLOBAL Claude Desktop config with that project's namespace.
+    #[test]
+    fn tool_filter_claude_does_not_match_claude_desktop() {
+        assert!(tool_filter_matches("claude", "Claude Code"));
+        assert!(!tool_filter_matches("claude", "Claude Desktop"));
+    }
+
+    #[test]
+    fn tool_filter_targets_desktop_only_via_full_slug() {
+        assert!(tool_filter_matches("claude-desktop", "Claude Desktop"));
+        assert!(!tool_filter_matches("claude-desktop", "Claude Code"));
+    }
+
+    #[test]
+    fn tool_filter_accepts_documented_aliases() {
+        for (f, name) in [
+            ("vscode", "VS Code"),
+            ("codex", "Codex"),
+            ("gemini", "Gemini"),
+            ("cursor", "Cursor"),
+            ("grok", "Grok"),
+        ] {
+            assert!(tool_filter_matches(f, name), "{f} should match {name}");
+        }
+    }
+
+    /// Substring matching also meant `--tool code` hit both "VS Code" and
+    /// "Claude Code"; the alias now resolves to exactly one.
+    #[test]
+    fn tool_filter_is_not_substring_matching() {
+        assert!(!tool_filter_matches("code", "Claude Code"));
+        assert!(tool_filter_matches("code", "VS Code"));
+    }
+
+    // -------- composite session id --------
+
+    /// Per (workspace, tool, checkout). Two tools in one repo must not share a
+    /// row, or their recall savings merge and neither is attributable.
+    #[test]
+    fn session_id_separates_tools_in_one_workspace() {
+        let a = compose_session_id(Some("ctxone"), "claude-code", "tok1");
+        let b = compose_session_id(Some("ctxone"), "codex", "tok1");
+        assert_ne!(a, b);
+        assert_eq!(a, "ctxone:claude-code:tok1");
+        assert_eq!(b, "ctxone:codex:tok1");
+    }
+
+    /// `default` is a real workspace name here: it must still produce a
+    /// namespaced id rather than the anonymous `proj-*` fallback, so a
+    /// deliberately-pinned client (Codex) is still distinguishable.
+    #[test]
+    fn session_id_namespaces_default_explicitly() {
+        assert_eq!(
+            compose_session_id(Some("default"), "codex", "tok1"),
+            "default:codex:tok1"
+        );
+    }
+
+    #[test]
+    fn session_id_falls_back_without_a_namespace() {
+        assert_eq!(
+            compose_session_id(None, "claude-code", "tok1"),
+            "proj-claude-code-tok1"
+        );
+    }
+
+    // -------- checkout token: stable identity, not a path hash --------
+
+    fn git_init(dir: &std::path::Path) {
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir)
+            .output()
+            .expect("git init");
+    }
+
+    #[test]
+    fn checkout_token_is_stable_across_calls() {
+        let tmp = tempfile::tempdir().unwrap();
+        git_init(tmp.path());
+        let a = checkout_token(tmp.path());
+        let b = checkout_token(tmp.path());
+        assert_eq!(a, b, "token must not drift; it is baked into a config file");
+        assert!(!a.is_empty());
+    }
+
+    /// THE point of the token. Hashing the cwd meant renaming or moving a repo
+    /// minted a new session id and orphaned everything the old one had accrued.
+    #[test]
+    fn checkout_token_survives_a_directory_rename() {
+        let parent = tempfile::tempdir().unwrap();
+        let before = parent.path().join("old-name");
+        std::fs::create_dir(&before).unwrap();
+        git_init(&before);
+        let original = checkout_token(&before);
+
+        let after = parent.path().join("new-name");
+        std::fs::rename(&before, &after).unwrap();
+
+        assert_eq!(
+            checkout_token(&after),
+            original,
+            "renaming a checkout must not change its identity"
+        );
+    }
+
+    /// Two checkouts (clone, or a second worktree) are different working
+    /// contexts and must not merge their stats into one row.
+    #[test]
+    fn checkout_token_differs_between_checkouts() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        git_init(a.path());
+        git_init(b.path());
+        assert_ne!(checkout_token(a.path()), checkout_token(b.path()));
+    }
+
+    /// The token is machine-local; committing it would hand every clone the
+    /// same identity.
+    #[test]
+    fn checkout_token_is_excluded_from_git() {
+        let tmp = tempfile::tempdir().unwrap();
+        git_init(tmp.path());
+        checkout_token(tmp.path());
+        let exclude = std::fs::read_to_string(tmp.path().join(".git/info/exclude")).unwrap();
+        assert!(
+            exclude.lines().any(|l| l.trim() == CHECKOUT_TOKEN_FILE),
+            "token file must be locally excluded, got:\n{exclude}"
+        );
+    }
 
     #[test]
     fn tool_slug_lowercases_and_dashes() {

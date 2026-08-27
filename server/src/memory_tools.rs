@@ -27,6 +27,31 @@ use crate::asd_pool::AsdProcessPool;
 /// The session ID used when a request doesn't set `X-CtxOne-Session`.
 pub const DEFAULT_SESSION_ID: &str = "default";
 
+// -- Session-node discovery contract -----------------------------------------
+//
+// A session's tokens are attributed to a workspace ONLY if that namespace's
+// graph holds a node for it. Discovery (`crate::http::session_ids_with_nodes`)
+// and minting (`CtxOneServer::ensure_session_node`) are two halves of one
+// contract, so the shape lives here rather than as a literal on each side —
+// they drifted once already and the symptom was silent: workspace token cards
+// simply read zero.
+
+/// Subtree every session node lives under.
+pub const SESSION_NODE_ROOT: &str = "/sessions";
+
+/// Depth limit for the discovery walk, relative to [`SESSION_NODE_ROOT`].
+///
+/// `list_paths` yields LEAVES, so this admits `/sessions/<id>/<leaf>` and
+/// nothing deeper. Raising it is NOT a safe fix for a missing session: at depth
+/// 3 the walk also pulls every `<id>/turns/<t>` leaf of every imported session,
+/// which overruns the path cap and starts silently DROPPING sessions.
+pub const SESSION_DISCOVERY_MAX_DEPTH: usize = 2;
+
+/// Key of the scalar every session node must carry at depth 2 so the discovery
+/// walk can see it. A node whose only leaves are `<id>/meta/<field>` sits at
+/// depth 3 and is invisible.
+pub const SESSION_DISCOVERY_LEAF: &str = "agent";
+
 /// The agent ID recorded on commits when no caller-specific agent is
 /// known. Clients identify themselves via the `X-CtxOne-Agent` header
 /// on HTTP writes, or via `--agent-id <name>` when they spawn the
@@ -2536,6 +2561,15 @@ pub struct CtxOneServer {
     /// Process pool for dynamically spawned `asd-serve` instances.
     /// Used when --asd-repo flags are given; provides lazy-spawn + idle eviction.
     pub asd_pool: Option<Arc<AsdProcessPool>>,
+    /// The caller's session id (the `X-CTXone-Session` header). Needed because
+    /// [`SessionStats`] itself is anonymous — the registry keys it externally —
+    /// yet the session NODE must be filed under this exact id for the workspace
+    /// rollup to find it. Empty when unset (stdio, tests): minting is skipped.
+    pub session_id: String,
+    /// Guards [`Self::ensure_session_node`] so the node is minted at most once
+    /// per service instance. Services are cached per (namespace, session id),
+    /// so this is effectively once per session per workspace.
+    session_node_minted: Arc<std::sync::atomic::AtomicBool>,
     #[allow(dead_code)] // used by rmcp tool_router macro
     tool_router: ToolRouter<Self>,
 }
@@ -2569,6 +2603,8 @@ impl CtxOneServer {
             namespace_explicit: false,
             asd_repos: Arc::new(asd_repos),
             asd_pool: None,
+            session_id: String::new(),
+            session_node_minted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tool_router: Self::tool_router(),
         }
     }
@@ -2590,6 +2626,85 @@ impl CtxOneServer {
     pub fn with_session(mut self, session: Arc<SessionStats>) -> Self {
         self.session = session;
         self
+    }
+
+    /// Record the id the session's stats are keyed under, so
+    /// [`Self::ensure_session_node`] can file the node to match.
+    pub fn with_session_id(mut self, session_id: String) -> Self {
+        self.session_id = session_id;
+        self
+    }
+
+    /// Mint `/sessions/<id>/meta` in this server's namespace the first time the
+    /// session does anything that accrues savings.
+    ///
+    /// The workspace rollup (`namespaces_summary`) attributes a session's tokens
+    /// to a workspace ONLY if that namespace's graph contains a `/sessions/<id>`
+    /// subtree — see `session_ids_with_nodes` in `crate::http`. Session nodes
+    /// were previously written only by transcript import and `summarize_session`,
+    /// both of which key on a per-conversation UUID. A live MCP session's id
+    /// never matched one, so its savings fell through to the `default`
+    /// COMPLEMENT bucket and every real workspace card read zero.
+    ///
+    /// Minting here makes the invariant hold BY CONSTRUCTION: any session id
+    /// that accrues savings in namespace N has a node in N.
+    ///
+    /// Deliberately cheap and best-effort: one commit per (session, namespace),
+    /// guarded by an atomic; failures are swallowed so a read-only or wedged
+    /// repo can never break the recall that triggered it.
+    pub fn ensure_session_node(&self) {
+        use std::sync::atomic::Ordering;
+
+        // Anonymous/unset ids are not real sessions — minting them would file a
+        // node named "default" into a real workspace and misreport the shared
+        // bucket as belonging to it.
+        if self.session_id.is_empty() || self.session_id == DEFAULT_SESSION_ID {
+            return;
+        }
+        if self.session_node_minted.swap(true, Ordering::Relaxed) {
+            return;
+        }
+
+        let root = format!("{}/{}", SESSION_NODE_ROOT, self.session_id);
+        // Don't rewrite a node that import or `summarize_session` already wrote:
+        // that would clobber the real title/turns/meta with live-MCP values.
+        if self.repo.get_json("main", &root).is_ok() {
+            return;
+        }
+
+        let now = chrono::Utc::now().to_rfc3339();
+        // Shape matters: `session_ids_with_nodes` (crate::http) discovers
+        // sessions with `list_paths(.., "/sessions", Some(2))`, which lists
+        // LEAVES no deeper than two levels below `/sessions`. A `meta` object
+        // alone puts every leaf at depth 3 (`<id>/meta/<field>`) and is invisible
+        // to that walk — which is exactly how live sessions went unattributed.
+        // So `agent` sits at depth 2 as the discovery leaf, while `meta` keeps
+        // the shape `put_session_meta`/`session_meta` already read.
+        //
+        // The depth-2 walk is deliberate and must stay: at depth 3 the walk also
+        // pulls every `<id>/turns/<t>` leaf of every imported session, which
+        // blows past the path cap and would start DROPPING sessions.
+        let body = serde_json::json!({
+            // Depth-2 discovery leaf — see SESSION_DISCOVERY_LEAF.
+            SESSION_DISCOVERY_LEAF: self.agent_id,
+            "meta": {
+                "source": "mcp-live",
+                "agent": self.agent_id,
+                "started_at": now,
+                "updated_at": now,
+            },
+        });
+        let opts = CommitOptions::new(
+            &self.agent_id,
+            IntentCategory::Custom("Observe".to_string()),
+            format!("session meta {}", self.session_id),
+        )
+        .with_tags(vec![
+            format!("session:{}", self.session_id),
+            "kind:session-meta".to_string(),
+        ]);
+        // Best-effort: a failure here must not fail the caller's recall.
+        let _ = self.repo.set_json("main", &root, &body, opts);
     }
 
     /// Record the namespace this server was scoped to. The caller is
@@ -2727,6 +2842,7 @@ impl CtxOneServer {
         if topic.chars().count() < 4 {
             return None;
         }
+        self.ensure_session_node();
         let result = run_recall_scoped(
             &self.repo,
             &self.session,
@@ -2855,6 +2971,9 @@ impl CtxOneServer {
     async fn recall(&self, params: Parameters<RecallParams>) -> String {
         let p = params.0;
         let p = self.apply_default_ref(p);
+        // Savings are about to accrue on this session — make sure the
+        // workspace rollup can see it. See `ensure_session_node`.
+        self.ensure_session_node();
         let result = run_recall_scoped(
             &self.repo,
             &self.session,
@@ -6340,6 +6459,122 @@ mod tests {
         assert!(
             !paths.iter().any(|p| p.contains("/archive/")),
             "recall must not read outside /memory: {paths:?}"
+        );
+    }
+
+    // -------- Phase 2: session-node minting --------
+
+    fn seeded_repo() -> Arc<Repository> {
+        let repo = Arc::new(Repository::new(Box::new(
+            agentstategraph_storage::SqliteStorage::in_memory().expect("in-memory sqlite"),
+        )));
+        repo.init().unwrap();
+        repo.set_json(
+            "main",
+            "/memory/db/f1",
+            &serde_json::json!("we use sqlite not postgres"),
+            CommitOptions::new("t", IntentCategory::Custom("Observe".to_string()), "seed"),
+        )
+        .unwrap();
+        repo
+    }
+
+    /// THE contract. `session_ids_with_nodes` (crate::http) discovers sessions
+    /// with `list_paths("/sessions", Some(2))`, which yields LEAVES at most two
+    /// levels deep. A node whose only leaves are `<id>/meta/<field>` (depth 3)
+    /// is invisible to it — that was the whole bug: live sessions accrued
+    /// savings that no workspace could claim, so they fell into `default`.
+    ///
+    /// If this fails, workspace token cards silently read zero again.
+    #[test]
+    fn minted_session_node_is_visible_to_the_depth_2_discovery_walk() {
+        let repo = seeded_repo();
+        let sid = "sessiondrift:claude-code:4be1fc2b";
+        let server = CtxOneServer::new(repo.clone()).with_session_id(sid.to_string());
+
+        server.ensure_session_node();
+
+        let found = repo.list_paths("main", "/sessions", Some(2)).unwrap();
+        let ids: Vec<&str> = found
+            .iter()
+            .filter_map(|p| p.strip_prefix("/sessions/"))
+            .filter_map(|rest| rest.split('/').next())
+            .collect();
+        assert!(
+            ids.contains(&sid),
+            "minted node must be discoverable at depth 2, got {found:?}"
+        );
+    }
+
+    /// Recall is the moment savings start accruing, so it must be the moment
+    /// the node exists — otherwise the tokens are stranded.
+    #[test]
+    fn recall_gate_mints_the_session_node() {
+        let repo = seeded_repo();
+        let sid = "ctxone:claude-code:15aacf35";
+        let server = CtxOneServer::new(repo.clone()).with_session_id(sid.to_string());
+        // An absent `/sessions` prefix errors rather than returning empty.
+        assert!(
+            repo.list_paths("main", "/sessions", Some(2))
+                .unwrap_or_default()
+                .is_empty()
+        );
+
+        server
+            .recall_gate("main", "sqlite database choice")
+            .expect("gate should hit the /memory fact");
+
+        assert!(
+            repo.get_json("main", &format!("/sessions/{sid}/agent"))
+                .is_ok(),
+            "recall must leave a discoverable node behind"
+        );
+    }
+
+    /// The anonymous shared id is not a real session; filing it into a workspace
+    /// would report the shared bucket as belonging to that workspace.
+    #[test]
+    fn anonymous_and_unset_sessions_are_never_minted() {
+        for sid in [DEFAULT_SESSION_ID, ""] {
+            let repo = seeded_repo();
+            let server = CtxOneServer::new(repo.clone()).with_session_id(sid.to_string());
+            server.ensure_session_node();
+            assert!(
+                repo.list_paths("main", "/sessions", Some(2))
+                    .unwrap_or_default()
+                    .is_empty(),
+                "must not mint a node for session id {sid:?}"
+            );
+        }
+    }
+
+    /// An imported transcript already owns its node (title, turns, real
+    /// `started_at`). Minting over it would replace real provenance with
+    /// live-MCP placeholders.
+    #[test]
+    fn existing_session_node_is_not_clobbered() {
+        let repo = seeded_repo();
+        let sid = "already-imported";
+        repo.set_json(
+            "main",
+            &format!("/sessions/{sid}/title"),
+            &serde_json::json!("a real imported transcript"),
+            CommitOptions::new("t", IntentCategory::Custom("Observe".to_string()), "seed"),
+        )
+        .unwrap();
+
+        let server = CtxOneServer::new(repo.clone()).with_session_id(sid.to_string());
+        server.ensure_session_node();
+
+        assert_eq!(
+            repo.get_json("main", &format!("/sessions/{sid}/title"))
+                .unwrap(),
+            serde_json::json!("a real imported transcript"),
+        );
+        assert!(
+            repo.get_json("main", &format!("/sessions/{sid}/meta"))
+                .is_err(),
+            "must not add live-MCP meta over an imported session"
         );
     }
 

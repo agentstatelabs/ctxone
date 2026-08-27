@@ -28,8 +28,8 @@ use agentstategraph_core::{IntentCategory, Namespace};
 
 use crate::asd_pool::AsdProcessPool;
 use crate::memory_tools::{
-    DEFAULT_AGENT_ID, DEFAULT_SESSION_ID, SessionRegistry, SessionSnapshot, SessionStats,
-    ensure_flat_size, run_prime, run_recall,
+    DEFAULT_AGENT_ID, DEFAULT_SESSION_ID, SESSION_DISCOVERY_MAX_DEPTH, SESSION_NODE_ROOT,
+    SessionRegistry, SessionSnapshot, SessionStats, ensure_flat_size, run_prime, run_recall,
 };
 use crate::plan_tools;
 use crate::rate_limit;
@@ -1145,10 +1145,11 @@ async fn session_token_stats(
 /// 900. Reliable for named namespaces, where every session was ingested or
 /// moved with a full subtree.
 fn session_ids_with_nodes(repo: &Repository) -> std::collections::HashSet<String> {
-    repo.list_paths("main", "/sessions", Some(2))
+    let prefix = format!("{SESSION_NODE_ROOT}/");
+    repo.list_paths("main", SESSION_NODE_ROOT, Some(SESSION_DISCOVERY_MAX_DEPTH))
         .unwrap_or_default()
         .iter()
-        .filter_map(|p| p.strip_prefix("/sessions/"))
+        .filter_map(|p| p.strip_prefix(prefix.as_str()))
         .filter_map(|rest| rest.split('/').next())
         .map(str::to_string)
         .collect()
