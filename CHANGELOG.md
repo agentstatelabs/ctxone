@@ -4,7 +4,7 @@ All notable changes to CTXone are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
 
-## [v1.0.8] — 2026-08-26
+## [v1.0.8] — 2026-08-27
 
 ### Fixed
 - **Recall savings were credited to the wrong workspace — every workspace card read zero.** Three independent faults compounded. (1) An MCP request naming no namespace and no session fell back to a shared `"default"` bucket, so every agent on a machine read and wrote one anonymous workspace and per-project memory was unreachable. (2) An explicitly named but *invalid* namespace was silently rewritten to `"default"`, so a typo leaked one project's memory into the shared bucket with no error. (3) A workspace only claims a session's tokens when its graph holds a node for that session, and session nodes were written solely by transcript import and `summarize_session` — both keyed on a per-conversation UUID that a live MCP session's id never matches, so live savings fell into the `default` complement bucket. Live MCP sessions now mint their own session node the first time they accrue savings, so the invariant holds by construction.
@@ -17,6 +17,64 @@ the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
 - **`CTXONE_REQUIRE_IDENTITY`** (default **off**). When on, an MCP request that names no namespace or no session is refused with a 400 naming the remedy, instead of silently joining the shared workspace. An explicitly named *invalid* namespace is refused whether or not this is set — that path is the leak itself.
 - **`?session=` on the MCP URL**, mirroring `?namespace=`. Clients that cannot send headers (Codex's `config.toml` accepts only a `url`) can carry a real identity instead of sharing the anonymous row.
 - **`ctx init` locally excludes the configs it writes** (`.mcp.json`, `.gemini/`, `.cursor/`, `.vscode/`) via `.git/info/exclude`, never the tracked `.gitignore`. They embed a machine-local token, so committing one hands every clone the same identity.
+
+## [v1.0.7] — 2026-08-25
+
+### Fixed
+- **Sealed checkpoints showed "0 commits" and a blank seal hash.** ASG's `EpochEntry.commit_count` reflects the empty create-time `commits` field — sealing stores the real set in `sealed_commits` and never updates the count — and the sqlite `epochs` table has no `seal_hash` column at all. The epoch view now reads the full epoch and reports `sealed_commits.len()` as "commits sealed"; the seal-hash column is removed from the API and both UIs rather than displaying a value that was never persisted. (The underlying engine gaps — persisting `seal_hash`, updating `commit_count` on seal, and making `export_epoch` bundles self-contained — are tracked against ASG.)
+
+## [v1.0.6] — 2026-08-25
+
+### Added
+- **Sealed checkpoints are now visible and downloadable.** Sealing produced nothing but a count. `GET /api/epochs` lists a workspace's sealed epochs (`?all=true` for every workspace), and `GET /api/epochs/{id}/export` downloads one epoch's audit bundle as a JSON attachment. The workspace dashboard gains a **Sealed checkpoints** panel (plan · sealed date · commits) with per-row download, and a new `/epochs` route lists every workspace's checkpoints, linked from the sidebar under Activity › Checkpoints.
+
+## [v1.0.5] — 2026-08-25
+
+### Fixed
+- **Completing a plan could brick the hub's write path.** ASG defaults epoch seal enforcement to *strict*: any ref update that would orphan a sealed commit is hard-rejected. Because the epoch store is global rather than per-namespace, one workspace's sealed per-plan epoch blocked writes in **every** workspace — observed live, with `plan_start` rejected by an unrelated workspace's epoch. CTXone seals per-plan epochs as viewable audit checkpoints, not immutability barriers, so the base repository is now built with `epoch_seal_strict(false)` and every forked namespace inherits it.
+
+## [v1.0.4] — 2026-08-25
+
+### Fixed
+- Formatting-only release: `rustfmt` wrapping of the per-workspace epoch count filter, to satisfy the CI `fmt` gate. No behaviour change.
+
+## [v1.0.3] — 2026-08-25
+
+### Fixed
+- **Every workspace card showed the same epoch count, and same-named plans collided.** ASG epochs live in one global table keyed by id with no namespace column, so the first cut reported the hub-wide total (171) on every workspace and let identically-named plans in different workspaces seal onto one shared epoch. Epoch ids are now `plan:<namespace>:<plan_id>`, and the Hub counts a workspace's own epochs by that prefix out of the global list — called once per summary, not once per namespace, to keep the rollup fast.
+
+## [v1.0.2] — 2026-08-25
+
+### Added
+- **Completing a plan seals a checkpoint.** Every plan that reaches `completed` now yields a tamper-evident, exportable ASG epoch — a sealed snapshot of the workspace's memory graph at plan close — making the per-workspace epoch count meaningful with no user effort. Sealing is idempotent, fires on the active→completed transition from `plan_close` / `plan_complete` / `plan_done`, and runs on a background task so the reachability walk never blocks the tool call. `POST /api/plans/backfill_epochs` retroactively seals existing completed plans.
+
+## [v1.0.1] — 2026-08-24
+
+### Changed
+- **Token headlines now lead with "new work" (input + output), not cache reads.** Agentic tools re-send the whole context on every tool step, so cache reads are routinely >95% of the raw count while costing about a tenth per token — a workspace read "5.5B tok" when the real work was ~200M. Cache reads are still shown, as a secondary figure with an input/output breakdown. Presentation only; the underlying data is unchanged.
+
+### Removed
+- The Team/Enterprise edition sections in the docs.
+
+## [v1.0.0] — 2026-08-24
+
+### Added
+- **Automatic recall, on a per-task gate.** `plan_new` / `plan_start` / `plan_next` now run a memory-scoped recall for the plan or task topic and return it inline as `recalled_memory`, so any agent — Claude, Codex, Cursor — receives the relevant prior decisions at task-lifecycle moments without a per-prompt or per-session hook. This restores an automatic trigger that had been intended since 2026-08-04 but was never wired up, leaving automatic recall with no trigger at all in the interim.
+- **MCP session identity and persistence.** The MCP-over-HTTP path built each server with an ephemeral session counter that was never registered and never flushed, so recall savings from the gate — and from every MCP tool — vanished on disconnect. MCP services are now backed by the same shared, flushed session registry the REST hub uses, keyed by `X-CTXone-Session`, and `ctx init` writes that header for HTTP transports.
+
+### Fixed
+- **Recall scanned the whole graph, including the transcript archive.** Topic matching ran an unindexed scan over every node value, dominated by `/sessions/**/turns` in a mature graph. Recall only ever surfaces memory, so it now reads the scoped subtree (default `/memory`) in one pass. On a 2 GB copy of the live graph, recall is ~0.01s for common, rare and zero-match terms alike (was 0.04–0.09s and degrading without bound as `/sessions` grew). Also a correctness win: recall can no longer surface transcript chatter.
+- **LLM usage inflated N× on re-ingest.** Ingest posts one aggregated `record_llm_usage` per run and the counter added to itself, so re-ingesting a session re-added its whole total — one session ingested 8× reported 6.5B input tokens against a true 817M, and the hub showed 1.01T tokens. Displays now derive from the per-model split, which is recomputed from idempotently-upserted turns and stayed accurate throughout.
+- **OpenAI/Codex cached tokens were double-counted.** OpenAI-family records count cached tokens *inside* `input_tokens`, whereas Anthropic reports input disjoint from cache reads — so summing the two double-counted the cached portion for OpenAI models (roughly 2× on cache-heavy sessions) and overcharged cost. The aggregation layer now subtracts the cached portion for OpenAI-family models, so "input" means fresh input for every provider. Anthropic workspaces were already correct.
+- **Workspace tiles read "0 tok ≈ $49520.76".** Each card printed session *context* tokens next to a cost priced from LLM *usage* records — unrelated measures, five orders of magnitude apart, and zero for 29 of 30 workspaces. Tokens and cost are now shown on the same basis.
+- Workspace cost is priced per model rather than from one representative model.
+- Whole-namespace `backfill_by_model` is paged, so large databases no longer time out.
+- Evicted `asd-serve` processes are killed on drop instead of lingering.
+- Lens: an optional code panel that fails degrades in place instead of blanking the page; an unreachable `asd-serve` reports why; two benign 404s removed.
+
+### Changed
+- **GitHub Actions is the sole release publisher.** Local cross-builds are retired and the Homebrew formula is rendered GitLab-side, dropping both tap secrets. Pushing `main` and a tag straight to GitHub is no longer done from a workstation — it bypassed the fail-closed leak-scan gate.
+- Rolled agentstategraph to v0.9.23.
 
 ## [v0.9.36] — 2026-08-13
 
