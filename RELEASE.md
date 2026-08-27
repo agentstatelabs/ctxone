@@ -115,6 +115,31 @@ rather than 422-ing.
   removes assets + the release entry. Tag removal:
   `git push origin :refs/tags/v<X>` on both source and tap.
 
+- **A dev binary pinned in the launchd plist survives `brew upgrade`.** While
+  testing an unreleased hub, `~/Library/LaunchAgents/com.ctxone.hub.plist` may
+  point `ProgramArguments[0]` at a locally built binary (e.g.
+  `~/.ctxone/bin/ctxone-hub-dev`) instead of `/opt/homebrew/bin/ctxone-hub`.
+  Brew then upgrades the Cellar while the *running service keeps the old dev
+  build* — `brew list --versions ctxone` looks right and the hub reports a stale
+  version, which reads as a failed upgrade. After releasing, point the plist
+  back at `/opt/homebrew/bin/ctxone-hub`, carry over any
+  `EnvironmentVariables` the dev run added (e.g. `CTXONE_REQUIRE_IDENTITY`),
+  then reload:
+
+  ```sh
+  # confirm what the service is ACTUALLY running
+  ps -o command= -p "$(launchctl list | awk '/com.ctxone.hub/{print $1}')"
+
+  # after editing the plist back to the brew path:
+  launchctl unload ~/Library/LaunchAgents/com.ctxone.hub.plist   # SIGTERM -> stats flush
+  launchctl load   ~/Library/LaunchAgents/com.ctxone.hub.plist
+  curl -s localhost:3001/api/health
+  ```
+
+  Always stop the hub with `launchctl unload`, never `kill -9`: session token
+  stats flush on graceful shutdown (and every 30s), so a hard kill loses
+  everything since the last flush.
+
 ## What the script does *not* do
 
 - Cut a new homepage on `agentstatelabs/ctxone-site`.
