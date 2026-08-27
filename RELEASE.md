@@ -1,7 +1,14 @@
 # Cutting a CTXone release
 
-Releases are built locally to keep CI minutes free. The one-command flow is
-`scripts/release.sh vMAJOR.MINOR.PATCH`.
+Releases are built and published by CI. `scripts/release.sh vMAJOR.MINOR.PATCH`
+bumps the version, tags, and pushes — it **builds nothing**. Pushing the tag is
+the entire trigger; `.github/workflows/release.yml` produces every platform
+build, the GitHub release, and the Homebrew formula.
+
+There is exactly **one publisher** on purpose. The script used to cross-compile
+and upload the tarballs itself, duplicating what CI already did on every tag —
+two publishers racing on one release is how you get assets whose `sha256`s
+disagree with what CI built (the asd v0.9.38 incident).
 
 ## What ships where
 
@@ -15,50 +22,53 @@ Releases are built locally to keep CI minutes free. The one-command flow is
 
 ## One-time prereqs
 
+Nothing is compiled locally, so there is no toolchain to install — no extra
+`rustup` targets, no `cross`, no Docker, and no sibling tap clone. CI holds the
+credentials that publish the release and the formula.
+
 ```sh
-# Rust targets
-rustup target add x86_64-apple-darwin
-
-# cross-rs for Linux targets (uses Docker images per triple)
-cargo install cross --git https://github.com/cross-rs/cross
-
-# Docker Desktop — must be running when you build Linux targets
-
-# gh CLI — must have both accounts auth'd:
-#   - agentstatelabs: write access on agentstatelabs/ctxone-releases
-#   - any account with write on the homebrew-ctxone tap
+# gh CLI — only to WATCH the run; the release is created by CI, not from here.
 gh auth status
-
-# The brew tap clone must exist as a sibling of CTXone:
-#   ../homebrew-ctxone
-# with origin pointing at GitLab.
-git clone ssh://git@git.internal.example:2222/agentstategroup/homebrew-ctxone.git \
-  ../homebrew-ctxone
 ```
 
 ## Cutting a release
 
-From a clean working tree on `main`:
+From a clean working tree on `main`, level with `origin/main`:
 
 ```sh
-scripts/release.sh v0.9.12
+scripts/release.sh v1.0.8
 ```
 
 The script:
 
-1. Bumps `Cargo.toml` workspace version, commits, tags, pushes to GitLab.
-2. Builds `ctxone-hub` and `ctx` for four targets:
-   - `aarch64-apple-darwin` (native)
-   - `x86_64-apple-darwin` (native cross via Apple toolchain)
-   - `x86_64-unknown-linux-gnu` (cross-rs + Docker)
-   - `aarch64-unknown-linux-gnu` (cross-rs + Docker)
-3. Tarballs each as `ctxone-<ver>-<target>.tar.gz`.
-4. Creates the GitHub release and uploads all four tarballs.
-5. Patches `Formula/ctxone.rb` in the sibling tap clone (version field + all
-   four URL+sha256 pairs), commits, pushes to GitLab. The GitLab → GitHub
-   push mirror replicates within seconds.
+1. **Preflight** — refuses a dirty tree, or a branch behind `origin/main`
+   (releasing from a stale main either fails the push or quietly reverts
+   upstream commits).
+2. **Bumps the version in lockstep** across `Cargo.toml`, `Cargo.lock`,
+   `bindings/python/pyproject.toml`, `web/package.json` and
+   `website/package.json`, runs `cargo check --workspace --release`, and commits
+   as `release: vX`. All five must agree or the `version-guard` CI job fails the
+   tag pipeline.
+3. **Tags** `vX` on HEAD (annotated), reusing an existing tag only if it already
+   points at HEAD.
+4. **Pushes `main` + the tag to GitLab only.** Never push the tag to GitHub by
+   hand: GitLab's `publish-github` job is fail-closed on `scripts/leak-scan.sh`,
+   and a push from a workstation bypasses that gate, putting unscanned commits
+   on the public mirror. GitLab CI mirrors them, and that mirror is what fires
+   the GitHub release workflow.
 
-About ~7 minutes wall-clock the first time; less on incremental rebuilds.
+Then watch CI — nothing further runs locally:
+
+```sh
+gh run watch -R agentstatelabs/ctxone
+```
+
+Release entry: `https://github.com/agentstatelabs/ctxone-releases/releases/tag/vX`
+
+Once CI has published, `brew upgrade ctxone` picks up the new formula.
+
+> `CHANGELOG.md` is **not** written by the script. Add the entry by hand before
+> cutting the tag.
 
 ## After the release: bump the site footer
 
@@ -83,21 +93,12 @@ home in a checklist.
 
 | env var | effect |
 |---------|--------|
-| `SKIP_TAG=1` | use HEAD as-is; don't bump Cargo.toml or tag |
-| `SKIP_LINUX=1` | only build the two macOS targets |
-| `SKIP_FORMULA=1` | leave the brew tap alone (e.g. uploads only) |
-| `ONLY_TARGETS=a,b` | build a comma-separated subset |
+| `SKIP_SYNC_CHECK=1` | don't require being level with `origin/main` (offline, or a deliberate out-of-band tag) |
+| `SKIP_BUMP=1` | tag HEAD as-is without touching the five version files |
 
-Example: re-upload just the aarch64-darwin tarball without touching the
-formula:
-
-```sh
-SKIP_TAG=1 SKIP_FORMULA=1 ONLY_TARGETS=aarch64-apple-darwin \
-  scripts/release.sh v0.9.11
-```
-
-`gh release upload --clobber` is used, so re-runs overwrite stale assets
-rather than 422-ing.
+There are no build-related flags any more — the script does not build, so there
+is no target subset to select and no upload to re-run. **To re-publish assets,
+re-run the GitHub Actions workflow**; do not upload them from a workstation.
 
 ## Traps and rollback
 
@@ -142,9 +143,10 @@ rather than 422-ing.
 
 ## What the script does *not* do
 
+- Build anything. Every artifact comes from `.github/workflows/release.yml`.
 - Cut a new homepage on `agentstatelabs/ctxone-site`.
 - Write a CHANGELOG entry — bump `CHANGELOG.md` by hand before running.
-- Cross-build for `musl` libc (the current Linux tarballs target glibc).
-- Sign or notarize macOS binaries.
 
-These are the next-mile improvements if/when they become worth automating.
+CI itself does not yet cross-build for `musl` libc (the Linux tarballs target
+glibc), nor sign or notarize the macOS binaries. Those are the next-mile
+improvements if/when they become worth automating.
