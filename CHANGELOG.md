@@ -56,25 +56,75 @@ the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
 ### Removed
 - The Team/Enterprise edition sections in the docs.
 
+## [v0.9.47] — 2026-08-24
+
+Tagged **after** `v1.0.0`, from four commits ahead of it — a numbering slip in a
+multi-agent repo, not a release that precedes 1.0. Its contents reached the 1.0
+line unchanged as `v1.0.1`; see that entry.
+
 ## [v1.0.0] — 2026-08-24
 
-### Added
-- **Automatic recall, on a per-task gate.** `plan_new` / `plan_start` / `plan_next` now run a memory-scoped recall for the plan or task topic and return it inline as `recalled_memory`, so any agent — Claude, Codex, Cursor — receives the relevant prior decisions at task-lifecycle moments without a per-prompt or per-session hook. This restores an automatic trigger that had been intended since 2026-08-04 but was never wired up, leaving automatic recall with no trigger at all in the interim.
-- **MCP session identity and persistence.** The MCP-over-HTTP path built each server with an ephemeral session counter that was never registered and never flushed, so recall savings from the gate — and from every MCP tool — vanished on disconnect. MCP services are now backed by the same shared, flushed session registry the REST hub uses, keyed by `X-CTXone-Session`, and `ctx init` writes that header for HTTP transports.
+The 1.0 milestone. **No functional change from `v0.9.47`'s predecessor
+`v0.9.46`** — this tag renumbers that tree, and the work it ships is described
+under the `v0.9.37`–`v0.9.46` entries below rather than repeated here.
+
+## [v0.9.46] — 2026-08-22
 
 ### Fixed
-- **Recall scanned the whole graph, including the transcript archive.** Topic matching ran an unindexed scan over every node value, dominated by `/sessions/**/turns` in a mature graph. Recall only ever surfaces memory, so it now reads the scoped subtree (default `/memory`) in one pass. On a 2 GB copy of the live graph, recall is ~0.01s for common, rare and zero-match terms alike (was 0.04–0.09s and degrading without bound as `/sessions` grew). Also a correctness win: recall can no longer surface transcript chatter.
-- **LLM usage inflated N× on re-ingest.** Ingest posts one aggregated `record_llm_usage` per run and the counter added to itself, so re-ingesting a session re-added its whole total — one session ingested 8× reported 6.5B input tokens against a true 817M, and the hub showed 1.01T tokens. Displays now derive from the per-model split, which is recomputed from idempotently-upserted turns and stayed accurate throughout.
-- **OpenAI/Codex cached tokens were double-counted.** OpenAI-family records count cached tokens *inside* `input_tokens`, whereas Anthropic reports input disjoint from cache reads — so summing the two double-counted the cached portion for OpenAI models (roughly 2× on cache-heavy sessions) and overcharged cost. The aggregation layer now subtracts the cached portion for OpenAI-family models, so "input" means fresh input for every provider. Anthropic workspaces were already correct.
-- **Workspace tiles read "0 tok ≈ $49520.76".** Each card printed session *context* tokens next to a cost priced from LLM *usage* records — unrelated measures, five orders of magnitude apart, and zero for 29 of 30 workspaces. Tokens and cost are now shown on the same basis.
-- Workspace cost is priced per model rather than from one representative model.
-- Whole-namespace `backfill_by_model` is paged, so large databases no longer time out.
+- **OpenAI/Codex cached tokens were double-counted.** OpenAI-family usage records count cached tokens *inside* `input_tokens`, whereas Anthropic reports input disjoint from cache reads — so summing the two double-counted the cached portion for OpenAI models (roughly 2× on cache-heavy sessions: SessionDrift 10.8B→5.5B) and overcharged cost, since cached tokens were billed at the input rate. The aggregation layer now subtracts the cached portion for OpenAI-family models, so "input" means fresh input for every provider and a turn's total matches the provider's own. Normalised in the recompute rather than at ingest, so stored turns keep their provider-native shape. Anthropic workspaces were already correct.
+
+### Added
+- CTXone Lens screenshots in the README (hub hero, plus workspace/code/sessions gallery).
+
+## [v0.9.45] — 2026-08-21
+
+### Fixed
+- Two benign Lens 404s removed: the symbol call-graph probe and the turn-less session title probe.
+
+## [v0.9.44] — 2026-08-20
+
+### Fixed
+- **Workspace cost was priced from a single representative model.** A workspace that used several models was costed as if all its tokens belonged to one of them. Each workspace tile is now priced per model from the per-model split.
+
+## [v0.9.43] — 2026-08-20
+
+### Fixed
+- **`backfill_by_model` timed out on large databases.** The whole-namespace recompute ran unpaged; it is now paged so big graphs complete.
+
+## [v0.9.42] — 2026-08-20
+
+### Fixed
+- **LLM usage inflated N× on re-ingest.** Ingest posts one aggregated `record_llm_usage` per run and the counter added to itself, so re-ingesting a session re-added its entire total — one session ingested 8× reported 6.5B input tokens against a true 817M, and the hub headline read 1.01T tokens. Displays now derive from the per-model split, which is recomputed from idempotently-upserted turns and had stayed accurate throughout.
+
+## [v0.9.41] — 2026-08-19
+
+### Fixed
+- **Recall scanned the whole graph, including the transcript archive.** Topic matching ran an unindexed scan over every node value, dominated by `/sessions/**/turns` in a mature graph. Recall only ever surfaces memory, so it now reads the scoped subtree (default `/memory`) in a single pass. On a 2 GB copy of the live graph, recall is ~0.01s for common, rare and zero-match terms alike — previously 0.04–0.09s and degrading without bound as `/sessions` grew. Also a correctness win: recall can no longer surface transcript chatter.
+
+## [v0.9.40] — 2026-08-19
+
+### Added
+- **Automatic recall, on a per-task gate.** `plan_new` / `plan_start` / `plan_next` now run a memory-scoped recall for the plan or task topic and return it inline as `recalled_memory`, so any agent — Claude, Codex, Cursor — gets the relevant prior decisions at task-lifecycle moments with no per-prompt or per-session hook. This restores an automatic trigger intended since 2026-08-04 but never wired up, which had left automatic recall with no trigger at all in the interim.
+- **MCP session identity and persistence.** The MCP-over-HTTP path built each server with an ephemeral session counter that was never registered and never flushed, so recall savings from the gate — and from every MCP tool — vanished on disconnect. MCP services are now backed by the same shared, flushed session registry the REST hub uses, keyed by `X-CTXone-Session`, and `ctx init` writes that header for HTTP transports.
+
+## [v0.9.39] — 2026-08-19
+
+### Fixed
+- **Workspace tiles read "0 tok ≈ $49520.76".** Each card printed session *context* tokens beside a cost priced from LLM *usage* records — unrelated measures, five orders of magnitude apart, and zero for 29 of the 30 workspaces on this hub. Tokens and cost are now shown on the same basis.
 - Evicted `asd-serve` processes are killed on drop instead of lingering.
-- Lens: an optional code panel that fails degrades in place instead of blanking the page; an unreachable `asd-serve` reports why; two benign 404s removed.
+- Lens: an optional code panel that fails degrades in place instead of blanking the page, and an unreachable `asd-serve` reports why rather than guessing.
+- **Releases no longer push `main` and the tag straight to GitHub** from a workstation — that bypassed the fail-closed leak-scan gate on the public mirror.
+
+## [v0.9.38] — 2026-08-17
 
 ### Changed
-- **GitHub Actions is the sole release publisher.** Local cross-builds are retired and the Homebrew formula is rendered GitLab-side, dropping both tap secrets. Pushing `main` and a tag straight to GitHub is no longer done from a workstation — it bypassed the fail-closed leak-scan gate.
-- Rolled agentstategraph to v0.9.23.
+- The Homebrew formula is rendered GitLab-side, dropping both tap secrets.
+
+## [v0.9.37] — 2026-08-15
+
+### Changed
+- **GitHub Actions is the sole release publisher**; local cross-builds are retired. Two publishers racing on one release is how assets end up with `sha256`s that disagree with what CI built.
+- Rolled agentstategraph v0.9.20 → v0.9.22 → v0.9.23.
 
 ## [v0.9.36] — 2026-08-13
 
@@ -165,6 +215,43 @@ the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
 - `GET /api/sessions/{sid}/starter` — generate a fresh-session seed from the user's own words (verbatim `user_text`, de-noised, grouped by topic arc). Pure, no-LLM. Surfaced in Lens as the payload the "roll to a new session" CTA copies.
 - `SessionSnapshot.session_startup_tokens` — the first-recall payload, surfaced as the session's startup boost.
 
+## [v0.9.25] — 2026-08-05
+
+### Added
+- Depth-capped shallow state reads (`t-007`); agentstategraph bumped to v0.9.18.
+- `session reattribute` enumerates the graph and resolves the working directory from it, rather than trusting the caller.
+
+### Fixed
+- Recall dedupes redundant searches and caches results keyed by graph head.
+
+## [v0.9.24] — 2026-08-04
+
+### Added
+- **Session analysis pipeline (P1–P8).** A pluggable extraction provider, hub-stored analysis status, cost estimation with a price table, session summaries with topic arcs (pseudo-branches), a generic import source for non-local clients, `ctx analyze list | estimate`, a Lens analysis panel on the session detail view, and user-facing toggles to control it.
+- Watermarked memory extraction for the hub's background sweep, so a re-run resumes rather than reprocessing.
+
+## [v0.9.23] — 2026-08-04
+
+### Added
+- **Background session sweep** — capture is pulled on a schedule rather than only on demand.
+
+### Fixed
+- The installed hub service bakes in `--ctx-binary`, so it resolves under a service manager.
+
+### Removed
+- The per-prompt recall hook in project settings. (Recall was intended to move to a per-task gate at this point; that gate was not actually implemented until v0.9.40, leaving the interim with no automatic trigger.)
+
+## [v0.9.22] — 2026-08-03
+
+### Added
+- **Summary-gated plan close** — closing a plan requires a summary; the engine no longer auto-completes plans.
+- New worktrees auto-enable `.githooks`, and a pre-push `rustfmt` gate stops formatting failures reaching CI.
+
+## [v0.9.21] — 2026-08-03
+
+### Fixed
+- Formatting-only release: `rustfmt` on `source_ref_for_path` and its test. No behaviour change.
+
 ## [v0.9.20] — 2026-07-29
 
 ### Added
@@ -186,6 +273,25 @@ the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
 ### Changed
 - Plan/task/doc read helpers (`plan next` in-progress, `plan stale`, `docs find`) now surface repository-integrity errors instead of masking a corrupt tree as an empty result.
 - CHANGELOG version headers no longer carry a `v` prefix, matching AgentStateGraph and AgentStateDeveloper.
+
+## [v0.9.17] — 2026-07-29
+
+Tagged from a tree already contained in `v0.9.18` — it carries no commits of its
+own. Recorded for completeness; there is nothing to install here that `v0.9.18`
+does not already have.
+
+## [v0.9.18] — 2026-07-28
+
+### Added
+- **`ctx db fsck [--repair]`** — an integrity check that walks refs → commits → state roots → objects, reports missing/dangling objects and the nearest readable ancestor, and can rewind a damaged ref. Paired with surfacing tree corruption instead of masking it: a dangling object used to be reported as an empty result, so corruption looked like "no data".
+
+### Fixed
+- Slash-containing branch names are percent-encoded, so refs like `codex/drift-pad-navigation` route instead of 404ing.
+- `install.sh` rewritten to the tarball pattern.
+- Lens auto-selects the first plan on a workspace or branch switch instead of erroring.
+
+### Changed
+- The public GitHub mirror is now a **gated `publish-github` job** replacing push-mirroring, so only scanned branches and tags reach it; private GitLab dependencies moved to public GitHub; stale GitLab token auth scrubbed from CI.
 
 ## [v0.9.16] — 2026-07-21
 
@@ -449,3 +555,32 @@ do the `reinstall agentstatelabs/ctxone/ctxone` first if needed.)
 For releases before v0.9.10 see `git log` and the archived GitHub
 repos under `ctxone/` (now archived; canonical history continues on
 `git.internal.example/agentstategroup/ctxone`).
+
+## [v0.9.13] — 2026-06-08
+
+### Fixed
+- The release workflow builds the SvelteKit frontend before cargo, so `rust-embed` finds `web/build/`.
+
+## [v0.9.12] — 2026-06-08
+
+### Added
+- **GitHub Actions release pipeline plus Windows distribution**, `scripts/release.sh` and `RELEASE.md` — the first automated release.
+- Lens surfaces Plan G/K thinking from `asd-serve`; the sidebar is split into CtxOne and ASD sections.
+- This CHANGELOG.
+
+## [v0.9.11] — 2026-06-02
+
+The consolidation release that renumbered the project onto the `0.9.x` line and
+moved it to GitLab. It carries roughly two months of work from the previous
+`0.7x`/`0.8x` line:
+
+### Added
+- **Multi-repo code intelligence (M18/M19)** — an ASD process pool with configurable idle timeout and health gating, a Code Lens view layer with a repo picker and hub routing table, code-intelligence MCP tools, `set_active_repo` / `get_active_repo` with a session-scoped active repo, auto-discovery of ASD repos from `~/.config/asd/repos.toml`, hot/cold status and a prefetch endpoint, and `--asd-path` / `--asd-idle-timeout`.
+- **`ctx session metrics`** with cost estimation and unit-of-work detection, per-turn model pricing, and an explicit cache discount in every metrics view.
+- Reminders across the stack.
+
+### Changed
+- The agentstategraph engine moved from a git submodule to a pinned git dependency; rolled 0.8.1 → 0.9.2.
+- Lens builds as a pure client-side SPA so dynamic routes build cleanly; CI builds the frontend before cargo.
+- Moved to GitLab CI with a pinned toolchain; clippy gates narrowed to correctness.
+
