@@ -131,7 +131,7 @@ under the `v0.9.37`–`v0.9.46` entries below rather than repeated here.
 ### Fixed
 - **Large ASD repos timed out on first load in the code proxy.** The pool's startup budget (10s) gated both binding *and* the first `/api/v1/health`, which warms the db with a symbol count over a possibly multi-GB store. A large repo (e.g. a 22GB iOS `.asd-state.db`) bound in ~1s but only passed health at ~10s, so it failed on first touch and only worked on a retry. The budget is now **45s**, tunable via `CTXONE_ASD_SPAWN_TIMEOUT_SECS`. (A pathologically bloated db whose health takes minutes still needs its store rebuilt — a longer wait won't save it.)
 
-## [v0.9.35] — 2026-08-13
+## [v0.9.35] — 2026-08-12
 
 ### Fixed
 - **Intermittent "ASD server unreachable" on a cold repo.** The code-proxy process pool released its lock before spawning `asd-serve` and re-acquired it after, so concurrent first-touch requests each spawned a process; later stores overwrote and killed earlier children, and any request holding a killed process's URL failed. The Lens code page fires health + symbols + files + overview at once, so opening a cold repo reliably tripped this. Spawns are now single-flighted per repo (concurrent callers share one spawn), verified with 8 concurrent cold requests producing exactly one process.
@@ -192,7 +192,7 @@ under the `v0.9.37`–`v0.9.46` entries below rather than repeated here.
 ### Fixed
 - `BrowsePane` no longer flashes "No memory on this branch yet" during its initial path load. The empty state was shown whenever the path list was empty — including the in-flight first fetch, which is slow because it returns the whole tree — so a cold load briefly and misleadingly claimed the branch had no memory. It now shows a "Loading memory…" placeholder until the first load completes.
 
-## [v0.9.28] — 2026-08-07
+## [v0.9.28] — 2026-08-10
 
 ### Changed
 - Split the Lens "Token economics" panel into distinct **Recall savings** and **LLM usage** views, and broke **Model efficiency** out into its own panel.
@@ -200,12 +200,12 @@ under the `v0.9.37`–`v0.9.46` entries below rather than repeated here.
 ### Fixed
 - Corrected inflated cost figures: `$/1M` now excludes cache reads, and the recall savings estimate no longer double-counts.
 
-## [v0.9.27] — 2026-08-06
+## [v0.9.27] — 2026-08-05
 
 ### Changed
 - CLI output no longer frames the per-recall flat-vs-injected ratio as "savings" — the last place still using the old "N tokens sent vs M flat (X× savings)" language. `ctx recall` now reports just the honest injected-token count, and `ctx demo`'s cumulative line reads "Estimated savings this session (conservative model … can't be measured) — N injected · ~M saved (est.)", consistent with the Lens reframing in v0.9.26.
 
-## [v0.9.26] — 2026-08-06
+## [v0.9.26] — 2026-08-05
 
 ### Changed
 - Token savings is now presented as an honest, bounded **estimate** rather than a measurement. The old figure divided the entire serialized memory graph by each recall injection and accumulated it per call, producing implausible ~9000× ratios and billions of "saved" tokens. Savings from a memory tool is inherently a counterfactual (the avoided run never happened), so `tokens_saved` is now a conservative model — `(RECONSTRUCTION_FACTOR − 1) ×` the real injected recall payload — that grows with the session and never touches the graph. Lens tiles are relabeled "Tokens saved (est.)" and the flat-memory ratio is removed.
@@ -252,7 +252,7 @@ under the `v0.9.37`–`v0.9.46` entries below rather than repeated here.
 ### Fixed
 - Formatting-only release: `rustfmt` on `source_ref_for_path` and its test. No behaviour change.
 
-## [v0.9.20] — 2026-07-29
+## [v0.9.20] — 2026-08-03
 
 ### Added
 - `ctx branch reset <name> --to <ref> [--backup]` and `POST /api/branches/reset` — reset a branch to a ref, optionally snapshotting a timestamped recovery ref first.
@@ -274,24 +274,26 @@ under the `v0.9.37`–`v0.9.46` entries below rather than repeated here.
 - Plan/task/doc read helpers (`plan next` in-progress, `plan stale`, `docs find`) now surface repository-integrity errors instead of masking a corrupt tree as an empty result.
 - CHANGELOG version headers no longer carry a `v` prefix, matching AgentStateGraph and AgentStateDeveloper.
 
-## [v0.9.17] — 2026-07-29
-
-Tagged from a tree already contained in `v0.9.18` — it carries no commits of its
-own. Recorded for completeness; there is nothing to install here that `v0.9.18`
-does not already have.
-
 ## [v0.9.18] — 2026-07-28
 
+Cut a few hours after `v0.9.17` the same evening, on top of it.
+
 ### Added
-- **`ctx db fsck [--repair]`** — an integrity check that walks refs → commits → state roots → objects, reports missing/dangling objects and the nearest readable ancestor, and can rewind a damaged ref. Paired with surfacing tree corruption instead of masking it: a dangling object used to be reported as an empty result, so corruption looked like "no data".
+- **`ctx db fsck [--repair]`** — an integrity check that walks refs → commits → state roots → objects, reports missing or dangling objects and the nearest readable ancestor, and can rewind a damaged ref. Paired with surfacing tree corruption instead of masking it: a dangling object used to be reported as an empty result, so corruption looked like "no data".
 
 ### Fixed
-- Slash-containing branch names are percent-encoded, so refs like `codex/drift-pad-navigation` route instead of 404ing.
-- `install.sh` rewritten to the tarball pattern.
-- Lens auto-selects the first plan on a workspace or branch switch instead of erroring.
+- Slash-containing branch names are percent-encoded, so refs like `codex/drift-pad-navigation` resolve instead of 404ing.
+
+## [v0.9.17] — 2026-07-28
 
 ### Changed
-- The public GitHub mirror is now a **gated `publish-github` job** replacing push-mirroring, so only scanned branches and tags reach it; private GitLab dependencies moved to public GitHub; stale GitLab token auth scrubbed from CI.
+- **The public GitHub mirror is now a gated `publish-github` job**, replacing push-mirroring, so only scanned branches and tags reach it — push-mirroring exposed every branch. Private GitLab dependencies (including the `@agentstate/lens-core` npm package) moved to public GitHub, and dead GitLab token dep-auth was scrubbed from CI.
+- `install.sh` rewritten to the tarball pattern.
+- Bumped agentstategraph v0.9.4 → v0.9.6.
+
+### Fixed
+- Lens auto-selects the first plan on a workspace or branch switch instead of erroring.
+- Test fixtures use generic example paths, keeping leak-scan clean.
 
 ## [v0.9.16] — 2026-07-21
 
