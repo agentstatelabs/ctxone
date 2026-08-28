@@ -266,16 +266,17 @@ pub fn promote_completed_plans(
 /// returns `Ok(false)`, so re-completing an already-completed plan never
 /// double-seals. Returns `Ok(true)` when it sealed a fresh epoch.
 ///
-/// The epoch id is `plan:<namespace>:<plan_id>`. ASG epochs live in a single
-/// global table keyed by id (no namespace column), so the id MUST carry the
-/// workspace — otherwise two workspaces with a same-named plan collide on one
-/// global epoch. `epoch_id_prefix` builds the matching `plan:<namespace>:`
-/// prefix the Hub uses to count a workspace's own epochs out of the global list.
+/// The epoch id is `plan:<namespace>:<plan_id>`. As of agentstategraph v1.1.0
+/// epochs carry a real `namespace` column and `create_epoch` stamps it, so the
+/// id no longer has to carry the workspace to avoid collisions — but it still
+/// does, because every epoch sealed before v1.1.0 has `namespace = NULL` and
+/// the id prefix is the only record of which workspace it belonged to. See
+/// [`epoch_id_prefix`].
 ///
 /// `root_intents` is left empty: this is a whole-workspace checkpoint keyed to
 /// the plan, not a per-intent slice (the seal captures reachable-from-`main`
-/// regardless). Seal enforcement stays in warn mode — we never set
-/// `ASG_EPOCH_SEAL_STRICT` — so a seal can never block later memory writes.
+/// regardless). Seal enforcement is ASG's default (strict) again as of v1.1.0,
+/// which is safe now that a seal binds only its own workspace.
 ///
 /// Runs a `reachable_commits_from(main)` walk (~1–2s on a 10k-commit graph),
 /// so callers should invoke it off the request path (a background task).
@@ -299,9 +300,19 @@ pub fn seal_plan_epoch(
 }
 
 /// The id prefix identifying epochs that belong to `namespace` — `plan:<ns>:`.
-/// ASG's `list_epochs()` is global (no namespace column), so the Hub counts a
-/// workspace's own epochs by matching this prefix rather than trusting the
-/// global `stats().epoch_count`.
+///
+/// KEPT DELIBERATELY, and not replaceable by ASG v1.1.0's namespace scoping
+/// yet. v1.1.0 added a `namespace` column and scopes `list_epochs()` to the
+/// active workspace, but it only stamps epochs created from v1.1.0 onward.
+/// Every epoch sealed before then has `namespace = NULL`, which ASG treats as
+/// belonging to the DEFAULT workspace — so switching to native scoping today
+/// would move every historical epoch out of its real workspace and report zero
+/// for the rest. On this hub that is 168 of 172 epochs.
+///
+/// The id prefix is the only surviving record of those epochs' workspaces.
+/// Removing this needs a one-time backfill stamping `namespace` from the id,
+/// which in turn needs a way to amend an existing epoch — ASG has no such
+/// setter today. Until then the Hub matches on this prefix.
 pub fn epoch_id_prefix(namespace: &str) -> String {
     format!("plan:{namespace}:")
 }
@@ -1342,6 +1353,76 @@ mod tests {
                 .as_deref(),
             Some("wrapped up")
         );
+    }
+
+    /// A sealed epoch must bind only its own workspace.
+    ///
+    /// The Hub used to build every repository with `epoch_seal_strict(false)`,
+    /// disabling seal enforcement entirely, because agentstategraph's epoch
+    /// store was global: one workspace's sealed epoch hard-rejected ref updates
+    /// in EVERY workspace, so completing a plan in one project could block
+    /// writes across all of them. ASG v1.1.0 scopes an epoch to its owner, and
+    /// this test is what lets the opt-out stay removed.
+    #[test]
+    fn a_sealed_epoch_in_one_workspace_does_not_block_writes_in_another() {
+        use agentstategraph_core::Namespace;
+        let base = fresh_repo();
+        let ws_a = base.fork_namespace(Namespace::new("wsA").expect("ns"));
+        let ws_b = base.fork_namespace(Namespace::new("wsB").expect("ns"));
+        ws_a.init().expect("init wsA");
+        ws_b.init().expect("init wsB");
+
+        // Give each workspace some history, so a seal has commits to guard.
+        let opts = || {
+            CommitOptions::new(
+                "test-agent",
+                IntentCategory::Custom("Observe".to_string()),
+                "seed",
+            )
+        };
+        ws_a.set(
+            "main",
+            "/memory/a1",
+            &agentstategraph_core::Object::string("alpha"),
+            opts(),
+        )
+        .expect("wsA write");
+        ws_b.set(
+            "main",
+            "/memory/b1",
+            &agentstategraph_core::Object::string("beta"),
+            opts(),
+        )
+        .expect("wsB write");
+
+        assert!(
+            seal_plan_epoch(&ws_a, "wsA", "p1", "plan one", "sealed").expect("seal"),
+            "wsA seals an epoch"
+        );
+
+        // The seal is stamped with the repo's namespace, not just encoded in
+        // the id — that is what scopes enforcement to wsA.
+        let sealed = ws_a.get_epoch("plan:wsA:p1").expect("epoch exists");
+        assert_eq!(sealed.namespace.as_deref(), Some("wsA"));
+
+        // THE REGRESSION: wsB must still be writable.
+        ws_b.set(
+            "main",
+            "/memory/b2",
+            &agentstategraph_core::Object::string("beta two"),
+            opts(),
+        )
+        .expect("a seal in wsA must not block writes in wsB");
+
+        // And wsA itself keeps working — scoping must not disable the guard,
+        // only aim it. Appending to main never orphans a sealed commit.
+        ws_a.set(
+            "main",
+            "/memory/a2",
+            &agentstategraph_core::Object::string("alpha two"),
+            opts(),
+        )
+        .expect("wsA still writable");
     }
 
     #[test]
