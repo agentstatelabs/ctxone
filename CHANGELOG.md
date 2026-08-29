@@ -4,6 +4,19 @@ All notable changes to CTXone are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
 
+## [v1.0.9] — 2026-08-29
+
+### Fixed
+- **Epoch seal enforcement is on again, and a seal now binds only the workspace that made it.** The Hub built every repository with enforcement disabled. That was not a preference: ASG's epoch store was global, so completing a plan in one project sealed an epoch that hard-rejected ref updates in *every* project — switching the guard off was the only way to keep the Hub writable. agentstategraph v1.1.2 scopes an epoch to its owning workspace, so the opt-out is gone from all three construction sites and the guard finally does what it was always meant to.
+- **The cross-workspace epoch view returned only the current workspace, and the workspace cards counted every workspace from the `default` listing.** `list_epochs` became workspace-scoped in agentstategraph v1.1.0; `/api/epochs?all=true` and `namespaces_summary` both still assumed it was global. The failure was partial rather than empty — legacy epochs read as `default` while newly sealed ones went missing — so it presented as "epochs stopped being sealed."
+
+### Added
+- **A startup migration stamps each legacy epoch with its owning workspace**, recovered from the `plan:<namespace>:<plan_id>` id that sealing writes. It is a migration and not an endpoint because an endpoint someone has to remember to call is not something the code reading that data can rely on. Assign-only underneath, so it cannot move an epoch between workspaces; ids carrying no namespace are skipped rather than guessed; a single unassignable epoch is logged and counted, never fatal. Verified against this hub's live database: 172 epochs assigned across 9 workspaces, 171 pre-namespace ids left unowned (every one of them already superseded by a namespaced twin), and the sealed commit sets byte-identical afterwards.
+
+### Changed
+- **A workspace's epoch count now comes from the epoch's `namespace` column rather than a match on its id prefix.** `epoch_id_prefix` survives in a reduced role — recovering a plan name from an id for display — and is no longer the source of truth for ownership.
+- agentstategraph pin moves **v0.9.23 → v1.1.2**.
+
 ## [v1.0.8] — 2026-08-27
 
 ### Fixed
