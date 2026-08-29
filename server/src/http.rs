@@ -3272,9 +3272,15 @@ async fn list_epochs(
     Query(q): Query<EpochListQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
-    let all = repo
-        .list_epochs()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // `list_epochs` is scoped to the active workspace (agentstategraph v1.1.0),
+    // so the cross-workspace view must ask for it explicitly — otherwise
+    // `?all=true` silently returns only this workspace's epochs.
+    let all = if q.all {
+        repo.list_all_epochs()
+    } else {
+        repo.list_epochs()
+    }
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let namespaces: Vec<String> = if q.all {
         let mut n: Vec<String> = s
@@ -3290,15 +3296,19 @@ async fn list_epochs(
     } else {
         vec![ns.0.clone()]
     };
-    let prefixes: Vec<(String, String)> = namespaces
-        .iter()
-        .map(|name| (name.clone(), plan_tools::epoch_id_prefix(name)))
-        .collect();
-
     let mut out = Vec::new();
     for e in &all {
-        if let Some((ns_name, prefix)) = prefixes.iter().find(|(_, p)| e.id.starts_with(p)) {
-            let plan = e.id.strip_prefix(prefix).unwrap_or(&e.id);
+        // Attribute by the epoch's own workspace. Schema migration 002 stamps
+        // this on every pre-v1.1.0 epoch from its `plan:<ns>:` id, so the id
+        // prefix is no longer the source of truth for ownership — only for
+        // recovering the plan name below.
+        let Some(ns_name) = e.namespace.clone() else {
+            continue;
+        };
+        if namespaces.iter().any(|n| n == &ns_name) {
+            let plan =
+                e.id.strip_prefix(&plan_tools::epoch_id_prefix(&ns_name))
+                    .unwrap_or(&e.id);
             // ASG's `EpochEntry.commit_count` (and the sqlite column) reflect the
             // empty `commits` field at create time, NOT the sealed set — seal
             // stores the real commits in `sealed_commits` and never updates the
@@ -4993,10 +5003,12 @@ async fn namespaces_summary(State(s): State<HubState>) -> impl IntoResponse {
     let empty = std::collections::HashSet::new();
     // ASG epochs are one global table, so list them ONCE and count per-workspace
     // by id prefix below — not once per namespace, which made the rollup crawl.
-    let all_epoch_ids: Vec<String> = s
+    // Cross-workspace by design: this rollup reports every workspace's count,
+    // so it must not use the namespace-scoped `list_epochs`.
+    let all_epoch_namespaces: Vec<Option<String>> = s
         .repo
-        .list_epochs()
-        .map(|es| es.into_iter().map(|e| e.id).collect())
+        .list_all_epochs()
+        .map(|es| es.into_iter().map(|e| e.namespace).collect())
         .unwrap_or_default();
     let mut out = Vec::new();
     for name in &names {
@@ -5014,15 +5026,13 @@ async fn namespaces_summary(State(s): State<HubState>) -> impl IntoResponse {
         // Same graph counts the per-ns `stats` handler returns
         // (commit_count / path_count / branch_count / epoch_count).
         let mut graph = repo.stats("main").unwrap_or(serde_json::Value::Null);
-        // ASG epochs are stored in one global table (no namespace column), so
-        // `stats().epoch_count` is the hub-wide total — the same on every card.
-        // Override it with THIS workspace's own count: epochs whose id carries
-        // the `plan:<ns>:` prefix `seal_plan_epoch` writes.
+        // ASG's `stats().epoch_count` is the hub-wide total — the same number on
+        // every card — because epochs live in one global table. Override it with
+        // THIS workspace's own count, taken from each epoch's namespace.
         if let Some(obj) = graph.as_object_mut() {
-            let prefix = plan_tools::epoch_id_prefix(name);
-            let count = all_epoch_ids
+            let count = all_epoch_namespaces
                 .iter()
-                .filter(|id| id.starts_with(&prefix))
+                .filter(|owner| owner.as_deref() == Some(name.as_str()))
                 .count();
             obj.insert("epoch_count".to_string(), serde_json::json!(count));
         }

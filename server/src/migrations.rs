@@ -26,7 +26,7 @@ use tracing::{debug, info, warn};
 
 /// Current CtxOne schema version. Bump this when you change the shape of
 /// anything CtxOne writes to the graph, and add a migration below.
-pub const CTXONE_SCHEMA_VERSION: u32 = 1;
+pub const CTXONE_SCHEMA_VERSION: u32 = 2;
 
 /// Path where the schema version is stored inside the graph.
 const SCHEMA_VERSION_PATH: &str = "/ctxone/schema_version";
@@ -141,7 +141,7 @@ pub fn run_migrations(repo: &Repository) -> Result<(), MigrationError> {
                 // future migrations can start from a known baseline.
                 info!(version = 1, "migration 001: initialize schema");
             }
-            // 2 => migrate_001_to_002(repo)?,
+            2 => migrate_001_to_002(repo)?,
             // 3 => migrate_002_to_003(repo)?,
             other => {
                 return Err(MigrationError::Repo(format!(
@@ -158,12 +158,109 @@ pub fn run_migrations(repo: &Repository) -> Result<(), MigrationError> {
     Ok(())
 }
 
+/// v1 -> v2: give pre-namespace epochs their workspace back.
+///
+/// agentstategraph v1.1.0 gave epochs a `namespace` and scoped seal enforcement
+/// and listing to it, but only stamps epochs created from v1.1.0 onward. Epochs
+/// sealed before then carry no owner and read as belonging to the DEFAULT
+/// workspace — on a mature hub that is most of them, all attributed to the
+/// wrong place.
+///
+/// CtxOne knows where they belong: `seal_plan_epoch` writes the id
+/// `plan:<namespace>:<plan_id>`, so the workspace is recoverable from the id
+/// itself. This settles it once, in the graph, so the Hub can attribute epochs
+/// by their real namespace instead of matching that id prefix forever.
+///
+/// Only touches epochs that have no owner — `assign_epoch_namespace` is
+/// assign-only, so this can never move an epoch between workspaces. Ids that do
+/// not match the `plan:<ns>:` convention are left alone: they were never
+/// attributed by prefix either, so there is nothing to recover.
+fn migrate_001_to_002(repo: &Repository) -> Result<(), MigrationError> {
+    let epochs = repo
+        .list_all_epochs()
+        .map_err(|e| MigrationError::Repo(format!("list epochs: {e}")))?;
+
+    let (mut assigned, mut already, mut skipped) = (0usize, 0usize, 0usize);
+    for e in &epochs {
+        if e.namespace.is_some() {
+            already += 1;
+            continue;
+        }
+        let Some(ns) = namespace_from_plan_epoch_id(&e.id) else {
+            skipped += 1;
+            continue;
+        };
+        match repo.assign_epoch_namespace(&e.id, &ns) {
+            Ok(true) => assigned += 1,
+            Ok(false) => already += 1,
+            // Best-effort per epoch: one unassignable epoch must not block
+            // startup, and the Hub still reads correctly without it.
+            Err(err) => {
+                warn!(epoch = %e.id, error = ?err, "could not assign epoch namespace");
+                skipped += 1;
+            }
+        }
+    }
+    info!(
+        version = 2,
+        assigned,
+        already_owned = already,
+        skipped,
+        total = epochs.len(),
+        "migration 002: backfilled epoch workspaces from plan:<ns>: ids"
+    );
+    Ok(())
+}
+
+/// Recover the workspace from a `plan:<namespace>:<plan_id>` epoch id.
+///
+/// Returns `None` for any other shape. Splits on the FIRST two colons only —
+/// a plan id may itself contain colons, and the namespace never does.
+fn namespace_from_plan_epoch_id(id: &str) -> Option<String> {
+    let rest = id.strip_prefix("plan:")?;
+    let (ns, plan) = rest.split_once(':')?;
+    if ns.is_empty() || plan.is_empty() {
+        return None;
+    }
+    Some(ns.to_string())
+}
+
 // -- Tests --
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use agentstategraph_storage::SqliteStorage;
+
+    #[test]
+    fn namespace_from_plan_epoch_id_recovers_the_workspace() {
+        assert_eq!(
+            namespace_from_plan_epoch_id("plan:sessiondrift:playhead"),
+            Some("sessiondrift".to_string())
+        );
+        // A plan id may itself contain colons; the namespace never does.
+        assert_eq!(
+            namespace_from_plan_epoch_id("plan:ctxone:feat:sub:task"),
+            Some("ctxone".to_string())
+        );
+    }
+
+    #[test]
+    fn namespace_from_plan_epoch_id_rejects_other_shapes() {
+        for id in [
+            "plan:onlyone",  // no second colon
+            "notaplan:ws:p", // wrong prefix
+            "plan::p",       // empty namespace
+            "plan:ws:",      // empty plan id
+            "",
+        ] {
+            assert_eq!(
+                namespace_from_plan_epoch_id(id),
+                None,
+                "should reject {id:?}"
+            );
+        }
+    }
 
     fn fresh_repo() -> Repository {
         let repo = Repository::new(Box::new(
