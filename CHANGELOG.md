@@ -4,6 +4,13 @@ All notable changes to CTXone are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
 
+## [v1.0.10] — 2026-09-02
+
+### Changed
+- **A task description can be 8 KiB, up from 2 KiB.** A title is a label; a description is a *brief* — why the task matters, what to exercise, what is most likely to be wrong, what counts as proof. 2048 bytes did not fit that: a real installer-verification task listing four cases and three likely failure modes came to ~2500 bytes and had to be cut down, losing exactly the detail that makes a task actionable months later. The character-level filter (`is_unsafe_text`, which rejects newlines, bidi overrides, zero-width and tag characters) is unchanged and remains the primary injection control — the byte cap only ever stopped someone pasting a whole document, and 8 KiB is still orders of magnitude below that.
+
+  The description boundary had no test at all before this. It now has three, because the obvious two are not enough: at-limit and over-limit both track the constant, so they pass at *any* value and prove only that validation is wired. A third pins the invariant that matters and fails at 2048.
+
 ## [v1.0.9] — 2026-08-29
 
 ### Fixed
