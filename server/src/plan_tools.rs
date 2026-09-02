@@ -61,7 +61,22 @@ pub const PLAN_LOCK_RATIO_ENV: &str = "CTXONE_PLAN_LOCK_RATIO";
 pub const MAX_TITLE_LEN: usize = 256;
 
 /// Maximum length (bytes) of a task description.
-pub const MAX_DESCRIPTION_LEN: usize = 2048;
+///
+/// Unlike a title, a description is a *brief*: it carries why the task
+/// matters, what to exercise, what is most likely to be wrong, and what
+/// counts as proof. 2048 was too tight for that in practice — real briefs
+/// (a Windows installer verification listing four cases and three likely
+/// failure modes) came in at 2100-2500 bytes and had to be truncated,
+/// which loses exactly the detail that makes a task actionable months
+/// later.
+///
+/// Still bounded, and by design: this is a prompt-injection channel like
+/// any other plan-tool text field, and the character-level filter in
+/// `is_unsafe_text` (which rejects newlines, bidi overrides and
+/// invisibles) is the primary control here — the byte cap only stops
+/// someone pasting a document. 8 KiB leaves room for a thorough brief
+/// while staying orders of magnitude below that.
+pub const MAX_DESCRIPTION_LEN: usize = 8192;
 
 /// Maximum length (bytes) of an `assigned_to` string. Assignee values
 /// are short labels (agent IDs, emails). A cap much larger than any
@@ -1991,6 +2006,64 @@ mod tests {
             vec![],
         );
         assert!(r.is_ok(), "max-length title should be accepted, got {r:?}");
+    }
+
+    #[test]
+    fn description_cap_leaves_room_for_a_real_brief() {
+        // The two boundary tests below track the constant, so they pass at
+        // ANY value — they prove validation is wired, not that the cap is
+        // usable. This one pins the thing that actually matters.
+        //
+        // At 2048 real briefs did not fit: a Windows installer verification
+        // task listing four cases to exercise and three likely failure modes
+        // came to ~2500 bytes and had to be cut down, losing the detail that
+        // makes a task actionable months later. Keep headroom.
+        assert!(
+            MAX_DESCRIPTION_LEN >= 4096,
+            "description cap {MAX_DESCRIPTION_LEN} is too tight for a task brief; \
+             see the constant's doc comment before lowering it"
+        );
+    }
+
+    #[test]
+    fn add_task_accepts_max_length_description() {
+        let (_repo, store) = fresh_store();
+        create_plan(&store, "main", "p", None).unwrap();
+        let at_limit = "d".repeat(MAX_DESCRIPTION_LEN);
+        let r = add_task(
+            &store,
+            "main",
+            "p",
+            "t",
+            Some(&at_limit),
+            None,
+            None,
+            None,
+            vec![],
+        );
+        assert!(
+            r.is_ok(),
+            "max-length description should be accepted, got {r:?}"
+        );
+    }
+
+    #[test]
+    fn add_task_rejects_over_length_description() {
+        let (_repo, store) = fresh_store();
+        create_plan(&store, "main", "p", None).unwrap();
+        let too_big = "d".repeat(MAX_DESCRIPTION_LEN + 1);
+        let r = add_task(
+            &store,
+            "main",
+            "p",
+            "t",
+            Some(&too_big),
+            None,
+            None,
+            None,
+            vec![],
+        );
+        assert!(r.is_err(), "over-length description must be rejected");
     }
 
     // -------- unicode bidi / invisible rejection (H4) --------
