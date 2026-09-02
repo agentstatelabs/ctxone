@@ -547,7 +547,7 @@ dependencies = [
 
 [[package]]
 name = "ctx"
-version = "1.0.9"
+version = "1.0.10"
 dependencies = [
  "agent-skillgen",
  "chrono",
@@ -567,7 +567,7 @@ dependencies = [
 
 [[package]]
 name = "ctxone-hub"
-version = "1.0.9"
+version = "1.0.10"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
