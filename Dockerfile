@@ -75,5 +75,14 @@ EXPOSE 3001
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
     CMD curl -fsS http://localhost:3001/api/health || exit 1
 
-# Default: run the Hub in HTTP mode, pointing at /data/ctxone.db
-CMD ["ctxone-hub", "--http", "--port", "3001", "--path", "/data/ctxone.db"]
+# Default: run the Hub in HTTP mode, pointing at /data/ctxone.db.
+#
+# --init is required here. The Hub deliberately refuses to create a missing db
+# (server/src/main.rs exits 66) so that a typo'd --path cannot silently hand an
+# operator an empty graph. In a container there is no typo to guard against —
+# the path is fixed in this CMD, not typed — while a fresh `-v ctxone-data:/data`
+# volume is empty by definition. Without --init the documented
+#   docker run -p 3001:3001 -v ctxone-data:/data <image>
+# exits 66 on first run. --init is a no-op once the file exists, so restarts and
+# existing volumes are unaffected.
+CMD ["ctxone-hub", "--http", "--port", "3001", "--path", "/data/ctxone.db", "--init"]

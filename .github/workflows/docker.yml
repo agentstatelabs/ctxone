@@ -54,15 +54,22 @@ jobs:
             echo "tags=${IMAGE}:edge-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
           fi
 
-      # linux/amd64 only. The Dockerfile compiles the Rust workspace from
-      # source, and an emulated arm64 build of that takes long enough to be a
-      # reliability problem rather than a convenience. Apple Silicon runs this
-      # under emulation; brew is the documented Mac path anyway.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      # Multi-arch because README.md and docs/WINDOWS.md both already promise
+      # "multi-arch linux/amd64 + linux/arm64" to users. Shipping amd64 only
+      # would have quietly made those docs false.
+      #
+      # arm64 is emulated, and this build compiles the whole Rust workspace, so
+      # expect it to be slow. If it becomes a quota or reliability problem,
+      # drop linux/arm64 here AND correct both docs in the same commit — do not
+      # let them drift apart again.
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha

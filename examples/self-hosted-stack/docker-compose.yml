@@ -35,7 +35,7 @@ services:
   hub:
     image: ghcr.io/agentstatelabs/ctxone:latest
     container_name: ctxone-hub
-    command: ["ctxone-hub", "--http", "--port", "3001", "--path", "/data/ctxone.db"]
+    command: ["ctxone-hub", "--http", "--port", "3001", "--path", "/data/ctxone.db", "--init"]
     ports:
       - "${HUB_PORT:-3001}:3001"
     volumes:
