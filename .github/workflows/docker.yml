@@ -1,18 +1,28 @@
 # Publishes the CtxOne Hub container to GitHub Container Registry.
 #
-# Why this exists: the docs have advertised
-# `docker run ghcr.io/ctxone/ctxone:latest` since June, but no image was ever
-# built or pushed anywhere — not ghcr, not the GitLab registry — so every
-# documented Docker install failed. The Dockerfile was fine; nothing ran it.
-# Worse, `ctxone` is an unclaimed GitHub org, so that path was squattable.
+# Why this exists: the docs advertised `docker run ghcr.io/ctxone/ctxone:latest`
+# for months, but commit 3850ce9 deleted the workflow that built it — and in the
+# same commit removed engine/ while leaving the Dockerfile copying it, so the
+# image silently became unbuildable. `ctxone` is also an unclaimed GitHub org,
+# so that path was squattable. See 2b7d562 / 4ca1979 / 36e282c for the repairs.
 #
-# Trigger matches release.yml: release tags publish, and workflow_dispatch
-# allows an on-demand build (useful for the first publish, since the tag for
-# the current release already exists).
+# --- Why a matrix instead of buildx multi-platform ---
 #
-# Auth uses the workflow's built-in GITHUB_TOKEN with packages:write — no PAT,
-# so this cannot drift out of sync the way GH_PAT/GITHUB_TOKEN did on
-# ctxone-site.
+# README.md and docs/WINDOWS.md promise a multi-arch image, and arm64 is not
+# decorative: Raspberry Pi, Jetson Orin and Apple Silicon are all arm64.
+#
+# The obvious approach — one buildx job with platforms: linux/amd64,linux/arm64
+# — builds arm64 under QEMU emulation on an amd64 runner. That was measured, not
+# guessed: run 33992965343 was still compiling after 67 minutes and was
+# cancelled. Emulation costs 5-10x on CPU-bound work, and this Dockerfile
+# compiles the whole Rust workspace.
+#
+# So each architecture builds on its OWN native runner in parallel
+# (ubuntu-24.04-arm is free for public repos), pushes a digest, and a final job
+# stitches the digests into one manifest list. Wall clock is the slower of the
+# two native builds rather than the sum of one native and one emulated, and it
+# burns less Actions time overall — which matters here, since auto-triggers were
+# once paused at 90% quota.
 name: docker
 
 on:
@@ -25,8 +35,18 @@ env:
   IMAGE: ghcr.io/agentstatelabs/ctxone
 
 jobs:
-  publish:
-    runs-on: ubuntu-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
@@ -42,43 +62,86 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # `latest` only on a tag build. A dispatch build is explicitly NOT
-      # latest: dispatch can run from any ref, and silently moving `latest`
-      # to an arbitrary commit is how a registry starts lying to users.
-      - name: Derive tags
-        id: meta
-        run: |
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            echo "tags=${IMAGE}:${GITHUB_REF_NAME},${IMAGE}:latest" >> "$GITHUB_OUTPUT"
-          else
-            echo "tags=${IMAGE}:edge-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      # Multi-arch because README.md and docs/WINDOWS.md both already promise
-      # "multi-arch linux/amd64 + linux/arm64" to users. Shipping amd64 only
-      # would have quietly made those docs false.
-      #
-      # arm64 is emulated, and this build compiles the whole Rust workspace, so
-      # expect it to be slow. If it becomes a quota or reliability problem,
-      # drop linux/arm64 here AND correct both docs in the same commit — do not
-      # let them drift apart again.
-      - name: Build and push
+      # Push by digest only. Tags are applied once, by the merge job below,
+      # so a half-finished matrix can never leave `latest` pointing at a
+      # single-architecture image.
+      - name: Build and push by digest
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
 
-      - name: Summary
+      # Each matrix leg leaves one empty file named after its image digest;
+      # the merge job globs them into the manifest list.
+      - name: Export digest
         run: |
-          echo "Pushed: ${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "NOTE: a newly created ghcr package is PRIVATE by default." >> "$GITHUB_STEP_SUMMARY"
-          echo "Anonymous 'docker pull' stays 401 until the package is set" >> "$GITHUB_STEP_SUMMARY"
-          echo "to Public once, under the org's Packages settings." >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p /tmp/digests
+          digest='${{ steps.build.outputs.digest }}'
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # `latest` only on a tag build. A dispatch can run from any ref, and
+      # silently moving `latest` to an arbitrary commit makes the registry lie
+      # about what is released.
+      - name: Create manifest list
+        working-directory: /tmp/digests
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            TAGS="-t ${IMAGE}:${GITHUB_REF_NAME} -t ${IMAGE}:latest"
+          else
+            TAGS="-t ${IMAGE}:edge-$(echo "${GITHUB_SHA}" | cut -c1-7)"
+          fi
+          # shellcheck disable=SC2046
+          docker buildx imagetools create $TAGS \
+            $(printf "${IMAGE}@sha256:%s " *)
+
+      - name: Verify both architectures are present
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then REF="${IMAGE}:${GITHUB_REF_NAME}";
+          else REF="${IMAGE}:edge-$(echo "${GITHUB_SHA}" | cut -c1-7)"; fi
+          echo "Inspecting $REF"
+          docker buildx imagetools inspect "$REF" --format '{{json .Manifest}}' > /tmp/m.json
+          for want in amd64 arm64; do
+            grep -q "\"architecture\":\"$want\"" /tmp/m.json \
+              || { echo "::error::manifest is missing linux/$want"; exit 1; }
+            echo "  linux/$want present"
+          done
+          {
+            echo "Published \`$REF\` (linux/amd64 + linux/arm64)."
+            echo ""
+            echo "NOTE: a newly created ghcr package is PRIVATE by default."
+            echo "Anonymous \`docker pull\` stays 401 until it is set to Public"
+            echo "once, in the org's package settings."
+          } >> "$GITHUB_STEP_SUMMARY"
