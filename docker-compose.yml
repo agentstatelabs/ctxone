@@ -2,7 +2,7 @@ services:
   hub:
     # Prefer the published image. To build locally instead, comment the
     # image line and uncomment the build block.
-    image: ghcr.io/ctxone/ctxone:latest
+    image: ghcr.io/agentstatelabs/ctxone:latest
     # build:
     #   context: .
     #   target: runtime

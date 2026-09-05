@@ -18,7 +18,7 @@ provenance so you can trace why a decision was made.**
 ```bash
 # Install (macOS/Linux)
 brew install agentstatelabs/ctxone/ctxone
-# or: curl -sSL .../install.sh | sh   |   docker run ... ghcr.io/ctxone/ctxone
+# or: curl -sSL .../install.sh | sh   |   docker run ... ghcr.io/agentstatelabs/ctxone
 
 # Start the Hub (memory server)
 ctx serve --http --lens        # Hub + REST API + Lens UI on :3001

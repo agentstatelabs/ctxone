@@ -286,7 +286,7 @@ You downgraded `ctxone-hub` but kept a graph written by a newer version.
 Options:
 
 1. **Upgrade back:** re-run `install.sh` or `install.ps1` to get the
-   latest Hub, or `docker pull ghcr.io/ctxone/ctxone:latest`.
+   latest Hub, or `docker pull ghcr.io/agentstatelabs/ctxone:latest`.
 2. **Start fresh:** delete `~/.ctxone/memory.db` (or `%APPDATA%\ctxone\memory.db`
    on Windows) and re-run. You lose the graph but get a clean start on
    the old binary.

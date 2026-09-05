@@ -61,7 +61,7 @@ If you already run Docker Desktop on Windows, you can skip `install.ps1`
 entirely:
 
 ```powershell
-docker run -p 3001:3001 -v ctxone-data:/data ghcr.io/ctxone/ctxone:latest
+docker run -p 3001:3001 -v ctxone-data:/data ghcr.io/agentstatelabs/ctxone:latest
 ```
 
 Docker Desktop pulls the Linux multi-arch image (amd64 or arm64 depending
@@ -399,7 +399,7 @@ Your config file stays intact; only the memory is wiped.
 If you're using Docker Desktop instead of `install.ps1`:
 
 - Docker Desktop runs Linux containers via a WSL2-based Linux VM. Our
-  `ghcr.io/ctxone/ctxone` image is a Linux image; it runs in that VM.
+  `ghcr.io/agentstatelabs/ctxone` image is a Linux image; it runs in that VM.
   You never see or touch the VM directly.
 - `docker run -p 3001:3001 ...` forwards port 3001 from the VM to
   Windows localhost. `ctx status` (if you also installed `ctx.exe`)

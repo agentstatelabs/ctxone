@@ -103,7 +103,7 @@ updates, and troubleshooting: [docs/WINDOWS.md](docs/WINDOWS.md).
 **Docker** (any platform — image is multi-arch `linux/amd64` + `linux/arm64`):
 
 ```bash
-docker run -p 3001:3001 -v ctxone-data:/data ghcr.io/ctxone/ctxone:latest
+docker run -p 3001:3001 -v ctxone-data:/data ghcr.io/agentstatelabs/ctxone:latest
 ```
 
 This works identically on macOS (via Docker Desktop), Linux (native),

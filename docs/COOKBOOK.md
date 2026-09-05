@@ -237,7 +237,7 @@ services:
       - "5432:5432"
 
   hub:
-    image: ghcr.io/ctxone/ctxone:latest
+    image: ghcr.io/agentstatelabs/ctxone:latest
     command: ["ctxone-hub", "--http", "--port", "3001", "--storage", "postgres"]
     environment:
       DATABASE_URL: postgres://ctxone:secret@db:5432/ctxone

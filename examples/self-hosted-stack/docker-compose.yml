@@ -33,7 +33,7 @@ services:
   # CtxOne Hub — the memory layer.
   # ------------------------------------------------------------------
   hub:
-    image: ghcr.io/ctxone/ctxone:latest
+    image: ghcr.io/agentstatelabs/ctxone:latest
     container_name: ctxone-hub
     command: ["ctxone-hub", "--http", "--port", "3001", "--path", "/data/ctxone.db"]
     ports:
@@ -84,7 +84,7 @@ services:
   # `ctx prime` with the same source name replaces the prior entries.
   # ------------------------------------------------------------------
   seed:
-    image: ghcr.io/ctxone/ctxone:latest
+    image: ghcr.io/agentstatelabs/ctxone:latest
     container_name: ctxone-seed
     depends_on:
       hub:
