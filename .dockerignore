@@ -1,0 +1,15 @@
+# Keep the build context small and hermetic.
+#
+# Without this, `docker build .` ships the whole working tree to the daemon —
+# including target/ (multi-GB) and web/node_modules — and `COPY web/ ./` would
+# overwrite the node_modules that `npm ci` just installed in the lens stage
+# with whatever the host happens to have. Both are silent correctness and
+# speed problems, so they are excluded here rather than worked around above.
+.git
+target/
+web/node_modules/
+web/build/
+node_modules/
+**/*.db
+**/*.db-shm
+**/*.db-wal
