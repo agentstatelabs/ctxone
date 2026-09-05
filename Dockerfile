@@ -14,10 +14,13 @@ RUN apt-get update \
 # Copy workspace root + Cargo.lock for reproducible builds
 COPY Cargo.toml Cargo.lock ./
 
-# Copy our crates and the engine submodule
+# Copy our crates. There is no engine/ directory: the ASG engine used to be a
+# git submodule, but Cargo.toml now pins those crates as git dependencies
+# (see its "was a GitHub submodule" note), so cargo fetches them during the
+# build. The stale `COPY engine/ engine/` left behind by that migration is why
+# this image never built and why every documented `docker run` failed.
 COPY cli/ cli/
 COPY server/ server/
-COPY engine/ engine/
 
 # The cli crate embeds docs/AGENTS.md via include_str!("../../docs/AGENTS.md"),
 # so the docs file must be present at build time even though it isn't inside
