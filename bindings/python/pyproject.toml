@@ -28,10 +28,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/ctxone/ctxone"
-Documentation = "https://github.com/ctxone/ctxone/tree/main/docs"
-Repository = "https://github.com/ctxone/ctxone"
-Issues = "https://github.com/ctxone/ctxone/issues"
+Homepage = "https://github.com/AgentStateLabs/CTXone"
+Documentation = "https://github.com/AgentStateLabs/CTXone/tree/main/docs"
+Repository = "https://github.com/AgentStateLabs/CTXone"
+Issues = "https://github.com/AgentStateLabs/CTXone/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "pytest-cov>=4.0", "pydantic>=2"]

@@ -13,7 +13,7 @@ Quick start:
         print(r.path, "-", r.value)
     print(f"{result.ctx_savings_ratio:.1f}x savings")
 
-See https://github.com/ctxone/ctxone for docs.
+See https://github.com/AgentStateLabs/CTXone for docs.
 """
 
 from .client import Hub

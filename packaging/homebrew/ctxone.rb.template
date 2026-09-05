@@ -18,7 +18,7 @@
 
 class Ctxone < Formula
   desc "Persistent, searchable, accountable memory for AI agents"
-  homepage "https://github.com/ctxone/ctxone"
+  homepage "https://github.com/AgentStateLabs/CTXone"
   version "{{VERSION}}"
   license "BUSL-1.1"
 
@@ -57,7 +57,7 @@ class Ctxone < Formula
         ctx serve --http  # Start the Hub (port 3001)
         ctx demo          # Seed demo data and see live token savings
 
-      Docs: https://github.com/ctxone/ctxone#readme
+      Docs: https://github.com/AgentStateLabs/CTXone#readme
     EOS
   end
 

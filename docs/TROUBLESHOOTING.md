@@ -79,7 +79,7 @@ Get-Item "$env:LOCALAPPDATA\ctxone\bin\ctx.exe"
 If missing, re-run the installer:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/ctxone/ctxone/main/install.sh | sh
+curl -sSL https://raw.githubusercontent.com/AgentStateLabs/CTXone/main/install.sh | sh
 ```
 
 ## 3. `No memories found for '<topic>'` but you know the fact is there
@@ -201,7 +201,7 @@ cargo build --workspace
 Or clone recursively from the start:
 
 ```bash
-git clone --recursive https://github.com/ctxone/ctxone.git
+git clone --recursive https://github.com/AgentStateLabs/CTXone.git
 ```
 
 ## 9. `ctx tail` shows nothing when I'm writing in another terminal
@@ -511,6 +511,6 @@ args, then restart your AI tool so it picks up the new config.
 - Run `ctx doctor` — it catches most infrastructure problems automatically.
 - Check the Hub logs. If running via `ctx serve`, errors print to stderr in
   that terminal. Use `RUST_LOG=debug` for more detail.
-- Open an issue at https://github.com/ctxone/ctxone/issues with: what you
+- Open an issue at https://github.com/AgentStateLabs/CTXone/issues with: what you
   tried, what you expected, what you got, and the output of `ctx --version`
   and `ctx doctor`.

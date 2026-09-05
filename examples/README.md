@@ -19,7 +19,7 @@ For recipe snippets (copy-paste), see [../docs/COOKBOOK.md](../docs/COOKBOOK.md)
 All examples assume you have CtxOne installed and a Hub running:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/ctxone/ctxone/main/install.sh | sh
+curl -sSL https://raw.githubusercontent.com/AgentStateLabs/CTXone/main/install.sh | sh
 ctx serve --http &
 ctx doctor  # verify
 ```

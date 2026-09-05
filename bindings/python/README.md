@@ -8,7 +8,7 @@ pip install ctxone
 
 ## Quick start
 
-You need a running CtxOne Hub. See the [CtxOne quickstart](https://github.com/ctxone/ctxone/blob/main/docs/QUICKSTART.md)
+You need a running CtxOne Hub. See the [CtxOne quickstart](https://github.com/AgentStateLabs/CTXone/blob/main/docs/QUICKSTART.md)
 or install the CLI and run `ctx serve --http`.
 
 ```python
@@ -180,7 +180,7 @@ Or paste the whole
 [`src/ctxone/integrations/openwebui.py`](src/ctxone/integrations/openwebui.py)
 file into Open WebUI → Admin Panel → Functions — the docstring frontmatter
 handles auto-install. Full docs:
-[OPENWEBUI.md](https://github.com/ctxone/ctxone/blob/main/docs/OPENWEBUI.md).
+[OPENWEBUI.md](https://github.com/AgentStateLabs/CTXone/blob/main/docs/OPENWEBUI.md).
 
 ## Development
 
@@ -199,11 +199,11 @@ installed binary.
 
 BSL-1.1 (same as the rest of CtxOne). Every version automatically
 converts to Apache-2.0 four years after release. See
-[LICENSING.md](https://github.com/ctxone/ctxone/blob/main/LICENSING.md).
+[LICENSING.md](https://github.com/AgentStateLabs/CTXone/blob/main/LICENSING.md).
 
 ## Links
 
-- [CtxOne repo](https://github.com/ctxone/ctxone)
-- [Architecture](https://github.com/ctxone/ctxone/blob/main/docs/ARCHITECTURE.md)
-- [Token Savings](https://github.com/ctxone/ctxone/blob/main/docs/TOKEN_SAVINGS.md)
-- [CLI Reference](https://github.com/ctxone/ctxone/blob/main/docs/CLI_REFERENCE.md)
+- [CtxOne repo](https://github.com/AgentStateLabs/CTXone)
+- [Architecture](https://github.com/AgentStateLabs/CTXone/blob/main/docs/ARCHITECTURE.md)
+- [Token Savings](https://github.com/AgentStateLabs/CTXone/blob/main/docs/TOKEN_SAVINGS.md)
+- [CLI Reference](https://github.com/AgentStateLabs/CTXone/blob/main/docs/CLI_REFERENCE.md)

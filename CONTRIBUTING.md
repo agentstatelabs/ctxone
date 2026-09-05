@@ -12,7 +12,7 @@ One consequence matters for contributors: **GitHub's `main` is force-advanced fr
 
 1. **Fork and clone** the repository (with submodules)
    ```bash
-   git clone --recursive https://github.com/ctxone/ctxone.git
+   git clone --recursive https://github.com/AgentStateLabs/CTXone.git
    cd ctxone
    ```
 2. **Install Rust**: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`

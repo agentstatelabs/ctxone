@@ -13,7 +13,7 @@ brew install agentstatelabs/ctxone/ctxone
 **macOS / Linux** (one-liner):
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/ctxone/ctxone/main/install.sh | sh
+curl -sSL https://raw.githubusercontent.com/AgentStateLabs/CTXone/main/install.sh | sh
 ```
 
 This drops `ctx` and `ctxone-hub` in `~/.local/bin`. If `~/.local/bin` isn't on
@@ -26,7 +26,7 @@ export PATH="$HOME/.local/bin:$PATH"
 **Windows (PowerShell):**
 
 ```powershell
-iwr https://raw.githubusercontent.com/ctxone/ctxone/main/install.ps1 | iex
+iwr https://raw.githubusercontent.com/AgentStateLabs/CTXone/main/install.ps1 | iex
 ```
 
 This drops `ctx.exe` and `ctxone-hub.exe` in `%LOCALAPPDATA%\ctxone\bin` and

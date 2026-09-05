@@ -4792,7 +4792,7 @@ async fn run_doctor(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     ));
     if !hub_exists {
         suggestions.push(
-            "Install ctxone-hub: curl -sSL https://raw.githubusercontent.com/ctxone/ctxone/main/install.sh | sh".to_string(),
+            "Install ctxone-hub: curl -sSL https://raw.githubusercontent.com/AgentStateLabs/CTXone/main/install.sh | sh".to_string(),
         );
     }
 

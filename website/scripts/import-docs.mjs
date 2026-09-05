@@ -310,7 +310,7 @@ hero:
       icon: right-arrow
       variant: primary
     - text: View on GitHub
-      link: https://github.com/ctxone/ctxone
+      link: https://github.com/AgentStateLabs/CTXone
       icon: external
 ---
 

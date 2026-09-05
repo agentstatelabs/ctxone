@@ -82,19 +82,19 @@ brew install agentstatelabs/ctxone/ctxone
 **macOS / Linux** (one-liner):
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/ctxone/ctxone/main/install.sh | sh
+curl -sSL https://raw.githubusercontent.com/AgentStateLabs/CTXone/main/install.sh | sh
 ```
 
 **Uninstall:**
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/ctxone/ctxone/main/uninstall.sh | sh
+curl -sSL https://raw.githubusercontent.com/AgentStateLabs/CTXone/main/uninstall.sh | sh
 ```
 
 **Windows** (PowerShell, one-liner):
 
 ```powershell
-iwr https://raw.githubusercontent.com/ctxone/ctxone/main/install.ps1 | iex
+iwr https://raw.githubusercontent.com/AgentStateLabs/CTXone/main/install.ps1 | iex
 ```
 
 Full Windows guide with background service setup, AI tool paths,
@@ -122,7 +122,7 @@ pip install ctxone
 **From source**:
 
 ```bash
-git clone --recursive https://github.com/ctxone/ctxone.git
+git clone --recursive https://github.com/AgentStateLabs/CTXone.git
 cd ctxone
 cargo build --workspace --release
 cd web && npm install && npm run build

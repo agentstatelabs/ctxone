@@ -8,7 +8,7 @@ quickstart, see [QUICKSTART.md](QUICKSTART.md).
 
 ```powershell
 # Install (one line)
-iwr https://raw.githubusercontent.com/ctxone/ctxone/main/install.ps1 | iex
+iwr https://raw.githubusercontent.com/AgentStateLabs/CTXone/main/install.ps1 | iex
 
 # Open a new PowerShell window, then
 ctx serve --http            # in one window
@@ -36,7 +36,7 @@ breaking anything.
 Open **PowerShell** (not Command Prompt) and run:
 
 ```powershell
-iwr https://raw.githubusercontent.com/ctxone/ctxone/main/install.ps1 | iex
+iwr https://raw.githubusercontent.com/AgentStateLabs/CTXone/main/install.ps1 | iex
 ```
 
 This downloads the latest release's `ctx.exe` and `ctxone-hub.exe` into
@@ -49,7 +49,7 @@ If the installer is blocked by PowerShell's execution policy, run:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-iwr https://raw.githubusercontent.com/ctxone/ctxone/main/install.ps1 | iex
+iwr https://raw.githubusercontent.com/AgentStateLabs/CTXone/main/install.ps1 | iex
 ```
 
 This only affects the current window — it doesn't weaken your system
@@ -82,7 +82,7 @@ Windows side, you just see `localhost:3001`.
 You need Rust ≥1.88 and Git.
 
 ```powershell
-git clone --recursive https://github.com/ctxone/ctxone.git
+git clone --recursive https://github.com/AgentStateLabs/CTXone.git
 cd ctxone
 cargo build --workspace --release
 ```
@@ -262,7 +262,7 @@ Re-run the installer. It overwrites `ctx.exe` and `ctxone-hub.exe` with
 the latest release.
 
 ```powershell
-iwr https://raw.githubusercontent.com/ctxone/ctxone/main/install.ps1 | iex
+iwr https://raw.githubusercontent.com/AgentStateLabs/CTXone/main/install.ps1 | iex
 ```
 
 If the Hub is running via Task Scheduler or NSSM, restart it:
@@ -331,7 +331,7 @@ Use a process-scoped bypass:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-iwr https://raw.githubusercontent.com/ctxone/ctxone/main/install.ps1 | iex
+iwr https://raw.githubusercontent.com/AgentStateLabs/CTXone/main/install.ps1 | iex
 ```
 
 This only affects the current window, not your system policy.

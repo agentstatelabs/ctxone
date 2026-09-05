@@ -23,7 +23,7 @@ export default defineConfig({
 				{
 					icon: 'github',
 					label: 'GitHub',
-					href: 'https://github.com/ctxone/ctxone',
+					href: 'https://github.com/AgentStateLabs/CTXone',
 				},
 			],
 			customCss: ['./src/styles/global.css', './src/styles/theme.css'],

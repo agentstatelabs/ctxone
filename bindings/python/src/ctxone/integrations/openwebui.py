@@ -2,7 +2,7 @@
 title: CTXone Memory
 author: Craig Brown
 author_url: https://github.com/ctxone
-git_url: https://github.com/ctxone/ctxone
+git_url: https://github.com/AgentStateLabs/CTXone
 description: Persistent, searchable, accountable memory for Open WebUI chats — via CTXone Hub.
 required_open_webui_version: 0.4.0
 requirements: ctxone>=0.73.0
