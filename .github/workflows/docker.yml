@@ -132,11 +132,21 @@ jobs:
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then REF="${IMAGE}:${GITHUB_REF_NAME}";
           else REF="${IMAGE}:edge-$(echo "${GITHUB_SHA}" | cut -c1-7)"; fi
           echo "Inspecting $REF"
-          docker buildx imagetools inspect "$REF" --format '{{json .Manifest}}' > /tmp/m.json
-          for want in amd64 arm64; do
-            grep -q "\"architecture\":\"$want\"" /tmp/m.json \
-              || { echo "::error::manifest is missing linux/$want"; exit 1; }
-            echo "  linux/$want present"
+          # Parse the manifest with jq, not grep. An earlier version grepped
+          # '"architecture":"amd64"' against --format '{{json .Manifest}}',
+          # which pretty-prints as '"architecture": "amd64"' WITH a space, so
+          # the guard failed a manifest that was actually correct and reported
+          # a good publish as broken. Do not go back to substring matching.
+          docker buildx imagetools inspect "$REF" --raw > /tmp/m.json
+          # Attestation manifests carry platform unknown/unknown; drop them.
+          jq -r '.manifests[]
+                 | select(.platform.architecture != "unknown")
+                 | "\(.platform.os)/\(.platform.architecture)"' /tmp/m.json \
+            | sort -u > /tmp/platforms.txt
+          echo "  platforms: $(tr '\n' ' ' < /tmp/platforms.txt)"
+          for want in linux/amd64 linux/arm64; do
+            grep -qx "$want" /tmp/platforms.txt \
+              || { echo "::error::manifest is missing $want"; exit 1; }
           done
           {
             echo "Published \`$REF\` (linux/amd64 + linux/arm64)."
