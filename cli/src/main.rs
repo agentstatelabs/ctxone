@@ -6766,7 +6766,7 @@ async fn run_demo(server: &str, client: reqwest::Client) -> Result<(), Box<dyn s
         (
             "licensing",
             "high",
-            "CtxOne is licensed under BSL-1.1 with automatic Apache 2.0 conversion after 4 years",
+            "CtxOne is licensed under BSL-1.1 with automatic Apache 2.0 conversion after 18 months",
         ),
         (
             "licensing",

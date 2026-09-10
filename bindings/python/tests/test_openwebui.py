@@ -464,7 +464,7 @@ def test_filter_outlet_captures_reply_when_enabled(filt):
                 {"role": "user", "content": "tell me about BSL"},
                 {
                     "role": "assistant",
-                    "content": "BSL is a source-available license that converts to Apache 2 after 4 years",
+                    "content": "BSL is a source-available license that converts to Apache 2 after 18 months",
                 },
             ]
         }

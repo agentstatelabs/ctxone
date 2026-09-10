@@ -1,7 +1,7 @@
 # Team conventions
 
 We default to BSL-1.1 for new repos. Every release auto-converts to
-Apache-2.0 four years after the release date. Do not add an MIT or
+Apache-2.0 18 months after the release date. Do not add an MIT or
 GPL file unless a customer contract requires it.
 
 # Architecture
