@@ -198,7 +198,7 @@ installed binary.
 ## License
 
 BSL-1.1 (same as the rest of CtxOne). Every version automatically
-converts to Apache-2.0 four years after release. See
+converts to Apache-2.0 18 months after release. See
 [LICENSING.md](https://github.com/AgentStateLabs/CTXone/blob/main/LICENSING.md).
 
 ## Links

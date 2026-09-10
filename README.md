@@ -279,7 +279,7 @@ The code is licensed under the **Business Source License 1.1 (BSL 1.1)**.
 **You can** use CTXone in production, self-host it, modify it, and build on top
 of it — all without a commercial license. **You cannot** offer CTXone itself as
 a competing managed service or redistribute it inside a product you sell. Each
-version converts to **Apache License 2.0** four years after release.
+version converts to **Apache License 2.0** 18 months after release.
 
 Full plain-English summary: [LICENSING.md](LICENSING.md) ([LICENSE](LICENSE)
 is the legal text).

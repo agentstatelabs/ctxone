@@ -68,7 +68,7 @@ you need a commercial license. Contact us at
 ## Automatic conversion to Apache 2.0
 
 Every version of CTXone automatically converts to the **Apache
-License 2.0** four years after its release date:
+License 2.0** 18 months after its release date:
 
 - **v0.73.0** (released 2026-04-15) becomes Apache 2.0 on
   **2030-04-15**
@@ -77,7 +77,7 @@ License 2.0** four years after its release date:
 After conversion, all BSL restrictions lift for that version — it
 becomes permissively licensed Apache 2.0. You can embed it, resell
 it, ship it in your products, host it as a managed service. The
-four-year clock is what keeps CTXone's ecosystem protected while
+18-month clock is what keeps CTXone's ecosystem protected while
 guaranteeing long-term openness.
 
 ## Why BSL?

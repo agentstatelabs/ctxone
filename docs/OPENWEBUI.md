@@ -132,7 +132,7 @@ runs:
 
    - [pinned] **Vision** — ship a BSL-1.1 product with MIT clients
    - [fact] CTXone uses BSL-1.1
-   - [fact] Converts to Apache 2 after 4 years
+   - [fact] Converts to Apache 2 after 18 months
 
    _(CTXone: this retrieval is 14.2× smaller than loading the full
    memory graph.)_
