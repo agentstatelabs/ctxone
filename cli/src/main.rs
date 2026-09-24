@@ -1689,6 +1689,12 @@ enum PlanAction {
         /// Branch to move the plan onto (must differ from --branch).
         #[arg(long = "to")]
         target: String,
+        /// Replace a same-named plan on the target branch, but only if it is
+        /// archived. To swap a stale copy for a finished one: archive the
+        /// stale copy, then move with this flag. Active or completed copies
+        /// are never overwritten.
+        #[arg(long)]
+        replace_archived: bool,
     },
 }
 
@@ -8771,14 +8777,21 @@ async fn handle_plan(
                 }
             });
         }
-        PlanAction::Move { plan_id, target } => {
+        PlanAction::Move {
+            plan_id,
+            target,
+            replace_archived,
+        } => {
             let url = format!(
                 "{}/api/plans/{}/move?ref={}",
                 server,
                 urlencoding(&plan_id),
                 urlencoding(&branch)
             );
-            let body = serde_json::json!({ "target_ref": target });
+            let body = serde_json::json!({
+                "target_ref": target,
+                "replace_archived": replace_archived,
+            });
             let resp = match client
                 .post(&url)
                 .header("X-CTXone-Agent", &agent_id)

@@ -515,6 +515,41 @@ pub const REGISTRY: &[HelpDoc] = &[
     HelpDoc {
         feature: "plan_move",
         group: "plans",
+        synopsis: "Move a plan and its tasks from one branch to another — e.g. promote a finished plan onto `main`. Task ids, statuses and proofs are preserved.",
+        syntax: "ctx plan move <plan> --to <branch> [--branch <source>] [--replace-archived]",
+        params: &[
+            p!("plan_id", true, "Plan to move."),
+            p!(
+                "--to",
+                true,
+                "Branch to move the plan onto. Must differ from the source."
+            ),
+            p!(
+                "--branch",
+                false,
+                "Branch the plan is on now. Defaults to the active branch, else main."
+            ),
+            p!(
+                "--replace-archived",
+                false,
+                "Replace a same-named plan on the target, but only if it is archived."
+            ),
+        ],
+        examples: &[
+            "ctx plan move website-v2 --branch feature-x --to main",
+            "ctx plan move website-v2 --branch feature-x --to main --replace-archived",
+        ],
+        gotchas: &[
+            "Refuses if the target already has a plan with that name. Archiving that copy does not clear the collision by itself: archive it, then move with --replace-archived.",
+            "--replace-archived never overwrites an active or completed copy, and the replaced archived copy stays recoverable in the target branch's history.",
+            "It is a move: the plan is removed from the source branch once the target write succeeds.",
+            "Much faster than `ctx merge` for landing one plan, since it touches only that plan.",
+        ],
+        related: &["plan_relocate", "merge", "plan_show"],
+    },
+    HelpDoc {
+        feature: "plan_relocate",
+        group: "plans",
         synopsis: "Move a plan (with its tasks and links) to another workspace/namespace — for plans created in the wrong one.",
         syntax: "ctx plan relocate <plan> --to <workspace> [--namespace <src>]",
         params: &[
