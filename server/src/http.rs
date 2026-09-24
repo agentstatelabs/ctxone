@@ -187,6 +187,9 @@ pub struct HubState {
     pub ctx_binary: Option<String>,
     /// The hub's own loopback base URL, passed to `ctx ingest-session --all`.
     pub self_base_url: Option<String>,
+    /// Merges currently running, keyed by (namespace, target ref). See
+    /// [`MergeGuard`].
+    pub merges_in_flight: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl HubState {
@@ -621,6 +624,7 @@ fn router_with_config_inner(
         asd_pool,
         ctx_binary: config.ctx_binary.clone(),
         self_base_url: config.self_base_url.clone(),
+        merges_in_flight: Arc::default(),
         autosync: config
             .autosync
             .clone()
@@ -2438,6 +2442,85 @@ async fn merge_refs(
     Json(req): Json<MergeRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
+    let guard = MergeGuard::acquire(&s.merges_in_flight, &ns.0, &req.target).ok_or_else(|| {
+        (
+            StatusCode::CONFLICT,
+            serde_json::json!({
+                "status": "merge_in_progress",
+                "target": req.target,
+                "hint": "another merge into this ref is still running in this workspace; retry when it finishes",
+            })
+            .to_string(),
+        )
+    })?;
+    let sessions = s.sessions.clone();
+    let span = tracing::Span::current();
+    // A merge is synchronous and can be heavy. Run it on the blocking pool so it
+    // never pins an async worker thread; the guard moves with it, so it is held
+    // for as long as the merge actually runs — not as long as the request lives.
+    tokio::task::spawn_blocking(move || {
+        let _in_flight = guard;
+        let _span = span.entered();
+        merge_refs_blocking(repo, sessions, agent_id, req)
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("merge task failed: {e}"),
+        )
+    })?
+}
+
+/// Marks a merge into one ref of one workspace as running, for as long as the
+/// merge work itself runs.
+///
+/// Cancelling the HTTP request does not cancel the merge: axum drops the
+/// handler's future when the client disconnects, but work on the blocking pool
+/// carries on to completion, and cutting a real merge short midway would be
+/// worse than letting it finish. So the marker lives inside the blocking task.
+/// A retry while the first merge is still running gets 409 instead of stacking
+/// a second one on top — which is how an abandoned dry-run and the real merge
+/// once ran side by side for hours.
+struct MergeGuard {
+    in_flight: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    key: String,
+}
+
+impl MergeGuard {
+    fn acquire(
+        in_flight: &Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+        namespace: &str,
+        target: &str,
+    ) -> Option<Self> {
+        let key = format!("{namespace}\u{0}{target}");
+        let newly = in_flight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key.clone());
+        newly.then(|| Self {
+            in_flight: in_flight.clone(),
+            key,
+        })
+    }
+}
+
+impl Drop for MergeGuard {
+    fn drop(&mut self) {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.key);
+    }
+}
+
+/// The merge itself, run off the async runtime by [`merge_refs`].
+fn merge_refs_blocking(
+    repo: Arc<Repository>,
+    sessions: Arc<SessionRegistry>,
+    agent_id: AgentId,
+    req: MergeRequest,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let mut opts = CommitOptions::new(&agent_id.0, IntentCategory::Merge, &req.description);
     if let Some(r) = req.reasoning {
         opts = opts.with_reasoning(r);
@@ -2491,7 +2574,7 @@ async fn merge_refs(
             let promoted =
                 plan_tools::promote_completed_plans(&store, &repo, &req.target, &agent_id.0);
             // Graph size may have changed — invalidate every session's cache.
-            s.sessions.mark_all_dirty();
+            sessions.mark_all_dirty();
             Ok(Json(serde_json::json!({
                 "status": "ok",
                 "source": req.source,
@@ -6749,6 +6832,43 @@ async fn detect_project_handler(
 mod tests {
     use super::*;
     use agentstategraph_storage::SqliteStorage;
+
+    // ── MergeGuard: one merge at a time per (workspace, target) ──────────────
+
+    /// A second merge into the same ref of the same workspace is refused while
+    /// the first holds the guard; other targets and other workspaces are not
+    /// affected; and the slot frees the moment the guard drops — which is when
+    /// the merge work finishes, not when the client disconnects.
+    #[test]
+    fn merge_guard_admits_one_merge_per_target_until_dropped() {
+        let in_flight = Arc::default();
+        let first = MergeGuard::acquire(&in_flight, "sessiondrift", "main").expect("first merge");
+        assert!(
+            MergeGuard::acquire(&in_flight, "sessiondrift", "main").is_none(),
+            "a concurrent merge into the same target must be refused"
+        );
+        let other_target =
+            MergeGuard::acquire(&in_flight, "sessiondrift", "release").expect("different target");
+        let other_ns =
+            MergeGuard::acquire(&in_flight, "ctxone", "main").expect("different workspace");
+
+        drop(first);
+        assert!(
+            MergeGuard::acquire(&in_flight, "sessiondrift", "main").is_some(),
+            "the slot frees when the merge finishes"
+        );
+        drop((other_target, other_ns));
+        assert!(in_flight.lock().unwrap().is_empty());
+    }
+
+    /// Names are joined with a separator no ref or workspace can contain, so
+    /// ("a", "b/c") and ("a/b", "c") can never share a slot.
+    #[test]
+    fn merge_guard_keys_cannot_collide_across_the_boundary() {
+        let in_flight = Arc::default();
+        let _a = MergeGuard::acquire(&in_flight, "a", "b/c").unwrap();
+        assert!(MergeGuard::acquire(&in_flight, "a/b", "c").is_some());
+    }
 
     // ── move_subtree_verified: the write→verify→delete guard ────────────────
     fn move_test_repo() -> Arc<Repository> {
