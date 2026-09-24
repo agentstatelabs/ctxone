@@ -3552,13 +3552,20 @@ impl CtxOneServer {
     #[tool(
         description = "Move a plan and every task it contains from one branch to another. Task ids, statuses, proofs, and the plan-meta envelope are preserved bit-for-bit — only the ref changes. \
         \
-        CALL THIS WHEN promoting a sandboxed plan onto `main`, pulling someone else's plan onto a feature branch for collaboration, or refiling work after a branch-strategy change. Refuses when source and target are the same ref or when a plan with the same name already exists on the target ref."
+        CALL THIS WHEN promoting a sandboxed plan onto `main`, pulling someone else's plan onto a feature branch for collaboration, or refiling work after a branch-strategy change. Refuses when source and target are the same ref or when a plan with the same name already exists on the target ref — unless that copy is archived and `replace_archived` is true, which is the supported way to replace a stale copy (archive it, then move with replace_archived). An active or completed copy is never overwritten."
     )]
     async fn plan_move(&self, params: Parameters<crate::plan_tools::PlanMoveParams>) -> String {
         use crate::plan_tools as pt;
         let p = params.0;
         let store = pt::make_store(self.repo.clone(), &self.agent_id);
-        match pt::move_plan(&self.repo, &store, &p.ref_name, &p.target_ref, &p.plan_id) {
+        match pt::move_plan(
+            &self.repo,
+            &store,
+            &p.ref_name,
+            &p.target_ref,
+            &p.plan_id,
+            p.replace_archived,
+        ) {
             Ok(result) => {
                 self.session.mark_dirty();
                 serde_json::to_string(&serde_json::json!({

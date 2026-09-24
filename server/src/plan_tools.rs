@@ -1028,6 +1028,12 @@ pub struct PlanMoveParams {
     /// The branch to move the plan onto. Required, must differ from
     /// `ref`.
     pub target_ref: String,
+    /// Replace a same-named plan on `target_ref` if — and only if — it is
+    /// archived. Use it to swap a stale copy for a finished one: archive the
+    /// stale copy, then move with this set. An active or completed copy is
+    /// never overwritten.
+    #[serde(default)]
+    pub replace_archived: bool,
 }
 
 #[derive(Serialize, Debug)]
@@ -1203,14 +1209,19 @@ pub fn close_plan(
 ///
 /// Refuses when source and target are the same ref. Refuses when a
 /// plan with the same name already exists on `target_ref` — overwriting
-/// would silently merge two unrelated histories. The caller can
-/// rename or archive the conflicting plan first.
+/// would silently merge two unrelated histories — with one opt-in
+/// exception: `replace_archived` replaces a target copy whose status is
+/// `archived`, the supported way to swap a stale copy for a finished one.
+/// An active or completed copy is never overwritten. The replaced copy is
+/// cleared as a whole subtree first, so none of its tasks leak into the
+/// moved plan, and it stays recoverable in the target ref's history.
 pub fn move_plan(
     repo: &Repository,
     store: &TaskStore,
     source_ref: &str,
     target_ref: &str,
     plan: &str,
+    replace_archived: bool,
 ) -> Result<MovePlanResult, PlanToolError> {
     if source_ref == target_ref {
         return Err(PlanToolError::InvalidInput(format!(
@@ -1224,11 +1235,31 @@ pub fn move_plan(
 
     // Check for a name collision on the target ref. plan_exists() is
     // engine-private, so we mirror its match-on-PlanNotFound shape here.
+    //
+    // This used to advise "rename or archive the conflicting plan first", but
+    // archiving never cleared the collision (an archived plan still exists)
+    // and there is no rename. Archive + replace_archived is the real path.
     match store.get_plan(target_ref, plan) {
-        Ok(_) => {
+        Ok(existing) if matches!(existing.status, PlanStatus::Archived) => {
+            if !replace_archived {
+                return Err(PlanToolError::InvalidInput(format!(
+                    "plan '{plan}' already exists on ref '{target_ref}' and is archived; \
+                     re-run with --replace-archived (MCP/HTTP: replace_archived=true) to \
+                     replace it. The archived copy stays recoverable in {target_ref}'s history."
+                )));
+            }
+            // Clear the whole archived subtree before writing, so none of its
+            // tasks survive into the moved plan. Done before the writes and
+            // long before the source delete: if anything below fails, the plan
+            // still exists on the source.
+            store.delete_plan(target_ref, plan)?;
+        }
+        Ok(existing) => {
             return Err(PlanToolError::InvalidInput(format!(
-                "plan '{}' already exists on ref '{}'; rename or archive the conflicting plan first",
-                plan, target_ref
+                "plan '{plan}' already exists on ref '{target_ref}' and is {}; refusing to \
+                 overwrite a plan that is not archived. If that copy is stale, archive it \
+                 on {target_ref} first, then re-run with --replace-archived.",
+                plan_status_label(existing.status)
             )));
         }
         Err(TaskStoreError::PlanNotFound(_)) => {}
@@ -1683,7 +1714,7 @@ mod tests {
         // Mark one task as in-progress so we can confirm status carries.
         store.start_task("main", "p1", &t2.id).unwrap();
 
-        let result = move_plan(&repo, &store, "main", "feature/x", "p1").expect("move");
+        let result = move_plan(&repo, &store, "main", "feature/x", "p1", false).expect("move");
         assert_eq!(result.task_count, 2);
         assert_eq!(result.source_ref, "main");
         assert_eq!(result.target_ref, "feature/x");
@@ -1711,8 +1742,8 @@ mod tests {
     fn move_plan_rejects_same_ref() {
         let (repo, store) = fresh_store();
         create_plan(&store, "main", "p1", None).unwrap();
-        let err =
-            move_plan(&repo, &store, "main", "main", "p1").expect_err("same ref should reject");
+        let err = move_plan(&repo, &store, "main", "main", "p1", false)
+            .expect_err("same ref should reject");
         assert!(matches!(err, PlanToolError::InvalidInput(_)));
     }
 
@@ -1722,11 +1753,123 @@ mod tests {
         repo.branch("feature/x", "main").unwrap();
         create_plan(&store, "main", "p1", None).unwrap();
         create_plan(&store, "feature/x", "p1", None).unwrap();
-        let err = move_plan(&repo, &store, "main", "feature/x", "p1")
+        let err = move_plan(&repo, &store, "main", "feature/x", "p1", false)
             .expect_err("collision should reject");
         assert!(matches!(err, PlanToolError::InvalidInput(_)));
         // Source plan must still be intact after a refused move.
         assert!(store.get_plan("main", "p1").is_ok());
+    }
+
+    /// The incident shape: a stale copy of a plan sits on the target, the
+    /// finished copy on the source. Archiving the stale copy used to be the
+    /// advice, but it never cleared the collision; the error must now say how
+    /// to proceed, and must not repeat the dead-end advice.
+    fn stale_archived_copy_on_target() -> (Arc<Repository>, TaskStore) {
+        let (repo, store) = fresh_store();
+        repo.branch("feature/x", "main").unwrap();
+        // Finished copy on the source (main): two tasks, one in progress.
+        create_plan(&store, "main", "p1", Some("finished".into())).unwrap();
+        add_task(
+            &store,
+            "main",
+            "p1",
+            "first",
+            None,
+            None,
+            None,
+            None,
+            vec![],
+        )
+        .unwrap();
+        let second = add_task(
+            &store,
+            "main",
+            "p1",
+            "second",
+            None,
+            None,
+            None,
+            None,
+            vec![],
+        )
+        .unwrap();
+        store.start_task("main", "p1", &second.id).unwrap();
+        // Stale copy on the target: three tasks — one the source never had.
+        create_plan(&store, "feature/x", "p1", Some("stale".into())).unwrap();
+        for t in ["a", "b", "c"] {
+            add_task(&store, "feature/x", "p1", t, None, None, None, None, vec![]).unwrap();
+        }
+        store.archive_plan("feature/x", "p1").unwrap();
+        (repo, store)
+    }
+
+    #[test]
+    fn move_plan_onto_an_archived_copy_says_how_to_replace_it() {
+        let (repo, store) = stale_archived_copy_on_target();
+        let err = move_plan(&repo, &store, "main", "feature/x", "p1", false)
+            .expect_err("an archived copy still collides without the opt-in");
+        let msg = err.to_string();
+        assert!(msg.contains("--replace-archived"), "{msg}");
+        assert!(
+            !msg.contains("rename or archive"),
+            "dead-end advice must be gone: {msg}"
+        );
+        // Nothing moved.
+        assert!(store.get_plan("main", "p1").is_ok());
+        assert_eq!(store.list_tasks("feature/x", "p1").unwrap().len(), 3);
+    }
+
+    #[test]
+    fn move_plan_replace_archived_swaps_the_stale_copy_whole() {
+        let (repo, store) = stale_archived_copy_on_target();
+        let result = move_plan(&repo, &store, "main", "feature/x", "p1", true).expect("replace");
+        assert_eq!(result.task_count, 2);
+
+        let on_target = store.get_plan("feature/x", "p1").unwrap();
+        assert_eq!(on_target.description.as_deref(), Some("finished"));
+        assert_ne!(on_target.status, PlanStatus::Archived);
+        let tasks = store.list_tasks("feature/x", "p1").unwrap();
+        assert_eq!(
+            tasks.len(),
+            2,
+            "the stale copy's third task must not survive into the moved plan"
+        );
+        assert!(tasks.iter().any(|t| t.status == TaskStatus::InProgress));
+        // It was a move: the source no longer has it.
+        assert!(matches!(
+            store.get_plan("main", "p1"),
+            Err(TaskStoreError::PlanNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn move_plan_replace_archived_never_overwrites_a_live_copy() {
+        let (repo, store) = fresh_store();
+        repo.branch("feature/x", "main").unwrap();
+        create_plan(&store, "main", "p1", None).unwrap();
+        create_plan(&store, "feature/x", "p1", Some("live".into())).unwrap();
+        add_task(
+            &store,
+            "feature/x",
+            "p1",
+            "work",
+            None,
+            None,
+            None,
+            None,
+            vec![],
+        )
+        .unwrap();
+
+        let err = move_plan(&repo, &store, "main", "feature/x", "p1", true)
+            .expect_err("an active copy must not be replaced");
+        let msg = err.to_string();
+        assert!(msg.contains("not archived"), "{msg}");
+        // Both copies untouched.
+        assert!(store.get_plan("main", "p1").is_ok());
+        let target = store.get_plan("feature/x", "p1").unwrap();
+        assert_eq!(target.description.as_deref(), Some("live"));
+        assert_eq!(store.list_tasks("feature/x", "p1").unwrap().len(), 1);
     }
 
     #[test]

@@ -3849,6 +3849,9 @@ async fn archive_plan(
 struct MovePlanBody {
     /// Branch the plan should be moved onto.
     target_ref: String,
+    /// Replace a same-named plan on the target only if it is archived.
+    #[serde(default)]
+    replace_archived: bool,
 }
 
 #[instrument(skip_all, fields(name = %name, ref_name = %q.ref_name, agent = %agent_id.0))]
@@ -3862,8 +3865,15 @@ async fn move_plan_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
     let store = plan_tools::make_store(repo.clone(), &agent_id.0);
-    let result = plan_tools::move_plan(&repo, &store, &q.ref_name, &body.target_ref, &name)
-        .map_err(plan_error_to_response)?;
+    let result = plan_tools::move_plan(
+        &repo,
+        &store,
+        &q.ref_name,
+        &body.target_ref,
+        &name,
+        body.replace_archived,
+    )
+    .map_err(plan_error_to_response)?;
     s.sessions.mark_all_dirty();
     Ok(Json(serde_json::json!({
         "plan": plan_tools::plan_to_json(&result.plan, &[], false),
