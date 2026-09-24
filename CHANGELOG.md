@@ -4,6 +4,23 @@ All notable changes to CTXone are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
 
+## [v1.0.11] — 2026-09-24
+
+### Fixed
+- **`ctx merge` could hang indefinitely and take the whole Hub with it.** On a long-lived workspace the merge base was O(n³) in the shared history: a plan branch with 1,304 common ancestors never finished. Both a `--dry-run` and the real merge were abandoned after five minutes and were still consuming CPU hours later, and because every commit read holds the storage lock, reads and `/api/health` stalled too. The fix is in AgentStateGraph v1.2.4's merge base, now linear: the same branch pair resolves in 65 ms, and an end-to-end `ctx merge --dry-run` on that workspace returns in about a second.
+- **Merges no longer run on the async runtime, and no longer stack.** `POST /api/merge` ran the merge synchronously inside its handler, pinning a worker for its whole duration. It now runs on the blocking pool, and only one merge per (workspace, target ref) runs at a time; a concurrent one gets `409 merge_in_progress` with a retry hint instead of piling on. The in-progress marker lives as long as the merge work, not the request — a disconnect drops the request but not the merge. This is deliberately not a timeout: a merge cannot be stopped midway safely, and reporting "failed" while a real merge might still commit a moment later would be worse than waiting.
+- **`ctx plan move` could not land a finished plan on a branch that held a stale copy.** It refused any same-named plan on the target and advised "rename or archive the conflicting plan first" — but archiving never cleared the collision and there is no rename. `--replace-archived` (MCP/HTTP `replace_archived`) now replaces the target copy if, and only if, it is archived; an active or completed copy is still refused, and the error names its status. The archived copy is cleared as a whole, so none of its tasks leak into the moved plan, and it stays recoverable in the branch history. Workflow for a stale copy: archive it, then move with `--replace-archived`.
+- **`ctx help plan_move` documented the wrong command** — it described `ctx plan relocate` (cross-workspace). It now documents the branch move, and relocate has its own `plan_relocate` entry.
+
+### Changed
+- **AgentStateGraph v1.1.2 → v1.2.4.** Beyond the merge base, CTX picks up:
+  - `blame`, commit-graph views, stats and the timestamp-anomaly check now walk every parent rather than the first-parent line, so changes made on a merged-in branch are attributed to the commit that made them rather than the merge.
+  - The history rollup files commits with no attributable workspace under `unattributed` instead of `default`, which is a real workspace name. Rows distilled before this upgrade keep their old value.
+  - Paged commit queries now see merged-in history and no longer return an empty page past a hard-coded scan limit.
+  - Checkpoint milestones pin their state only when asked to, and the GC sweep takes the store's write lock. CTX does not run GC itself, so neither changes day-to-day behaviour.
+
+  The Hub opens an existing store unchanged (schema `0.4.0`); verified by starting it against a copy of a 2.3 GB field store, which came up healthy with reads, recall and plans intact.
+
 ## [v1.0.10] — 2026-09-02
 
 ### Changed
