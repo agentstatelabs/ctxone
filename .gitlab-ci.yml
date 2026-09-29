@@ -173,3 +173,24 @@ homebrew:
     - apt-get update -qq && apt-get install -y -qq --no-install-recommends git curl ca-certificates python3
     - chmod +x scripts/publish-homebrew.sh
     - ./scripts/publish-homebrew.sh
+
+# site-version: move ctxone in agentstatelabs.com/releases.json to this tag, which
+# is what ctxone.com and agentstatelabs.com show as the current version. Runs
+# after homebrew so the site never advertises a release users cannot install
+# yet. Gated on SITE_RELEASES_TOKEN so it no-ops until that is configured.
+site-version:
+  stage: .post
+  image: debian:bookworm-slim
+  before_script: []
+  cache: {}
+  needs:
+    - job: homebrew
+      artifacts: false
+  rules:
+    - if: '$CI_COMMIT_TAG && $SITE_RELEASES_TOKEN'
+  variables:
+    SITE_PROJECT: site/agentstatelabs-site
+    SITE_PRODUCT: ctxone
+  script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates python3
+    - ./scripts/publish-site-version.sh
