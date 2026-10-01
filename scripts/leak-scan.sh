@@ -69,8 +69,36 @@ ALLOW_PATHS=(
 # Per-repo overrides (append to arrays above).
 [ -f "${REPO_ROOT}/.leakscan.local" ] && . "${REPO_ROOT}/.leakscan.local"
 
+# --- word boundaries: \b is not portable ------------------------------------
+# git grep uses the platform's regex engine. glibc (CI) understands \b in an
+# ERE; macOS's does not, and there a \b pattern silently matches nothing — a
+# Mac scan reported 0 hits for a term CI flagged 384 times. macOS spells word
+# boundaries [[:<:]] / [[:>:]] instead. Probe once and rewrite only where \b
+# is unsupported, so platforms that understand \b scan the patterns verbatim.
+probe_dir="$(mktemp -d)"
+printf 'ab\n' >"$probe_dir/p"
+if (cd "$probe_dir" && git grep --no-index -qE '\bab\b' -- p) 2>/dev/null; then
+  word_bounds=native
+elif (cd "$probe_dir" && git grep --no-index -qE '[[:<:]]ab[[:>:]]' -- p) 2>/dev/null; then
+  word_bounds=bsd
+else
+  word_bounds=none
+fi
+rm -rf "$probe_dir"
+
+# portable_pattern <ERE> — a \b right after a word character, closing bracket
+# or quantifier ends a word; any other \b starts one.
+portable_pattern() {
+  if [ "$word_bounds" = bsd ]; then
+    printf '%s' "$1" | sed -E 's/([]_[:alnum:])*+?}])\\b/\1[[:>:]]/g; s/\\b/[[:<:]]/g'
+  else
+    printf '%s' "$1"
+  fi
+}
+
 hits_block=0
 hits_warn=0
+hits_warn_quiet=0
 : >"$LOG_FILE"
 
 log() { printf '%s\n' "$*" | tee -a "$LOG_FILE"; }
@@ -85,6 +113,7 @@ scan_ref() {
   if [ "$tier" = BLOCK ]; then set -- ${BLOCK[@]+"${BLOCK[@]}"}; else set -- ${WARN[@]+"${WARN[@]}"}; fi
   label="$ref"; [ -z "$ref" ] && label="(working tree)"
   for p in "$@"; do
+    p="$(portable_pattern "$p")"
     if [ -n "$ref" ]; then
       out=$(git grep -nIE -e "$p" "$ref" -- "${ALLOW_PATHS[@]}" 2>/dev/null || true)
     else
@@ -100,7 +129,19 @@ scan_ref() {
     while IFS= read -r line; do
       # For a committish, git grep already prefixes "<commit>:"; only the
       # working-tree scan needs a label.
-      if [ -z "$ref" ]; then log "  [$tier] (working tree): ${line}"; else log "  [$tier] ${line}"; fi
+      if [ -z "$ref" ]; then
+        log "  [$tier] (working tree): ${line}"
+      elif [ "$tier" = WARN ]; then
+        # A history scan greps each commit's whole tree, so a WARN term is
+        # reported once per commit that contains it — tens of thousands of
+        # lines, enough to overflow a CI job log (GitLab cuts at 4 MB) and push
+        # the BLOCK lines and the summary out of it. WARN never fails a scan:
+        # keep these in the log file and count them on stdout.
+        printf '%s\n' "  [$tier] ${line}" >>"$LOG_FILE"
+        hits_warn_quiet=$((hits_warn_quiet+1))
+      else
+        log "  [$tier] ${line}"
+      fi
       if [ "$tier" = BLOCK ]; then hits_block=$((hits_block+1)); else hits_warn=$((hits_warn+1)); fi
     done <<EOF
 $out
@@ -128,6 +169,9 @@ case "$MODE" in
 esac
 
 log "leak-scan: mode=$MODE refs=${#refs[@]}"
+if [ "$word_bounds" = none ]; then
+  log "leak-scan: WARNING — this git's regex has no word-boundary syntax; patterns using \\b will not match"
+fi
 for r in ${refs[@]+"${refs[@]}"}; do
   scan_ref BLOCK "$r"
   scan_ref WARN "$r"
@@ -147,6 +191,9 @@ if [ -n "$tracked_bad" ]; then
 fi
 
 log ""
+if [ "$hits_warn_quiet" -gt 0 ]; then
+  log "leak-scan: ${hits_warn_quiet} WARN hit(s) in commits not printed (one per commit containing the term; details in ${LOG_FILE})"
+fi
 log "leak-scan: ${hits_block} BLOCK hit(s), ${hits_warn} WARN hit(s)  (log: ${LOG_FILE})"
 
 # Notification hook — set LEAKSCAN_NOTIFY to an executable to wire email later.
