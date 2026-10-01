@@ -103,7 +103,7 @@ other windows.
 
 What you see while it is pending:
 
-- **CLI and hub from this fix onward:** the hub gives up on detection after 3 s
+- **v1.0.12 and later:** the hub gives up on detection after 3 s
   and every `ctx` command in such a repo stops with
   `can't tell which workspace <dir> belongs to: project detection did not
   finish within 3s …` (exit `75`). Once 16 detections are stuck, the hub
