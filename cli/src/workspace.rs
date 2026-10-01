@@ -19,10 +19,15 @@
 //!   a different client — no per-request URL rewriting and no change to any
 //!   of the `store_*` writers.
 //!
-//! Unresolvable sessions (no cwd recorded, no git root, hub unreachable) fall
-//! back to the default namespace. That is the honest answer: guessing a
-//! workspace from a lossy directory label is how the old `label`-based
-//! grouping produced wrong answers.
+//! Unresolvable sessions (no cwd recorded, no git root) fall back to the
+//! default namespace. That is the honest answer: guessing a workspace from a
+//! lossy directory label is how the old `label`-based grouping produced wrong
+//! answers.
+//!
+//! A directory whose detection *failed* (hub timed out, errored, unreachable)
+//! is different: the hub never said it has no project, so its sessions are
+//! skipped this run ([`Routed::Unresolved`]) rather than filed in `default` or
+//! registered as a second project, and the next sync picks them up.
 
 use std::collections::HashMap;
 
@@ -39,17 +44,29 @@ pub enum Routed {
     WouldRegister(String),
     /// No workspace could be determined; the default namespace is used.
     Fallback,
+    /// Detection failed for this directory, so nobody knows where it belongs.
+    /// Not a destination: sessions routed here are skipped, not written.
+    Unresolved(String),
 }
 
 impl Routed {
     /// The namespace to write into, or `None` for the default.
     ///
     /// `WouldRegister` maps to `None`: the namespace does not exist yet, so a
-    /// real write against it would 404.
+    /// real write against it would 404. `Unresolved` also maps to `None`, but
+    /// is not a write target at all — check [`Self::unresolved`] first.
     pub fn namespace(&self) -> Option<&str> {
         match self {
             Routed::Existing(ns) | Routed::Registered(ns) => Some(ns.as_str()),
-            Routed::WouldRegister(_) | Routed::Fallback => None,
+            Routed::WouldRegister(_) | Routed::Fallback | Routed::Unresolved(_) => None,
+        }
+    }
+
+    /// Why detection failed, when it did.
+    pub fn unresolved(&self) -> Option<&str> {
+        match self {
+            Routed::Unresolved(reason) => Some(reason.as_str()),
+            _ => None,
         }
     }
 }
@@ -94,10 +111,11 @@ impl Router {
             server: server.to_string(),
             dry_run,
             fallback,
-            // Short timeout: routing must never be the reason a sync stalls.
-            // A miss costs one session its workspace, not the run.
+            // Bounded, so a stuck hub cannot stall the sync; long enough for
+            // the hub's own detect timeout to answer first and explain itself.
+            // A miss skips one directory's sessions for this run.
             probe: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_millis(2500))
+                .timeout(crate::detect::DETECT_TIMEOUT)
                 .build()
                 .unwrap_or_default(),
             auto_register,
@@ -158,8 +176,13 @@ impl Router {
     }
 
     async fn resolve(&self, cwd: &str) -> Routed {
-        if let Some(ns) = self.detect(cwd).await {
-            return Routed::Existing(ns);
+        match self.detect(cwd).await {
+            Ok(Some(ns)) => return Routed::Existing(ns),
+            Ok(None) => {}
+            // Never register on a failed detection: the repo may already be a
+            // project under a different id, and minting one from its remote
+            // would split it across two workspaces.
+            Err(reason) => return Routed::Unresolved(reason),
         }
         if !self.auto_register {
             return self.fallback();
@@ -199,18 +222,11 @@ impl Router {
     }
 
     /// Ask the hub to run its project-detection chain for this directory.
-    async fn detect(&self, cwd: &str) -> Option<String> {
-        let resp = self
-            .probe
-            .get(format!("{}/api/projects/detect", self.server))
-            .query(&[("cwd", cwd)])
-            .send()
+    /// `Ok(None)` is the hub saying "no project"; `Err` is it not saying.
+    async fn detect(&self, cwd: &str) -> Result<Option<String>, String> {
+        crate::detect::detect(&self.probe, &self.server, cwd)
             .await
-            .ok()?;
-        let v: serde_json::Value = resp.json().await.ok()?;
-        (v["status"] == "found")
-            .then(|| v["namespace"].as_str().map(str::to_string))
-            .flatten()
+            .map_err(|f| f.detail)
     }
 
     /// Mint a project for an unregistered repo, which is also the only path
@@ -389,6 +405,49 @@ mod tests {
         assert_eq!(Routed::Existing("a".into()).namespace(), Some("a"));
         assert_eq!(Routed::Registered("b".into()).namespace(), Some("b"));
         assert_eq!(Routed::Fallback.namespace(), None);
+        assert_eq!(Routed::Fallback.unresolved(), None);
+        assert_eq!(Routed::Unresolved("x".into()).unresolved(), Some("x"));
+    }
+
+    /// A git repo whose detection fails is `Unresolved` — not `Fallback`
+    /// (which files it in `default`) and not a fresh registration (which could
+    /// split an already-registered repo into a second workspace).
+    #[tokio::test]
+    async fn failed_detection_is_unresolved_not_default_or_registered() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .output()
+                .expect("git")
+        };
+        git(&["init", "-q"]);
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            "https://example.com/acme/widgets.git",
+        ]);
+        let cwd = repo.path().to_string_lossy().to_string();
+
+        // Bind then drop, so nothing listens and the connect is refused.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let server = format!("http://127.0.0.1:{port}");
+        for auto_register in [false, true] {
+            let mut router = Router::new(&server, auto_register, false, None);
+            let routed = router.route(Some(&cwd)).await;
+            assert!(
+                matches!(routed, Routed::Unresolved(ref why) if why.contains("unreachable")),
+                "auto_register={auto_register}: got {routed:?}"
+            );
+            // Memoized, like every other outcome.
+            assert_eq!(router.decisions().len(), 1);
+        }
     }
 
     #[tokio::test]

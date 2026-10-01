@@ -968,6 +968,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 info!(project = %project_id, namespace = %namespace_id, via = "git-remote", "project detected");
                                 Some(namespace_id)
                             }
+                            ctxone_hub::project::DetectResult::Failed(reason) => {
+                                warn!(error = %reason, "project detection failed");
+                                None
+                            }
                             _ => None,
                         }
                     })

@@ -1645,6 +1645,41 @@ async fn project_detect_finds_ctxproject_file() {
     assert_eq!(body["namespace"], "found-me");
 }
 
+/// A `.ctxproject` the hub cannot read must come back as an error, not as
+/// `not_found` — the CLI falls back to `default` on `not_found`, and this
+/// directory does belong to a project.
+#[cfg(unix)]
+#[tokio::test]
+async fn project_detect_unreadable_marker_is_an_error_not_not_found() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_dir, _repo, router) = sqlite_router();
+    let (status, _) = call_json(
+        router.clone(),
+        post_json("/api/projects", json!({ "id": "hidden" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let marker = tmp.path().join(".ctxproject");
+    std::fs::write(&marker, "hidden\n").unwrap();
+    std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read_to_string(&marker).is_ok() {
+        return; // running as root: permissions cannot hide the file
+    }
+    let uri = format!(
+        "/api/projects/detect?cwd={}",
+        urlencoding_encode(tmp.path().to_str().unwrap())
+    );
+    let (status, body) = call_json(router.clone(), get(&uri)).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "body: {body}");
+    assert_eq!(body["status"], "error");
+    assert!(
+        body["error"].as_str().unwrap_or("").contains(".ctxproject"),
+        "error should name the unreadable file: {body}"
+    );
+}
+
 #[tokio::test]
 async fn projects_require_sqlite_backend() {
     // The default memory-backed test router has no db_path.

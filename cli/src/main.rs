@@ -1,6 +1,7 @@
 mod burn;
 mod codex;
 mod cursor;
+mod detect;
 mod gemini;
 mod ingest;
 mod metrics;
@@ -87,7 +88,9 @@ struct RawCli {
 
     /// Namespace to operate in (env: CTX_NAMESPACE). When omitted, the
     /// project detection chain runs for the cwd (.ctxproject walk-up,
-    /// then git remote lookup); no match → the "default" namespace.
+    /// then git remote lookup); no match → the "default" namespace. If the
+    /// hub can't be asked (timeout, error, unreachable) the command stops
+    /// rather than guess — pass this to skip detection.
     #[arg(long, env = "CTX_NAMESPACE", global = true)]
     namespace: Option<String>,
 
@@ -142,31 +145,46 @@ impl Cli {
 
     /// Resolve the namespace for this invocation. An explicit
     /// --namespace / CTX_NAMESPACE wins; otherwise ask the Hub to run
-    /// the project detection chain for the cwd. Returns `None` (→ the
-    /// "default" namespace, no header sent) when nothing matches or the
-    /// Hub is unreachable — namespace resolution must never block a
-    /// command, so failures here are silent by design.
-    async fn resolve_namespace(&self) -> Option<String> {
+    /// the project detection chain for the cwd. `Ok(None)` means the hub
+    /// answered and no project claims the cwd, so `default` is right.
+    ///
+    /// A hub that times out, errors or can't be reached is `Err`, never
+    /// `Ok(None)`. This used to be silent by design, and a hub blocked on a
+    /// macOS privacy prompt then sent every command to `default` ("plan not
+    /// found") without a word. Callers choose whether to stop or warn.
+    async fn resolve_namespace(&self) -> Result<Option<String>, detect::DetectFailure> {
         if let Some(ns) = &self.namespace {
-            return Some(ns.clone());
+            return Ok(Some(ns.clone()));
         }
-        let cwd = std::env::current_dir().ok()?;
+        let cwd = std::env::current_dir().map_err(|e| {
+            detect::DetectFailure::new(
+                detect::FailureKind::NoCwd,
+                "the current directory",
+                format!("it is unavailable ({e})"),
+            )
+        })?;
+        let cwd = cwd.to_string_lossy();
+        // Carries the token: an authenticated hub would otherwise answer 401,
+        // which is now a failure rather than a quiet `default`.
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Some(ref token) = self.token
+            && let Ok(mut val) = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+        {
+            val.set_sensitive(true);
+            headers.insert(reqwest::header::AUTHORIZATION, val);
+        }
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_millis(1500))
+            .timeout(detect::DETECT_TIMEOUT)
+            .default_headers(headers)
             .build()
-            .ok()?;
-        let resp = client
-            .get(format!("{}/api/projects/detect", self.server))
-            .query(&[("cwd", cwd.to_string_lossy().as_ref())])
-            .send()
-            .await
-            .ok()?;
-        let v: serde_json::Value = resp.json().await.ok()?;
-        if v["status"] == "found" {
-            v["namespace"].as_str().map(str::to_string)
-        } else {
-            None
-        }
+            .map_err(|e| {
+                detect::DetectFailure::new(
+                    detect::FailureKind::Hub,
+                    &cwd,
+                    format!("couldn't build an HTTP client ({e})"),
+                )
+            })?;
+        detect::detect(&client, &self.server, &cwd).await
     }
 
     /// The pieces `http_client` needs, detached from `Cli`.
@@ -2006,12 +2024,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Resolve the namespace once per invocation, but only for commands
     // that talk to the Hub — purely-local commands (and `serve`, where
     // the Hub is by definition not up yet) skip the detection round-trip.
+    //
+    // A failed detection stops the command (see `Cli::resolve_namespace`):
+    // running on in `default` reads and writes the wrong workspace.
+    let mut status_detect_failure: Option<detect::DetectFailure> = None;
     let namespace = match &cli.command {
         // `init` needs the project namespace: `--transport http` bakes it into
         // the `/mcp?namespace=<ns>` URL, and both transports use it as the
         // stable CTX_SESSION id injected into the stdio server's env (t-015).
-        // Best-effort — a down hub just yields None and we fall back below.
-        Commands::Init { .. } => cli.resolve_namespace().await,
+        // Running `init` before the hub is up is a supported first step (it
+        // warns about the hub below), so only that case carries on, loudly; a
+        // hub that is up but can't answer would bake the wrong workspace into
+        // every config it writes.
+        Commands::Init { .. } => match cli.resolve_namespace().await {
+            Ok(ns) => ns,
+            Err(f) if f.kind == detect::FailureKind::Unreachable => {
+                eprintln!("  \u{26A0} {}", f.headline());
+                eprintln!(
+                    "    The configs below won't name a workspace. Re-run `ctx init` once \
+                     the hub is running, or pass --namespace <workspace>."
+                );
+                None
+            }
+            Err(f) => f.exit(),
+        },
+        // `status` is where you look when commands land in the wrong
+        // workspace, so it reports a failed detection instead of dying on it.
+        Commands::Status => match cli.resolve_namespace().await {
+            Ok(ns) => ns,
+            Err(f) => {
+                status_detect_failure = Some(f);
+                None
+            }
+        },
+        // `ingest-session --all` routes every transcript by its own recorded
+        // cwd (see `workspace::Router`); the invoking directory plays no part.
+        Commands::IngestSession { all: true, .. } => None,
         Commands::Skill { .. }
         | Commands::Bootstrap
         | Commands::Completion { .. }
@@ -2019,8 +2067,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         | Commands::Serve { .. }
         | Commands::Session { .. }
         | Commands::Service { .. }
-        | Commands::Db { .. } => None,
-        _ => cli.resolve_namespace().await,
+        | Commands::Db { .. }
+        // Local-only: never touch the hub, so a detection failure is not theirs
+        // to report.
+        | Commands::Tokens { .. }
+        | Commands::Worktree { .. }
+        // Runs its own detection check and reports it with the others.
+        | Commands::Doctor => None,
+        _ => match cli.resolve_namespace().await {
+            Ok(ns) => ns,
+            Err(f) => f.exit(),
+        },
     };
     let client = cli.http_client(namespace.as_deref());
     // Captured before the dispatch `match` moves out of `cli.command`, so
@@ -2350,6 +2407,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "server": cli.server,
                 "namespace": namespace.as_deref().unwrap_or("default"),
             });
+            // Detection failed: the namespace is unknown, not `default`.
+            if let Some(f) = &status_detect_failure {
+                out["namespace"] = Value::Null;
+                out["namespace_error"] = serde_json::json!(f.detail);
+            }
             if let Some(ns) = &namespace
                 && let Ok(r) = client
                     .get(format!(
@@ -2385,10 +2447,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         v["namespace"].as_str().unwrap_or("default"),
                         v["project_via"].as_str().unwrap_or("?"),
                     ),
-                    None => println!(
-                        "Namespace: {}",
-                        v["namespace"].as_str().unwrap_or("default")
-                    ),
+                    None => match &status_detect_failure {
+                        Some(f) => {
+                            println!("Namespace: unknown — {}", f.detail);
+                            println!(
+                                "  Commands here will stop until detection works. Pass \
+                                 --namespace <workspace> (or set CTX_NAMESPACE) to choose one."
+                            );
+                        }
+                        None => println!(
+                            "Namespace: {}",
+                            v["namespace"].as_str().unwrap_or("default")
+                        ),
+                    },
                 }
                 if let Some(t) = v.get("tokens") {
                     let used = t
@@ -2409,6 +2480,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
             });
+            if let Some(f) = &status_detect_failure {
+                std::process::exit(f.exit_code());
+            }
         }
         Commands::Stats => {
             let resp = match client
@@ -4858,6 +4932,27 @@ async fn run_doctor(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         },
     ));
 
+    // Check 4b: which workspace this directory resolves to. Every other
+    // command stops when this fails, so doctor is where it gets explained.
+    if hub_reachable {
+        let (ok, detail) = match cli.resolve_namespace().await {
+            Ok(Some(ns)) if cli.namespace.is_some() => {
+                (true, format!("{ns} (from --namespace / CTX_NAMESPACE)"))
+            }
+            Ok(Some(ns)) => (true, ns),
+            Ok(None) => (true, "default (no project registered here)".to_string()),
+            Err(f) => {
+                suggestions.push(
+                    "Fix workspace detection (see its detail above), or pass \
+                     --namespace <workspace> / set CTX_NAMESPACE to skip it"
+                        .to_string(),
+                );
+                (false, f.detail)
+            }
+        };
+        checks.push(("workspace detection".to_string(), ok, detail));
+    }
+
     // Check 5: MCP configs for detected AI tools
     let tools = detect_tools(false);
     for t in &tools {
@@ -5226,6 +5321,8 @@ async fn ingest_one_session(
             crate::workspace::Routed::Registered(ns) => format!("{ns} (new)"),
             crate::workspace::Routed::WouldRegister(ns) => format!("{ns} (would create)"),
             crate::workspace::Routed::Fallback => "default".to_string(),
+            // Filtered out before a job is built; kept for exhaustiveness.
+            crate::workspace::Routed::Unresolved(_) => "unknown".to_string(),
         }
     );
 
@@ -5701,6 +5798,9 @@ async fn run_ingest_session(
     // Reported explicitly: a sync that quietly imported fewer sessions than
     // it found would look like data loss.
     let mut skipped_deleted = 0usize;
+    // Sessions whose directory's detection failed. Skipped rather than filed
+    // in `default`; they import on a later sync once detection works.
+    let mut skipped_unresolved = 0usize;
     let mut total_turns_seen = 0usize;
     let mut total_memories = 0usize;
     let mut total_full_turns = 0usize;
@@ -5764,6 +5864,10 @@ async fn run_ingest_session(
                 Some(ns) => crate::workspace::Routed::Existing(ns.clone()),
                 None => router.route(session_ref.cwd.as_deref()).await,
             };
+            if routed.unresolved().is_some() {
+                skipped_unresolved += 1;
+                continue;
+            }
 
             // A deleted session must stay deleted. Its transcript is still on
             // disk, so without this the next sync would faithfully restore
@@ -5889,6 +5993,19 @@ async fn run_ingest_session(
             if total_skipped_since == 1 { "" } else { "s" }
         );
     }
+    if skipped_unresolved > 0 {
+        eprintln!(
+            "\u{26A0} Skipped {} session{} whose workspace couldn't be determined \
+             (not filed in 'default'; a later sync imports them once detection works):",
+            skipped_unresolved,
+            if skipped_unresolved == 1 { "" } else { "s" }
+        );
+        for (cwd, routed) in router.decisions() {
+            if let Some(why) = routed.unresolved() {
+                eprintln!("    {cwd}: {why}");
+            }
+        }
+    }
     println!(
         "Tokens — input: {}  output: {}  cache_read: {}  cache_create: {}",
         total_tokens.input,
@@ -5909,6 +6026,7 @@ async fn run_ingest_session(
                 crate::workspace::Routed::Registered(ns) => (ns.as_str(), "  (registered)"),
                 crate::workspace::Routed::WouldRegister(ns) => (ns.as_str(), "  (would register)"),
                 crate::workspace::Routed::Fallback => ("default", "  (no project)"),
+                crate::workspace::Routed::Unresolved(_) => ("?", "  (detection failed; skipped)"),
             };
             println!("  {:<20} {}{}", ns, cwd, note);
         }
@@ -5924,6 +6042,7 @@ async fn run_ingest_session(
                 "sessions": total_sessions,
                 "turns": total_turns_seen,
                 "tokens": grand_tokens,
+                "skipped_unresolved": skipped_unresolved,
             })
         );
     }
@@ -6372,7 +6491,15 @@ async fn run_reattribute(
             unresolved += 1;
             continue;
         };
-        match router.route(Some(&cwd)).await.namespace() {
+        let routed = router.route(Some(&cwd)).await;
+        if let Some(why) = routed.unresolved() {
+            // Detection failed: leave it where it is, but don't count it as
+            // settled in `default`.
+            eprintln!("  {}: workspace unknown ({why})", &sid[..sid.len().min(24)]);
+            unresolved += 1;
+            continue;
+        }
+        match routed.namespace() {
             Some(ns) if ns != "default" => plan.push((sid.to_string(), ns.to_string())),
             _ => {} // routes to default (or would-register under dry run): leave it
         }

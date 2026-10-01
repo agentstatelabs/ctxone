@@ -233,8 +233,14 @@ pub enum DetectResult {
     },
     /// No project found — caller should warn and fall back to "default".
     NotFound,
-    /// Registry is unavailable (non-sqlite backend). Silently use default.
+    /// No registry to consult (non-sqlite backend), so `default` is the only
+    /// namespace there is. Silently use default.
     RegistryUnavailable,
+    /// Detection could not finish: the registry query failed, or a
+    /// `.ctxproject` marker exists but cannot be read. Unlike `NotFound` this
+    /// is not an answer — falling back to `default` here would be a guess, and
+    /// a wrong one whenever the directory does belong to a project.
+    Failed(String),
 }
 
 /// Run the project detection chain from a given working directory.
@@ -254,14 +260,20 @@ pub enum DetectResult {
 ///
 /// `db_path` is `None` for memory/postgres backends, in which case detection
 /// is skipped entirely (`RegistryUnavailable`).
+///
+/// A `.ctxproject` that exists but cannot be read does not stop the chain —
+/// steps 2 and 3 may still identify the project — but if nothing else matches
+/// the result is `Failed`, not `NotFound`: the unread marker may well have
+/// named a project.
 pub fn detect_project(cwd: &Path, db_path: Option<&str>) -> DetectResult {
     let Some(db) = db_path else {
         return DetectResult::RegistryUnavailable;
     };
 
     // Step 1: .ctxproject file walk
-    if let Some(project_id) = find_ctxproject_file(cwd) {
-        match resolve_by_id(db, &project_id) {
+    let mut unreadable_marker: Option<String> = None;
+    match find_ctxproject_file(cwd) {
+        Ok(Some(project_id)) => match resolve_by_id(db, &project_id) {
             Ok(Some(p)) => {
                 return DetectResult::FoundByFile {
                     project_id: p.id,
@@ -272,10 +284,10 @@ pub fn detect_project(cwd: &Path, db_path: Option<&str>) -> DetectResult {
                 // .ctxproject points to an unknown project — warn, fall through
                 // to remote URL lookup before giving up.
             }
-            Err(_) => {
-                return DetectResult::RegistryUnavailable;
-            }
-        }
+            Err(e) => return registry_failed(e),
+        },
+        Ok(None) => {}
+        Err((path, e)) => unreadable_marker = Some(unreadable_marker_message(&path, &e)),
     }
 
     // Step 2: git remote URL lookup
@@ -289,9 +301,7 @@ pub fn detect_project(cwd: &Path, db_path: Option<&str>) -> DetectResult {
                 };
             }
             Ok(None) => {}
-            Err(_) => {
-                return DetectResult::RegistryUnavailable;
-            }
+            Err(e) => return registry_failed(e),
         }
     }
 
@@ -299,9 +309,9 @@ pub fn detect_project(cwd: &Path, db_path: Option<&str>) -> DetectResult {
     //
     // A query error here means "nothing registered by path" — most often the
     // `project_paths` table does not exist yet because no project has been
-    // registered — not "the registry is down". Reporting RegistryUnavailable
-    // would turn a normal first-run detection into a hard failure, so this
-    // falls through to NotFound.
+    // registered — not "the registry is down". Reporting Failed would turn a
+    // normal first-run detection into a hard failure, so this falls through to
+    // NotFound.
     if let Ok(Some((p, local_path))) = resolve_by_local_path(db, cwd) {
         return DetectResult::FoundByPath {
             project_id: p.id,
@@ -310,7 +320,29 @@ pub fn detect_project(cwd: &Path, db_path: Option<&str>) -> DetectResult {
         };
     }
 
-    DetectResult::NotFound
+    match unreadable_marker {
+        Some(msg) => DetectResult::Failed(msg),
+        None => DetectResult::NotFound,
+    }
+}
+
+fn registry_failed(e: rusqlite::Error) -> DetectResult {
+    DetectResult::Failed(format!("project registry query failed: {e}"))
+}
+
+/// Explain a `.ctxproject` the hub is not allowed to read.
+///
+/// On macOS this is what a denied Files & Folders privacy prompt looks like,
+/// so name the setting that fixes it.
+fn unreadable_marker_message(path: &Path, e: &std::io::Error) -> String {
+    let mut msg = format!("cannot read {}: {e}", path.display());
+    if cfg!(target_os = "macos") {
+        msg.push_str(
+            " — grant ctxone-hub access in System Settings → Privacy & Security → \
+             Files and Folders (or Full Disk Access), then retry",
+        );
+    }
+    msg
 }
 
 /// The project whose registered `local_path` is the longest prefix of `cwd`.
@@ -343,26 +375,38 @@ fn resolve_by_local_path(db_path: &str, cwd: &Path) -> SqlResult<Option<(Project
 
 /// Walk `start` and its parents looking for a `.ctxproject` file.
 /// Returns the project ID (first non-empty, non-whitespace line) or `None`.
-fn find_ctxproject_file(start: &Path) -> Option<String> {
+///
+/// A marker the hub is not permitted to stat or read is an error, not an
+/// absence: the walk stops there (the nearest marker wins, and this one might
+/// be it) and the path comes back so the caller can say what was unreadable.
+fn find_ctxproject_file(start: &Path) -> Result<Option<String>, (PathBuf, std::io::Error)> {
+    use std::io::ErrorKind::PermissionDenied;
     let mut dir: Option<&Path> = Some(start);
     while let Some(d) = dir {
         let candidate = d.join(".ctxproject");
-        if candidate.is_file() {
-            if let Ok(content) = std::fs::read_to_string(&candidate) {
+        let content = match std::fs::metadata(&candidate) {
+            Ok(meta) if meta.is_file() => std::fs::read_to_string(&candidate),
+            Ok(_) => Err(std::io::ErrorKind::InvalidInput.into()),
+            Err(e) => Err(e),
+        };
+        match content {
+            Ok(content) => {
                 let id = content
                     .lines()
                     .find(|l| !l.trim().is_empty())
                     .map(|l| l.trim().to_string());
                 if let Some(id) = id {
                     if !id.is_empty() {
-                        return Some(id);
+                        return Ok(Some(id));
                     }
                 }
             }
+            Err(e) if e.kind() == PermissionDenied => return Err((candidate, e)),
+            Err(_) => {}
         }
         dir = d.parent();
     }
-    None
+    Ok(None)
 }
 
 /// Run `git remote get-url origin` (or `git ls-remote --get-url`) in `dir`
@@ -628,7 +672,7 @@ mod tests {
         let nested = dir.path().join("sub/dir");
         std::fs::create_dir_all(&nested).unwrap();
         write_ctxproject_file(dir.path(), "my-project-id").unwrap();
-        let result = find_ctxproject_file(&nested);
+        let result = find_ctxproject_file(&nested).unwrap();
         assert_eq!(result, Some("my-project-id".to_string()));
     }
 
@@ -669,6 +713,70 @@ mod tests {
         bootstrap(&conn).unwrap();
         let result = detect_project(dir.path(), Some(&db));
         assert!(matches!(result, DetectResult::NotFound));
+    }
+
+    /// Make `path` unreadable. Returns false when that is impossible because
+    /// the test runs as root (CI containers), so callers can skip.
+    #[cfg(unix)]
+    fn make_unreadable(path: &Path) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::read_to_string(path).is_err()
+    }
+
+    /// A marker the hub may not read is a failure, not "no project": treating
+    /// it as absent is how a denied macOS privacy prompt used to send every
+    /// command to `default` without a word.
+    #[cfg(unix)]
+    #[test]
+    fn detect_project_reports_unreadable_marker_as_failed() {
+        let dir = tempdir().unwrap();
+        let (_dbdir, db) = tmp_db();
+        register_project(&db, "p", None, "p-ns", None, None).unwrap();
+        write_ctxproject_file(dir.path(), "p").unwrap();
+        let marker = dir.path().join(".ctxproject");
+        if !make_unreadable(&marker) {
+            return;
+        }
+        let result = detect_project(dir.path(), Some(&db));
+        assert!(
+            matches!(result, DetectResult::Failed(ref msg) if msg.contains(".ctxproject")),
+            "got {result:?}"
+        );
+    }
+
+    /// An unreadable marker does not stop the chain: a registered local path
+    /// still identifies the project.
+    #[cfg(unix)]
+    #[test]
+    fn detect_project_unreadable_marker_still_matches_by_path() {
+        let dir = tempdir().unwrap();
+        let (_dbdir, db) = tmp_db();
+        let root = dir.path().to_str().unwrap();
+        register_project(&db, "p", None, "p-ns", None, Some(root)).unwrap();
+        write_ctxproject_file(dir.path(), "p").unwrap();
+        if !make_unreadable(&dir.path().join(".ctxproject")) {
+            return;
+        }
+        let result = detect_project(dir.path(), Some(&db));
+        assert!(
+            matches!(result, DetectResult::FoundByPath { ref namespace_id, .. } if namespace_id == "p-ns"),
+            "got {result:?}"
+        );
+    }
+
+    /// A registry that cannot be queried is a failure, not a quiet default.
+    #[test]
+    fn detect_project_reports_registry_error_as_failed() {
+        let dir = tempdir().unwrap();
+        write_ctxproject_file(dir.path(), "p").unwrap();
+        let (_dbdir, db) = tmp_db();
+        std::fs::write(&db, b"this is not a sqlite database, just junk bytes").unwrap();
+        let result = detect_project(dir.path(), Some(&db));
+        assert!(
+            matches!(result, DetectResult::Failed(ref msg) if msg.contains("registry")),
+            "got {result:?}"
+        );
     }
 
     #[test]

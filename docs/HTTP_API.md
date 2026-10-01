@@ -467,14 +467,15 @@ session started there would land in:
    any parent
 2. `git remote get-url origin` looked up in the registry (URLs
    normalized the same way as on write)
+3. the longest registered `local_path` containing `cwd`
 
 **Response (200):**
 ```json
 { "status": "found", "via": "ctxproject", "project_id": "myrepo", "namespace": "myrepo" }
 ```
 
-`via` is `"ctxproject"` or `"remote"` (remote matches also carry
-`remote_url`). No match:
+`via` is `"ctxproject"`, `"remote"` (also carries `remote_url`) or
+`"local_path"` (also carries `local_path`). No match:
 
 ```json
 { "status": "not_found", "namespace": "default" }
@@ -482,6 +483,20 @@ session started there would land in:
 
 Non-sqlite backends report `{ "status": "registry_unavailable",
 "namespace": "default" }`.
+
+Only those three `200` answers say where a session belongs. Anything else
+means detection did not finish, and the directory may well have a project —
+callers must not treat it as `not_found`:
+
+| Status | `status` | When |
+|--------|----------|------|
+| **500** | `error` | The registry query failed, or a `.ctxproject` exists but the Hub may not read it (on macOS, a denied Files & Folders prompt) and no later step matched |
+| **503** | `busy` | 16 earlier detections are still stuck; refused without starting another |
+| **504** | `timeout` | Detection ran past 3 s — typically the Hub blocked on file access, e.g. a pending macOS privacy prompt |
+
+```json
+{ "status": "timeout", "error": "project detection did not finish within 3s — …" }
+```
 
 ---
 

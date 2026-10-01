@@ -243,6 +243,36 @@ ctx serve --http --storage postgres
 
 The Hub will create its tables on first run.
 
+## 11. `ctx: can't tell which workspace <dir> belongs to`
+
+Every Hub-bound `ctx` command first asks the Hub which workspace the current
+directory belongs to. When the Hub can't answer, the command stops rather than
+fall back to `default` — reading and writing `default` instead of your project
+is how plans and branches turn up "not found". The text after the colon says
+why. Exit codes: `75` timed out, `76` the Hub reported an error, `69` Hub
+unreachable.
+
+**Cause A — macOS is showing a privacy prompt for `ctxone-hub`** (`project
+detection did not finish within 3s`). Common right after `brew upgrade`: macOS
+treats the upgraded binary as a new app, and the first time it reads a repo
+under `~/Documents`, `~/Desktop` or `~/Downloads` the read blocks until the
+prompt is answered. Find the "ctxone-hub would like to access files in your
+Documents folder" dialog (it may be behind other windows) and click **Allow**.
+
+**Cause B — the prompt was denied** (`cannot read …/.ctxproject: Operation not
+permitted`). Grant access in **System Settings → Privacy & Security → Files and
+Folders → ctxone-hub** (or add it under **Full Disk Access**), then retry.
+
+**Cause C — the Hub isn't running** (`hub unreachable`). See
+[section 1](#1-hub-unreachable-httplocalhost3001).
+
+**Check:** `ctx status` and `ctx doctor` report the failure instead of stopping
+on it. **Workaround** while you fix the cause:
+
+```bash
+ctx --namespace <workspace> plan list   # or: export CTX_NAMESPACE=<workspace>
+```
+
 ---
 
 ## Schema migrations
