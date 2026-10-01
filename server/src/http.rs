@@ -190,6 +190,9 @@ pub struct HubState {
     /// Merges currently running, keyed by (namespace, target ref). See
     /// [`MergeGuard`].
     pub merges_in_flight: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Project detections still running on the blocking pool, including ones
+    /// whose request already timed out. See [`run_detect_bounded`].
+    pub detects_in_flight: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl HubState {
@@ -625,6 +628,7 @@ fn router_with_config_inner(
         ctx_binary: config.ctx_binary.clone(),
         self_base_url: config.self_base_url.clone(),
         merges_in_flight: Arc::default(),
+        detects_in_flight: Arc::default(),
         autosync: config
             .autosync
             .clone()
@@ -6776,21 +6780,127 @@ struct DetectQuery {
     cwd: String,
 }
 
+/// How long `GET /api/projects/detect` waits for the detection chain.
+///
+/// Detection normally answers in tens of milliseconds, but it reads files under
+/// the caller's cwd and runs git there. On macOS the first such access to
+/// `~/Documents`, `~/Desktop` or `~/Downloads` by a newly installed hub binary
+/// blocks inside `open()` until the user answers a privacy prompt — possibly
+/// never. Kept below the CLI's own detect timeout (5 s) so the CLI gets this
+/// handler's explanation instead of a bare client timeout.
+const DETECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Detections allowed on the blocking pool at once.
+///
+/// A timeout abandons the blocking thread; it cannot cancel it, because a
+/// thread parked in `open()` is not interruptible. While a prompt sits
+/// unanswered every `ctx` command would strand one more thread, so past this
+/// many the handler refuses up front instead of piling them up. That refusal
+/// covers every directory, not just the stuck one, until the stuck threads
+/// return — by then the fix (answer the prompt) is the same for all of them,
+/// and failing in microseconds beats making each caller wait out the
+/// timeout. Normal detections finish in milliseconds and never come near it.
+const MAX_DETECTS_IN_FLIGHT: usize = 16;
+
+/// Outcome of [`run_detect_bounded`].
+#[derive(Debug)]
+enum DetectRun {
+    Done(crate::project::DetectResult),
+    /// Still running when the timeout fired; the thread is left to finish.
+    TimedOut,
+    /// Too many detections already stuck; this one was never started.
+    Saturated,
+}
+
+/// Run `detect` on the blocking pool, giving up after `timeout` and refusing
+/// outright once `max` are already running.
+///
+/// The in-flight count is released by a guard owned by the blocking closure,
+/// not by this future: an abandoned detection still holds its thread, so it
+/// must keep counting until the thread actually returns.
+async fn run_detect_bounded<F>(
+    detect: F,
+    timeout: std::time::Duration,
+    in_flight: &Arc<std::sync::atomic::AtomicUsize>,
+    max: usize,
+) -> DetectRun
+where
+    F: FnOnce() -> crate::project::DetectResult + Send + 'static,
+{
+    struct Release(Arc<std::sync::atomic::AtomicUsize>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    if in_flight.fetch_add(1, Ordering::SeqCst) >= max {
+        in_flight.fetch_sub(1, Ordering::SeqCst);
+        return DetectRun::Saturated;
+    }
+    let release = Release(in_flight.clone());
+    let task = tokio::task::spawn_blocking(move || {
+        let _release = release;
+        detect()
+    });
+    match tokio::time::timeout(timeout, task).await {
+        Ok(Ok(result)) => DetectRun::Done(result),
+        Ok(Err(e)) => DetectRun::Done(crate::project::DetectResult::Failed(format!(
+            "detection task failed: {e}"
+        ))),
+        Err(_) => DetectRun::TimedOut,
+    }
+}
+
 /// `GET /api/projects/detect?cwd=/abs/path` — run the detection chain
 /// (`.ctxproject` walk-up, then git remote lookup) and report which
 /// namespace a session started in that directory would land in.
+///
+/// `200` with `status` `found` / `not_found` / `registry_unavailable` is an
+/// answer. Anything else means detection did not finish — `500` `error`,
+/// `503` `busy`, `504` `timeout` — and the body's `error` says why. Callers
+/// must not treat those as "no project": the directory may well have one.
 async fn detect_project_handler(
     State(s): State<HubState>,
     Query(q): Query<DetectQuery>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> (StatusCode, Json<serde_json::Value>) {
     use crate::project::DetectResult;
     let db = s.db_path.clone();
+    let cwd = q.cwd.clone();
     // Detection shells out to git — keep it off the async runtime.
-    let result = tokio::task::spawn_blocking(move || {
-        crate::project::detect_project(std::path::Path::new(&q.cwd), db.as_deref())
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {}", e)))?;
+    let run = run_detect_bounded(
+        move || crate::project::detect_project(std::path::Path::new(&cwd), db.as_deref()),
+        DETECT_TIMEOUT,
+        &s.detects_in_flight,
+        MAX_DETECTS_IN_FLIGHT,
+    )
+    .await;
+    let result = match run {
+        DetectRun::Done(result) => result,
+        DetectRun::TimedOut => {
+            warn!(cwd = %q.cwd, "project detection timed out");
+            return detect_failure(
+                StatusCode::GATEWAY_TIMEOUT,
+                "timeout",
+                format!(
+                    "project detection did not finish within {}s{}",
+                    DETECT_TIMEOUT.as_secs(),
+                    blocked_file_access_hint()
+                ),
+            );
+        }
+        DetectRun::Saturated => {
+            warn!(cwd = %q.cwd, "project detection refused: earlier detections still blocked");
+            return detect_failure(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "busy",
+                format!(
+                    "{MAX_DETECTS_IN_FLIGHT} earlier project detections are still blocked{}",
+                    blocked_file_access_hint()
+                ),
+            );
+        }
+    };
 
     let json = match result {
         DetectResult::FoundByFile {
@@ -6824,8 +6934,33 @@ async fn detect_project_handler(
         DetectResult::RegistryUnavailable => serde_json::json!({
             "status": "registry_unavailable", "namespace": "default",
         }),
+        DetectResult::Failed(msg) => {
+            warn!(cwd = %q.cwd, error = %msg, "project detection failed");
+            return detect_failure(StatusCode::INTERNAL_SERVER_ERROR, "error", msg);
+        }
     };
-    Ok(Json(json))
+    (StatusCode::OK, Json(json))
+}
+
+fn detect_failure(
+    code: StatusCode,
+    status: &str,
+    error: String,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        code,
+        Json(serde_json::json!({ "status": status, "error": error })),
+    )
+}
+
+/// What usually blocks detection, for the error a stuck detection returns.
+fn blocked_file_access_hint() -> &'static str {
+    if cfg!(target_os = "macos") {
+        " — the hub is probably waiting on file access; if macOS is showing a \
+         privacy prompt for ctxone-hub (common right after an upgrade), answer it"
+    } else {
+        " — the hub is probably blocked reading files or running git in that directory"
+    }
 }
 
 #[cfg(test)]
@@ -6868,6 +7003,95 @@ mod tests {
         let in_flight = Arc::default();
         let _a = MergeGuard::acquire(&in_flight, "a", "b/c").unwrap();
         assert!(MergeGuard::acquire(&in_flight, "a/b", "c").is_some());
+    }
+
+    // ── run_detect_bounded: detection must time out, not hang ───────────────
+
+    /// A detection stuck past the timeout returns `TimedOut` promptly, and its
+    /// thread keeps counting as in flight until it really returns — the case a
+    /// macOS privacy prompt produces by parking the thread inside `open()`.
+    #[tokio::test]
+    async fn detect_times_out_and_counts_the_stranded_thread() {
+        let in_flight = Arc::default();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let started = std::time::Instant::now();
+        let run = run_detect_bounded(
+            move || {
+                let _ = release_rx.recv();
+                crate::project::DetectResult::NotFound
+            },
+            std::time::Duration::from_millis(50),
+            &in_flight,
+            4,
+        )
+        .await;
+        assert!(matches!(run, DetectRun::TimedOut), "got {run:?}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert_eq!(
+            in_flight.load(Ordering::SeqCst),
+            1,
+            "stranded thread still counts"
+        );
+
+        release_tx.send(()).unwrap();
+        for _ in 0..200 {
+            if in_flight.load(Ordering::SeqCst) == 0 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("in-flight count never released after the thread returned");
+    }
+
+    /// Once `max` detections are stuck, the next is refused without spawning,
+    /// so an unanswered prompt cannot drain the blocking pool.
+    #[tokio::test]
+    async fn detect_refuses_once_max_are_stuck() {
+        let in_flight = Arc::default();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let stuck = run_detect_bounded(
+            move || {
+                let _ = release_rx.recv();
+                crate::project::DetectResult::NotFound
+            },
+            std::time::Duration::from_millis(20),
+            &in_flight,
+            1,
+        )
+        .await;
+        assert!(matches!(stuck, DetectRun::TimedOut));
+
+        let refused = run_detect_bounded(
+            || panic!("a saturated detect must not run"),
+            std::time::Duration::from_secs(5),
+            &in_flight,
+            1,
+        )
+        .await;
+        assert!(matches!(refused, DetectRun::Saturated), "got {refused:?}");
+        assert_eq!(
+            in_flight.load(Ordering::SeqCst),
+            1,
+            "a refusal takes no slot"
+        );
+        drop(release_tx);
+    }
+
+    #[tokio::test]
+    async fn detect_that_finishes_in_time_returns_its_result() {
+        let in_flight = Arc::default();
+        let run = run_detect_bounded(
+            || crate::project::DetectResult::NotFound,
+            std::time::Duration::from_secs(5),
+            &in_flight,
+            4,
+        )
+        .await;
+        assert!(matches!(
+            run,
+            DetectRun::Done(crate::project::DetectResult::NotFound)
+        ));
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
     }
 
     // ── move_subtree_verified: the write→verify→delete guard ────────────────

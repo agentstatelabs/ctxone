@@ -65,7 +65,9 @@ gh run watch -R agentstatelabs/ctxone
 
 Release entry: `https://github.com/agentstatelabs/ctxone-releases/releases/tag/vX`
 
-Once CI has published, `brew upgrade ctxone` picks up the new formula.
+Once CI has published, `brew upgrade ctxone` picks up the new formula. Then
+clear the macOS privacy prompt straight away — see
+[After `brew upgrade` on macOS](#after-brew-upgrade-on-macos-answer-the-privacy-prompt).
 
 > `CHANGELOG.md` is **not** written by the script. Add the entry by hand before
 > cutting the tag.
@@ -88,6 +90,42 @@ the pipeline — a green pipeline only means the mirror landed.
 This is not hypothetical: agentstategraph.dev advertised `0.9.21` while the
 real release was `0.9.24`, stale by three patches, because this step had no
 home in a checklist.
+
+## After `brew upgrade` on macOS: answer the privacy prompt
+
+macOS ties Files & Folders permission to the binary, and CI does not sign the
+macOS builds (see the end of this file), so to macOS every upgraded
+`ctxone-hub` is a new app. The first time the new hub reads a `.ctxproject` or
+runs git in a repo under `~/Documents`, `~/Desktop` or `~/Downloads`, macOS
+shows **"ctxone-hub would like to access files in your Documents folder"**, and
+that read **blocks until someone answers**. The dialog is easy to miss behind
+other windows.
+
+What you see while it is pending:
+
+- **v1.0.12 and later:** the hub gives up on detection after 3 s
+  and every `ctx` command in such a repo stops with
+  `can't tell which workspace <dir> belongs to: project detection did not
+  finish within 3s …` (exit `75`). Once 16 detections are stuck, the hub
+  refuses new ones instantly with `busy`.
+- **CLI v1.0.11 and earlier:** the CLI gave up after 1.5 s and silently ran
+  against the `default` workspace. Nothing said so; plans and branches came
+  back "not found" and writes landed in `default`.
+
+Trigger and clear it as part of the upgrade, not mid-work:
+
+```sh
+brew upgrade ctxone
+# restart the service so the new binary is the one running (see below)
+cd ~/Documents/<any repo with a .ctxproject>
+ctx status        # "Namespace: unknown — …did not finish within 3s" = prompt pending
+```
+
+Click **Allow**, then rerun `ctx status`: it should name the project. If the
+prompt was denied, `ctx status` reports `cannot read …/.ctxproject: Operation
+not permitted`. Grant access in **System Settings → Privacy & Security → Files
+and Folders → ctxone-hub** (or add the binary under **Full Disk Access**), then
+retry. Until then, `--namespace <workspace>` / `CTX_NAMESPACE` skips detection.
 
 ## Partial / recovery flags
 

@@ -4,6 +4,16 @@ All notable changes to CTXone are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
 
+## [v1.0.12] — 2026-09-30
+
+### Fixed
+- **`ctx` no longer falls back to the `default` workspace when it can't find out which workspace you're in.** The CLI asked the Hub (`GET /api/projects/detect`) with a 1.5 s timeout and treated a timeout, an error or an unreachable Hub exactly like "no project here". After a `brew upgrade`, macOS blocked the new hub's read of `.ctxproject` under `~/Documents` until a privacy prompt was answered, so every command ran against `default` without a word and plans and branches came back "not found". Detection now has three outcomes, not two: found, no project (→ `default`, as before), or failed. A failure stops the command with `can't tell which workspace <dir> belongs to: <why>` and the `--namespace` hint (exit `75` timeout, `76` Hub error, `69` unreachable). `ctx status` and `ctx doctor` report it instead of stopping; `ctx init` continues with a warning only when the Hub isn't running yet; local-only commands (`tokens`, `worktree`) and `ingest-session --all` (which routes by each transcript's own cwd) don't depend on it. The detect request now carries `--token`, so an authenticated Hub's 401 can't be mistaken for "no project".
+- **The Hub's detect endpoint times out instead of hanging.** Detection is capped at 3 s and answers `504 timeout`, with a hint about the macOS prompt; the CLI waits 5 s, so it gets that explanation rather than a bare client timeout. A timed-out detection leaves its thread blocked (a thread parked in `open()` can't be cancelled), so once 16 are stuck the Hub refuses new detections instantly with `503 busy` rather than pile up threads. A `.ctxproject` the Hub may not read (a *denied* prompt) and a failed registry query are now `500 error`, not `not_found` / `registry_unavailable`; an unreadable marker still lets the git-remote and local-path steps identify the project.
+- **Session sync no longer files sessions in `default`, or registers a duplicate project, when detection fails.** `ctx ingest-session` treated a failed detection as "no project": with auto-registration on, it could mint a second project from the repo's remote, splitting the repo across two workspaces. Those sessions are now skipped for the run and listed with the reason, and the next sync imports them. The `--all` summary line gains `skipped_unresolved`.
+
+### Docs
+- `RELEASE.md` documents the post-upgrade macOS privacy prompt and how to clear it. `TROUBLESHOOTING.md` §11 covers the new error; `HTTP_API.md` documents the detect endpoint's error responses and its `local_path` step.
+
 ## [v1.0.11] — 2026-09-24
 
 ### Fixed

@@ -28,9 +28,17 @@ variables.
 absent, every Hub-bound command resolves the namespace via the project
 detection chain for the current directory: a `.ctxproject` file in the
 cwd or any parent, then the repo's git remote looked up in the Hub's
-project registry. No match — or Hub unreachable — silently falls back
-to the `default` namespace. See [`ctx project`](#ctx-project--map-repos-to-namespaces)
-below.
+project registry. No match falls back to the `default` namespace.
+
+If the Hub can't answer — it times out, reports an error, or is
+unreachable — the command stops with `can't tell which workspace <dir>
+belongs to` instead of guessing `default` (exit `75` timeout, `76` Hub
+error, `69` unreachable). Pass `--namespace` to skip detection. `ctx
+status` and `ctx doctor` report the failure rather than stopping, `ctx
+init` carries on with a warning only when the Hub isn't running yet, and
+local-only commands (`tokens`, `worktree`) never detect. See
+[Troubleshooting §11](TROUBLESHOOTING.md#11-ctx-cant-tell-which-workspace-dir-belongs-to)
+and [`ctx project`](#ctx-project--map-repos-to-namespaces) below.
 
 **Branch resolution.** Precedence for the working branch:
 
