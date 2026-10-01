@@ -2,8 +2,10 @@
 
 Releases are built and published by CI. `scripts/release.sh vMAJOR.MINOR.PATCH`
 bumps the version, tags, and pushes — it **builds nothing**. Pushing the tag is
-the entire trigger; `.github/workflows/release.yml` produces every platform
-build, the GitHub release, and the Homebrew formula.
+the entire trigger: the GitLab tag pipeline mirrors it to GitHub, where
+`.github/workflows/release.yml` produces every platform build and the GitHub
+release; the same pipeline then renders the Homebrew formula and publishes the
+version to the sites. See [What CI does after the tag](#what-ci-does-after-the-tag).
 
 There is exactly **one publisher** on purpose. The script used to cross-compile
 and upload the tarballs itself, duplicating what CI already did on every tag —
@@ -65,31 +67,47 @@ gh run watch -R agentstatelabs/ctxone
 
 Release entry: `https://github.com/agentstatelabs/ctxone-releases/releases/tag/vX`
 
-Once CI has published, `brew upgrade ctxone` picks up the new formula. Then
-clear the macOS privacy prompt straight away — see
+Once the `homebrew` job has run (about 10–15 minutes after the tag),
+`brew upgrade ctxone` picks up the new formula. Then clear the macOS privacy
+prompt straight away — see
 [After `brew upgrade` on macOS](#after-brew-upgrade-on-macos-answer-the-privacy-prompt).
 
 > `CHANGELOG.md` is **not** written by the script. Add the entry by hand before
 > cutting the tag.
 
-## After the release: bump the site footer
+## What CI does after the tag
 
-The marketing site carries a hardcoded version string that nothing derives
-from this repo. It will not update itself.
+Everything after the push is the GitLab **tag pipeline**, and nothing in it
+needs a hand. The release is fully out when its last job, `site-version`, is
+green:
 
-In `CTXone-site`, `website/src/components/SiteFooter.astro`:
+1. **Checks** — `fmt`, `clippy`, `build`, `test`, `frontend`, plus
+   `version-guard` (every component version must equal the tag).
+2. **`publish-github`** — leak-scans, then mirrors `main` and the tag to
+   GitHub. The tag fires `release.yml`, which builds all five targets (~10 min)
+   and publishes the release in `ctxone-releases`.
+3. **`homebrew`** — starts 10 minutes later (delayed, so it doesn't hold a
+   runner), polls for the release assets, renders `Formula/ctxone.rb` with their
+   `sha256`s and commits it to the GitLab tap, which mirrors to GitHub.
+4. **`site-version`** — after `homebrew`, so the sites never advertise a release
+   that isn't installable yet. Moves `ctxone` in
+   `agentstatelabs.com/releases.json` forward to the tag (never backward). The
+   ctxone.com footer and agentstatelabs.com read that file at page load, so no
+   site deploy is needed. The job only exists when `SITE_RELEASES_TOKEN` is set:
+   if it's missing from the pipeline, the site was not updated.
 
-```html
-<div class="version">CTXone v1.0.0</div>
+Confirm the version the sites will show:
+
+```sh
+curl -s https://agentstatelabs.com/releases.json   # "ctxone": "vX"
 ```
 
-Bump it, commit, push. The site deploys in two hops (GitLab CI mirrors to
-GitHub, GitHub Actions builds Pages), so confirm the live page rather than
-the pipeline — a green pipeline only means the mirror landed.
-
-This is not hypothetical: agentstategraph.dev advertised `0.9.21` while the
-real release was `0.9.24`, stale by three patches, because this step had no
-home in a checklist.
+The version in `CTXone-site`'s `website/src/components/SiteFooter.astro`
+(`<span data-release="ctxone">`) is only the fallback for visitors whose fetch
+of `releases.json` fails. It is not part of the release; refresh it whenever
+the site is next touched. Bumping it by hand used to be a release step, and it
+drifted: agentstategraph.dev once advertised `0.9.21` three patches after
+`0.9.24` shipped.
 
 ## After `brew upgrade` on macOS: answer the privacy prompt
 
@@ -145,10 +163,9 @@ re-run the GitHub Actions workflow**; do not upload them from a workstation.
   `brew reinstall ctxone` (and remove a stale
   `/opt/homebrew/Cellar/ctxone/<ver>.reinstall` keg if `brew reinstall` errors
   with "Could not rename ctxone keg").
-- **Mirror lag for the formula.** GitLab → GitHub usually replicates within
-  seconds, but if you need the formula on GitHub *now*, the script does an
-  immediate `git push origin main`; you can also force-trigger via the
-  GitLab API:
+- **Mirror lag for the formula.** The `homebrew` job commits to the GitLab tap,
+  and GitLab → GitHub usually replicates within seconds. If you need the
+  formula on GitHub *now*, force the tap's mirror via the GitLab API:
   `POST /projects/<id>/remote_mirrors/<mirror_id>/sync` with a `PRIVATE-TOKEN`.
 - **Rolling back a release.** `gh release delete v<X> -R agentstatelabs/ctxone-releases`
   removes assets + the release entry. Tag removal:
@@ -181,7 +198,9 @@ re-run the GitHub Actions workflow**; do not upload them from a workstation.
 
 ## What the script does *not* do
 
-- Build anything. Every artifact comes from `.github/workflows/release.yml`.
+- Build or publish anything. The tarballs and GitHub release come from
+  `.github/workflows/release.yml`; the formula and the site version from the
+  tag pipeline's `homebrew` and `site-version` jobs.
 - Cut a new homepage on `agentstatelabs/ctxone-site`.
 - Write a CHANGELOG entry — bump `CHANGELOG.md` by hand before running.
 
