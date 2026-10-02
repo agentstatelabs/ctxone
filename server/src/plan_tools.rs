@@ -149,6 +149,19 @@ fn validate_plan_text(field: &str, value: &str, max_len: usize) -> Result<(), Pl
     Ok(())
 }
 
+/// A plan or task id is one segment of a state path (`/plans/<plan>/<task>`,
+/// `/plan_links/<plan>/<task>`), and a `/` inside it becomes a path
+/// separator: a plan named `asd/v2` would be stored inside plan `asd`, where
+/// its key reads as one of `asd`'s tasks.
+pub fn validate_id_segment(field: &str, value: &str) -> Result<(), PlanToolError> {
+    if value.contains('/') {
+        return Err(PlanToolError::InvalidInput(format!(
+            "{field} {value:?} contains '/', which would nest it inside another plan's state; use '-' instead"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_assigned_to(value: &str) -> Result<(), PlanToolError> {
     // Empty is fine — the caller elsewhere treats it as None.
     if value.is_empty() {
@@ -662,6 +675,8 @@ pub fn add_satisfies(
     task: &str,
     target: &str,
 ) -> Result<Vec<String>, String> {
+    validate_id_segment("plan", plan).map_err(|e| e.to_string())?;
+    validate_id_segment("task", task).map_err(|e| e.to_string())?;
     let mut links = read_satisfies(repo, ref_name, plan, task);
     if !links.iter().any(|l| l == target) {
         links.push(target.to_string());
@@ -1065,6 +1080,7 @@ pub fn create_plan(
     name: &str,
     description: Option<String>,
 ) -> Result<Plan, PlanToolError> {
+    validate_id_segment("plan name", name)?;
     let p = store.create_plan(ref_name, name, description)?;
     Ok(p)
 }
@@ -1519,6 +1535,29 @@ mod tests {
         assert_eq!(priority_from_str("High"), Some(Priority::High));
         assert_eq!(priority_from_str("critical"), Some(Priority::Critical));
         assert_eq!(priority_from_str("nope"), None);
+    }
+
+    /// A `/` in a plan name becomes a path separator: `asd/v2` was stored
+    /// inside plan `asd`, where `v2` then listed as one of its tasks.
+    #[test]
+    fn a_plan_name_with_a_slash_cannot_land_inside_another_plan() {
+        let (_repo, store) = fresh_store();
+        create_plan(&store, "main", "asd", None).unwrap();
+        let err = create_plan(&store, "main", "asd/v2", None).unwrap_err();
+        assert!(matches!(err, PlanToolError::InvalidInput(_)), "{err}");
+        assert!(
+            store.task_ids("main", "asd").unwrap().is_empty(),
+            "plan asd gained a phantom task"
+        );
+    }
+
+    #[test]
+    fn a_link_from_a_plan_or_task_id_with_a_slash_is_rejected() {
+        let (repo, _store) = fresh_store();
+        for (plan, task) in [("a/b", "t-001"), ("a", "t/1")] {
+            let err = add_satisfies(&repo, "main", "agent", plan, task, "other/t-002").unwrap_err();
+            assert!(err.contains("contains '/'"), "{plan}/{task}: {err}");
+        }
     }
 
     #[test]
