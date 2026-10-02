@@ -3578,6 +3578,9 @@ async fn link_plan_task(
             "target must be 'plan/task' (e.g. other-plan/t-002)".to_string(),
         ));
     }
+    plan_tools::validate_id_segment("plan", &name)
+        .and_then(|()| plan_tools::validate_id_segment("task", &task_id))
+        .map_err(plan_error_to_response)?;
     let repo = s.repo_for(&ns)?;
     let mut links = read_satisfies(&repo, &req.ref_name, &name, &task_id);
     if !links.contains(&req.target) {
