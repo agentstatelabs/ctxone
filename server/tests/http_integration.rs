@@ -110,6 +110,40 @@ async fn health_returns_ok() {
 
 // -------- Remember / recall round-trip --------
 
+/// `ctx remember --context` posts here. The MCP `remember` tool rejected a
+/// `/` in the context — it becomes a path segment (`/memory/<ctx>/<id>`) and
+/// would write into another context's subtree — but this route took it.
+#[tokio::test]
+async fn remember_rejects_a_slash_in_context_like_the_mcp_tool() {
+    let router = test_router();
+    let (status, body) = call_raw(
+        router,
+        post_json(
+            "/api/memory/remember",
+            json!({"fact": "x", "context": "projects/app-a"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("'/'"), "{body}");
+}
+
+/// The MCP tool caps a fact at 64 KB; this route stored any size.
+#[tokio::test]
+async fn remember_caps_an_oversized_fact_like_the_mcp_tool() {
+    let router = test_router();
+    let (status, body) = call_json(
+        router,
+        post_json(
+            "/api/memory/remember",
+            json!({"fact": "a".repeat(64 * 1024 + 10), "context": "test"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["truncated"], true);
+}
+
 #[tokio::test]
 async fn remember_then_recall_round_trip() {
     let router = test_router();
