@@ -2658,6 +2658,15 @@ async fn remember(
     session_id: SessionId,
     Json(req): Json<RememberRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // What the MCP `remember` tool checks, checked here too (`ctx remember`
+    // comes this way): `context` becomes a path segment, so a `/` would
+    // write into another context's subtree; tags are bounded; the fact is
+    // capped rather than stored at any size.
+    crate::memory_tools::validate_remember_fields(req.context.as_deref(), req.tags.as_deref())
+        .map_err(|msg| (StatusCode::BAD_REQUEST, msg))?;
+    let fact = crate::memory_tools::truncate_utf8(&req.fact, crate::memory_tools::MAX_FACT_LEN);
+    let was_truncated = fact.len() != req.fact.len();
+
     let repo = s.repo_for(&ns)?;
     let path = match &req.context {
         Some(ctx) => format!("/memory/{}/{}", ctx, timestamp_id()),
@@ -2668,7 +2677,7 @@ async fn remember(
     let mut opts = CommitOptions::new(
         &agent_id.0,
         IntentCategory::Custom("Observe".to_string()),
-        &req.fact,
+        crate::memory_tools::truncate_utf8(&fact, 512),
     );
     opts = opts.with_confidence(confidence);
     let mut tags = req.tags.unwrap_or_default();
@@ -2685,19 +2694,23 @@ async fn remember(
         opts = opts.with_tags(tags);
     }
 
-    let value = serde_json::Value::String(req.fact.clone());
+    let value = serde_json::Value::String(fact);
     let commit_id = repo
         .set_json(&req.ref_name, &path, &value, opts)
         .map_err(internal_error)?;
 
     s.sessions.mark_all_dirty();
 
-    Ok(Json(serde_json::json!({
+    let mut out = serde_json::json!({
         "status": "ok",
         "ref": req.ref_name,
         "path": path,
         "commit_id": format!("{}", commit_id.short()),
-    })))
+    });
+    if was_truncated && let Some(obj) = out.as_object_mut() {
+        obj.insert("truncated".into(), serde_json::Value::Bool(true));
+    }
+    Ok(Json(out))
 }
 
 #[derive(Deserialize)]

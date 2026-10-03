@@ -93,7 +93,17 @@ fn has_control_chars(s: &str) -> bool {
 /// a JSON `{"error": ...}` response. Kept as a pure function so tests
 /// can exercise it without an async runtime or a live `CtxOneServer`.
 pub fn validate_remember_params(p: &RememberParams) -> Result<(), String> {
-    if let Some(ctx) = p.context.as_ref() {
+    validate_remember_fields(p.context.as_deref(), p.tags.as_deref())
+}
+
+/// The `context` and `tags` checks of [`validate_remember_params`], for
+/// callers without a `RememberParams` — `POST /api/memory/remember` applies
+/// exactly what the MCP `remember` tool does.
+pub fn validate_remember_fields(
+    context: Option<&str>,
+    tags: Option<&[String]>,
+) -> Result<(), String> {
+    if let Some(ctx) = context {
         if ctx.len() > MAX_CONTEXT_LEN {
             return Err(format!(
                 "context exceeds maximum length ({} bytes; max {MAX_CONTEXT_LEN})",
@@ -110,7 +120,7 @@ pub fn validate_remember_params(p: &RememberParams) -> Result<(), String> {
             return Err("context contains control characters".to_string());
         }
     }
-    if let Some(tags) = p.tags.as_ref() {
+    if let Some(tags) = tags {
         if tags.len() > MAX_TAGS {
             return Err(format!(
                 "tags exceeds maximum count ({}; max {MAX_TAGS})",
