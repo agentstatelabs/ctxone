@@ -191,6 +191,8 @@ namespace, which contradicts
 | t-010 | **Attribution.** `ctx init` writes `X-CTXone-Agent`; the device id goes on commits. | 2 |
 | t-011 | **Hub-mode gaps on Postgres.** Today the project registry returns 400 and session stats aren't persisted on Postgres. A hub needs both, plus read-only access to synced ASD stores (AgentStateDeveloper Plan W t-008). | 3 |
 | t-012 | **Docs.** Add a "connect a hub" guide. Correct MEMORY_BRANCH_SCOPING (reminders and taints aren't namespace-isolated until the control ref lands), COST_SAVINGS ("every machine resolves to the same graph" holds only with one shared hub), DEPLOYMENT, UNIFIED_HUB's default transport, and the `workspace.rs` doc comment. | 3 |
+| t-013 | **A remote hub never receives raw turns unless the user opts in.** When the configured hub isn't loopback, `ctx ingest-session`, the Stop-hook `capture-turn` path and imports send the session envelope and extracted memories, not `turns`. This applies to hosted hubs as well as sync, so decision 2 holds when a client talks to a hub directly. | 1 |
+| t-014 | **Hosted-mode hardening.** Add an option to turn off the loopback exemption: today loopback peers skip the bearer token, so a proxy or sidecar on 127.0.0.1 would bypass auth. Add token rotation without a restart, and an explicit origin allow-list for a hosted Lens. | 1 |
 
 ### Depends on AgentStateGraph
 
