@@ -7,7 +7,7 @@ description: Persistent, searchable, accountable memory for Open WebUI chats —
 required_open_webui_version: 0.4.0
 requirements: ctxone>=0.73.0
 version: 0.73.0
-license: BSL-1.1
+license: BUSL-1.1
 
 This module provides two Open WebUI plugins that share a Hub client:
 
