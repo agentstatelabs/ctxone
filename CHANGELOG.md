@@ -4,7 +4,7 @@ All notable changes to CTXone are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
 
-## [Unreleased]
+## [v1.0.13] — 2026-10-09
 
 ### Added
 - **CTXone is packaged for crates.io.** `cargo install ctxone ctxone-hub` installs `ctx` and the Hub. The CLI package is renamed from `ctx`, which is taken on crates.io, to `ctxone`; the binary is still `ctx`. The published Hub embeds Lens: `scripts/stage-lens.sh` copies `web/build/` into `server/lens/` before publishing, and `server/build.rs` embeds that copy when `web/build/` is absent. `scripts/publish-crates.sh` runs the publish (dry run by default) and refuses a real upload unless HEAD is the release tag and nothing else is uncommitted. Both crates ship the license and a README.
