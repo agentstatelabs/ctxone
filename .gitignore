@@ -2,6 +2,8 @@
 /web/node_modules
 /web/.svelte-kit
 /web/build
+# Lens build staged into the hub crate for `cargo publish` (scripts/stage-lens.sh)
+/server/lens/
 *.db
 *.db-shm
 *.db-wal
@@ -24,3 +26,6 @@ ctxone.db.bak.*
 .asd/v1/
 .asd/cache/
 .asd/index.log
+
+# Org-specific leak-scan denylist: private, written by CI from LEAKSCAN_LOCAL
+.leakscan.local

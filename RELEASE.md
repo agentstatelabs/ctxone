@@ -21,6 +21,9 @@ disagree with what CI built (the asd v0.9.38 incident).
 - **Homebrew tap:** `git.internal.example/agentstategroup/homebrew-ctxone`
   → mirrored to `github.com/agentstatelabs/homebrew-ctxone`. End-user
   command: `brew tap agentstatelabs/ctxone && brew install ctxone`.
+- **Rust crates:** crates.io, as `ctxone` (the `ctx` CLI) and `ctxone-hub`.
+  Published by hand from the tag; see
+  [Publishing the crates to crates.io](#publishing-the-crates-to-cratesio).
 
 ## One-time prereqs
 
@@ -207,3 +210,32 @@ re-run the GitHub Actions workflow**; do not upload them from a workstation.
 CI itself does not yet cross-build for `musl` libc (the Linux tarballs target
 glibc), nor sign or notarize the macOS binaries. Those are the next-mile
 improvements if/when they become worth automating.
+
+## Publishing the crates to crates.io
+
+No CI job does this yet. Once the tag pipeline is green, publish from a
+detached checkout of the tag, never from a branch:
+
+```sh
+git worktree add --detach /tmp/ctxone-vX.Y.Z vX.Y.Z
+cd /tmp/ctxone-vX.Y.Z
+scripts/publish-crates.sh             # dry run
+scripts/publish-crates.sh --publish   # the real upload
+```
+
+`ctxone-hub` embeds the Lens build. Its source tree reaches it at
+`../web/build/`, outside the crate, so `stage-lens.sh` copies it into
+`server/lens/` (gitignored), which `server/Cargo.toml` packages and
+`server/build.rs` embeds when `../web/build/` is absent, as it is in the
+unpacked crate.
+
+Because `server/lens/` is gitignored, cargo counts the staged files as
+uncommitted and only packages them with `--allow-dirty`. `publish-crates.sh`
+passes that flag only after checking that nothing else is uncommitted. With
+`--publish`, it also checks that HEAD is exactly the tag for the workspace
+version. Don't run `cargo publish --allow-dirty` by hand.
+
+The AgentStateGraph crates also come from crates.io, so an ASG bump means a new
+`version` on the `agentstategraph*` lines in `[workspace.dependencies]`. That
+ASG version must already be published. A crates.io version can be yanked but
+never deleted or re-uploaded.

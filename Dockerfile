@@ -36,25 +36,19 @@ RUN apt-get update \
 COPY Cargo.toml Cargo.lock ./
 
 # Copy our crates. There is no engine/ directory: the ASG engine used to be a
-# git submodule, but Cargo.toml now pins those crates as git dependencies
-# (see its "was a GitHub submodule" note), so cargo fetches them during the
-# build. Commit 3850ce9 removed the directory, left the old
+# git submodule, but its crates now come from crates.io, so cargo fetches them
+# during the build. Commit 3850ce9 removed the directory, left the old
 # `COPY engine/ engine/` here, and deleted the docker workflow that would have
 # caught it — so this file quietly stopped building. It DID build before that.
 COPY cli/ cli/
 COPY server/ server/
-
-# The cli crate embeds docs/AGENTS.md via include_str!("../../docs/AGENTS.md"),
-# so the docs file must be present at build time even though it isn't inside
-# any crate. Copy just that file to keep the build context tight.
-COPY docs/AGENTS.md docs/AGENTS.md
 
 # The embedded Lens assets, from the node stage above. Must land before the
 # cargo build: rust-embed reads this folder at compile time, not at runtime.
 COPY --from=lens /web/build/ web/build/
 
 # Build just the two binaries we ship, not the whole workspace
-RUN cargo build --release -p ctx -p ctxone-hub \
+RUN cargo build --release -p ctxone -p ctxone-hub \
     && strip target/release/ctx target/release/ctxone-hub
 
 # -- Stage 3: Runtime --

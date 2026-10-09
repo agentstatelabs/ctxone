@@ -4,6 +4,17 @@ All notable changes to CTXone are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
 
+## [Unreleased]
+
+### Added
+- **CTXone is packaged for crates.io.** `cargo install ctxone ctxone-hub` installs `ctx` and the Hub. The CLI package is renamed from `ctx`, which is taken on crates.io, to `ctxone`; the binary is still `ctx`. The published Hub embeds Lens: `scripts/stage-lens.sh` copies `web/build/` into `server/lens/` before publishing, and `server/build.rs` embeds that copy when `web/build/` is absent. `scripts/publish-crates.sh` runs the publish (dry run by default) and refuses a real upload unless HEAD is the release tag and nothing else is uncommitted. Both crates ship the license and a README.
+
+### Changed
+- **AgentStateGraph comes from crates.io** (`agentstategraph*` = "1.2.8") instead of git tags, which crates.io rejects in published manifests.
+- **`ctx` embeds AGENTS.md from inside the CLI crate** (`cli/assets/AGENTS.md`), so the published package builds; `include_str!` reached `../../docs/`. `docs/AGENTS.md` stays the source of truth, and a test fails if the two differ. The Docker build no longer copies `docs/AGENTS.md` separately.
+- `Cargo.lock` moves `chacha20` from 0.10.0 (yanked) to 0.10.2.
+- **`agent-skillgen` is vendored into the CLI** (`cli/src/skillgen/`, from v0.1.0) instead of being a git dependency, which crates.io rejects. AgentStateDeveloper carries the same copy; change it upstream first and re-copy it into both.
+
 ## [v1.0.12] — 2026-09-30
 
 ### Fixed

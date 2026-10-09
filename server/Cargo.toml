@@ -4,7 +4,15 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "CtxOne Hub — MCP server for AI agent memory"
+description = "CTXone Hub, the MCP and HTTP server for AI agent memory, with the Lens web UI built in"
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/ctxone-hub"
+keywords.workspace = true
+categories.workspace = true
+# `include` (not the git file list) so the staged Lens build in lens/, which is
+# gitignored, is packaged. See build.rs and scripts/stage-lens.sh.
+include = ["/src/", "/tests/", "/lens/", "/build.rs", "/Cargo.toml", "/README.md", "/LICENSE"]
 
 [lib]
 name = "ctxone_hub"

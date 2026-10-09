@@ -11,16 +11,21 @@ edition = "2024"
 authors = ["Craig Brown"]
 license = "BUSL-1.1"
 repository = "https://github.com/agentstatelabs/ctxone"
+homepage = "https://github.com/agentstatelabs/ctxone"
+keywords = ["agents", "ai", "memory", "mcp", "context"]
+categories = ["command-line-utilities", "development-tools"]
+# Local asd state (index logs, caches, sidecar DBs) must never be packaged.
+exclude = [".asd/", ".asd-*"]
 
 [workspace.dependencies]
-# ASG engine crates — git deps pinned to an ASG release tag (was a GitHub submodule)
-agentstategraph = { git = "https://github.com/agentstatelabs/agentstategraph.git", tag = "v1.2.7" }
-agentstategraph-core = { git = "https://github.com/agentstatelabs/agentstategraph.git", tag = "v1.2.7" }
-agentstategraph-storage = { git = "https://github.com/agentstatelabs/agentstategraph.git", tag = "v1.2.7", features = ["postgres", "memory"] }
-agentstategraph-tasks = { git = "https://github.com/agentstatelabs/agentstategraph.git", tag = "v1.2.7" }
-agentstategraph-migrate = { git = "https://github.com/agentstatelabs/agentstategraph.git", tag = "v1.2.7" }
-agentstategraph-taint = { git = "https://github.com/agentstatelabs/agentstategraph.git", tag = "v1.2.7" }
-agentstategraph-reminders = { git = "https://github.com/agentstatelabs/agentstategraph.git", tag = "v1.2.7" }
+# ASG engine crates, from crates.io. Bump deliberately; the version must already be published.
+agentstategraph = "1.2.8"
+agentstategraph-core = "1.2.8"
+agentstategraph-storage = { version = "1.2.8", features = ["postgres", "memory"] }
+agentstategraph-tasks = "1.2.8"
+agentstategraph-migrate = "1.2.8"
+agentstategraph-taint = "1.2.8"
+agentstategraph-reminders = "1.2.8"
 
 # Engine's workspace deps (required because engine crates inherit from workspace)
 blake3 = "1"

@@ -16,8 +16,11 @@ use axum::{
 };
 use rust_embed::Embed;
 
+// `lens_staged` is set by build.rs when only the copy staged into the crate
+// (the published package) exists.
 #[derive(Embed)]
-#[folder = "../web/build/"]
+#[cfg_attr(not(lens_staged), folder = "../web/build/")]
+#[cfg_attr(lens_staged, folder = "lens/")]
 struct LensAssets;
 
 /// Handler for all non-API routes — serves embedded Lens static files.

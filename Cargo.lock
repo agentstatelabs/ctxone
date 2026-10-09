@@ -3,18 +3,10 @@
 version = 4
 
 [[package]]
-name = "agent-skillgen"
-version = "0.1.0"
-source = "git+https://github.com/agentstatelabs/agent-skillgen.git?tag=v0.1.0#be42d5d0b2b7f627d1271bf61a10a0fd0d5d7897"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "agentstategraph"
-version = "1.2.7"
-source = "git+https://github.com/agentstatelabs/agentstategraph.git?tag=v1.2.7#df55a8a7fbdd9b43cbd41da5ccba11cc2a9abc3e"
+version = "1.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb56b99f7d73969d9b34951f99b3908489c1cbbe9fa8c6e6290c66f3a97a586e"
 dependencies = [
  "agentstategraph-core",
  "agentstategraph-reminders",
@@ -29,8 +21,9 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-core"
-version = "1.2.7"
-source = "git+https://github.com/agentstatelabs/agentstategraph.git?tag=v1.2.7#df55a8a7fbdd9b43cbd41da5ccba11cc2a9abc3e"
+version = "1.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "44ba88c5b22bfaedf23b54b566ba8cad20ec43da454c56098e536bc34426f064"
 dependencies = [
  "blake3",
  "chrono",
@@ -42,8 +35,9 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-migrate"
-version = "1.2.7"
-source = "git+https://github.com/agentstatelabs/agentstategraph.git?tag=v1.2.7#df55a8a7fbdd9b43cbd41da5ccba11cc2a9abc3e"
+version = "1.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d31d142df4dd113c12faaaa5966bf330b6ded0b1b5596eca1a249572ed1d59a"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -55,8 +49,9 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-reminders"
-version = "1.2.7"
-source = "git+https://github.com/agentstatelabs/agentstategraph.git?tag=v1.2.7#df55a8a7fbdd9b43cbd41da5ccba11cc2a9abc3e"
+version = "1.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4279adbab178d979e033dd44aae27ce292715f623dfe1bcce84f98511a3485b"
 dependencies = [
  "agentstategraph-core",
  "chrono",
@@ -68,8 +63,9 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-storage"
-version = "1.2.7"
-source = "git+https://github.com/agentstatelabs/agentstategraph.git?tag=v1.2.7#df55a8a7fbdd9b43cbd41da5ccba11cc2a9abc3e"
+version = "1.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ee0f62e669bb1834162a0aabb2a07799377da1340e8223f1d6ac8cc666f738c"
 dependencies = [
  "agentstategraph-core",
  "agentstategraph-reminders",
@@ -86,8 +82,9 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-taint"
-version = "1.2.7"
-source = "git+https://github.com/agentstatelabs/agentstategraph.git?tag=v1.2.7#df55a8a7fbdd9b43cbd41da5ccba11cc2a9abc3e"
+version = "1.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3fe3793be0374b46176e10080e9b1353cf89d8dcce92af237717b300d53c6315"
 dependencies = [
  "agentstategraph-core",
  "chrono",
@@ -99,8 +96,9 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-tasks"
-version = "1.2.7"
-source = "git+https://github.com/agentstatelabs/agentstategraph.git?tag=v1.2.7#df55a8a7fbdd9b43cbd41da5ccba11cc2a9abc3e"
+version = "1.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01383044c2e9ad0382e4e8444bcc745852a8bfdd0d9fb1a9ad7131957bc62bc7"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -391,9 +389,9 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "chacha20"
-version = "0.10.0"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f8d983286843e49675a4b7a2d174efe136dc93a18d69130dd18198a6c167601"
+checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.3.0",
@@ -546,10 +544,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "ctx"
+name = "ctxone"
 version = "1.0.12"
 dependencies = [
- "agent-skillgen",
  "chrono",
  "clap",
  "clap_complete",
@@ -2506,7 +2503,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -3232,7 +3229,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
