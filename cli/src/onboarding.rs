@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use agent_skillgen::{
+use crate::skillgen::{
     Action, SkillScope, SkillSpec, SkillState, already_nudged, binary_on_path, install_suite,
     place_skills, record_nudge, should_nudge, skill_status,
 };
@@ -145,7 +145,7 @@ pub fn run_skill(
 /// Print CTX's paste-into-your-agent bootstrap block (suite-onboarding-ctx
 /// t-006) — the agent installs + primes CTX, and is pointed at ASD.
 pub fn run_bootstrap() {
-    match agent_skillgen::render_bootstrap(&ctx_skill_spec()) {
+    match crate::skillgen::render_bootstrap(&ctx_skill_spec()) {
         Some(block) => print!("{block}"),
         None => println!("No bootstrap steps are defined."),
     }
@@ -228,7 +228,7 @@ fn maybe_nudge_sibling(spec: &SkillSpec, state_dir: &Path, suppressed: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_skillgen::{platform, render_bootstrap, render_combined, render_skill};
+    use crate::skillgen::{platform, render_bootstrap, render_combined, render_skill};
 
     #[test]
     fn ctx_spec_renders_real_content() {

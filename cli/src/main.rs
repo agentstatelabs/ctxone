@@ -9,6 +9,9 @@ mod onboarding;
 mod pricing;
 mod service;
 mod session_import;
+// Vendored agent-skillgen; the CLI uses only part of its surface.
+#[allow(dead_code, unused_imports)]
+mod skillgen;
 mod sources;
 mod workspace;
 mod worktree;

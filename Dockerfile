@@ -54,7 +54,7 @@ COPY docs/AGENTS.md docs/AGENTS.md
 COPY --from=lens /web/build/ web/build/
 
 # Build just the two binaries we ship, not the whole workspace
-RUN cargo build --release -p ctx -p ctxone-hub \
+RUN cargo build --release -p ctxone -p ctxone-hub \
     && strip target/release/ctx target/release/ctxone-hub
 
 # -- Stage 3: Runtime --

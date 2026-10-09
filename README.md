@@ -85,6 +85,12 @@ brew install agentstatelabs/ctxone/ctxone
 curl -sSL https://raw.githubusercontent.com/AgentStateLabs/CTXone/main/install.sh | sh
 ```
 
+**From crates.io** (Rust toolchain; the CLI crate is `ctxone`, its binary `ctx`):
+
+```bash
+cargo install ctxone ctxone-hub
+```
+
 **Uninstall:**
 
 ```bash

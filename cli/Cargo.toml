@@ -1,10 +1,17 @@
 [package]
-name = "ctx"
+# Published as `ctxone` (`ctx` is taken on crates.io); the binary is still `ctx`.
+name = "ctxone"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "CLI for CtxOne — AI agent memory"
+description = "The `ctx` CLI for CTXone, memory and context for AI agents"
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/ctxone"
+keywords.workspace = true
+categories.workspace = true
+exclude.workspace = true
 
 [[bin]]
 name = "ctx"

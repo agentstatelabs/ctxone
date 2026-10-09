@@ -105,7 +105,7 @@ jobs:
       # GitHub, so cargo resolves them anonymously — no auth step needed.
 
       - name: build ctx
-        run: cargo build --release --locked --target ${{ matrix.target }} -p ctx
+        run: cargo build --release --locked --target ${{ matrix.target }} -p ctxone
 
       - name: build ctxone-hub
         run: cargo build --release --locked --target ${{ matrix.target }} -p ctxone-hub

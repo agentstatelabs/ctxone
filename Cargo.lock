@@ -546,7 +546,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ctx"
+name = "ctxone"
 version = "1.0.12"
 dependencies = [
  "agent-skillgen",
