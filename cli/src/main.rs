@@ -35,9 +35,10 @@ use std::path::PathBuf;
 /// filesystem lookup on startup. The `ctx agents install` subcommand
 /// reads this (or a user-supplied override via `--file`), writes it to
 /// ~/.config/ctxone/AGENTS.md if no local copy exists, and then primes
-/// it into the Hub as pinned memory. See `docs/AGENTS.md` for the
-/// source of truth.
-const EMBEDDED_AGENTS_MD: &str = include_str!("../../docs/AGENTS.md");
+/// it into the Hub as pinned memory. `docs/AGENTS.md` is the source of
+/// truth; this copy lives inside the crate so the published package
+/// builds, and `embedded_agents_md_matches_docs` keeps the two equal.
+const EMBEDDED_AGENTS_MD: &str = include_str!("../assets/AGENTS.md");
 
 /// Source name used when priming AGENTS.md into the Hub. Sections of
 /// the file end up under `/memory/pinned/ctxone-agents/<slug>/`.
@@ -9593,6 +9594,21 @@ async fn handle_docs(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The embedded AGENTS.md must match `docs/AGENTS.md`. Skipped outside the
+    /// source checkout (e.g. in the published package), where `docs/` does
+    /// not exist.
+    #[test]
+    fn embedded_agents_md_matches_docs() {
+        let docs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/AGENTS.md");
+        let Ok(text) = std::fs::read_to_string(&docs) else {
+            return;
+        };
+        assert_eq!(
+            EMBEDDED_AGENTS_MD, text,
+            "cli/assets/AGENTS.md has drifted from docs/AGENTS.md; copy the docs file over it"
+        );
+    }
 
     #[test]
     fn effective_namespace_is_always_concrete() {
