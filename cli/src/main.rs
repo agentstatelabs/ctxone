@@ -6904,7 +6904,7 @@ async fn run_demo(server: &str, client: reqwest::Client) -> Result<(), Box<dyn s
         (
             "licensing",
             "high",
-            "The engine (AgentStateGraph) is BSL-1.1 licensed by the same author",
+            "The engine (AgentStateGraph) is MIT OR Apache-2.0 licensed, by the same author",
         ),
         (
             "licensing",
