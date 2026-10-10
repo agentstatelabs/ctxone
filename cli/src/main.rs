@@ -6913,7 +6913,7 @@ async fn run_demo(server: &str, client: reqwest::Client) -> Result<(), Box<dyn s
         (
             "licensing",
             "medium",
-            "Commercial licensing contact: info@agentstatelabs.com",
+            "Commercial licensing contact: licensing@agentstatelabs.com",
         ),
         // Architecture
         (

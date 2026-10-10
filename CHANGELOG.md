@@ -4,6 +4,13 @@ All notable changes to CTXone are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
 
+## [Unreleased]
+
+### Changed
+- **LICENSE names AgentStateLabs, LLC as the licensor without the "not yet formed" placeholder, and the Licensed Work as "CTXone" without a version.** The old line named 0.73.0 while shipping with every release; each version already has its own Change Date.
+- **LICENSING.md had v0.73.0 converting to Apache 2.0 on 2030-04-15, the old four-year term; it is 2027-10-15.** It also now states that releases before 2026-09-09 (v1.0.10 and earlier) get the 18-month term, and licensing questions go to licensing@agentstatelabs.com, matching LICENSE (the `ctx` CLI's licensing note too).
+- Package metadata (Cargo, PyPI, the Open WebUI plugin) credits AgentStateLabs, LLC as the author. The plugin's `author_url` pointed at github.com/ctxone, which does not exist; it now points at github.com/agentstatelabs.
+
 ## [v1.0.13] — 2026-10-09
 
 ### Added

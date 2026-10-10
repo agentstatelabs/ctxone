@@ -63,7 +63,7 @@ permitted.
 If you want to embed CTXone into a product you distribute to third
 parties, resell it, or run a hosted CTXone service for customers,
 you need a commercial license. Contact us at
-**info@agentstatelabs.com**.
+**licensing@agentstatelabs.com**.
 
 ## Automatic conversion to Apache 2.0
 
@@ -71,8 +71,13 @@ Every version of CTXone automatically converts to the **Apache
 License 2.0** 18 months after its release date:
 
 - **v0.73.0** (released 2026-04-15) becomes Apache 2.0 on
-  **2030-04-15**
-- Future versions follow the same rolling per-version pattern
+  **2027-10-15**
+- Every other version follows the same rolling per-version pattern
+
+The 18-month term covers every version, including those released before
+2026-09-09 (v1.0.10 and earlier). Those releases shipped a LICENSE that
+says four years, but that day the term was shortened to 18 months for all
+versions, and a shorter term only widens the grant.
 
 After conversion, all BSL restrictions lift for that version — it
 becomes permissively licensed Apache 2.0. You can embed it, resell
@@ -106,5 +111,5 @@ Grant specifically because:
 ## Questions
 
 If you're unsure whether your use case is covered by the BSL 1.1 grant, email
-**info@agentstatelabs.com** and we'll clarify. The bar is straightforward:
+**licensing@agentstatelabs.com** and we'll clarify. The bar is straightforward:
 internal use is free.
