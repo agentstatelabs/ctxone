@@ -139,6 +139,38 @@ publish-github:
     - printf '%s' "${LEAKSCAN_LOCAL:-}" > .leakscan.local
     - bash scripts/publish-to-github.sh
 
+# publish-crates: publish ctxone and ctxone-hub to crates.io from a release tag
+# (scripts/publish-crates.sh). It needs publish-github, so only a tag that
+# passed the checks, the tests and the mirror's fail-closed leak scan gets
+# here, and it runs the leak scan again on the tree it packages. The hub embeds
+# Lens, so it takes the frontend job's web/build/ (SKIP_BUILD=1 copies it into
+# server/lens/). That artifact expires after an hour; a later retry needs the
+# frontend job retried first. Re-running is safe: a crate already at this
+# version is skipped. resource_group keeps two tag pipelines from publishing
+# at once.
+#
+# Set CARGO_REGISTRY_TOKEN (masked + protected; v* tags are protected): a
+# crates.io token scoped to publish-update and ctxone*. Gated on it so the job
+# no-ops until configured.
+publish-crates:
+  stage: publish
+  needs:
+    - job: frontend
+      artifacts: true
+    - job: publish-github
+      artifacts: false
+  resource_group: crates-io
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/ && $CARGO_REGISTRY_TOKEN'
+  script:
+    - |
+      if [ -z "${LEAKSCAN_LOCAL:-}" ]; then
+        echo "ERROR: LEAKSCAN_LOCAL unset; not publishing without the org leak-scan patterns"; exit 1
+      fi
+      printf '%s' "$LEAKSCAN_LOCAL" > .leakscan.local
+    - bash scripts/leak-scan.sh --tree
+    - SKIP_BUILD=1 bash scripts/publish-crates.sh --publish
+
 # homebrew: render Formula/ctxone.rb from the published release assets and commit
 # it to the tap on GitLab. Runs on tag pipelines only, AFTER publish-github has
 # mirrored the tag to GitHub and GitHub Actions has built and published it.
