@@ -9,7 +9,7 @@ description = "Python client for CtxOne — persistent, searchable, accountable 
 readme = "README.md"
 license = { text = "BUSL-1.1" }
 requires-python = ">=3.9"
-authors = [{ name = "Craig Brown" }]
+authors = [{ name = "AgentStateLabs, LLC" }]
 keywords = ["ai", "memory", "mcp", "agents", "llm", "context"]
 classifiers = [
     "Development Status :: 4 - Beta",
