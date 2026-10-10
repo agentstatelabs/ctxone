@@ -213,8 +213,19 @@ improvements if/when they become worth automating.
 
 ## Publishing the crates to crates.io
 
-No CI job does this yet. Once the tag pipeline is green, publish from a
-detached checkout of the tag, never from a branch:
+The `publish-crates` job does this on every release tag, once
+`CARGO_REGISTRY_TOKEN` is set. It needs `publish-github`, so it runs only after
+the checks, the tests and the GitHub mirror's leak scan have passed. It runs
+the leak scan again, then `scripts/publish-crates.sh --publish` with the
+frontend job's `web/build/`. A crate already on crates.io at the version is
+skipped, so retrying the job is safe; after the frontend artifact expires (an
+hour), retry the frontend job first.
+
+`CARGO_REGISTRY_TOKEN` is a masked, protected CI variable (`v*` tags are
+protected, so tag pipelines can read it). Make it a crates.io token scoped to
+`publish-update` and `ctxone*`, with an expiry.
+
+By hand, from a detached checkout of the tag, never from a branch:
 
 ```sh
 git worktree add --detach /tmp/ctxone-vX.Y.Z vX.Y.Z
