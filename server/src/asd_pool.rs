@@ -329,14 +329,17 @@ async fn spawn_asd_serve(
         .env("ASD_DB", db_path)
         .env("ASD_SERVE_ADDR", "127.0.0.1:0")
         .env("ASD_NAME", name)
-        // tracing-subscriber emits ANSI escapes by default; NO_COLOR=1
-        // disables them so our "listening on host:port" parse sees a clean
-        // address. (We also strip-tolerantly in extract_listening_addr.)
+        // Older asd-serve builds log through tracing-subscriber, which emits
+        // ANSI escapes by default; NO_COLOR=1 disables them so our
+        // "listening on host:port" parse sees a clean address. (We also
+        // strip-tolerantly in extract_listening_addr.)
         .env("NO_COLOR", "1")
-        // asd-serve initializes tracing-subscriber with the default fmt
-        // writer, which is stdout — not stderr. Pipe both so we don't lose
-        // diagnostic output if tracing ever moves; read from stdout for the
-        // "listening on …" line.
+        // asd-serve writes its log lines as text on stdout, and we read the
+        // "listening on …" line from there. Newer builds log through oxtel,
+        // whose OXTEL_LOG_FORMAT / OXTEL_LOG_OUTPUT would otherwise follow
+        // the user's environment (JSON, or stderr), so pin them here.
+        .env("OXTEL_LOG_FORMAT", "text")
+        .env("OXTEL_LOG_OUTPUT", "stdout")
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         // Without this, tokio DETACHES the child on drop. Every place the pool
