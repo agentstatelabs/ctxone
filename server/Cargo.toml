@@ -29,6 +29,12 @@ http-body-util = "0.1"
 reqwest = { workspace = true }
 tokio-stream = "0.1"
 
+[features]
+# Send traces, metrics and logs over OTLP/HTTP once OTEL_EXPORTER_OTLP_ENDPOINT
+# is set. Off by default: CTXone sends nothing anywhere unless an operator
+# builds this in and points it somewhere.
+otlp = ["oxtel/otlp"]
+
 [dependencies]
 agentstategraph = { workspace = true }
 agentstategraph-core = { workspace = true }
@@ -50,7 +56,9 @@ tower-http = { workspace = true }
 tower_governor = { workspace = true }
 governor = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
+oxtel = { workspace = true }
+oxtel-tower = { workspace = true }
+oxtel-rmcp = { workspace = true }
 thiserror = { workspace = true }
 lru = "0.12"
 rusqlite = { workspace = true }

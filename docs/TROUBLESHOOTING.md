@@ -335,8 +335,9 @@ Outputs the integer version. The write is recorded under the
 
 ## Enabling verbose logs
 
-The Hub uses the `tracing` crate. Set `RUST_LOG` before starting it to
-control verbosity:
+The Hub records with the `tracing` crate and logs through
+[oxtel](https://github.com/agentstatelabs/oxtel). Set `RUST_LOG` before
+starting it to control verbosity:
 
 ```bash
 # Default — info-level startup and recall telemetry
@@ -351,12 +352,35 @@ RUST_LOG=trace ctx serve --http
 # Scoped — only enable debug for CTXone's own code
 RUST_LOG=ctxone_hub=debug ctx serve --http
 
-# Combined — debug CTXone, info HTTP request traces from tower-http
-RUST_LOG=ctxone_hub=debug,tower_http=info ctx serve --http
+# Quieter — keep CTXone's info lines, drop the per-request lines
+RUST_LOG=info,oxtel_tower=warn ctx serve --http
 ```
 
 All logs go to **stderr**, so they never corrupt the stdio MCP channel
-when the Hub runs as an MCP server.
+when the Hub runs as an MCP server. On a terminal they're text; anywhere
+else, such as a log file or a container, they're one JSON object per line.
+`OXTEL_LOG_FORMAT` chooses: `text`, `json`, `ecs` (Elastic Common Schema)
+or `none`.
+
+When the Hub starts, it logs one line from the target `oxtel` saying where
+log lines go and whether anything is exported. In HTTP mode, each request
+logs a `request` line with its method, route, status, duration and trace
+id.
+
+### Sending traces, metrics and logs to a collector
+
+The Hub sends nothing anywhere by default. A Hub built with the `otlp`
+feature (`cargo build -p ctxone-hub --features otlp`) sends traces, metrics
+and logs over OTLP once `OTEL_EXPORTER_OTLP_ENDPOINT` is set:
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 ctxone-hub --http
+```
+
+HTTP requests and MCP tool calls, over HTTP and stdio, get spans named by
+the OpenTelemetry conventions (`GET /api/health`, `tools/call recall`), and
+continue the caller's trace when it sends one. Tool arguments and results
+are never recorded. If sending fails, a warning says where and why.
 
 In HTTP mode, every `recall` call emits an `info`-level line with the
 topic, tokens sent, and savings ratio — useful for watching memory earn
