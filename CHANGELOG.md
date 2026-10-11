@@ -6,6 +6,13 @@ the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
 
 ## [Unreleased]
 
+### Added
+- **Logs, traces and metrics through [oxtel](https://github.com/agentstatelabs/oxtel).** The Hub's hand-built `tracing-subscriber` setup is replaced.
+  - Logs still go to stderr. They're text on a terminal and one JSON object per line otherwise, so a log file or container gets JSON. `OXTEL_LOG_FORMAT` (`text`, `json`, `ecs`, `none`) chooses. One startup line says where logs go and whether anything is exported.
+  - In HTTP mode, each request gets a span named by its route and a `request` log line with its status, duration and trace id. This replaces tower-http's trace layer, which logged at `debug`.
+  - MCP requests, over HTTP and stdio, get spans named like `tools/call recall` and `mcp.server.operation.duration`. Tool arguments and results are never recorded.
+  - **Nothing is sent anywhere by default.** The new opt-in `otlp` feature sends traces, metrics and logs over OTLP once `OTEL_EXPORTER_OTLP_ENDPOINT` is set. A default build contains no OTLP client.
+
 ### Changed
 - **LICENSE names AgentStateLabs, LLC as the licensor without the "not yet formed" placeholder, and the Licensed Work as "CTXone" without a version.** The old line named 0.73.0 while shipping with every release; each version already has its own Change Date.
 - **LICENSING.md had v0.73.0 converting to Apache 2.0 on 2030-04-15, the old four-year term; it is 2027-10-15.** It also now states that releases before 2026-09-09 (v1.0.10 and earlier) get the 18-month term, and licensing questions go to licensing@agentstatelabs.com, matching LICENSE (the `ctx` CLI's licensing note too).

@@ -20,7 +20,6 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{Any, CorsLayer};
-use tower_http::trace::TraceLayer;
 use tracing::{debug, info, instrument, warn};
 
 use agentstategraph::{CommitOptions, Repository};
@@ -580,7 +579,9 @@ fn router_with_config_inner(
     // Request tracing layer — emits a span per HTTP request. At `info` level
     // you get one line per request with method, URI, status, and latency.
     // At `debug` you also get the request body, at `trace` the response body.
-    let trace = TraceLayer::new_for_http();
+    // A span, a request log line and duration metrics for every request,
+    // named by the OpenTelemetry HTTP conventions.
+    let trace = oxtel_tower::HttpServerLayer::new();
 
     // Rate limiter — returns None when rpm=0 (disabled).
     let governor = rate_limit::build_layer(config.rate_limit_rpm);

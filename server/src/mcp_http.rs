@@ -36,7 +36,10 @@ use agentstategraph_core::Namespace;
 use crate::asd_pool::AsdProcessPool;
 use crate::memory_tools::{CtxOneServer, DEFAULT_SESSION_ID, SessionRegistry};
 
-type McpService = StreamableHttpService<CtxOneServer, LocalSessionManager>;
+/// Each MCP request gets a span and `mcp.server.operation.duration`, per the
+/// OpenTelemetry MCP conventions.
+type McpService =
+    StreamableHttpService<oxtel_rmcp::Instrumented<CtxOneServer>, LocalSessionManager>;
 
 /// State for the `/mcp` route: everything needed to build a namespace-scoped
 /// MCP service, plus the per-namespace service cache.
@@ -160,7 +163,7 @@ impl McpHttpState {
             if let Some(pool) = asd_pool.clone() {
                 server = server.with_pool(pool);
             }
-            Ok(server)
+            Ok(oxtel_rmcp::Instrumented::new(server))
         };
 
         // Defaults are what we want: `stateful_mode: true` (per-client session

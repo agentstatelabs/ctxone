@@ -11,11 +11,15 @@
 //! ephemeral zone for cargo workspaces. Production deployments should
 //! always pass --path explicitly (e.g. /var/lib/ctxone/db).
 //!
-//! Logging is controlled via the `RUST_LOG` env var (see `tracing-subscriber`
-//! docs). Default level is `info`. Examples:
+//! Logging is controlled via the `RUST_LOG` env var. Default level is
+//! `info`. Examples:
 //!     RUST_LOG=debug ctxone-hub --http
 //!     RUST_LOG=ctxone_hub=trace ctxone-hub --http
-//! All logs go to stderr so they never corrupt the MCP stdio JSON stream.
+//! All logs go to stderr so they never corrupt the MCP stdio JSON stream:
+//! text on a terminal, one JSON object per line otherwise
+//! (`OXTEL_LOG_FORMAT=text|json|ecs|none` chooses). Telemetry is oxtel's;
+//! nothing is exported unless the hub is built with the `otlp` feature and
+//! `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
 
 use ctxone_hub::{asd_pool, backup, http, lockfile, memory_tools, migrations};
 
@@ -25,31 +29,22 @@ use agentstategraph::Repository;
 use agentstategraph_storage::SqliteStorage;
 use rmcp::ServiceExt;
 use tracing::{error, info, warn};
-use tracing_subscriber::{EnvFilter, fmt};
 
-fn init_tracing(mcp_stdio: bool) {
-    // Parse RUST_LOG, defaulting to "info" if unset.
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-
-    let fmt_layer = fmt::layer()
-        // Always write to stderr. In MCP stdio mode, stdout is the
-        // JSON-RPC channel and must never be polluted by log output.
-        .with_writer(std::io::stderr)
-        // Quieter format for MCP stdio (minimize noise to the parent
-        // process), richer format for HTTP mode.
-        .with_target(!mcp_stdio)
-        .with_level(true)
-        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()));
-
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(fmt_layer)
-        .init();
+/// Set up logs, traces and metrics with oxtel. Log lines go to stderr, never
+/// stdout, which is the MCP stdio channel: text on a terminal, one JSON
+/// object per line otherwise (`OXTEL_LOG_FORMAT` picks another), at
+/// `RUST_LOG` or `info`. Nothing is sent anywhere unless the server was built
+/// with the `otlp` feature and `OTEL_EXPORTER_OTLP_ENDPOINT` is set. Keep the
+/// guard until `main` returns: dropping it sends what's pending.
+fn init_telemetry() -> Result<oxtel::Guard, oxtel::Error> {
+    oxtel::builder()
+        .with_default_service_name("ctxone-hub")
+        .with_resource_attribute(oxtel::KeyValue::new(
+            "service.version",
+            env!("CARGO_PKG_VERSION"),
+        ))
+        .install()
 }
-
-// Bring registry into scope for the init above
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
 
 /// Resolve when the process is asked to stop, by either Ctrl-C or SIGTERM.
 ///
@@ -444,8 +439,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         i += 1;
     }
 
-    // Initialize tracing before doing anything loggable.
-    init_tracing(!http_mode);
+    // Initialize telemetry before doing anything loggable.
+    let _telemetry = init_telemetry()?;
 
     info!(version = env!("CARGO_PKG_VERSION"), "CtxOne Hub starting");
 
@@ -1142,7 +1137,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     });
                 }
 
-                let service = ctx_server
+                let service = oxtel_rmcp::Instrumented::new(ctx_server)
+                    .with_transport("pipe")
                     .serve(rmcp::transport::stdio())
                     .await
                     .map_err(|e| {

@@ -52,4 +52,8 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 tower_governor = "0.8"
 governor = "0.10"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+# Logs, traces and metrics. OTLP export is the server crate's opt-in `otlp`
+# feature, so a default build sends nothing anywhere.
+oxtel = { version = "0.2", default-features = false, features = ["log", "config"] }
+oxtel-tower = { version = "0.2", features = ["axum"] }
+oxtel-rmcp = "0.2"
