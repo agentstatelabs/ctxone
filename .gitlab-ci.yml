@@ -2,7 +2,11 @@
 # The Hub (server) embeds web/build/ at compile time via rust-embed, so the
 # frontend must be built BEFORE cargo. Vite 8 / Svelte 5 need Node >= 20.19.
 # Only run pipelines that matter, and never the same SHA twice:
-#  * internal working branches (claude/*, worktree-agent-*, …) get no pipeline;
+#  * a merge request gets a detached pipeline, so its branch is checked
+#    (frontend, fmt, clippy, build, test) before it merges. The publish jobs
+#    run only on main or a tag, so none of them runs in it;
+#  * a plain push of any other branch (claude/*, worktree-agent-*, …) gets no
+#    pipeline: its merge request's pipeline covers it;
 #  * a `release: vX` commit on main is validated by its tag pipeline (release.sh
 #    pushes main + tag together — same SHA, plus publish), so its branch
 #    pipeline is skipped to avoid a duplicate frontend+compile.
@@ -10,6 +14,7 @@ workflow:
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_TITLE =~ /^release: v/'
       when: never
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_TAG
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
     - when: never
