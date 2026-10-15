@@ -16,11 +16,21 @@ use agentstategraph_storage::MemoryStorage;
 use ctxone_hub::{http, memory_tools::SessionRegistry};
 
 fn router(allowed: &[&str]) -> axum::Router {
+    router_with(allowed, false)
+}
+
+/// A hub that allows only `allowed`, never trusting a matching `Host`.
+fn strict_router(allowed: &[&str]) -> axum::Router {
+    router_with(allowed, true)
+}
+
+fn router_with(allowed: &[&str], strict_origin: bool) -> axum::Router {
     let repo = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
     repo.init().expect("repo init");
     let sessions = Arc::new(SessionRegistry::new());
     let config = http::HubConfig {
         allowed_origins: allowed.iter().map(|s| s.to_string()).collect(),
+        strict_origin,
         ..Default::default()
     };
     http::router_with_config(repo, sessions, config)
@@ -92,5 +102,51 @@ async fn null_origin_rejected() {
     assert_eq!(
         status(router(&[]), health("localhost:3001", Some("null"))).await,
         StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
+async fn strict_origin_does_not_trust_a_matching_host() {
+    // Without --strict-origin this is same-origin and allowed (see
+    // same_origin_passes); with it, Host proves nothing.
+    assert_eq!(
+        status(
+            strict_router(&[]),
+            health("alice.ctxone.example", Some("https://alice.ctxone.example"))
+        )
+        .await,
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
+async fn strict_origin_allows_only_listed_origins() {
+    let lens = "https://alice.ctxone.example";
+    assert_eq!(
+        status(
+            strict_router(&[lens]),
+            health("alice.ctxone.example", Some(lens))
+        )
+        .await,
+        StatusCode::OK
+    );
+    // DNS rebinding: a page on the attacker's domain, resolving to the hub,
+    // sends its own name as both Origin and Host.
+    assert_eq!(
+        status(
+            strict_router(&[lens]),
+            health("evil.example", Some("https://evil.example"))
+        )
+        .await,
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
+async fn strict_origin_still_passes_requests_without_an_origin() {
+    // The CLI and native MCP clients send no Origin.
+    assert_eq!(
+        status(strict_router(&[]), health("alice.ctxone.example", None)).await,
+        StatusCode::OK
     );
 }

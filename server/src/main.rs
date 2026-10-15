@@ -137,6 +137,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut auth_token: Option<String> = std::env::var("CTXONE_AUTH_TOKEN")
         .ok()
         .filter(|s| !s.is_empty());
+    // Bearer tokens from a file, re-read while the hub runs so they rotate
+    // without a restart. From --auth-token-file or CTXONE_AUTH_TOKEN_FILE.
+    let mut auth_token_file: Option<String> = std::env::var("CTXONE_AUTH_TOKEN_FILE")
+        .ok()
+        .filter(|s| !s.is_empty());
+    // Make loopback peers send the token too (a proxy or sidecar on 127.0.0.1
+    // in front of the hub). From --require-auth-on-loopback or
+    // CTXONE_REQUIRE_AUTH_ON_LOOPBACK.
+    let mut require_auth_on_loopback = env_truthy("CTXONE_REQUIRE_AUTH_ON_LOOPBACK");
+    // Allow browser requests only from --allowed-origin, never because Origin
+    // matches Host. From --strict-origin or CTXONE_STRICT_ORIGIN.
+    let mut strict_origin = env_truthy("CTXONE_STRICT_ORIGIN");
     // Extra browser origins allowed to call the API (repeatable
     // --allowed-origin). Same-origin is always allowed; anything else carrying
     // an Origin header is rejected. Seedable from CTXONE_ALLOWED_ORIGINS (comma-
@@ -239,6 +251,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if i < args.len() && !args[i].is_empty() {
                     allowed_origins.push(args[i].clone());
                 }
+            }
+            "--auth-token-file" => {
+                i += 1;
+                if i < args.len() {
+                    auth_token_file = Some(args[i].clone()).filter(|s| !s.is_empty());
+                }
+            }
+            "--require-auth-on-loopback" => {
+                require_auth_on_loopback = true;
+            }
+            "--strict-origin" => {
+                strict_origin = true;
             }
             "--namespace" => {
                 i += 1;
@@ -361,6 +385,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "                           loopback is exempt. Unset = no auth (warns if bound remotely)."
                 );
                 eprintln!(
+                    "      --auth-token-file <PATH>  Bearer tokens, one per line (env: CTXONE_AUTH_TOKEN_FILE)."
+                );
+                eprintln!(
+                    "                           Re-read every second, so tokens rotate without a restart."
+                );
+                eprintln!(
+                    "      --require-auth-on-loopback  Loopback peers must send the token too, for a proxy or"
+                );
+                eprintln!(
+                    "                           sidecar on 127.0.0.1 (env: CTXONE_REQUIRE_AUTH_ON_LOOPBACK)."
+                );
+                eprintln!(
+                    "      --allowed-origin <ORIGIN>  Browser origin allowed to call the API; repeatable"
+                );
+                eprintln!(
+                    "                           (env: CTXONE_ALLOWED_ORIGINS). Same-origin is allowed too,"
+                );
+                eprintln!(
+                    "                           unless --strict-origin (env: CTXONE_STRICT_ORIGIN) is set."
+                );
+                eprintln!(
                     "      --namespace <NS>     MCP mode: namespace to operate in (default: detect \
                      project from cwd, else \"default\")"
                 );
@@ -437,6 +482,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         i += 1;
+    }
+
+    // Auth settings that can't work are refused here, before anything listens.
+    if auth_token.is_some() && auth_token_file.is_some() {
+        eprintln!(
+            "ctxone-hub: use --auth-token or --auth-token-file, not both (a token file can hold \
+             several tokens)"
+        );
+        std::process::exit(64);
+    }
+    let auth_token_file: Option<http::AuthTokenFile> = match auth_token_file {
+        Some(path) => match http::AuthTokenFile::open(&path) {
+            Ok(file) => Some(file),
+            Err(e) => {
+                eprintln!("ctxone-hub: can't read --auth-token-file {path}: {e}");
+                std::process::exit(66);
+            }
+        },
+        None => None,
+    };
+    if require_auth_on_loopback && auth_token.is_none() && auth_token_file.is_none() {
+        eprintln!(
+            "ctxone-hub: --require-auth-on-loopback needs a token (--auth-token or \
+             --auth-token-file)"
+        );
+        std::process::exit(64);
     }
 
     // Initialize telemetry before doing anything loggable.
@@ -678,10 +749,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Auth posture. The socket binds 0.0.0.0 (all interfaces), so without a
         // token the REST API + /mcp are reachable from the network unauthenticated.
         // Loopback peers are always exempt; a token only gates non-loopback.
-        if auth_token.is_some() {
-            info!(
-                "Bearer auth enabled: non-loopback requests require Authorization: Bearer <token> (loopback exempt)"
-            );
+        if auth_token.is_some() || auth_token_file.is_some() {
+            if require_auth_on_loopback {
+                info!(
+                    "Bearer auth enabled: every request requires Authorization: Bearer <token>, \
+                     loopback included"
+                );
+            } else {
+                info!(
+                    "Bearer auth enabled: non-loopback requests require Authorization: Bearer <token> (loopback exempt)"
+                );
+            }
+            if let Some(file) = &auth_token_file {
+                info!(
+                    path = %file.path().display(),
+                    "Bearer tokens read from a file, re-read every second (rotate by editing it)"
+                );
+            }
             if lens_mode {
                 info!(
                     "Lens UI is served, but a remote browser can't send a bearer token — \
@@ -696,6 +780,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                  with no authentication. Set --auth-token / CTXONE_AUTH_TOKEN before \
                  exposing this hub beyond localhost."
             );
+        }
+        if strict_origin {
+            if allowed_origins.is_empty() {
+                warn!(
+                    "--strict-origin with no --allowed-origin: no browser page can call the API, \
+                     Lens included"
+                );
+            } else {
+                info!(
+                    origins = ?allowed_origins,
+                    "Strict origins: browsers may call the API only from these origins"
+                );
+            }
         }
 
         // Session registry: load persisted stats from SQLite (if sqlite storage),
@@ -751,7 +848,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             mcp_http: true,
             agent_id: agent_id.clone(),
             auth_token: auth_token.clone(),
+            auth_token_file: auth_token_file.clone(),
+            require_auth_on_loopback,
             allowed_origins: allowed_origins.clone(),
+            strict_origin,
             ctx_binary: ctx_binary.clone(),
             self_base_url: Some(self_base_url),
             autosync: Some(autosync.clone()),
@@ -762,6 +862,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let sync_ctx_bin = hub_config.ctx_binary.clone();
         let sync_base_url = hub_config.self_base_url.clone();
         let sync_autosync = autosync.clone();
+        let sync_auth = http::AuthTokens::new(auth_token.clone(), auth_token_file.clone());
 
         // Capture db_path for background flush tasks.
         let flush_db_path = if storage_type == "sqlite" {
@@ -890,7 +991,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             last_sweep = Some(std::time::Instant::now());
                             // Awaiting to completion before the next tick means
                             // sweeps never overlap even if one runs long.
-                            match http::run_session_sync(&ctx_bin, &base_url).await {
+                            let token = sync_auth.for_children();
+                            match http::run_session_sync(&ctx_bin, &base_url, token.as_deref())
+                                .await
+                            {
                                 Ok((sessions, turns, tokens, elapsed_ms)) => info!(
                                     sessions,
                                     turns, tokens, elapsed_ms, "background session sweep complete"
@@ -1161,4 +1265,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Hub shut down");
     Ok(())
+}
+
+/// Whether environment variable `name` is set to a true value (`1`, `true`,
+/// `yes` or `on`, any case).
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }

@@ -12,6 +12,11 @@ the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
   - In HTTP mode, each request gets a span named by its route and a `request` log line with its status, duration and trace id. This replaces tower-http's trace layer, which logged at `debug`.
   - MCP requests, over HTTP and stdio, get spans named like `tools/call recall` and `mcp.server.operation.duration`. Tool arguments and results are never recorded.
   - **Nothing is sent anywhere by default.** The new opt-in `otlp` feature sends traces, metrics and logs over OTLP once `OTEL_EXPORTER_OTLP_ENDPOINT` is set. A default build contains no OTLP client.
+- **Hosted-mode hardening for the Hub.**
+  - `--auth-token-file <PATH>` (`CTXONE_AUTH_TOKEN_FILE`): bearer tokens, one per line, re-read every second, so tokens rotate without a restart. Every listed token is accepted, and an empty file accepts none.
+  - `--require-auth-on-loopback` (`CTXONE_REQUIRE_AUTH_ON_LOOPBACK`): loopback peers must send the token too, for a hub behind a proxy or sidecar on 127.0.0.1. The Hub then hands its own `ctx` (session sync and import) the token as `CTX_TOKEN`.
+  - `--strict-origin` (`CTXONE_STRICT_ORIGIN`): browsers may call the API only from `--allowed-origin` origins, never because `Origin` matches `Host`.
+  - The Hub refuses to start with both token options, with `--require-auth-on-loopback` and no token, or with a token file it can't read.
 
 ### Changed
 - **LICENSE names AgentStateLabs, LLC as the licensor without the "not yet formed" placeholder, and the Licensed Work as "CTXone" without a version.** The old line named 0.73.0 while shipping with every release; each version already has its own Change Date.
