@@ -14,6 +14,14 @@
 # the source of truth; never write the GitHub tap directly, or the next tap
 # change reverts it and leaves GitHub non-ff in between.
 #
+# Safe to re-run. The formula only ever moves forward: re-running an older
+# tag's pipeline (v1.4.7 after v1.4.8 shipped), or a patch tag cut on an older
+# line, leaves the tap on the newer release. Re-running the tag the tap is on
+# renders the same formula, so it repairs a wrong sha256 or pushes nothing.
+# A tag's pipeline runs the script at that tag, so this holds only for tags
+# cut after the guard landed; an older tag still carries the script that
+# rewrites the formula unconditionally.
+#
 # Required env (set per-repo in .gitlab-ci.yml):
 #   RELEASES_REPO   — GitHub "org/repo" holding the release assets
 #   TAP_PATH        — GitLab "group/project" of the tap
@@ -23,7 +31,8 @@
 # Required CI variables (group-level, protected):
 #   GITLAB_RELEASE_TOKEN — write_repository on $TAP_PATH
 #
-# Exit: 0 pushed or already current, 1 assets never appeared, 2 misconfig.
+# Exit: 0 pushed, already current, or the tap is on a newer release;
+#       1 assets never appeared; 2 misconfig.
 set -euo pipefail
 
 : "${CI_COMMIT_TAG:?this job only runs on tag pipelines}"
@@ -87,10 +96,37 @@ done
 TAP_URL="https://oauth2:${GITLAB_RELEASE_TOKEN}@${CI_SERVER_URL#https://}/${TAP_PATH}.git"
 git clone --depth 1 "$TAP_URL" "${WORK}/tap" 2>&1 | sed 's/^/   /'
 
-# --- render ------------------------------------------------------------------
 FORMULA="${WORK}/tap/${FORMULA_PATH}"
 [ -f "$FORMULA" ] || { echo "formula not found at ${FORMULA_PATH} in ${TAP_PATH}" >&2; exit 2; }
 
+# --- never move the formula backward -----------------------------------------
+# Prints the formula's version when it is newer than the tag, nothing
+# otherwise. Same ordering as publish-site-version.sh. A failure here fails
+# the job under set -e, so a broken check can never fall through to a render.
+NEWER="$(FORMULA="$FORMULA" TAG="$TAG" python3 - <<'PY'
+import os, re
+
+def key(v):
+    # v1.2.3 < v1.2.4-beta.1 < v1.2.4; anything unparseable sorts lowest.
+    m = re.match(r'v?(\d+)\.(\d+)\.(\d+)(?:-(.+))?$', v or '')
+    if not m:
+        return (-1,)
+    pre = m.group(4)
+    return (*map(int, m.group(1, 2, 3)), 0 if pre else 1, pre or '')
+
+src = open(os.environ["FORMULA"]).read()
+m = re.search(r'^\s*version\s+"([^"]*)"', src, flags=re.M)
+current = m.group(1) if m else ""
+if current and key(os.environ["TAG"]) < key(current):
+    print(current)
+PY
+)"
+if [ -n "$NEWER" ]; then
+  echo ">> formula already at ${NEWER}; not moving it to ${TAG}"
+  exit 0
+fi
+
+# --- render ------------------------------------------------------------------
 TARGETS_CSV="$(IFS=,; echo "${TARGETS[*]}")" \
 SHAS_CSV="$(IFS=,; echo "${SHAS[*]}")" \
 FORMULA="$FORMULA" TAG="$TAG" VER="$VER" \
