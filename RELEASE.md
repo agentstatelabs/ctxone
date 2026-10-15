@@ -177,13 +177,28 @@ re-run the GitHub Actions workflow**; do not upload them from a workstation.
   the tap is on renders the same formula, so it repairs a wrong `sha256` or
   pushes nothing; re-running an older tag leaves the tap on the newer release.
   A tag's pipeline runs the scripts at that tag, so a tag cut before this
-  guard landed (v1.0.13 and earlier) still rewrites the formula to its own
-  version when re-run.
+  guard landed (v1.0.13 and earlier) still rewrites the formula on the GitLab
+  tap to its own version when re-run. The tap's own `version-guard` job then
+  fails and `publish-github` doesn't run, so the older formula never reaches
+  the GitHub tap. Revert that commit on the GitLab tap, or let the next release
+  write the formula forward; until then `version-guard` blocks every push to
+  the tap's `main`.
 - **Rolling back a release.** `gh release delete v<X> -R agentstatelabs/ctxone-releases`
   removes assets + the release entry. Tag removal:
-  `git push origin :refs/tags/v<X>` on both source and tap. Revert
-  `Formula/ctxone.rb` on the GitLab tap by hand: re-running the previous tag's
-  pipeline will not move the formula back.
+  `git push origin :refs/tags/v<X>` on both source and tap. Roll
+  `Formula/ctxone.rb` back on the GitLab tap by hand: re-running the previous
+  tag's pipeline will not move the formula back, and the tap's `version-guard`
+  refuses a plain revert. Commit the older formula with the trailer
+  `Allow-Downgrade: <version>` at the end of the commit message, or run a tap
+  pipeline on `main` with the variable `TAP_ALLOW_DOWNGRADE=<version>`. Either
+  must name the exact version being published:
+
+  ```sh
+  # in a clone of the GitLab tap, homebrew-ctxone
+  git revert --no-edit <the version-bump commit>
+  git commit --amend --no-edit --trailer "Allow-Downgrade: <previous version>"
+  git push origin HEAD:main
+  ```
 
 - **A dev binary pinned in the launchd plist survives `brew upgrade`.** While
   testing an unreleased hub, `~/Library/LaunchAgents/com.ctxone.hub.plist` may
