@@ -182,6 +182,10 @@ publish-crates:
 # assets over HTTPS and writes to a GitLab project. Nothing reaches back into
 # GitLab from GitHub Actions, and the tap URL is built from $CI_SERVER_URL so
 # no internal hostname lands in a mirrored file.
+#
+# Re-running it is safe: the formula only moves forward, so re-running an older
+# tag leaves the tap on the newer release, and re-running the current tag
+# pushes nothing unless a sha256 needs repairing.
 homebrew:
   stage: .post
   image: rust:1-bookworm

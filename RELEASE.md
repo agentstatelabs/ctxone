@@ -91,7 +91,10 @@ green:
    and publishes the release in `ctxone-releases`.
 3. **`homebrew`** — starts 10 minutes later (delayed, so it doesn't hold a
    runner), polls for the release assets, renders `Formula/ctxone.rb` with their
-   `sha256`s and commits it to the GitLab tap, which mirrors to GitHub.
+   `sha256`s and commits it to the GitLab tap, which mirrors to GitHub. It only
+   moves the formula forward: a tag older than the tap's version (a re-run of
+   an older tag's pipeline, or a patch on an older line) leaves the tap alone
+   and logs `formula already at X; not moving it to vY`.
 4. **`site-version`** — after `homebrew`, so the sites never advertise a release
    that isn't installable yet. Moves `ctxone` in
    `agentstatelabs.com/releases.json` forward to the tag (never backward). The
@@ -170,9 +173,17 @@ re-run the GitHub Actions workflow**; do not upload them from a workstation.
   and GitLab → GitHub usually replicates within seconds. If you need the
   formula on GitHub *now*, force the tap's mirror via the GitLab API:
   `POST /projects/<id>/remote_mirrors/<mirror_id>/sync` with a `PRIVATE-TOKEN`.
+- **Re-running a tag's pipeline is safe for the formula.** Re-running the tag
+  the tap is on renders the same formula, so it repairs a wrong `sha256` or
+  pushes nothing; re-running an older tag leaves the tap on the newer release.
+  A tag's pipeline runs the scripts at that tag, so a tag cut before this
+  guard landed (v1.0.13 and earlier) still rewrites the formula to its own
+  version when re-run.
 - **Rolling back a release.** `gh release delete v<X> -R agentstatelabs/ctxone-releases`
   removes assets + the release entry. Tag removal:
-  `git push origin :refs/tags/v<X>` on both source and tap.
+  `git push origin :refs/tags/v<X>` on both source and tap. Revert
+  `Formula/ctxone.rb` on the GitLab tap by hand: re-running the previous tag's
+  pipeline will not move the formula back.
 
 - **A dev binary pinned in the launchd plist survives `brew upgrade`.** While
   testing an unreleased hub, `~/Library/LaunchAgents/com.ctxone.hub.plist` may
