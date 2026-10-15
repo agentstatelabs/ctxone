@@ -17,6 +17,7 @@ the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
 - **LICENSE names AgentStateLabs, LLC as the licensor without the "not yet formed" placeholder, and the Licensed Work as "CTXone" without a version.** The old line named 0.73.0 while shipping with every release; each version already has its own Change Date.
 - **LICENSING.md had v0.73.0 converting to Apache 2.0 on 2030-04-15, the old four-year term; it is 2027-10-15.** It also now states that releases before 2026-09-09 (v1.0.10 and earlier) get the 18-month term, and licensing questions go to licensing@agentstatelabs.com, matching LICENSE (the `ctx` CLI's licensing note too).
 - Package metadata (Cargo, PyPI, the Open WebUI plugin) credits AgentStateLabs, LLC as the author. The plugin's `author_url` pointed at github.com/ctxone, which does not exist; it now points at github.com/agentstatelabs.
+- **Raw session turns stay on this machine unless the hub is here too.** When `ctx`'s hub isn't on this machine (anything but `localhost`, a `.localhost` name, 127.x or `::1`), `ctx ingest-session`, `ctx session import` and the Stop-hook `ctx capture-turn` no longer send the turns; titles, metadata, provenance, token counts and extracted memories still go. An import says so in one line. Opt in with `ctx config set remote_turns true`, or `CTX_REMOTE_TURNS=1` for one command. A hub on this machine, including the Hub's own background import, is unaffected.
 
 ## [v1.0.13] — 2026-10-09
 
