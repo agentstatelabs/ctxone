@@ -28,7 +28,10 @@ variables.
 absent, every Hub-bound command resolves the namespace via the project
 detection chain for the current directory: a `.ctxproject` file in the
 cwd or any parent, then the repo's git remote looked up in the Hub's
-project registry. No match falls back to the `default` namespace.
+project registry, then a registered local path containing the cwd. `ctx`
+reads the marker and the remote itself and the Hub only looks them up,
+so this works with a Hub on another machine. No match falls back to the
+`default` namespace.
 
 If the Hub can't answer — it times out, reports an error, or is
 unreachable — the command stops with `can't tell which workspace <dir>

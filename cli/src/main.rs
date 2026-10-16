@@ -2467,15 +2467,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 out["namespace"] = Value::Null;
                 out["namespace_error"] = serde_json::json!(f.detail);
             }
+            let cwd = std::env::current_dir()
+                .map(|d| d.to_string_lossy().into_owned())
+                .unwrap_or_default();
             if let Some(ns) = &namespace
+                && let Ok(query) = detect::query_for(&cwd).await
                 && let Ok(r) = client
-                    .get(format!(
-                        "{}/api/projects/detect?cwd={}",
-                        cli.server,
-                        std::env::current_dir()
-                            .map(|d| d.to_string_lossy().into_owned())
-                            .unwrap_or_default()
-                    ))
+                    .get(format!("{}/api/projects/detect", cli.server))
+                    .query(&query)
                     .send()
                     .await
                 && let Ok(det) = r.json::<Value>().await
@@ -4248,10 +4247,14 @@ async fn handle_project(
             });
         }
         ProjectAction::Detect => {
-            let cwd = std::env::current_dir()?;
+            let cwd = std::env::current_dir()?.to_string_lossy().into_owned();
+            let query = match detect::query_for(&cwd).await {
+                Ok(q) => q,
+                Err(f) => f.exit(),
+            };
             let resp = match client
                 .get(format!("{}/api/projects/detect", server))
-                .query(&[("cwd", cwd.to_string_lossy().as_ref())])
+                .query(&query)
                 .send()
                 .await
             {

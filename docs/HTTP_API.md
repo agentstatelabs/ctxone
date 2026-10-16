@@ -469,6 +469,21 @@ session started there would land in:
    normalized the same way as on write)
 3. the longest registered `local_path` containing `cwd`
 
+Steps 1 and 2 read the directory, which only works on the machine it is
+on. So `ctx` reads it itself and sends what it found; the Hub then reads
+nothing and only looks it up, which also works for a Hub on another
+machine:
+
+| Parameter | Meaning |
+|-----------|---------|
+| `client_read=true` | The caller read `cwd`; use the parameters below instead of reading it |
+| `ctxproject=<id>` | The id in the nearest `.ctxproject` |
+| `ctxproject_error=<msg>` | The nearest `.ctxproject` exists but couldn't be read |
+| `remote_url=<url>` | `git remote get-url origin` as git prints it (the Hub normalizes it) |
+
+Without `client_read` (older clients), the Hub reads `cwd` on its own
+machine.
+
 **Response (200):**
 ```json
 { "status": "found", "via": "ctxproject", "project_id": "myrepo", "namespace": "myrepo" }
@@ -490,9 +505,9 @@ callers must not treat it as `not_found`:
 
 | Status | `status` | When |
 |--------|----------|------|
-| **500** | `error` | The registry query failed, or a `.ctxproject` exists but the Hub may not read it (on macOS, a denied Files & Folders prompt) and no later step matched |
+| **500** | `error` | The registry query failed, or a `.ctxproject` exists but couldn't be read (`ctxproject_error`, or the Hub's own read; on macOS, a denied Files & Folders prompt) and no later step matched |
 | **503** | `busy` | 16 earlier detections are still stuck; refused without starting another |
-| **504** | `timeout` | Detection ran past 3 s — typically the Hub blocked on file access, e.g. a pending macOS privacy prompt |
+| **504** | `timeout` | Detection ran past 3 s — typically the Hub blocked reading `cwd` for an older client, e.g. on a pending macOS privacy prompt |
 
 ```json
 { "status": "timeout", "error": "project detection did not finish within 3s — …" }
