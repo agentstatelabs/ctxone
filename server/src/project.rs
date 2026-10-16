@@ -266,14 +266,54 @@ pub enum DetectResult {
 /// the result is `Failed`, not `NotFound`: the unread marker may well have
 /// named a project.
 pub fn detect_project(cwd: &Path, db_path: Option<&str>) -> DetectResult {
+    if db_path.is_none() {
+        return DetectResult::RegistryUnavailable;
+    }
+    resolve_clues(cwd, db_path, &Clues::read(cwd))
+}
+
+/// What a directory says about its project: steps 1 and 2 of the detection
+/// chain, which read the directory and so must run on the machine it is on.
+/// The hub reads them for itself ([`Clues::read`]) when asked about a
+/// directory by an older client; `ctx` reads them where it runs and sends them
+/// (`GET /api/projects/detect?client_read=true`), so a hub on another machine
+/// can still resolve them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Clues {
+    /// The project id in the nearest `.ctxproject` (its first non-empty line).
+    pub ctxproject: Option<String>,
+    /// Why the nearest `.ctxproject` exists but couldn't be read.
+    pub ctxproject_error: Option<String>,
+    /// The git remote `origin`.
+    pub remote_url: Option<String>,
+}
+
+impl Clues {
+    /// Read `cwd`'s clues on this machine.
+    pub fn read(cwd: &Path) -> Self {
+        let (ctxproject, ctxproject_error) = match find_ctxproject_file(cwd) {
+            Ok(id) => (id, None),
+            Err((path, e)) => (None, Some(unreadable_marker_message(&path, &e))),
+        };
+        Self {
+            ctxproject,
+            ctxproject_error,
+            remote_url: read_git_remote(cwd),
+        }
+    }
+}
+
+/// Resolve a directory's [`Clues`] against the registry: the detection chain
+/// with steps 1 and 2 already read. Reads no files, so `cwd` (used by step 3)
+/// need not exist on this machine.
+pub fn resolve_clues(cwd: &Path, db_path: Option<&str>, clues: &Clues) -> DetectResult {
     let Some(db) = db_path else {
         return DetectResult::RegistryUnavailable;
     };
 
-    // Step 1: .ctxproject file walk
-    let mut unreadable_marker: Option<String> = None;
-    match find_ctxproject_file(cwd) {
-        Ok(Some(project_id)) => match resolve_by_id(db, &project_id) {
+    // Step 1: the .ctxproject marker
+    if let Some(project_id) = &clues.ctxproject {
+        match resolve_by_id(db, project_id) {
             Ok(Some(p)) => {
                 return DetectResult::FoundByFile {
                     project_id: p.id,
@@ -285,13 +325,11 @@ pub fn detect_project(cwd: &Path, db_path: Option<&str>) -> DetectResult {
                 // to remote URL lookup before giving up.
             }
             Err(e) => return registry_failed(e),
-        },
-        Ok(None) => {}
-        Err((path, e)) => unreadable_marker = Some(unreadable_marker_message(&path, &e)),
+        }
     }
 
     // Step 2: git remote URL lookup
-    if let Some(remote_url) = read_git_remote(cwd) {
+    if let Some(remote_url) = clues.remote_url.as_deref().map(normalize_remote_url) {
         match resolve_by_remote_url(db, &remote_url) {
             Ok(Some(p)) => {
                 return DetectResult::FoundByRemote {
@@ -320,8 +358,8 @@ pub fn detect_project(cwd: &Path, db_path: Option<&str>) -> DetectResult {
         };
     }
 
-    match unreadable_marker {
-        Some(msg) => DetectResult::Failed(msg),
+    match &clues.ctxproject_error {
+        Some(msg) => DetectResult::Failed(msg.clone()),
         None => DetectResult::NotFound,
     }
 }
@@ -797,5 +835,89 @@ mod tests {
         assert!(
             matches!(result, DetectResult::FoundByFile { ref namespace_id, .. } if namespace_id == "test-ns")
         );
+    }
+
+    /// A client's clues resolve without the directory existing here, the way
+    /// a hub on another machine sees it.
+    #[test]
+    fn resolve_clues_reads_nothing_on_this_machine() {
+        let (_dbdir, db) = tmp_db();
+        register_project(
+            &db,
+            "by-marker",
+            Some("https://git.example.com/g/app"),
+            "marker-ns",
+            None,
+            Some("/elsewhere/app"),
+        )
+        .unwrap();
+        let cwd = Path::new("/no/such/dir/on/this/machine");
+        assert!(!cwd.exists());
+
+        let marker = Clues {
+            ctxproject: Some("by-marker".into()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            resolve_clues(cwd, Some(&db), &marker),
+            DetectResult::FoundByFile { ref namespace_id, .. } if namespace_id == "marker-ns"
+        ));
+
+        // The client sends git's URL as is; the hub normalizes it.
+        let remote = Clues {
+            remote_url: Some("https://git.example.com/g/app.git/".into()),
+            ..Default::default()
+        };
+        match resolve_clues(cwd, Some(&db), &remote) {
+            DetectResult::FoundByRemote { remote_url, .. } => {
+                assert_eq!(remote_url, "https://git.example.com/g/app");
+            }
+            other => panic!("expected FoundByRemote, got {other:?}"),
+        }
+
+        // A marker naming an unknown project falls through to the remote.
+        let unknown_marker = Clues {
+            ctxproject: Some("nobody".into()),
+            ..remote
+        };
+        assert!(matches!(
+            resolve_clues(cwd, Some(&db), &unknown_marker),
+            DetectResult::FoundByRemote { .. }
+        ));
+
+        // Step 3 still matches on the path alone.
+        let nested = Path::new("/elsewhere/app/src");
+        assert!(matches!(
+            resolve_clues(nested, Some(&db), &Clues::default()),
+            DetectResult::FoundByPath { ref local_path, .. } if local_path == "/elsewhere/app"
+        ));
+        assert!(matches!(
+            resolve_clues(cwd, Some(&db), &Clues::default()),
+            DetectResult::NotFound
+        ));
+        assert!(matches!(
+            resolve_clues(cwd, None, &marker),
+            DetectResult::RegistryUnavailable
+        ));
+    }
+
+    /// A marker the client couldn't read is a failure unless a later step
+    /// matches, as when the hub reads it itself.
+    #[test]
+    fn resolve_clues_reports_an_unreadable_marker_only_without_a_match() {
+        let (_dbdir, db) = tmp_db();
+        register_project(&db, "p", None, "p-ns", None, Some("/srv/p")).unwrap();
+        let unreadable = Clues {
+            ctxproject_error: Some("cannot read /srv/x/.ctxproject: denied".into()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            resolve_clues(Path::new("/srv/x"), Some(&db), &unreadable),
+            DetectResult::Failed(ref msg) if msg.contains("/srv/x/.ctxproject")
+        ));
+        assert!(matches!(
+            resolve_clues(Path::new("/srv/p/sub"), Some(&db), &unreadable),
+            DetectResult::FoundByPath { .. }
+        ));
     }
 }

@@ -6795,6 +6795,18 @@ async fn add_project_path_handler(
 #[derive(Deserialize)]
 struct DetectQuery {
     cwd: String,
+    /// The caller read `cwd` itself and sends what it found in the fields
+    /// below, so the hub reads nothing on its own filesystem. `ctx` always
+    /// does this; without it (older clients) the hub reads `cwd` itself, which
+    /// only works when the caller is on this machine.
+    #[serde(default)]
+    client_read: bool,
+    /// The id in the nearest `.ctxproject`.
+    ctxproject: Option<String>,
+    /// Why the nearest `.ctxproject` couldn't be read.
+    ctxproject_error: Option<String>,
+    /// The git remote `origin`.
+    remote_url: Option<String>,
 }
 
 /// How long `GET /api/projects/detect` waits for the detection chain.
@@ -6873,6 +6885,10 @@ where
 /// (`.ctxproject` walk-up, then git remote lookup) and report which
 /// namespace a session started in that directory would land in.
 ///
+/// With `client_read=true` the caller has read the directory and sends its
+/// [`Clues`](crate::project::Clues); the hub only resolves them against the
+/// registry, so this works for a caller on another machine.
+///
 /// `200` with `status` `found` / `not_found` / `registry_unavailable` is an
 /// answer. Anything else means detection did not finish — `500` `error`,
 /// `503` `busy`, `504` `timeout` — and the body's `error` says why. Callers
@@ -6884,9 +6900,20 @@ async fn detect_project_handler(
     use crate::project::DetectResult;
     let db = s.db_path.clone();
     let cwd = q.cwd.clone();
+    let clues = q.client_read.then(|| crate::project::Clues {
+        ctxproject: q.ctxproject.clone().filter(|id| !id.trim().is_empty()),
+        ctxproject_error: q.ctxproject_error.clone(),
+        remote_url: q.remote_url.clone().filter(|url| !url.trim().is_empty()),
+    });
     // Detection shells out to git — keep it off the async runtime.
     let run = run_detect_bounded(
-        move || crate::project::detect_project(std::path::Path::new(&cwd), db.as_deref()),
+        move || {
+            let cwd = std::path::Path::new(&cwd);
+            match clues {
+                Some(clues) => crate::project::resolve_clues(cwd, db.as_deref(), &clues),
+                None => crate::project::detect_project(cwd, db.as_deref()),
+            }
+        },
         DETECT_TIMEOUT,
         &s.detects_in_flight,
         MAX_DETECTS_IN_FLIGHT,

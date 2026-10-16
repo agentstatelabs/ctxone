@@ -252,16 +252,22 @@ is how plans and branches turn up "not found". The text after the colon says
 why. Exit codes: `75` timed out, `76` the Hub reported an error, `69` Hub
 unreachable.
 
-**Cause A — macOS is showing a privacy prompt for `ctxone-hub`** (`project
-detection did not finish within 3s`). Common right after `brew upgrade`: macOS
-treats the upgraded binary as a new app, and the first time it reads a repo
-under `~/Documents`, `~/Desktop` or `~/Downloads` the read blocks until the
-prompt is answered. Find the "ctxone-hub would like to access files in your
-Documents folder" dialog (it may be behind other windows) and click **Allow**.
+**Cause A — macOS is showing a privacy prompt** (`reading <dir> (its
+.ctxproject and git remote) took over 3s`, or `project detection did not
+finish within 3s`). `ctx` reads the directory's `.ctxproject` and git remote
+itself, and the first time an app macOS hasn't seen reads a repo under
+`~/Documents`, `~/Desktop` or `~/Downloads`, the read blocks until the prompt
+is answered. The prompt names the app running `ctx`: your terminal, or
+`ctxone-hub` when its background session sync runs `ctx`. A Hub older than
+your `ctx` (or an older `ctx`) has the Hub read the directory instead, so the
+prompt is for `ctxone-hub`; that is common right after `brew upgrade`, since
+macOS treats the upgraded binary as a new app. Find the "… would like to
+access files in your Documents folder" dialog (it may be behind other
+windows) and click **Allow**.
 
 **Cause B — the prompt was denied** (`cannot read …/.ctxproject: Operation not
-permitted`). Grant access in **System Settings → Privacy & Security → Files and
-Folders → ctxone-hub** (or add it under **Full Disk Access**), then retry.
+permitted`). Grant that app access in **System Settings → Privacy & Security →
+Files and Folders** (or add it under **Full Disk Access**), then retry.
 
 **Cause C — the Hub isn't running** (`hub unreachable`). See
 [section 1](#1-hub-unreachable-httplocalhost3001).

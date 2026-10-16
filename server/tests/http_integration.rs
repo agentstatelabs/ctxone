@@ -1714,6 +1714,128 @@ async fn project_detect_unreadable_marker_is_an_error_not_not_found() {
     );
 }
 
+/// Percent-encode a query value (everything but RFC 3986's unreserved set).
+fn query_value(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+fn client_detect_uri(cwd: &str, clues: &[(&str, &str)]) -> String {
+    let mut uri = format!(
+        "/api/projects/detect?cwd={}&client_read=true",
+        query_value(cwd)
+    );
+    for (k, v) in clues {
+        uri.push_str(&format!("&{k}={}", query_value(v)));
+    }
+    uri
+}
+
+/// `ctx` reads the directory and sends what it found; the hub resolves it for
+/// a directory that doesn't exist on the hub's machine.
+#[tokio::test]
+async fn project_detect_resolves_a_clients_clues() {
+    let (_dir, _repo, router) = sqlite_router();
+    let (status, _) = call_json(
+        router.clone(),
+        post_json(
+            "/api/projects",
+            json!({ "id": "remote-proj", "remote_url": "git@git.example.com:g/app.git" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let cwd = "/srv/on-another-machine/app";
+
+    let (status, body) = call_json(
+        router.clone(),
+        get(&client_detect_uri(cwd, &[("ctxproject", "remote-proj")])),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "found");
+    assert_eq!(body["via"], "ctxproject");
+    assert_eq!(body["namespace"], "remote-proj");
+
+    let (status, body) = call_json(
+        router.clone(),
+        get(&client_detect_uri(
+            cwd,
+            &[("remote_url", "git@git.example.com:g/app.git")],
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["via"], "remote");
+    assert_eq!(body["remote_url"], "git@git.example.com:g/app");
+
+    let (status, body) = call_json(router.clone(), get(&client_detect_uri(cwd, &[]))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "not_found");
+}
+
+/// With `client_read`, the hub trusts the client's reading and reads nothing
+/// itself, even a marker it could see.
+#[tokio::test]
+async fn project_detect_with_client_read_ignores_the_hubs_filesystem() {
+    let (_dir, _repo, router) = sqlite_router();
+    let (status, _) = call_json(
+        router.clone(),
+        post_json("/api/projects", json!({ "id": "on-hub-disk" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join(".ctxproject"), "on-hub-disk\n").unwrap();
+    let cwd = tmp.path().to_str().unwrap();
+
+    // An older client: the hub reads the marker itself.
+    let (_, body) = call_json(
+        router.clone(),
+        get(&format!("/api/projects/detect?cwd={}", query_value(cwd))),
+    )
+    .await;
+    assert_eq!(body["status"], "found", "{body}");
+
+    // A client that read the directory and found nothing.
+    let (status, body) = call_json(router.clone(), get(&client_detect_uri(cwd, &[]))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "not_found", "{body}");
+}
+
+/// A marker the client couldn't read comes back as the client's error, not
+/// as `not_found`.
+#[tokio::test]
+async fn project_detect_passes_on_a_clients_unreadable_marker() {
+    let (_dir, _repo, router) = sqlite_router();
+    let (status, body) = call_json(
+        router.clone(),
+        get(&client_detect_uri(
+            "/r",
+            &[(
+                "ctxproject_error",
+                "cannot read /r/.ctxproject: Permission denied",
+            )],
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(body["status"], "error");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("/r/.ctxproject"),
+        "{body}"
+    );
+}
+
 #[tokio::test]
 async fn projects_require_sqlite_backend() {
     // The default memory-backed test router has no db_path.
