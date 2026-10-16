@@ -91,6 +91,19 @@ build:
 
 test:
   stage: test
+  # Postgres for the hub's Postgres tables (server/tests/postgres_hub_tables.rs).
+  # Without TEST_DATABASE_URL those tests skip. The alias resolves on both the
+  # docker and kubernetes executors.
+  services:
+    - name: postgres:16
+      alias: postgres
+  variables:
+    POSTGRES_USER: ctx
+    POSTGRES_PASSWORD: ctx
+    POSTGRES_DB: ctx_test
+    TEST_DATABASE_URL: postgres://ctx:ctx@postgres:5432/ctx_test
+    # Fail rather than skip if the database is ever missing.
+    CTXONE_REQUIRE_POSTGRES: "1"
   script:
     - cargo test --workspace --locked
 

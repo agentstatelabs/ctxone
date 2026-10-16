@@ -11,6 +11,9 @@ use std::sync::{Mutex, RwLock};
 
 use rusqlite::{Connection as SqliteConn, params as sqlite_params};
 
+use crate::hub_store::{HubStore, PgStore, pg_error};
+use agentstategraph_storage::PostgresStorage;
+
 use lru::LruCache;
 
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -878,19 +881,38 @@ impl SessionRegistry {
     /// as data corruption rather than a deletion.
     ///
     /// Returns whether the session was present in memory.
-    pub fn remove(&self, id: &str, db_path: Option<&str>) -> bool {
+    pub fn remove(&self, id: &str, store: Option<&HubStore>) -> bool {
         let existed = {
             let mut w = self.sessions.lock().expect("sessions lock");
             w.pop(id).is_some()
         };
-        if let Some(db) = db_path
-            && let Ok(conn) = SqliteConn::open(db)
-        {
-            // Best-effort: a missing table just means nothing was persisted.
-            let _ = conn.execute(
-                "DELETE FROM ctxone_sessions WHERE session_id = ?1",
-                rusqlite::params![id],
-            );
+        match store {
+            Some(HubStore::Sqlite(db)) => {
+                if let Ok(conn) = SqliteConn::open(db) {
+                    // Best-effort: a missing table just means nothing was persisted.
+                    let _ = conn.execute(
+                        "DELETE FROM ctxone_sessions WHERE session_id = ?1",
+                        rusqlite::params![id],
+                    );
+                }
+            }
+            Some(HubStore::Postgres(pg)) => {
+                let (pool, tenant, id) = (pg.pool(), pg.tenant().to_string(), id.to_string());
+                let removed = PostgresStorage::run(async move {
+                    let client = pool.get().await.map_err(|e| e.to_string())?;
+                    client
+                        .execute(
+                            "DELETE FROM ctxone_sessions WHERE tenant_id = $1 AND session_id = $2",
+                            &[&tenant, &id],
+                        )
+                        .await
+                        .map_err(|e| pg_error(&e))
+                });
+                if let Err(e) = removed {
+                    tracing::warn!(error = %e, "session stats: delete from postgres failed");
+                }
+            }
+            None => {}
         }
         existed
     }
@@ -1244,6 +1266,167 @@ impl SessionRegistry {
             }
         }
         tracing::debug!(sessions = written, "session stats flushed to db");
+    }
+
+    /// Load persisted session stats from the hub's store into a fresh registry.
+    pub fn load(store: &HubStore) -> Self {
+        match store {
+            HubStore::Sqlite(db) => Self::load_from_db(db),
+            HubStore::Postgres(pg) => Self::load_from_pg(pg),
+        }
+    }
+
+    /// Upsert every in-memory session into the hub's store. Best-effort, like
+    /// [`flush_to_db`](Self::flush_to_db): errors are logged.
+    pub fn flush(&self, store: &HubStore) {
+        match store {
+            HubStore::Sqlite(db) => self.flush_to_db(db),
+            HubStore::Postgres(pg) => self.flush_to_pg(pg),
+        }
+    }
+
+    /// [`load_from_db`](Self::load_from_db) for a Postgres hub: this tenant's
+    /// rows of `ctxone_sessions` (created by [`PgStore::new`]).
+    pub fn load_from_pg(pg: &PgStore) -> Self {
+        let registry = Self::new();
+        let (pool, tenant) = (pg.pool(), pg.tenant().to_string());
+        let rows = PostgresStorage::run(async move {
+            let client = pool.get().await.map_err(|e| e.to_string())?;
+            client
+                .query(
+                    "SELECT session_id, tokens_sent, tokens_saved,
+                            llm_input_tokens, llm_output_tokens, llm_cache_read_tokens,
+                            llm_cache_create_tokens, llm_call_count, last_model, last_provider,
+                            extra_tokens, by_model
+                     FROM ctxone_sessions WHERE tenant_id = $1",
+                    &[&tenant],
+                )
+                .await
+                .map_err(|e| pg_error(&e))
+        });
+        let rows = match rows {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "session stats: postgres load failed; starting empty");
+                return registry;
+            }
+        };
+        {
+            let mut lru = registry.sessions.lock().expect("sessions lock");
+            for row in &rows {
+                // Counters are BIGINT; a negative value can't come from us.
+                let n = |i: usize| row.get::<_, i64>(i).max(0) as u64;
+                // The same degrade-to-empty policy as the SQLite load.
+                let extra = row
+                    .get::<_, Option<String>>(10)
+                    .and_then(|s| serde_json::from_str::<BTreeMap<String, u64>>(&s).ok())
+                    .unwrap_or_default();
+                let by_model = row
+                    .get::<_, Option<String>>(11)
+                    .and_then(|s| serde_json::from_str::<BTreeMap<String, ModelUsage>>(&s).ok())
+                    .unwrap_or_default();
+                let stats = Arc::new(SessionStats::with_values(
+                    n(1),
+                    n(2),
+                    n(3),
+                    n(4),
+                    n(5),
+                    n(6),
+                    n(7),
+                    row.get(8),
+                    row.get(9),
+                    extra,
+                    by_model,
+                ));
+                lru.put(row.get::<_, String>(0), stats);
+            }
+        }
+        tracing::info!(sessions = rows.len(), "session stats loaded from postgres");
+        registry
+    }
+
+    /// [`flush_to_db`](Self::flush_to_db) for a Postgres hub.
+    pub fn flush_to_pg(&self, pg: &PgStore) {
+        let snaps = self.snapshot_all();
+        if snaps.is_empty() {
+            return;
+        }
+        let (pool, tenant) = (pg.pool(), pg.tenant().to_string());
+        let flushed = PostgresStorage::run(async move {
+            let client = pool.get().await.map_err(|e| e.to_string())?;
+            let mut written = 0usize;
+            for s in &snaps {
+                // NULL rather than "{}", as in the SQLite table.
+                let extra = (!s.extra_tokens.is_empty())
+                    .then(|| serde_json::to_string(&s.extra_tokens).ok())
+                    .flatten();
+                let by_model = (!s.llm_by_model.is_empty())
+                    .then(|| serde_json::to_string(&s.llm_by_model).ok())
+                    .flatten();
+                let counts = [
+                    s.session_tokens_used,
+                    s.session_tokens_saved,
+                    s.llm_input_tokens,
+                    s.llm_output_tokens,
+                    s.llm_cache_read_tokens,
+                    s.llm_cache_create_tokens,
+                    s.llm_call_count,
+                ]
+                .map(|n| i64::try_from(n).unwrap_or(i64::MAX));
+                let result = client
+                    .execute(
+                        "INSERT INTO ctxone_sessions
+                            (tenant_id, session_id, tokens_sent, tokens_saved,
+                             llm_input_tokens, llm_output_tokens, llm_cache_read_tokens,
+                             llm_cache_create_tokens, llm_call_count, last_model, last_provider,
+                             extra_tokens, by_model, updated_at)
+                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
+                                 to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))
+                         ON CONFLICT (tenant_id, session_id) DO UPDATE SET
+                            tokens_sent             = excluded.tokens_sent,
+                            tokens_saved            = excluded.tokens_saved,
+                            llm_input_tokens        = excluded.llm_input_tokens,
+                            llm_output_tokens       = excluded.llm_output_tokens,
+                            llm_cache_read_tokens   = excluded.llm_cache_read_tokens,
+                            llm_cache_create_tokens = excluded.llm_cache_create_tokens,
+                            llm_call_count          = excluded.llm_call_count,
+                            last_model              = excluded.last_model,
+                            last_provider           = excluded.last_provider,
+                            extra_tokens            = excluded.extra_tokens,
+                            by_model                = excluded.by_model,
+                            updated_at              = excluded.updated_at",
+                        &[
+                            &tenant,
+                            &s.session_id,
+                            &counts[0],
+                            &counts[1],
+                            &counts[2],
+                            &counts[3],
+                            &counts[4],
+                            &counts[5],
+                            &counts[6],
+                            &s.last_model,
+                            &s.last_provider,
+                            &extra,
+                            &by_model,
+                        ],
+                    )
+                    .await;
+                match result {
+                    Ok(_) => written += 1,
+                    Err(e) => tracing::warn!(
+                        session = %s.session_id,
+                        error = %pg_error(&e),
+                        "session stats: postgres upsert failed"
+                    ),
+                }
+            }
+            Ok::<_, String>(written)
+        });
+        match flushed {
+            Ok(written) => tracing::debug!(sessions = written, "session stats flushed to postgres"),
+            Err(e) => tracing::warn!(error = %e, "session stats: postgres flush failed"),
+        }
     }
 }
 

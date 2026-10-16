@@ -10,6 +10,7 @@ pub mod backup;
 pub mod code_tools;
 pub mod help;
 pub mod http;
+pub mod hub_store;
 pub mod lens;
 pub mod lockfile;
 pub mod mcp_http;

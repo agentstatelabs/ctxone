@@ -553,6 +553,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // all of them. v1.1.0 scopes an epoch to its owning workspace, so a seal
     // now binds only the workspace that made it — which is what the guard was
     // always meant to do.
+    // A Postgres hub keeps its project registry and session statistics in
+    // `ctxone_*` tables on the storage's own pool; captured here because the
+    // storage itself is boxed into the repository.
+    let mut postgres_tables: Option<ctxone_hub::hub_store::PgStore> = None;
     let repo: Arc<Repository> = match storage_type {
         "memory" => {
             info!(storage = "memory", "Storage: in-memory SQLite (ephemeral)");
@@ -575,6 +579,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 agentstategraph_storage::PostgresStorage::connect_tenant(&database_url, &tenant_id)
                     .await
             })?;
+            match ctxone_hub::hub_store::PgStore::new(&storage) {
+                Ok(tables) => postgres_tables = Some(tables),
+                Err(e) => {
+                    error!(error = %e, "could not set up the hub's Postgres tables");
+                    std::process::exit(1);
+                }
+            }
             Arc::new(Repository::new(Box::new(storage)))
         }
         _ => {
@@ -617,6 +628,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     repo.init()?;
+
+    // Where the project registry and session statistics live: the SQLite file,
+    // or the `ctxone_*` tables of a Postgres hub. None in memory mode.
+    let hub_store: Option<ctxone_hub::hub_store::HubStore> = match storage_type {
+        "sqlite" => Some(ctxone_hub::hub_store::HubStore::Sqlite(db_path.clone())),
+        "postgres" => postgres_tables
+            .clone()
+            .map(ctxone_hub::hub_store::HubStore::Postgres),
+        _ => None,
+    };
 
     // Run ASG-level schema migrations first — the substrate's
     // /_meta/schema_version must be current before CTXone starts
@@ -795,13 +816,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // Session registry: load persisted stats from SQLite (if sqlite storage),
-        // so token savings survive hub restarts. Falls back to empty on memory/pg.
-        let sessions = Arc::new(if storage_type == "sqlite" {
-            info!("Loading persisted session stats from db");
-            memory_tools::SessionRegistry::load_from_db(&db_path)
-        } else {
-            memory_tools::SessionRegistry::new()
+        // Session registry: load persisted stats (SQLite file or Postgres
+        // tables), so token savings survive hub restarts. Empty in memory mode.
+        let sessions = Arc::new(match &hub_store {
+            Some(store) => {
+                info!("Loading persisted session stats");
+                memory_tools::SessionRegistry::load(store)
+            }
+            None => memory_tools::SessionRegistry::new(),
         });
 
         // Loopback base URL the hub hands to `ctx ingest-session --all` for
@@ -855,6 +877,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ctx_binary: ctx_binary.clone(),
             self_base_url: Some(self_base_url),
             autosync: Some(autosync.clone()),
+            postgres_tables: postgres_tables.clone(),
         };
 
         // Values for the background session-sweep task (below). Cloned before
@@ -864,7 +887,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let sync_autosync = autosync.clone();
         let sync_auth = http::AuthTokens::new(auth_token.clone(), auth_token_file.clone());
 
-        // Capture db_path for background flush tasks.
+        // The SQLite file, for backups and the integrity baseline (session
+        // stats flush through `hub_store`).
         let flush_db_path = if storage_type == "sqlite" {
             Some(db_path.clone())
         } else {
@@ -883,17 +907,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     lens_mode,
                 );
 
-                // Spawn background flush task: writes session stats to SQLite every 30s.
-                if let Some(ref path) = flush_db_path {
+                // Spawn background flush task: writes session stats every 30s.
+                if let Some(ref store) = hub_store {
                     let sessions_bg = sessions.clone();
-                    let path_bg = path.clone();
+                    let store_bg = store.clone();
                     tokio::spawn(async move {
                         let mut interval =
                             tokio::time::interval(std::time::Duration::from_secs(30));
                         interval.tick().await; // skip the immediate first tick
                         loop {
                             interval.tick().await;
-                            sessions_bg.flush_to_db(&path_bg);
+                            sessions_bg.flush(&store_bg);
                         }
                     });
                 }
@@ -1022,9 +1046,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 // Graceful shutdown on Ctrl-C / SIGTERM: flush sessions before exit.
                 let result = serve.with_graceful_shutdown(shutdown_signal()).await;
-                if let Some(ref path) = flush_db_path {
-                    info!("Flushing session stats to db on shutdown");
-                    sessions.flush_to_db(path);
+                if let Some(ref store) = hub_store {
+                    info!("Flushing session stats on shutdown");
+                    sessions.flush(store);
                 }
                 if let Err(e) = result {
                     error!(error = %e, "HTTP server error");
@@ -1049,9 +1073,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (namespace, namespace_explicit): (String, bool) = match namespace_flag.clone() {
             Some(ns) => (ns, true),
             None => {
-                let detected = if storage_type == "sqlite" {
+                let detected = if hub_store.is_some() {
                     std::env::current_dir().ok().and_then(|cwd| {
-                        match ctxone_hub::project::detect_project(&cwd, Some(&db_path)) {
+                        match ctxone_hub::project::detect_project(&cwd, hub_store.as_ref()) {
                             ctxone_hub::project::DetectResult::FoundByFile {
                                 project_id,
                                 namespace_id,
@@ -1154,7 +1178,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         //   3. share that one `Arc<SessionStats>` between a `SessionRegistry`
         //      and the `CtxOneServer`, then flush it periodically and on exit
         //      using the same machinery the HTTP hub uses.
-        // Skipped entirely for memory/postgres — no db_path to persist to.
+        // Skipped in memory mode — nowhere to persist to.
         // Attribution key for live recall + LLM-usage counters. We prefer an
         // explicit CTX_SESSION, then the host agent's own session id when it
         // exposes one (CLAUDE_SESSION_ID today; add siblings as other agents
@@ -1181,22 +1205,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         info!(session = %mcp_session_id, "MCP session-stats id (savings accounting)");
 
-        // (registry, shared session Arc, db_path). None on memory/postgres.
+        // (registry, shared session Arc, where to persist). None in memory mode.
         let session_persistence: Option<(
             Arc<memory_tools::SessionRegistry>,
             Arc<memory_tools::SessionStats>,
-            String,
-        )> = if storage_type == "sqlite" {
-            info!("Loading persisted session stats from db (stdio)");
-            let registry = Arc::new(memory_tools::SessionRegistry::load_from_db(&db_path));
+            ctxone_hub::hub_store::HubStore,
+        )> = hub_store.clone().map(|store| {
+            info!("Loading persisted session stats (stdio)");
+            let registry = Arc::new(memory_tools::SessionRegistry::load(&store));
             // get_or_create returns the loaded Arc when the row existed (seeded
             // with prior totals), else a fresh zeroed one — either way the
             // server and registry now share this exact Arc.
             let session = registry.get_or_create(&mcp_session_id);
-            Some((registry, session, db_path.clone()))
-        } else {
-            None
-        };
+            (registry, session, store)
+        });
 
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1227,16 +1249,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // Periodic flush: mirror the HTTP hub's 30s background task so
                 // long-lived stdio sessions persist savings even before exit.
-                if let Some((ref registry, _, ref path)) = session_persistence {
+                if let Some((ref registry, _, ref store)) = session_persistence {
                     let registry_bg = registry.clone();
-                    let path_bg = path.clone();
+                    let store_bg = store.clone();
                     tokio::spawn(async move {
                         let mut interval =
                             tokio::time::interval(std::time::Duration::from_secs(30));
                         interval.tick().await; // skip the immediate first tick
                         loop {
                             interval.tick().await;
-                            registry_bg.flush_to_db(&path_bg);
+                            registry_bg.flush(&store_bg);
                         }
                     });
                 }
@@ -1255,9 +1277,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 // Graceful shutdown flush: persist final savings before exit.
-                if let Some((ref registry, _, ref path)) = session_persistence {
-                    info!("Flushing session stats to db on stdio shutdown");
-                    registry.flush_to_db(path);
+                if let Some((ref registry, _, ref store)) = session_persistence {
+                    info!("Flushing session stats on stdio shutdown");
+                    registry.flush(store);
                 }
                 Ok::<(), Box<dyn std::error::Error>>(())
             })?;
