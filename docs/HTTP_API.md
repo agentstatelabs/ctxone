@@ -954,18 +954,33 @@ Origin guard below apply to `/mcp` just as they do to `/api/*`.
 The HTTP surface (REST **and** `/mcp`) is guarded by an **optional bearer
 token**:
 
-- Set it with `--auth-token <TOK>` or `CTXONE_AUTH_TOKEN=<TOK>`.
+- Set it with `--auth-token <TOK>` or `CTXONE_AUTH_TOKEN=<TOK>`, or keep tokens
+  in a file with `--auth-token-file <PATH>` or `CTXONE_AUTH_TOKEN_FILE` (not
+  both). The file holds one token per line (blank lines and `#` comments are
+  ignored), every listed token is accepted, and the hub re-reads it every
+  second, so tokens rotate without a restart: add the new token, move clients
+  to it, then remove the old line. An empty file accepts no token. If a later
+  read fails, the tokens last read stay in force; a file that can't be read at
+  startup stops the hub.
 - When set, **non-loopback** requests must send `Authorization: Bearer <TOK>`;
-  requests are rejected with **401** otherwise. **Loopback peers are always
-  exempt**, so a hub bound to `127.0.0.1` needs no token and local tools keep
-  working.
+  requests are rejected with **401** otherwise. **Loopback peers are exempt** by
+  default, so a hub bound to `127.0.0.1` needs no token and local tools keep
+  working. `--require-auth-on-loopback` (or `CTXONE_REQUIRE_AUTH_ON_LOOPBACK=1`)
+  ends the exemption, for a hub fronted by a proxy or sidecar on 127.0.0.1,
+  where every request arrives from loopback. It needs a token, and with it the
+  hub hands its own `ctx` (session sync and import) the token as `CTX_TOKEN`.
+  Lens can't send a token, so it can't load data then.
 - When unset, there is no authentication. If the hub is bound to a non-loopback
   interface, it logs a warning that REST and `/mcp` are reachable unauthenticated
   — set a token before exposing it beyond loopback.
 
 Cross-origin requests are additionally guarded (see the [intro](#http-api-reference)):
-same-origin always passes; a foreign `Origin` is rejected unless allow-listed
-via `--allowed-origin` / `CTXONE_ALLOWED_ORIGINS` (comma-separated).
+same-origin passes; a foreign `Origin` is rejected unless allow-listed via
+`--allowed-origin` / `CTXONE_ALLOWED_ORIGINS` (comma-separated). With
+`--strict-origin` (or `CTXONE_STRICT_ORIGIN=1`) only the listed origins pass:
+an `Origin` matching the request's `Host` isn't enough, since behind an ingress
+or under DNS rebinding `Host` is whatever the caller sent. A hosted hub lists
+its Lens origin and sets this.
 
 For multi-tenant / keyed isolation beyond a single shared token, the engine's
 `agentstategraph-mcp` binary supports `--auth` and `--keys-file`; CTXone Hub's
