@@ -184,8 +184,12 @@ Override per agent with `--path` (topology C). A bare `ctxone-hub` with no
 | `CTX_NAMESPACE` | Project namespace for CLI/MCP scoping |
 | `CTX_BRANCH` | Default memory branch/ref |
 | `CTX_TOKEN` | Bearer token the `ctx` CLI sends (for a remote authed hub) |
+| `CTX_REMOTE_TURNS` | `1` lets `ctx` send raw session turns to a hub that isn't on this machine (overrides the `remote_turns` config key; see below) |
 | `CTXONE_AUTH_TOKEN` | Same as `--auth-token` (bearer guarding REST + `/mcp`) |
+| `CTXONE_AUTH_TOKEN_FILE` | Same as `--auth-token-file` (tokens one per line, re-read every second) |
+| `CTXONE_REQUIRE_AUTH_ON_LOOPBACK` | `1` = same as `--require-auth-on-loopback` (loopback peers need the token too) |
 | `CTXONE_ALLOWED_ORIGINS` | Comma/space-separated extra allowed browser origins |
+| `CTXONE_STRICT_ORIGIN` | `1` = same as `--strict-origin` (only the allowed origins, never same-origin by `Host`) |
 | `CTXONE_BACKUP_KEEP` | Startup snapshots to retain (default 5) |
 | `CTXONE_BACKUP_INTERVAL_SECS` | Background VACUUM-INTO snapshot interval (default 1800; 0 disables) |
 | `RUST_LOG` | Log level (`info` default) |
@@ -202,14 +206,24 @@ ctxone-hub --http --lens --path ~/.ctxone/memory.db --auth-token "$(openssl rand
 ```
 
 Behaviour:
-- **Loopback peers (127.0.0.1/::1) are always exempt** — local CLI, Lens, and
-  same-host agents keep working with no token.
+- **Loopback peers (127.0.0.1/::1) are exempt** — local CLI, Lens, and
+  same-host agents keep working with no token — unless
+  `--require-auth-on-loopback` is set (see *Hosted hub* below).
 - **Non-loopback requests must send** `Authorization: Bearer <token>` (else 401).
 - Setting a token also relaxes `/mcp`'s loopback-only Host check so authenticated
   remote clients can connect (the bearer becomes the gate).
 
 How each client gets the token:
 - **`ctx` CLI** — pass `--token <TOK>` or set `CTX_TOKEN` (only for a remote hub).
+
+Raw session turns stay on the machine that recorded them. When `ctx`'s hub isn't
+on this machine (anything but `localhost`, a `.localhost` name, 127.x or `::1`),
+`ctx ingest-session` and `ctx session import` send each session's title,
+metadata, provenance and extracted memories, and the Stop-hook
+`ctx capture-turn` sends token counts and extracted memories, but none of them
+sends the turns. An import's per-model token usage is derived from the turns,
+so it doesn't show on that hub. To send turns as well, run
+`ctx config set remote_turns true`, or set `CTX_REMOTE_TURNS=1` for one command.
 - **AI tools** — `ctx init --transport http` writes it into each tool's config:
 - **`ctx init --transport http --auth-token <TOK>`** — embeds a literal bearer:
   a `headers` entry for native http (Claude Code/Cursor/VS Code) and a
@@ -220,6 +234,41 @@ How each client gets the token:
   entries reference `Bearer ${VAR}` (for clients that expand env vars). The
   mcp-remote bridge can't expand env vars, so Claude Desktop needs the literal
   `--auth-token` form.
+
+### Rotating tokens
+
+Keep tokens in a file instead of on the command line, one per line:
+
+```bash
+ctxone-hub --http --auth-token-file /etc/ctxone/tokens
+```
+
+The hub re-reads the file every second and accepts every token in it, so a
+rotation needs no restart: add the new token as a line, switch clients to it,
+then delete the old line. An empty file accepts no token. A Kubernetes secret
+mounted as a volume works as is, since its updates swap the file atomically; one
+mounted with `subPath` never updates.
+
+### Hosted hub
+
+A hub reached over the internet, behind an ingress, should also stop trusting
+loopback and `Host`:
+
+```bash
+ctxone-hub --http --storage postgres \
+  --auth-token-file /run/secrets/ctxone-tokens \
+  --require-auth-on-loopback \
+  --strict-origin --allowed-origin https://alice.ctxone.example
+```
+
+- `--require-auth-on-loopback`: an ingress or sidecar on 127.0.0.1 makes every
+  request arrive from loopback, which would otherwise skip the token. The hub
+  refuses this flag without a token, and hands its own `ctx` subprocesses the
+  token as `CTX_TOKEN`.
+- `--strict-origin`: browsers may call the API only from the listed origins.
+  Without it, an `Origin` matching the request's `Host` counts as same-origin,
+  and behind an ingress, or under DNS rebinding, `Host` is whatever the caller
+  sent.
 
 ### Cross-origin (CSRF / DNS-rebinding)
 

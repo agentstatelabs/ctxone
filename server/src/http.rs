@@ -67,17 +67,33 @@ pub struct HubConfig {
     /// `ctxone-hub --agent-id`). Only read when `mcp_http` is true.
     pub agent_id: String,
     /// Optional bearer token guarding the whole HTTP surface (REST + `/mcp`).
-    /// When `Some`, non-loopback requests must send `Authorization: Bearer
-    /// <token>`; loopback peers are always exempt. When `None`, no per-request
-    /// auth is enforced (the binary warns at startup if bound non-loopback).
-    /// See [`crate::mcp_http`] and the auth middleware in this module.
+    /// When set, requests must send `Authorization: Bearer <token>`, except
+    /// from loopback peers unless `require_auth_on_loopback` is set. With
+    /// neither this nor `auth_token_file`, no per-request auth is enforced (the
+    /// binary warns at startup if bound non-loopback). See [`crate::mcp_http`]
+    /// and the auth middleware in this module.
     pub auth_token: Option<String>,
+    /// Bearer tokens read from a file and re-read while the hub runs, so they
+    /// rotate without a restart (see [`AuthTokenFile`]). Accepted alongside
+    /// `auth_token`. From `--auth-token-file`.
+    pub auth_token_file: Option<AuthTokenFile>,
+    /// Make loopback peers send the bearer token too. Off by default, so the
+    /// local CLI, Lens and agents work without one; turn it on when a proxy or
+    /// sidecar on 127.0.0.1 fronts the hub, since every request then arrives
+    /// from loopback. No effect without a token. From
+    /// `--require-auth-on-loopback`.
+    pub require_auth_on_loopback: bool,
     /// Extra browser origins allowed to call the API (beyond same-origin, which
     /// is always allowed). A request carrying an `Origin` header that is neither
     /// same-origin nor in this list is rejected (CSRF/DNS-rebinding guard), and
     /// only these origins get CORS response headers. Non-browser clients (CLI,
     /// native MCP) send no `Origin` and are unaffected. From `--allowed-origin`.
     pub allowed_origins: Vec<String>,
+    /// Allow browser requests only from `allowed_origins`, never because the
+    /// `Origin` matches the request's `Host`. For a hosted hub: behind an
+    /// ingress, or under DNS rebinding, `Host` is whatever the caller sent.
+    /// From `--strict-origin`.
+    pub strict_origin: bool,
     /// Override path to the `ctx` CLI binary used by `POST /api/sessions/sync`
     /// to re-ingest local Claude Code transcripts. `None` → resolve `"ctx"` on
     /// PATH. From `--ctx-binary`.
@@ -186,6 +202,9 @@ pub struct HubState {
     pub ctx_binary: Option<String>,
     /// The hub's own loopback base URL, passed to `ctx ingest-session --all`.
     pub self_base_url: Option<String>,
+    /// The tokens the hub accepts, so its own `ctx` subprocesses can be given
+    /// one (`CTX_TOKEN`) and get through the auth it enforces.
+    pub ctx_auth: AuthTokens,
     /// Merges currently running, keyed by (namespace, target ref). See
     /// [`MergeGuard`].
     pub merges_in_flight: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
@@ -418,10 +437,159 @@ pub fn router_with_config(
     router_with_config_inner(repo, sessions, config, None)
 }
 
-/// State for the bearer-auth middleware: the configured token (if any).
+/// How often an [`AuthTokenFile`] is re-read.
+const TOKEN_FILE_RELOAD: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Bearer tokens read from a file: one per line, with blank lines and `#`
+/// comments ignored. The file is re-read at most once a second, so tokens
+/// rotate without a restart: add the new token as a line, move clients to it,
+/// then remove the old line. Every listed token is accepted, and an empty file
+/// accepts none. If a later read fails, the tokens last read stay in force and
+/// a warning is logged, so a passing error neither opens nor locks the hub; to
+/// revoke every token, empty the file rather than delete it.
+#[derive(Clone)]
+pub struct AuthTokenFile {
+    inner: Arc<TokenFileInner>,
+}
+
+struct TokenFileInner {
+    path: std::path::PathBuf,
+    reload: std::time::Duration,
+    state: std::sync::Mutex<TokenFileState>,
+}
+
+struct TokenFileState {
+    tokens: Vec<String>,
+    read_at: std::time::Instant,
+}
+
+impl std::fmt::Debug for AuthTokenFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The path only, never the tokens.
+        f.debug_struct("AuthTokenFile")
+            .field("path", &self.inner.path)
+            .finish_non_exhaustive()
+    }
+}
+
+impl AuthTokenFile {
+    /// Read `path` now, failing if it can't be read, and re-read it at most
+    /// once a second from then on.
+    pub fn open(path: impl Into<std::path::PathBuf>) -> std::io::Result<Self> {
+        Self::open_with_reload(path, TOKEN_FILE_RELOAD)
+    }
+
+    /// [`open`](Self::open) with another re-read interval (tests use zero).
+    pub fn open_with_reload(
+        path: impl Into<std::path::PathBuf>,
+        reload: std::time::Duration,
+    ) -> std::io::Result<Self> {
+        let path = path.into();
+        let tokens = read_token_file(&path)?;
+        Ok(Self {
+            inner: Arc::new(TokenFileInner {
+                path,
+                reload,
+                state: std::sync::Mutex::new(TokenFileState {
+                    tokens,
+                    read_at: std::time::Instant::now(),
+                }),
+            }),
+        })
+    }
+
+    /// The file's path.
+    pub fn path(&self) -> &std::path::Path {
+        &self.inner.path
+    }
+
+    /// The tokens in force, re-reading the file when it's due.
+    pub fn tokens(&self) -> Vec<String> {
+        let mut state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.read_at.elapsed() >= self.inner.reload {
+            state.read_at = std::time::Instant::now();
+            match read_token_file(&self.inner.path) {
+                Ok(tokens) => state.tokens = tokens,
+                Err(e) => warn!(
+                    path = %self.inner.path.display(),
+                    error = %e,
+                    "auth token file unreadable; keeping the tokens last read"
+                ),
+            }
+        }
+        state.tokens.clone()
+    }
+}
+
+fn read_token_file(path: &std::path::Path) -> std::io::Result<Vec<String>> {
+    Ok(std::fs::read_to_string(path)?
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(str::to_string)
+        .collect())
+}
+
+/// The bearer tokens the hub accepts: a fixed token (`--auth-token`) and the
+/// lines of a token file (`--auth-token-file`). Cheap to clone.
+#[derive(Clone, Default)]
+pub struct AuthTokens {
+    fixed: Option<Arc<String>>,
+    file: Option<AuthTokenFile>,
+}
+
+impl std::fmt::Debug for AuthTokens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Whether a fixed token is set, never its value.
+        f.debug_struct("AuthTokens")
+            .field("fixed", &self.fixed.is_some())
+            .field("file", &self.file)
+            .finish()
+    }
+}
+
+impl AuthTokens {
+    /// The tokens from `fixed` (an empty string counts as unset) and `file`.
+    pub fn new(fixed: Option<String>, file: Option<AuthTokenFile>) -> Self {
+        Self {
+            fixed: fixed.filter(|t| !t.is_empty()).map(Arc::new),
+            file,
+        }
+    }
+
+    /// Whether a token source is configured. Without one nothing is enforced.
+    pub fn is_configured(&self) -> bool {
+        self.fixed.is_some() || self.file.is_some()
+    }
+
+    /// Whether `presented` is a token the hub accepts right now.
+    pub fn accepts(&self, presented: &str) -> bool {
+        self.fixed
+            .as_deref()
+            .is_some_and(|t| constant_time_eq(presented, t))
+            || self
+                .file
+                .as_ref()
+                .is_some_and(|f| f.tokens().iter().any(|t| constant_time_eq(presented, t)))
+    }
+
+    /// A token for the hub's own `ctx` subprocesses, sent as `CTX_TOKEN`: the
+    /// fixed token, else the token file's first line.
+    pub fn for_children(&self) -> Option<String> {
+        self.fixed.as_deref().cloned().or_else(|| {
+            self.file
+                .as_ref()
+                .and_then(|f| f.tokens().into_iter().next())
+        })
+    }
+}
+
+/// State for the bearer-auth middleware.
 #[derive(Clone)]
 struct AuthState {
-    token: Option<Arc<String>>,
+    tokens: AuthTokens,
+    /// Let loopback peers through without a token (the default).
+    loopback_exempt: bool,
 }
 
 /// The authority (`host[:port]`) of an `Origin` header value, lowercased and
@@ -438,14 +606,15 @@ fn origin_authority(origin: &str) -> Option<String> {
 }
 
 /// Is this browser `Origin` allowed to call the hub? Same-origin (the Origin's
-/// authority equals the request `Host`) is always allowed; otherwise the origin
-/// must be in the configured allow-list. Non-browser clients send no `Origin`
-/// and never reach this check.
-fn origin_is_allowed(origin: &str, host: Option<&str>, allow: &[String]) -> bool {
+/// authority equals the request `Host`) is allowed unless `strict`; otherwise
+/// the origin must be in the configured allow-list. Non-browser clients send no
+/// `Origin` and never reach this check.
+fn origin_is_allowed(origin: &str, host: Option<&str>, allow: &[String], strict: bool) -> bool {
     match origin_authority(origin) {
         None => false, // opaque/`null` origin — never same-origin, never listed
         Some(auth) => {
-            if let Some(h) = host
+            if !strict
+                && let Some(h) = host
                 && auth == h.to_ascii_lowercase()
             {
                 return true; // same-origin
@@ -457,10 +626,12 @@ fn origin_is_allowed(origin: &str, host: Option<&str>, allow: &[String]) -> bool
     }
 }
 
-/// State for the Origin-guard middleware: the extra allowed origins.
+/// State for the Origin-guard middleware: the extra allowed origins, and
+/// whether only those are allowed.
 #[derive(Clone)]
 struct OriginState {
     allowed: Arc<Vec<String>>,
+    strict: bool,
 }
 
 /// Reject requests carrying a disallowed `Origin` — the CSRF / DNS-rebinding
@@ -482,7 +653,7 @@ async fn require_allowed_origin(
             .headers()
             .get(axum::http::header::HOST)
             .and_then(|v| v.to_str().ok());
-        if !origin_is_allowed(origin, host, &state.allowed) {
+        if !origin_is_allowed(origin, host, &state.allowed, state.strict) {
             return (
                 StatusCode::FORBIDDEN,
                 "cross-origin request rejected (add the origin with --allowed-origin)",
@@ -505,21 +676,22 @@ fn constant_time_eq(provided: &str, expected: &str) -> bool {
     diff == 0
 }
 
-/// Whole-surface bearer auth. Loopback peers are always exempt (local CLI,
-/// Lens, and same-host agents keep working tokenless). When a token is
-/// configured, every non-loopback request must carry `Authorization: Bearer
-/// <token>`. When no token is configured, nothing is enforced here (the binary
-/// warns at startup if it bound to a non-loopback address). A request whose peer
-/// address is unknown (no `ConnectInfo`) is treated as untrusted — fail closed.
+/// Whole-surface bearer auth. When a token is configured, every request must
+/// carry `Authorization: Bearer <token>`, except from loopback peers while they
+/// are exempt (the default: local CLI, Lens and same-host agents work
+/// tokenless; `--require-auth-on-loopback` ends that). When no token is
+/// configured, nothing is enforced here (the binary warns at startup if it
+/// bound to a non-loopback address). A request whose peer address is unknown
+/// (no `ConnectInfo`) is treated as untrusted — fail closed.
 async fn require_auth(
     State(auth): State<AuthState>,
     req: axum::extract::Request,
     next: Next,
 ) -> axum::response::Response {
-    let Some(token) = auth.token.as_deref() else {
+    if !auth.tokens.is_configured() {
         // No token configured → no per-request enforcement.
         return next.run(req).await;
-    };
+    }
 
     // Peer address is attached by `into_make_service_with_connect_info`. Absent
     // in unit tests (oneshot) and any misconfig → treat as non-loopback (fail
@@ -529,7 +701,7 @@ async fn require_auth(
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ci| ci.0.ip().is_loopback())
         .unwrap_or(false);
-    if is_loopback {
+    if is_loopback && auth.loopback_exempt {
         return next.run(req).await;
     }
 
@@ -540,7 +712,7 @@ async fn require_auth(
         .and_then(|s| s.strip_prefix("Bearer "));
 
     match presented {
-        Some(t) if constant_time_eq(t, token) => next.run(req).await,
+        Some(t) if auth.tokens.accepts(t) => next.run(req).await,
         _ => (
             StatusCode::UNAUTHORIZED,
             "missing or invalid bearer token (Authorization: Bearer <token>)",
@@ -560,6 +732,7 @@ fn router_with_config_inner(
     // Origin-guard middleware below additionally blocks such requests from
     // executing; this layer just supplies correct headers for allowed origins.
     let cors_allow = Arc::new(config.allowed_origins.clone());
+    let cors_strict = config.strict_origin;
     let cors = CorsLayer::new()
         .allow_origin(tower_http::cors::AllowOrigin::predicate(
             move |origin: &axum::http::HeaderValue, parts: &axum::http::request::Parts| {
@@ -569,7 +742,7 @@ fn router_with_config_inner(
                     .and_then(|v| v.to_str().ok());
                 origin
                     .to_str()
-                    .map(|o| origin_is_allowed(o, host, &cors_allow))
+                    .map(|o| origin_is_allowed(o, host, &cors_allow, cors_strict))
                     .unwrap_or(false)
             },
         ))
@@ -613,7 +786,7 @@ fn router_with_config_inner(
             // When a bearer token guards the surface, the auth middleware is the
             // real gate, so relax rmcp's loopback-only Host allow-list to let
             // authenticated remote clients reach /mcp.
-            config.auth_token.is_some(),
+            config.auth_token.is_some() || config.auth_token_file.is_some(),
             // Share the REST hub's session registry so MCP recall/savings land in
             // the same rows the process flushes to SQLite.
             sessions.clone(),
@@ -628,6 +801,7 @@ fn router_with_config_inner(
         asd_pool,
         ctx_binary: config.ctx_binary.clone(),
         self_base_url: config.self_base_url.clone(),
+        ctx_auth: AuthTokens::new(config.auth_token.clone(), config.auth_token_file.clone()),
         merges_in_flight: Arc::default(),
         detects_in_flight: Arc::default(),
         autosync: config
@@ -863,7 +1037,8 @@ fn router_with_config_inner(
     // unauthenticated non-loopback traffic is rejected before doing any work.
     // Added last = outermost layer. Guards REST + /mcp alike.
     let auth_state = AuthState {
-        token: config.auth_token.clone().map(Arc::new),
+        tokens: AuthTokens::new(config.auth_token.clone(), config.auth_token_file.clone()),
+        loopback_exempt: !config.require_auth_on_loopback,
     };
     router = router.layer(axum::middleware::from_fn_with_state(
         auth_state,
@@ -874,6 +1049,7 @@ fn router_with_config_inner(
     // requests before auth/rate-limit/routing. Whole-surface (REST + /mcp).
     let origin_state = OriginState {
         allowed: Arc::new(config.allowed_origins.clone()),
+        strict: config.strict_origin,
     };
     router = router.layer(axum::middleware::from_fn_with_state(
         origin_state,
@@ -6001,8 +6177,12 @@ async fn run_ingest_for_source(
     ctx_bin: &str,
     base_url: &str,
     source: &str,
+    token: Option<&str>,
 ) -> Result<(u64, u64, u64), (StatusCode, String)> {
     let mut cmd = tokio::process::Command::new(ctx_bin);
+    if let Some(t) = token {
+        cmd.env("CTX_TOKEN", t);
+    }
     cmd.arg("ingest-session")
         .arg("--all")
         .arg("--full-turn")
@@ -6124,9 +6304,13 @@ async fn run_ingest_for_source(
 /// binary is fatal (surfaced once); any other per-source failure (a timeout, an
 /// unavailable source) is logged and skipped so the rest still runs. Returns
 /// `(sessions, turns, tokens, elapsed_ms)`.
+///
+/// `token` is handed to each `ctx` as `CTX_TOKEN`, so the import gets through
+/// the hub's auth when loopback isn't exempt.
 pub async fn run_session_sync(
     ctx_bin: &str,
     base_url: &str,
+    token: Option<&str>,
 ) -> Result<(u64, u64, u64, u64), (StatusCode, String)> {
     let start = std::time::Instant::now();
     let (mut sessions, mut turns, mut tokens) = (0u64, 0u64, 0u64);
@@ -6134,7 +6318,7 @@ pub async fn run_session_sync(
     let mut any_ok = false;
 
     for source in SYNC_SOURCES {
-        match run_ingest_for_source(ctx_bin, base_url, source).await {
+        match run_ingest_for_source(ctx_bin, base_url, source, token).await {
             Ok((s, t, k)) => {
                 sessions += s;
                 turns += t;
@@ -6174,7 +6358,9 @@ async fn sync_sessions(
         .clone()
         .unwrap_or_else(|| "http://127.0.0.1:3001".to_string());
 
-    let (sessions, turns, tokens, elapsed_ms) = run_session_sync(&ctx_bin, &base_url).await?;
+    let child_token = s.ctx_auth.for_children();
+    let (sessions, turns, tokens, elapsed_ms) =
+        run_session_sync(&ctx_bin, &base_url, child_token.as_deref()).await?;
     info!(
         sessions,
         turns,
@@ -6206,8 +6392,15 @@ async fn sync_sessions(
 /// Run `ctx <args>` to completion with the sweep timeout, returning stdout.
 /// Centralises the spawn / not-found / timeout / non-zero-exit handling shared
 /// by discover/import/ignore so each handler is just its argument list.
-async fn run_ctx(ctx_bin: &str, args: &[String]) -> Result<String, (StatusCode, String)> {
+async fn run_ctx(
+    ctx_bin: &str,
+    args: &[String],
+    token: Option<&str>,
+) -> Result<String, (StatusCode, String)> {
     let mut cmd = tokio::process::Command::new(ctx_bin);
+    if let Some(t) = token {
+        cmd.env("CTX_TOKEN", t);
+    }
     cmd.args(args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -6289,7 +6482,7 @@ async fn discoverable_sessions(
         "--server".into(),
         base_url,
     ];
-    let stdout = run_ctx(&ctx_bin, &args).await?;
+    let stdout = run_ctx(&ctx_bin, &args, s.ctx_auth.for_children().as_deref()).await?;
     // The list is the last JSON array line (a "no sessions" run prints prose).
     let items: serde_json::Value = stdout
         .lines()
@@ -6344,7 +6537,7 @@ async fn import_sessions(
     args.push(base_url);
     args.push("--branch".into());
     args.push("main".into());
-    let stdout = run_ctx(&ctx_bin, &args).await?;
+    let stdout = run_ctx(&ctx_bin, &args, s.ctx_auth.for_children().as_deref()).await?;
     // `session import` fans out with --all semantics, so its final stdout line is
     // the machine-readable `{sessions,turns,tokens}` object.
     let summary = stdout
@@ -6395,7 +6588,7 @@ async fn session_skiplist_edit(
     let (ctx_bin, _base) = ctx_bin_and_base(s);
     let mut args: Vec<String> = vec!["session".into(), verb.into()];
     args.extend(ids.iter().cloned());
-    let stdout = run_ctx(&ctx_bin, &args).await?;
+    let stdout = run_ctx(&ctx_bin, &args, s.ctx_auth.for_children().as_deref()).await?;
     Ok(Json(serde_json::json!({
         "status": "ok",
         "verb": verb,

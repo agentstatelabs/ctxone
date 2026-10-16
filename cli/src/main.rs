@@ -296,6 +296,11 @@ struct CtxConfig {
     /// per-tool locations. Set by `--scan-dir`, reused on later syncs.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     scan_dirs: Vec<String>,
+    /// Send raw session turns to a hub that isn't on this machine. Off unless
+    /// set: turns stay here, and that hub gets each session's title, metadata,
+    /// provenance and extracted memories. `CTX_REMOTE_TURNS` overrides it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote_turns: Option<bool>,
 }
 
 impl CtxConfig {
@@ -361,9 +366,15 @@ impl CtxConfig {
                     .filter(|s| !s.is_empty())
                     .collect();
             }
+            "remote_turns" => {
+                self.remote_turns =
+                    Some(parse_bool(value).ok_or_else(|| {
+                        format!("remote_turns must be true or false, not {value:?}")
+                    })?);
+            }
             _ => {
                 return Err(format!(
-                    "unknown key: {} (expected server|branch|format|import_since|scan_dirs)",
+                    "unknown key: {} (expected server|branch|format|import_since|scan_dirs|remote_turns)",
                     key
                 ));
             }
@@ -386,8 +397,9 @@ impl CtxConfig {
                 .to_string()),
             "import_since" => Ok(self.import_since.clone().unwrap_or_default()),
             "scan_dirs" => Ok(self.scan_dirs.join(",")),
+            "remote_turns" => Ok(self.remote_turns.map(|b| b.to_string()).unwrap_or_default()),
             _ => Err(format!(
-                "unknown key: {} (expected server|branch|format|import_since|scan_dirs)",
+                "unknown key: {} (expected server|branch|format|import_since|scan_dirs|remote_turns)",
                 key
             )),
         }
@@ -400,15 +412,47 @@ impl CtxConfig {
             "format" => self.format = None,
             "import_since" => self.import_since = None,
             "scan_dirs" => self.scan_dirs.clear(),
+            "remote_turns" => self.remote_turns = None,
             _ => {
                 return Err(format!(
-                    "unknown key: {} (expected server|branch|format|import_since|scan_dirs)",
+                    "unknown key: {} (expected server|branch|format|import_since|scan_dirs|remote_turns)",
                     key
                 ));
             }
         }
         Ok(())
     }
+}
+
+/// `true`/`false` and the usual spellings (`1`/`0`, `yes`/`no`, `on`/`off`).
+fn parse_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+/// Whether the user opted in to sending raw turns to a hub that isn't on this
+/// machine: `CTX_REMOTE_TURNS` when set, else `remote_turns` in config. A value
+/// that isn't a recognised boolean counts as no.
+fn remote_turns_opted_in(env: Option<&str>, cfg: &CtxConfig) -> bool {
+    match env {
+        Some(v) if !v.trim().is_empty() => parse_bool(v).unwrap_or(false),
+        _ => cfg.remote_turns.unwrap_or(false),
+    }
+}
+
+/// Whether raw session turns may go to `server`: always to a hub on this
+/// machine, and to any other only when the user opted in. Hosted CTXone is
+/// reached directly, before sync exists, so without this every transcript
+/// would leave the machine (ctx-hub-sync t-013).
+fn turns_allowed(server: &str) -> bool {
+    crate::ingest::hub_is_local(server)
+        || remote_turns_opted_in(
+            std::env::var("CTX_REMOTE_TURNS").ok().as_deref(),
+            &CtxConfig::load(),
+        )
 }
 
 #[derive(Subcommand)]
@@ -615,8 +659,10 @@ enum Commands {
         source: String,
 
         /// Scan EVERY project the selected source knows about, not just this
-        /// one. Forces full-turn + token capture; extraction still requires an
-        /// API key. Prints per-project counts and a final JSON summary line.
+        /// one. Forces full-turn + token capture (full turns still go only to a
+        /// hub on this machine unless `remote_turns` is set); extraction still
+        /// requires an API key. Prints per-project counts and a final JSON
+        /// summary line.
         #[arg(long)]
         all: bool,
 
@@ -648,6 +694,9 @@ enum Commands {
 
         /// Force persisting the full turn JSON (default anyway; explicit for
         /// callers that want the guarantee, e.g. the hub's session-sync).
+        /// Raw turns go only to a hub on this machine unless you opt in with
+        /// `ctx config set remote_turns true` (or CTX_REMOTE_TURNS=1); a remote
+        /// hub still gets titles, metadata and extracted memories.
         #[arg(long)]
         full_turn: bool,
 
@@ -697,7 +746,9 @@ enum Commands {
     ///
     /// Called automatically by the Claude Code / Codex Stop hook.
     /// Reads hook payload JSON from stdin (contains transcript_path).
-    /// Requires ANTHROPIC_API_KEY.
+    /// Requires ANTHROPIC_API_KEY. The full turn goes only to a hub on this
+    /// machine unless `remote_turns` is set (`ctx config set remote_turns
+    /// true`, or CTX_REMOTE_TURNS=1).
     CaptureTurn {
         /// Path to transcript file (overrides stdin payload)
         #[arg(long)]
@@ -5654,6 +5705,18 @@ async fn run_ingest_session(
     if all {
         full_turn = true;
     }
+    // Raw turns stay on this machine unless the hub is here too or the user
+    // opted in. Everything else this import sends still goes.
+    if full_turn && !turns_allowed(server) {
+        eprintln!(
+            "Not sending raw turns to {}: that hub isn't on this machine. Session titles, \
+             metadata and extracted memories still go; per-model token usage needs the turns, \
+             so it won't show there. To send turns too, run `ctx config set remote_turns true` \
+             (or set CTX_REMOTE_TURNS=1).",
+            crate::ingest::hub_origin(server)
+        );
+        full_turn = false;
+    }
 
     // Build the (project-label, files) groups to ingest. A single explicit
     // --file or the cwd project are one-group cases; --all fans out across
@@ -6755,6 +6818,9 @@ async fn run_capture_turn(
     full_turn: bool,
     client: reqwest::Client,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Raw turns only go to a hub on this machine unless the user opted in.
+    // Silently: this runs in the Stop hook after every turn.
+    let full_turn = full_turn && turns_allowed(server);
     // Resolve transcript path: explicit flag > stdin hook payload > latest session file.
     let transcript_path: std::path::PathBuf = if let Some(t) = transcript {
         std::path::PathBuf::from(t)
@@ -7714,6 +7780,9 @@ fn handle_config(
                     }
                     if let Some(f) = v.get("format").and_then(|x| x.as_str()) {
                         println!("  format: {}", f);
+                    }
+                    if let Some(r) = v.get("remote_turns").and_then(|x| x.as_bool()) {
+                        println!("  remote_turns: {}", r);
                     }
                 }
             });
@@ -9597,6 +9666,62 @@ async fn handle_docs(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn parse_bool_takes_the_usual_spellings() {
+        for v in ["true", "TRUE", "1", "yes", "on", " On "] {
+            assert_eq!(parse_bool(v), Some(true), "{v:?}");
+        }
+        for v in ["false", "0", "no", "off"] {
+            assert_eq!(parse_bool(v), Some(false), "{v:?}");
+        }
+        for v in ["", "maybe", "2"] {
+            assert_eq!(parse_bool(v), None, "{v:?}");
+        }
+    }
+
+    #[test]
+    fn remote_turns_are_off_unless_opted_in() {
+        let mut cfg = CtxConfig::default();
+        assert!(!remote_turns_opted_in(None, &cfg), "off by default");
+
+        cfg.set_key("remote_turns", "true").unwrap();
+        assert!(remote_turns_opted_in(None, &cfg), "config opts in");
+        assert!(
+            !remote_turns_opted_in(Some("0"), &cfg),
+            "CTX_REMOTE_TURNS=0 overrides the config"
+        );
+        assert!(
+            !remote_turns_opted_in(Some("perhaps"), &cfg),
+            "an unrecognised value counts as no"
+        );
+        assert!(
+            remote_turns_opted_in(Some(""), &cfg),
+            "an empty variable falls back to the config"
+        );
+
+        let off = CtxConfig::default();
+        assert!(remote_turns_opted_in(Some("1"), &off), "env opts in alone");
+    }
+
+    #[test]
+    fn remote_turns_config_key_round_trips() {
+        let mut cfg = CtxConfig::default();
+        assert_eq!(cfg.get_key("remote_turns").unwrap(), "");
+        cfg.set_key("remote_turns", "yes").unwrap();
+        assert_eq!(cfg.get_key("remote_turns").unwrap(), "true");
+        assert!(cfg.set_key("remote_turns", "sometimes").is_err());
+        assert_eq!(cfg.get_key("remote_turns").unwrap(), "true");
+        cfg.unset_key("remote_turns").unwrap();
+        assert_eq!(cfg.get_key("remote_turns").unwrap(), "");
+
+        // Saved only when set, so existing config files don't change.
+        assert!(
+            !toml::to_string(&CtxConfig::default())
+                .unwrap()
+                .contains("remote_turns")
+        );
+    }
 
     /// The embedded AGENTS.md must match `docs/AGENTS.md`. Skipped outside the
     /// source checkout (e.g. in the published package), where `docs/` does
