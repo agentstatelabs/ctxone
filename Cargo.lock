@@ -83,11 +83,14 @@ dependencies = [
  "metrics",
  "oxtel-sql",
  "rusqlite",
+ "rustls",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tokio-postgres",
+ "tokio-rustls",
+ "webpki-roots",
 ]
 
 [[package]]

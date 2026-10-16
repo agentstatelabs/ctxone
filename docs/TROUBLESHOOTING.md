@@ -245,6 +245,19 @@ The Hub will create its tables on first run: the graph's, and
 `ctxone_projects`, `ctxone_project_paths` and `ctxone_sessions` for the
 project registry and session stats.
 
+**TLS errors** (see [Postgres over TLS](DEPLOYMENT.md#postgres-over-tls)):
+
+- `no pg_hba.conf entry for host …, no encryption`: the server accepts only
+  TLS. Add `sslmode=verify-full` to `DATABASE_URL`.
+- `invalid peer certificate: UnknownIssuer`: the server's certificate isn't
+  from a public CA. Add `&sslrootcert=<the provider's CA bundle>`, or set
+  `PGSSLROOTCERT`.
+- `certificate not valid for name "…"`: `DATABASE_URL` names the server
+  differently from its certificate, for example by IP address. Use the host
+  name the certificate is for.
+- `sslrootcert <path>: … No such file or directory`: the CA file isn't where the
+  connection string says.
+
 ## 11. `ctx: can't tell which workspace <dir> belongs to`
 
 Every Hub-bound `ctx` command first asks the Hub which workspace the current

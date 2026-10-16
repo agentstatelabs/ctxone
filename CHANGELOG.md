@@ -7,6 +7,7 @@ the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
 ## [Unreleased]
 
 ### Added
+- **The Hub connects to Postgres over verified TLS.** It builds AgentStateGraph's storage with `postgres-tls` (rustls with the ring backend and Mozilla's roots, crates the Hub already used), so `DATABASE_URL` can ask for `sslmode=verify-full`; a provider with its own CA takes `sslrootcert=<CA file>` or `PGSSLROOTCERT`. Before, any TLS setting was refused with an error naming the feature, so the Hub couldn't reach a managed Postgres that requires TLS. The startup line now says which TLS mode is in use (`tls=verify-full`, never the URL), and a database on another machine with no `sslmode`, or `prefer`, gets a warning; `sslmode=disable` says plaintext is intended. `scripts/test-postgres-tls.sh` runs the TLS tests against a throwaway Postgres that accepts only TLS. See docs/DEPLOYMENT.md, "Postgres over TLS".
 - **Logs, traces and metrics through [oxtel](https://github.com/agentstatelabs/oxtel).** The Hub's hand-built `tracing-subscriber` setup is replaced.
   - Logs still go to stderr. They're text on a terminal and one JSON object per line otherwise, so a log file or container gets JSON. `OXTEL_LOG_FORMAT` (`text`, `json`, `ecs`, `none`) chooses. One startup line says where logs go and whether anything is exported.
   - In HTTP mode, each request gets a span named by its route and a `request` log line with its status, duration and trace id. This replaces tower-http's trace layer, which logged at `debug`.
