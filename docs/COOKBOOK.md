@@ -249,6 +249,10 @@ volumes:
   ctxone-pg-data:
 ```
 
+The project registry (`ctx project add`) and session stats live in the
+same database, in `ctxone_*` tables, so they survive a restart and a new
+Hub container.
+
 Each team member points their CLI at the shared Hub:
 
 ```bash

@@ -108,6 +108,10 @@ pub struct HubConfig {
     /// constructs it from the persisted preference + env seed and keeps a clone
     /// for the sweep loop.
     pub autosync: Option<Autosync>,
+    /// A Postgres hub's tables for the project registry and session stats,
+    /// on AgentStateGraph's pool (see [`crate::hub_store`]). `None` for SQLite
+    /// (whose tables live in `db_path`) and memory.
+    pub postgres_tables: Option<crate::hub_store::PgStore>,
 }
 
 /// Runtime state of the background session sweep, shared between the HTTP
@@ -194,6 +198,9 @@ pub struct HubState {
     pub autosync: Autosync,
     /// Path to the live sqlite db file, or None for memory/postgres.
     pub db_path: Option<String>,
+    /// Where the project registry and session stats live: the sqlite file, or
+    /// the Postgres tables. `None` for the memory backend.
+    pub store: Option<crate::hub_store::HubStore>,
     /// Named ASD repos with pre-known base URLs (static, no pool).
     pub asd_repos: Arc<Vec<(String, String)>>,
     /// Process pool for dynamically spawned `asd-serve` instances.
@@ -793,10 +800,20 @@ fn router_with_config_inner(
         )
     });
 
+    let store = db_path
+        .clone()
+        .map(crate::hub_store::HubStore::Sqlite)
+        .or_else(|| {
+            config
+                .postgres_tables
+                .clone()
+                .map(crate::hub_store::HubStore::Postgres)
+        });
     let state = HubState {
         repo,
         sessions,
         db_path,
+        store,
         asd_repos,
         asd_pool,
         ctx_binary: config.ctx_binary.clone(),
@@ -1590,8 +1607,8 @@ async fn backfill_by_model(
         let (updated, turns) = backfill_one_session(&repo, &s.sessions, sid, &mut models_seen);
         let sessions_updated = usize::from(updated);
         let turns_scanned = turns;
-        if let Some(path) = &s.db_path {
-            s.sessions.flush_to_db(path);
+        if let Some(store) = &s.store {
+            s.sessions.flush(store);
         }
         return Ok(Json(serde_json::json!({
             "status": "ok",
@@ -1612,8 +1629,8 @@ async fn backfill_by_model(
 
     // Persist so the backfill survives a restart (it's a REPLACE, so flushing
     // the same result again is harmless).
-    if let Some(path) = &s.db_path {
-        s.sessions.flush_to_db(path);
+    if let Some(store) = &s.store {
+        s.sessions.flush(store);
     }
 
     Ok(Json(serde_json::json!({
@@ -5097,7 +5114,7 @@ async fn delete_session(
         true
     };
 
-    let from_registry = s.sessions.remove(&sid, s.db_path.as_deref());
+    let from_registry = s.sessions.remove(&sid, s.store.as_ref());
     // Cached flat sizes reference a tree that no longer has this session.
     s.sessions.mark_all_dirty();
 
@@ -6839,14 +6856,23 @@ async fn admin_backup(
 
 // -- Projects (namespace registry) --
 
-/// The project registry lives in the Hub's sqlite file. Memory/postgres
-/// backends have no registry — those requests get a 400, mirroring
-/// `/api/admin/backup`.
-fn registry_db(s: &HubState) -> Result<String, (StatusCode, String)> {
-    s.db_path.clone().ok_or((
+/// The project registry lives in the Hub's own tables: in its sqlite file, or
+/// in its Postgres database. The memory backend has none — those requests get
+/// a 400, mirroring `/api/admin/backup`.
+fn registry(s: &HubState) -> Result<crate::hub_store::HubStore, (StatusCode, String)> {
+    s.store.clone().ok_or((
         StatusCode::BAD_REQUEST,
-        "project registry requires sqlite storage (db_path is unset)".to_string(),
+        "project registry requires sqlite or postgres storage".to_string(),
     ))
+}
+
+/// A registry error as an HTTP error: a duplicate id or remote is the
+/// client's (409), anything else the hub's (500).
+fn registry_error(e: crate::project::RegistryError) -> (StatusCode, String) {
+    match e {
+        crate::project::RegistryError::Duplicate(msg) => (StatusCode::CONFLICT, msg),
+        crate::project::RegistryError::Other(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
+    }
 }
 
 /// Serialize a project, annotating the pool-managed ASD repos whose db
@@ -6889,7 +6915,7 @@ async fn register_project_handler(
     State(s): State<HubState>,
     Json(req): Json<RegisterProjectRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let db = registry_db(&s)?;
+    let db = registry(&s)?;
     let namespace = req.namespace.clone().unwrap_or_else(|| req.id.clone());
 
     // Create the ASG namespace first — Namespace::new validates the name
@@ -6904,41 +6930,29 @@ async fn register_project_handler(
         .remote_url
         .as_deref()
         .map(crate::project::normalize_remote_url);
-    crate::project::register_project(
-        &db,
+    // A duplicate id / remote_url is a client error (409), not a 500.
+    db.register_project(
         &req.id,
         remote.as_deref(),
         &namespace,
         req.display_name.as_deref(),
         req.local_path.as_deref(),
     )
-    .map_err(|e| {
-        let msg = e.to_string();
-        // Duplicate id / remote_url is a client error, not a 500.
-        let status = if msg.contains("UNIQUE constraint failed") {
-            StatusCode::CONFLICT
-        } else {
-            StatusCode::INTERNAL_SERVER_ERROR
-        };
-        (status, msg)
-    })?;
+    .map_err(registry_error)?;
 
     info!(id = %req.id, namespace = %namespace, "project registered");
-    let p = crate::project::resolve_by_id(&db, &req.id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "project vanished after insert".to_string(),
-        ))?;
+    let p = db.resolve_by_id(&req.id).map_err(registry_error)?.ok_or((
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "project vanished after insert".to_string(),
+    ))?;
     Ok(Json(project_to_json(&s, p).await))
 }
 
 async fn list_projects_handler(
     State(s): State<HubState>,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
-    let db = registry_db(&s)?;
-    let projects = crate::project::list_projects(&db)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let db = registry(&s)?;
+    let projects = db.list_projects().map_err(registry_error)?;
     let mut out = Vec::with_capacity(projects.len());
     for p in projects {
         out.push(project_to_json(&s, p).await);
@@ -6950,11 +6964,11 @@ async fn get_project_handler(
     State(s): State<HubState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let db = registry_db(&s)?;
-    match crate::project::resolve_by_id(&db, &id) {
+    let db = registry(&s)?;
+    match db.resolve_by_id(&id) {
         Ok(Some(p)) => Ok(Json(project_to_json(&s, p).await)),
         Ok(None) => Err((StatusCode::NOT_FOUND, format!("project not found: {id}"))),
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+        Err(e) => Err(registry_error(e)),
     }
 }
 
@@ -6968,19 +6982,17 @@ async fn add_project_path_handler(
     Path(id): Path<String>,
     Json(req): Json<AddProjectPathRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let db = registry_db(&s)?;
+    let db = registry(&s)?;
     // sqlite doesn't enforce the FK by default — check existence explicitly
     // so a typo'd id is a 404, not a silent orphan row.
-    if crate::project::resolve_by_id(&db, &id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .is_none()
-    {
+    if db.resolve_by_id(&id).map_err(registry_error)?.is_none() {
         return Err((StatusCode::NOT_FOUND, format!("project not found: {id}")));
     }
-    crate::project::add_local_path(&db, &id, &req.local_path)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let p = crate::project::resolve_by_id(&db, &id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    db.add_local_path(&id, &req.local_path)
+        .map_err(registry_error)?;
+    let p = db
+        .resolve_by_id(&id)
+        .map_err(registry_error)?
         .ok_or((StatusCode::NOT_FOUND, format!("project not found: {id}")))?;
     Ok(Json(project_to_json(&s, p).await))
 }
@@ -7091,7 +7103,7 @@ async fn detect_project_handler(
     Query(q): Query<DetectQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     use crate::project::DetectResult;
-    let db = s.db_path.clone();
+    let store = s.store.clone();
     let cwd = q.cwd.clone();
     let clues = q.client_read.then(|| crate::project::Clues {
         ctxproject: q.ctxproject.clone().filter(|id| !id.trim().is_empty()),
@@ -7103,8 +7115,8 @@ async fn detect_project_handler(
         move || {
             let cwd = std::path::Path::new(&cwd);
             match clues {
-                Some(clues) => crate::project::resolve_clues(cwd, db.as_deref(), &clues),
-                None => crate::project::detect_project(cwd, db.as_deref()),
+                Some(clues) => crate::project::resolve_clues(cwd, store.as_ref(), &clues),
+                None => crate::project::detect_project(cwd, store.as_ref()),
             }
         },
         DETECT_TIMEOUT,

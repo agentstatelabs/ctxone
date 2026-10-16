@@ -241,7 +241,9 @@ export DATABASE_URL=postgres://ctxone:secret@localhost:5432/ctxone
 ctx serve --http --storage postgres
 ```
 
-The Hub will create its tables on first run.
+The Hub will create its tables on first run: the graph's, and
+`ctxone_projects`, `ctxone_project_paths` and `ctxone_sessions` for the
+project registry and session stats.
 
 ## 11. `ctx: can't tell which workspace <dir> belongs to`
 

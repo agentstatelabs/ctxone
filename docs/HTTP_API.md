@@ -388,10 +388,13 @@ existed (in which case `commit_id` is omitted).
 ## Project endpoints
 
 A **project** maps a code repo to an ASG namespace. The registry lives
-in the Hub's sqlite database (`projects` and `project_paths` tables) —
-memory/postgres backends have no registry, so project endpoints return
-**400** there. Registered projects are what the CLI and MCP server use
-to auto-detect the namespace from a working directory.
+in the Hub's database: the sqlite file's `projects` and `project_paths`
+tables, or on Postgres the `ctxone_projects` and `ctxone_project_paths`
+tables, where every row carries the Hub's tenant, so Hubs sharing a
+database never see each other's projects. The memory backend has no
+registry, so project endpoints return **400** there. Registered projects
+are what the CLI and MCP server use to auto-detect the namespace from a
+working directory.
 
 ### `GET /api/projects`
 
@@ -496,7 +499,7 @@ machine.
 { "status": "not_found", "namespace": "default" }
 ```
 
-Non-sqlite backends report `{ "status": "registry_unavailable",
+The memory backend reports `{ "status": "registry_unavailable",
 "namespace": "default" }`.
 
 Only those three `200` answers say where a session belongs. Anything else
@@ -762,6 +765,11 @@ the `"default"` session. Per-session stats are exposed via:
 - `GET /api/stats/tokens/{session_id}` — single-session snapshot
 - `GET /api/stats/sessions` — all sessions
 - `GET /api/stats/tokens` — cross-session aggregate (backward-compat)
+
+The Hub saves session stats every 30 seconds and on shutdown, and loads
+them at startup: to the `ctxone_sessions` table of its sqlite file, or of
+its Postgres database, one row set per tenant. The memory backend keeps
+them only while it runs.
 
 The Python client accepts a `session_id` constructor arg or reads
 `CTX_SESSION_ID` from the environment.

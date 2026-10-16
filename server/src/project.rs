@@ -1,20 +1,311 @@
 //! Project registry — maps codebases to CTXone namespaces.
 //!
-//! The registry lives in the hub's **own SQLite database** (the same file as
-//! the ASG storage), under two tables that are completely independent of the
-//! content-addressed graph:
+//! The registry lives in the hub's **own database**, in two tables that are
+//! completely independent of the content-addressed graph. In a SQLite hub
+//! they're in the same file as the ASG storage:
 //!
 //! - `projects(id, remote_url, namespace_id, display_name, created_at)`
 //! - `project_paths(project_id, local_path)`
 //!
+//! In a Postgres hub they're `ctxone_projects` and `ctxone_project_paths`,
+//! with every row scoped to the hub's tenant (see [`crate::hub_store`]).
+//!
 //! This must exist in plain SQL and be readable *before* any ASG
 //! namespace-scoped operation, because the registry is how we discover
-//! which namespace to open.
+//! which namespace to open. Reach it through [`HubStore`]; the SQLite
+//! functions taking a path remain for SQLite-only callers.
 //!
 //! Schema is created on first use (idempotent `CREATE TABLE IF NOT EXISTS`).
 
+use crate::hub_store::{HubStore, PgStore, pg_error};
+use agentstategraph_storage::PostgresStorage;
+use agentstategraph_storage::tokio_postgres::error::SqlState;
 use rusqlite::{Connection, Result as SqlResult, params};
 use std::path::{Path, PathBuf};
+
+/// A registry operation that failed.
+#[derive(Debug, Clone)]
+pub enum RegistryError {
+    /// The project id, or its remote URL, is registered already.
+    Duplicate(String),
+    /// Anything else: the database couldn't be reached or the query failed.
+    Other(String),
+}
+
+impl std::fmt::Display for RegistryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Duplicate(msg) | Self::Other(msg) => f.write_str(msg),
+        }
+    }
+}
+
+impl std::error::Error for RegistryError {}
+
+impl From<rusqlite::Error> for RegistryError {
+    fn from(e: rusqlite::Error) -> Self {
+        let msg = e.to_string();
+        if msg.contains("UNIQUE constraint failed") {
+            Self::Duplicate(msg)
+        } else {
+            Self::Other(msg)
+        }
+    }
+}
+
+fn from_pg(e: agentstategraph_storage::tokio_postgres::Error) -> RegistryError {
+    if e.code() == Some(&SqlState::UNIQUE_VIOLATION) {
+        RegistryError::Duplicate(pg_error(&e))
+    } else {
+        RegistryError::Other(pg_error(&e))
+    }
+}
+
+/// The columns every project query selects, in this order.
+const PG_PROJECT_COLUMNS: &str = "id, remote_url, namespace_id, display_name, created_at";
+
+impl HubStore {
+    /// Register a new project. A [`RegistryError::Duplicate`] if the id, or a
+    /// non-null `remote_url`, is registered already.
+    pub fn register_project(
+        &self,
+        id: &str,
+        remote_url: Option<&str>,
+        namespace_id: &str,
+        display_name: Option<&str>,
+        local_path: Option<&str>,
+    ) -> Result<(), RegistryError> {
+        match self {
+            Self::Sqlite(db) => Ok(register_project(
+                db,
+                id,
+                remote_url,
+                namespace_id,
+                display_name,
+                local_path,
+            )?),
+            Self::Postgres(pg) => {
+                pg_register_project(pg, id, remote_url, namespace_id, display_name, local_path)
+            }
+        }
+    }
+
+    /// Add a local path binding to an existing project. Idempotent.
+    pub fn add_local_path(&self, project_id: &str, local_path: &str) -> Result<(), RegistryError> {
+        match self {
+            Self::Sqlite(db) => Ok(add_local_path(db, project_id, local_path)?),
+            Self::Postgres(pg) => {
+                let (pool, tenant) = (pg.pool(), pg.tenant().to_string());
+                let (project_id, local_path) = (project_id.to_string(), local_path.to_string());
+                PostgresStorage::run(async move {
+                    let client = pool
+                        .get()
+                        .await
+                        .map_err(|e| RegistryError::Other(e.to_string()))?;
+                    client
+                        .execute(
+                            "INSERT INTO ctxone_project_paths (tenant_id, project_id, local_path)
+                             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+                            &[&tenant, &project_id, &local_path],
+                        )
+                        .await
+                        .map_err(from_pg)?;
+                    Ok(())
+                })
+            }
+        }
+    }
+
+    /// The project with this id, if registered.
+    pub fn resolve_by_id(&self, project_id: &str) -> Result<Option<Project>, RegistryError> {
+        match self {
+            Self::Sqlite(db) => Ok(resolve_by_id(db, project_id)?),
+            Self::Postgres(pg) => pg_load_project(pg, "id", project_id),
+        }
+    }
+
+    /// The project with this git remote URL, if registered.
+    pub fn resolve_by_remote_url(
+        &self,
+        remote_url: &str,
+    ) -> Result<Option<Project>, RegistryError> {
+        match self {
+            Self::Sqlite(db) => Ok(resolve_by_remote_url(db, remote_url)?),
+            Self::Postgres(pg) => pg_load_project(pg, "remote_url", remote_url),
+        }
+    }
+
+    /// Every registered project, oldest first.
+    pub fn list_projects(&self) -> Result<Vec<Project>, RegistryError> {
+        match self {
+            Self::Sqlite(db) => Ok(list_projects(db)?),
+            Self::Postgres(pg) => {
+                let (pool, tenant) = (pg.pool(), pg.tenant().to_string());
+                PostgresStorage::run(async move {
+                    let client = pool
+                        .get()
+                        .await
+                        .map_err(|e| RegistryError::Other(e.to_string()))?;
+                    let rows = client
+                        .query(
+                            &format!(
+                                "SELECT {PG_PROJECT_COLUMNS} FROM ctxone_projects
+                                 WHERE tenant_id = $1 ORDER BY created_at, id"
+                            ),
+                            &[&tenant],
+                        )
+                        .await
+                        .map_err(from_pg)?;
+                    let paths = client
+                        .query(
+                            "SELECT project_id, local_path FROM ctxone_project_paths
+                             WHERE tenant_id = $1 ORDER BY local_path",
+                            &[&tenant],
+                        )
+                        .await
+                        .map_err(from_pg)?;
+                    Ok(rows
+                        .iter()
+                        .map(|row| {
+                            let mut p = pg_project(row);
+                            p.local_paths = paths
+                                .iter()
+                                .filter(|r| r.get::<_, String>(0) == p.id)
+                                .map(|r| r.get(1))
+                                .collect();
+                            p
+                        })
+                        .collect())
+                })
+            }
+        }
+    }
+
+    /// Every `(project_id, local_path)` binding.
+    fn project_paths(&self) -> Result<Vec<(String, String)>, RegistryError> {
+        match self {
+            Self::Sqlite(db) => {
+                let conn = rusqlite::Connection::open(db)?;
+                let mut stmt = conn.prepare("SELECT project_id, local_path FROM project_paths")?;
+                let rows = stmt
+                    .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                    .collect::<SqlResult<_>>()?;
+                Ok(rows)
+            }
+            Self::Postgres(pg) => {
+                let (pool, tenant) = (pg.pool(), pg.tenant().to_string());
+                PostgresStorage::run(async move {
+                    let client = pool
+                        .get()
+                        .await
+                        .map_err(|e| RegistryError::Other(e.to_string()))?;
+                    let rows = client
+                        .query(
+                            "SELECT project_id, local_path FROM ctxone_project_paths
+                             WHERE tenant_id = $1",
+                            &[&tenant],
+                        )
+                        .await
+                        .map_err(from_pg)?;
+                    Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
+                })
+            }
+        }
+    }
+}
+
+fn pg_register_project(
+    pg: &PgStore,
+    id: &str,
+    remote_url: Option<&str>,
+    namespace_id: &str,
+    display_name: Option<&str>,
+    local_path: Option<&str>,
+) -> Result<(), RegistryError> {
+    let (pool, tenant) = (pg.pool(), pg.tenant().to_string());
+    let id = id.to_string();
+    let remote_url = remote_url.map(str::to_string);
+    let namespace_id = namespace_id.to_string();
+    let display_name = display_name.map(str::to_string);
+    let local_path = local_path.map(str::to_string);
+    PostgresStorage::run(async move {
+        let mut client = pool
+            .get()
+            .await
+            .map_err(|e| RegistryError::Other(e.to_string()))?;
+        let tx = client.transaction().await.map_err(from_pg)?;
+        tx.execute(
+            "INSERT INTO ctxone_projects (tenant_id, id, remote_url, namespace_id, display_name)
+             VALUES ($1, $2, $3, $4, $5)",
+            &[&tenant, &id, &remote_url, &namespace_id, &display_name],
+        )
+        .await
+        .map_err(from_pg)?;
+        if let Some(path) = &local_path {
+            tx.execute(
+                "INSERT INTO ctxone_project_paths (tenant_id, project_id, local_path)
+                 VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+                &[&tenant, &id, path],
+            )
+            .await
+            .map_err(from_pg)?;
+        }
+        tx.commit().await.map_err(from_pg)
+    })
+}
+
+/// The project whose `column` (`id` or `remote_url`) equals `value`.
+fn pg_load_project(
+    pg: &PgStore,
+    column: &'static str,
+    value: &str,
+) -> Result<Option<Project>, RegistryError> {
+    let (pool, tenant, value) = (pg.pool(), pg.tenant().to_string(), value.to_string());
+    PostgresStorage::run(async move {
+        let client = pool
+            .get()
+            .await
+            .map_err(|e| RegistryError::Other(e.to_string()))?;
+        let Some(row) = client
+            .query_opt(
+                &format!(
+                    "SELECT {PG_PROJECT_COLUMNS} FROM ctxone_projects
+                     WHERE tenant_id = $1 AND {column} = $2"
+                ),
+                &[&tenant, &value],
+            )
+            .await
+            .map_err(from_pg)?
+        else {
+            return Ok(None);
+        };
+        let mut p = pg_project(&row);
+        p.local_paths = client
+            .query(
+                "SELECT local_path FROM ctxone_project_paths
+                 WHERE tenant_id = $1 AND project_id = $2 ORDER BY local_path",
+                &[&tenant, &p.id],
+            )
+            .await
+            .map_err(from_pg)?
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        Ok(Some(p))
+    })
+}
+
+/// A project from a row of [`PG_PROJECT_COLUMNS`], without its paths.
+fn pg_project(row: &agentstategraph_storage::tokio_postgres::Row) -> Project {
+    Project {
+        id: row.get(0),
+        remote_url: row.get(1),
+        namespace_id: row.get(2),
+        display_name: row.get(3),
+        created_at: row.get(4),
+        local_paths: Vec::new(),
+    }
+}
 
 /// A registered project.
 #[derive(Debug, Clone)]
@@ -258,18 +549,18 @@ pub enum DetectResult {
 /// `.ctxproject` marker stayed undetectable however it was registered.
 /// Longest-prefix wins so a nested checkout beats its parent.
 ///
-/// `db_path` is `None` for memory/postgres backends, in which case detection
-/// is skipped entirely (`RegistryUnavailable`).
+/// `store` is `None` for the memory backend, in which case detection is
+/// skipped entirely (`RegistryUnavailable`).
 ///
 /// A `.ctxproject` that exists but cannot be read does not stop the chain —
 /// steps 2 and 3 may still identify the project — but if nothing else matches
 /// the result is `Failed`, not `NotFound`: the unread marker may well have
 /// named a project.
-pub fn detect_project(cwd: &Path, db_path: Option<&str>) -> DetectResult {
-    if db_path.is_none() {
+pub fn detect_project(cwd: &Path, store: Option<&HubStore>) -> DetectResult {
+    if store.is_none() {
         return DetectResult::RegistryUnavailable;
     }
-    resolve_clues(cwd, db_path, &Clues::read(cwd))
+    resolve_clues(cwd, store, &Clues::read(cwd))
 }
 
 /// What a directory says about its project: steps 1 and 2 of the detection
@@ -306,14 +597,14 @@ impl Clues {
 /// Resolve a directory's [`Clues`] against the registry: the detection chain
 /// with steps 1 and 2 already read. Reads no files, so `cwd` (used by step 3)
 /// need not exist on this machine.
-pub fn resolve_clues(cwd: &Path, db_path: Option<&str>, clues: &Clues) -> DetectResult {
-    let Some(db) = db_path else {
+pub fn resolve_clues(cwd: &Path, store: Option<&HubStore>, clues: &Clues) -> DetectResult {
+    let Some(store) = store else {
         return DetectResult::RegistryUnavailable;
     };
 
     // Step 1: the .ctxproject marker
     if let Some(project_id) = &clues.ctxproject {
-        match resolve_by_id(db, project_id) {
+        match store.resolve_by_id(project_id) {
             Ok(Some(p)) => {
                 return DetectResult::FoundByFile {
                     project_id: p.id,
@@ -330,7 +621,7 @@ pub fn resolve_clues(cwd: &Path, db_path: Option<&str>, clues: &Clues) -> Detect
 
     // Step 2: git remote URL lookup
     if let Some(remote_url) = clues.remote_url.as_deref().map(normalize_remote_url) {
-        match resolve_by_remote_url(db, &remote_url) {
+        match store.resolve_by_remote_url(&remote_url) {
             Ok(Some(p)) => {
                 return DetectResult::FoundByRemote {
                     project_id: p.id,
@@ -350,7 +641,7 @@ pub fn resolve_clues(cwd: &Path, db_path: Option<&str>, clues: &Clues) -> Detect
     // registered — not "the registry is down". Reporting Failed would turn a
     // normal first-run detection into a hard failure, so this falls through to
     // NotFound.
-    if let Ok(Some((p, local_path))) = resolve_by_local_path(db, cwd) {
+    if let Ok(Some((p, local_path))) = resolve_by_local_path(store, cwd) {
         return DetectResult::FoundByPath {
             project_id: p.id,
             namespace_id: p.namespace_id,
@@ -364,7 +655,7 @@ pub fn resolve_clues(cwd: &Path, db_path: Option<&str>, clues: &Clues) -> Detect
     }
 }
 
-fn registry_failed(e: rusqlite::Error) -> DetectResult {
+fn registry_failed(e: RegistryError) -> DetectResult {
     DetectResult::Failed(format!("project registry query failed: {e}"))
 }
 
@@ -387,14 +678,12 @@ fn unreadable_marker_message(path: &Path, e: &std::io::Error) -> String {
 ///
 /// Compared on path components, not raw strings, so `/a/repo-two` cannot match
 /// a registration for `/a/repo`.
-fn resolve_by_local_path(db_path: &str, cwd: &Path) -> SqlResult<Option<(Project, String)>> {
-    let conn = rusqlite::Connection::open(db_path)?;
-    let mut stmt = conn.prepare("SELECT project_id, local_path FROM project_paths")?;
-    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-
+fn resolve_by_local_path(
+    store: &HubStore,
+    cwd: &Path,
+) -> Result<Option<(Project, String)>, RegistryError> {
     let mut best: Option<(String, String, usize)> = None;
-    for row in rows {
-        let (project_id, local_path) = row?;
+    for (project_id, local_path) in store.project_paths()? {
         let candidate = Path::new(&local_path);
         if !cwd.starts_with(candidate) {
             continue;
@@ -408,7 +697,7 @@ fn resolve_by_local_path(db_path: &str, cwd: &Path) -> SqlResult<Option<(Project
     let Some((project_id, local_path, _)) = best else {
         return Ok(None);
     };
-    Ok(resolve_by_id(db_path, &project_id)?.map(|p| (p, local_path)))
+    Ok(store.resolve_by_id(&project_id)?.map(|p| (p, local_path)))
 }
 
 /// Walk `start` and its parents looking for a `.ctxproject` file.
@@ -749,7 +1038,7 @@ mod tests {
         // bootstrap the db so it's valid
         let conn = rusqlite::Connection::open(&db).unwrap();
         bootstrap(&conn).unwrap();
-        let result = detect_project(dir.path(), Some(&db));
+        let result = detect_project(dir.path(), Some(&HubStore::Sqlite(db.clone())));
         assert!(matches!(result, DetectResult::NotFound));
     }
 
@@ -776,7 +1065,7 @@ mod tests {
         if !make_unreadable(&marker) {
             return;
         }
-        let result = detect_project(dir.path(), Some(&db));
+        let result = detect_project(dir.path(), Some(&HubStore::Sqlite(db.clone())));
         assert!(
             matches!(result, DetectResult::Failed(ref msg) if msg.contains(".ctxproject")),
             "got {result:?}"
@@ -796,7 +1085,7 @@ mod tests {
         if !make_unreadable(&dir.path().join(".ctxproject")) {
             return;
         }
-        let result = detect_project(dir.path(), Some(&db));
+        let result = detect_project(dir.path(), Some(&HubStore::Sqlite(db.clone())));
         assert!(
             matches!(result, DetectResult::FoundByPath { ref namespace_id, .. } if namespace_id == "p-ns"),
             "got {result:?}"
@@ -810,7 +1099,7 @@ mod tests {
         write_ctxproject_file(dir.path(), "p").unwrap();
         let (_dbdir, db) = tmp_db();
         std::fs::write(&db, b"this is not a sqlite database, just junk bytes").unwrap();
-        let result = detect_project(dir.path(), Some(&db));
+        let result = detect_project(dir.path(), Some(&HubStore::Sqlite(db.clone())));
         assert!(
             matches!(result, DetectResult::Failed(ref msg) if msg.contains("registry")),
             "got {result:?}"
@@ -831,7 +1120,7 @@ mod tests {
         )
         .unwrap();
         write_ctxproject_file(dir.path(), "test-proj").unwrap();
-        let result = detect_project(dir.path(), Some(&db));
+        let result = detect_project(dir.path(), Some(&HubStore::Sqlite(db.clone())));
         assert!(
             matches!(result, DetectResult::FoundByFile { ref namespace_id, .. } if namespace_id == "test-ns")
         );
@@ -842,6 +1131,7 @@ mod tests {
     #[test]
     fn resolve_clues_reads_nothing_on_this_machine() {
         let (_dbdir, db) = tmp_db();
+        let store = HubStore::Sqlite(db.clone());
         register_project(
             &db,
             "by-marker",
@@ -859,7 +1149,7 @@ mod tests {
             ..Default::default()
         };
         assert!(matches!(
-            resolve_clues(cwd, Some(&db), &marker),
+            resolve_clues(cwd, Some(&store), &marker),
             DetectResult::FoundByFile { ref namespace_id, .. } if namespace_id == "marker-ns"
         ));
 
@@ -868,7 +1158,7 @@ mod tests {
             remote_url: Some("https://git.example.com/g/app.git/".into()),
             ..Default::default()
         };
-        match resolve_clues(cwd, Some(&db), &remote) {
+        match resolve_clues(cwd, Some(&store), &remote) {
             DetectResult::FoundByRemote { remote_url, .. } => {
                 assert_eq!(remote_url, "https://git.example.com/g/app");
             }
@@ -881,18 +1171,18 @@ mod tests {
             ..remote
         };
         assert!(matches!(
-            resolve_clues(cwd, Some(&db), &unknown_marker),
+            resolve_clues(cwd, Some(&store), &unknown_marker),
             DetectResult::FoundByRemote { .. }
         ));
 
         // Step 3 still matches on the path alone.
         let nested = Path::new("/elsewhere/app/src");
         assert!(matches!(
-            resolve_clues(nested, Some(&db), &Clues::default()),
+            resolve_clues(nested, Some(&store), &Clues::default()),
             DetectResult::FoundByPath { ref local_path, .. } if local_path == "/elsewhere/app"
         ));
         assert!(matches!(
-            resolve_clues(cwd, Some(&db), &Clues::default()),
+            resolve_clues(cwd, Some(&store), &Clues::default()),
             DetectResult::NotFound
         ));
         assert!(matches!(
@@ -906,17 +1196,18 @@ mod tests {
     #[test]
     fn resolve_clues_reports_an_unreadable_marker_only_without_a_match() {
         let (_dbdir, db) = tmp_db();
+        let store = HubStore::Sqlite(db.clone());
         register_project(&db, "p", None, "p-ns", None, Some("/srv/p")).unwrap();
         let unreadable = Clues {
             ctxproject_error: Some("cannot read /srv/x/.ctxproject: denied".into()),
             ..Default::default()
         };
         assert!(matches!(
-            resolve_clues(Path::new("/srv/x"), Some(&db), &unreadable),
+            resolve_clues(Path::new("/srv/x"), Some(&store), &unreadable),
             DetectResult::Failed(ref msg) if msg.contains("/srv/x/.ctxproject")
         ));
         assert!(matches!(
-            resolve_clues(Path::new("/srv/p/sub"), Some(&db), &unreadable),
+            resolve_clues(Path::new("/srv/p/sub"), Some(&store), &unreadable),
             DetectResult::FoundByPath { .. }
         ));
     }
