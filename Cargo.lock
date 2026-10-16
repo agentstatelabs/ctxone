@@ -10,26 +10,28 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agentstategraph"
-version = "1.2.8"
+version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb56b99f7d73969d9b34951f99b3908489c1cbbe9fa8c6e6290c66f3a97a586e"
+checksum = "26c8ec87cccf3b43dbc3fc25f40af2c42e35c4066db590044ec9dd75bfaf4be2"
 dependencies = [
  "agentstategraph-core",
  "agentstategraph-reminders",
  "agentstategraph-storage",
  "agentstategraph-taint",
  "chrono",
+ "metrics",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tracing",
  "uuid",
 ]
 
 [[package]]
 name = "agentstategraph-core"
-version = "1.2.8"
+version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44ba88c5b22bfaedf23b54b566ba8cad20ec43da454c56098e536bc34426f064"
+checksum = "07c091800de75007dcb8d696590e22513ee9b44a5d1c97b3b0109566eb21e797"
 dependencies = [
  "blake3",
  "chrono",
@@ -41,9 +43,9 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-migrate"
-version = "1.2.8"
+version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d31d142df4dd113c12faaaa5966bf330b6ded0b1b5596eca1a249572ed1d59a"
+checksum = "4e3d6af2f24446cfa7e3f18eda4a1d1f054305f89c35046d33df85c06f2fbb86"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -55,9 +57,9 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-reminders"
-version = "1.2.8"
+version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4279adbab178d979e033dd44aae27ce292715f623dfe1bcce84f98511a3485b"
+checksum = "d10a255b28313a3363fb9e80acd981107f4cf9dec9e57305fc477c43e01758af"
 dependencies = [
  "agentstategraph-core",
  "chrono",
@@ -69,15 +71,17 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-storage"
-version = "1.2.8"
+version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ee0f62e669bb1834162a0aabb2a07799377da1340e8223f1d6ac8cc666f738c"
+checksum = "3d19f2a145943f024cf5e024ca2caf82d1f0896df5edaa910e4085d2934b3fd9"
 dependencies = [
  "agentstategraph-core",
  "agentstategraph-reminders",
  "agentstategraph-taint",
  "chrono",
  "deadpool-postgres",
+ "metrics",
+ "oxtel-sql",
  "rusqlite",
  "serde",
  "serde_json",
@@ -88,9 +92,9 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-taint"
-version = "1.2.8"
+version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3fe3793be0374b46176e10080e9b1353cf89d8dcce92af237717b300d53c6315"
+checksum = "7783f87fdeb8893a67d67906b02b43a119d149fdcce6cab1ccc3cb4118c4b34e"
 dependencies = [
  "agentstategraph-core",
  "chrono",
@@ -102,9 +106,9 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-tasks"
-version = "1.2.8"
+version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01383044c2e9ad0382e4e8444bcc745852a8bfdd0d9fb1a9ad7131957bc62bc7"
+checksum = "17f91e38e4037f8a05f650f6000b63ca409e7a509ded9673e85cf1f2621a7f2a"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -1755,6 +1759,19 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "oxtel-sql"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc3690cee450db843722a46d534262b73d1d2110e79ff25f3bf706410b778058"
+dependencies = [
+ "deadpool-postgres",
+ "metrics",
+ "rusqlite",
+ "tokio-postgres",
+ "tracing",
 ]
 
 [[package]]

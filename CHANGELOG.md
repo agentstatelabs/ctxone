@@ -14,6 +14,7 @@ the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
   - **Nothing is sent anywhere by default.** The new opt-in `otlp` feature sends traces, metrics and logs over OTLP once `OTEL_EXPORTER_OTLP_ENDPOINT` is set. A default build contains no OTLP client.
 
 ### Changed
+- **AgentStateGraph 1.3** (`agentstategraph*` = "1.3", from 1.2.8). The Hub's `--storage postgres` mode gets AgentStateGraph's Postgres fixes: storage that works from any caller, working epochs, atomic multi-step writes, history and search on Postgres, and garbage collection. CTXone's own code is unchanged; `Cargo.lock` adds `oxtel-sql`, which AgentStateGraph's storage uses for query telemetry. Postgres TLS (AgentStateGraph's opt-in `postgres-tls` feature) is not enabled yet.
 - **LICENSE names AgentStateLabs, LLC as the licensor without the "not yet formed" placeholder, and the Licensed Work as "CTXone" without a version.** The old line named 0.73.0 while shipping with every release; each version already has its own Change Date.
 - **LICENSING.md had v0.73.0 converting to Apache 2.0 on 2030-04-15, the old four-year term; it is 2027-10-15.** It also now states that releases before 2026-09-09 (v1.0.10 and earlier) get the 18-month term, and licensing questions go to licensing@agentstatelabs.com, matching LICENSE (the `ctx` CLI's licensing note too).
 - Package metadata (Cargo, PyPI, the Open WebUI plugin) credits AgentStateLabs, LLC as the author. The plugin's `author_url` pointed at github.com/ctxone, which does not exist; it now points at github.com/agentstatelabs.
