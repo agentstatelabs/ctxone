@@ -184,6 +184,7 @@ Override per agent with `--path` (topology C). A bare `ctxone-hub` with no
 | `CTX_NAMESPACE` | Project namespace for CLI/MCP scoping |
 | `CTX_BRANCH` | Default memory branch/ref |
 | `CTX_TOKEN` | Bearer token the `ctx` CLI sends (for a remote authed hub) |
+| `CTX_REMOTE_TURNS` | `1` lets `ctx` send raw session turns to a hub that isn't on this machine (overrides the `remote_turns` config key; see below) |
 | `CTXONE_AUTH_TOKEN` | Same as `--auth-token` (bearer guarding REST + `/mcp`) |
 | `CTXONE_ALLOWED_ORIGINS` | Comma/space-separated extra allowed browser origins |
 | `CTXONE_BACKUP_KEEP` | Startup snapshots to retain (default 5) |
@@ -210,6 +211,15 @@ Behaviour:
 
 How each client gets the token:
 - **`ctx` CLI** — pass `--token <TOK>` or set `CTX_TOKEN` (only for a remote hub).
+
+Raw session turns stay on the machine that recorded them. When `ctx`'s hub isn't
+on this machine (anything but `localhost`, a `.localhost` name, 127.x or `::1`),
+`ctx ingest-session` and `ctx session import` send each session's title,
+metadata, provenance and extracted memories, and the Stop-hook
+`ctx capture-turn` sends token counts and extracted memories, but none of them
+sends the turns. An import's per-model token usage is derived from the turns,
+so it doesn't show on that hub. To send turns as well, run
+`ctx config set remote_turns true`, or set `CTX_REMOTE_TURNS=1` for one command.
 - **AI tools** — `ctx init --transport http` writes it into each tool's config:
 - **`ctx init --transport http --auth-token <TOK>`** — embeds a literal bearer:
   a `headers` entry for native http (Claude Code/Cursor/VS Code) and a

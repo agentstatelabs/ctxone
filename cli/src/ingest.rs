@@ -1209,6 +1209,43 @@ pub fn turn_snapshot(turn: &Turn, idx: usize, sid: &str, source_file: &str) -> V
     })
 }
 
+/// True when `hub` (a base URL such as `http://127.0.0.1:3001`) is on this
+/// machine: `localhost` or a `*.localhost` name, a 127.0.0.0/8 or `::1`
+/// address, or the unspecified address (`0.0.0.0`, `::`), which connects here
+/// too. Anything else counts as remote: a LAN address, a host name, a hosted
+/// hub. There is no DNS lookup, so a name that resolves to loopback still
+/// counts as remote, which errs toward keeping turns on this machine.
+pub fn hub_is_local(hub: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(hub) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let lower = host.to_ascii_lowercase();
+    if lower == "localhost" || lower.ends_with(".localhost") {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(v6)) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
+        }
+        Ok(ip) => ip.is_loopback() || ip.is_unspecified(),
+        Err(_) => false,
+    }
+}
+
+/// `hub`'s scheme, host and port, for messages: never its path or any
+/// credentials in the URL.
+pub fn hub_origin(hub: &str) -> String {
+    reqwest::Url::parse(hub)
+        .map(|u| u.origin().ascii_serialization())
+        .unwrap_or_else(|_| "the configured hub".to_string())
+}
+
 /// Write one turn (the real-time per-turn hook path; the bulk sync uses
 /// [`store_turns_bulk`]).
 pub async fn store_full_turn(
@@ -1679,6 +1716,49 @@ pub fn last_turns(path: &Path, n: usize) -> Vec<Turn> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hubs_on_this_machine_are_local() {
+        for hub in [
+            "http://localhost:3001",
+            "http://LOCALHOST:3001/",
+            "http://ctx.localhost:3001",
+            "http://127.0.0.1:3001",
+            "http://127.1.2.3",
+            "http://[::1]:3001",
+            "http://[::ffff:127.0.0.1]:3001",
+            "http://0.0.0.0:3001",
+            "http://[::]:3001",
+            "https://user:secret@127.0.0.1:3001/base",
+        ] {
+            assert!(hub_is_local(hub), "{hub} should be local");
+        }
+    }
+
+    #[test]
+    fn every_other_hub_is_remote() {
+        for hub in [
+            "https://alice.ctxone.example/",
+            "http://192.168.1.20:3001",
+            "http://10.0.0.5:3001",
+            "http://[2001:db8::1]:3001",
+            "http://localhost.example.com:3001",
+            "http://notlocalhost:3001",
+            "not a url",
+            "",
+        ] {
+            assert!(!hub_is_local(hub), "{hub:?} should be remote");
+        }
+    }
+
+    #[test]
+    fn hub_origin_drops_credentials_and_path() {
+        assert_eq!(
+            hub_origin("https://user:secret@hub.example:8443/base?x=1"),
+            "https://hub.example:8443"
+        );
+        assert_eq!(hub_origin("not a url"), "the configured hub");
+    }
 
     #[test]
     fn session_analysis_parses_summary_and_topics() {
