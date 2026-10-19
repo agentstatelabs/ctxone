@@ -6,6 +6,23 @@ the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
 
 ## [Unreleased]
 
+### Changed
+- **The Hub's busiest reads take a handful of queries instead of one or more per item.** On a Postgres Hub each storage read is a round trip, and these endpoints read per item:
+  - the session list read each session's title, metadata and turns separately (Lens's Sessions view);
+  - the plan list read each plan's tasks;
+  - plan show read each task's cross-plan links;
+  - pinned memory read each pinned leaf.
+
+  Now the session list reads `/sessions` once two levels deep (titles, turns) plus every session's metadata in one `get_json_many`. The plan list uses `list_plans_with_tasks`, plan show reads the plan's links once, and pinned memory reads its subtree once and flattens it here. Results are unchanged; tests compare the new session discovery and pinned listing with the old reads.
+
+  Measured on a large real store (160 sessions in the registry) against local Postgres, before and after:
+  - session list (largest workspace): 3,773 queries (3.9 s) → 198 (0.23 s);
+  - plan list: 343 → 10;
+  - plan show: 132 → 22;
+  - pinned: 315 → 9.
+
+  SQLite got faster too: the session list went from 1.1 s to 0.14 s. Requires AgentStateGraph 1.3.2 (`agentstategraph*` = "1.3.2"), whose tree reads and writes are batched as well; `Cargo.lock` moves only the seven agentstategraph crates.
+
 ### Added
 - **The Hub connects to Postgres over verified TLS.** It builds AgentStateGraph's storage with `postgres-tls` (rustls with the ring backend and Mozilla's roots, crates the Hub already used), so `DATABASE_URL` can ask for `sslmode=verify-full`; a provider with its own CA takes `sslrootcert=<CA file>` or `PGSSLROOTCERT`. Before, any TLS setting was refused with an error naming the feature, so the Hub couldn't reach a managed Postgres that requires TLS. The startup line now says which TLS mode is in use (`tls=verify-full`, never the URL), and a database on another machine with no `sslmode`, or `prefer`, gets a warning; `sslmode=disable` says plaintext is intended. `scripts/test-postgres-tls.sh` runs the TLS tests against a throwaway Postgres that accepts only TLS. See docs/DEPLOYMENT.md, "Postgres over TLS".
 - **Logs, traces and metrics through [oxtel](https://github.com/agentstatelabs/oxtel).** The Hub's hand-built `tracing-subscriber` setup is replaced.

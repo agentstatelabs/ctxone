@@ -1341,19 +1341,49 @@ async fn session_token_stats(
 ///
 /// Session ids that have a node in this namespace's graph.
 ///
-/// One `list_paths` at depth 2 rather than a `get` per session: a session in a
-/// named namespace always carries a `title`/`meta` leaf, and depth 2 stops
-/// above the `turns` map — so a 900-turn session contributes ~5 leaves, not
-/// 900. Reliable for named namespaces, where every session was ingested or
-/// moved with a full subtree.
+/// A session counts when it, or one of its children, is a leaf (an atom or
+/// an empty map): a session in a named namespace always carries a
+/// `title`/`meta` leaf. Reliable for named namespaces, where every session was
+/// ingested or moved with a full subtree. Read from [`sessions_view`], so a
+/// session's turns are never fetched.
 fn session_ids_with_nodes(repo: &Repository) -> std::collections::HashSet<String> {
-    let prefix = format!("{SESSION_NODE_ROOT}/");
-    repo.list_paths("main", SESSION_NODE_ROOT, Some(SESSION_DISCOVERY_MAX_DEPTH))
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|p| p.strip_prefix(prefix.as_str()))
-        .filter_map(|rest| rest.split('/').next())
-        .map(str::to_string)
+    session_ids_in(&sessions_view(repo))
+}
+
+/// `/sessions` read [`SESSION_DISCOVERY_MAX_DEPTH`] levels deep, in one pass
+/// over the store: each session's children, with leaves as values and deeper
+/// nodes summarized (`{"_truncated": true, "_keys" | "_len": …}`). Empty when
+/// there are no sessions.
+fn sessions_view(repo: &Repository) -> serde_json::Map<String, serde_json::Value> {
+    match repo.get_json_capped("main", SESSION_NODE_ROOT, SESSION_DISCOVERY_MAX_DEPTH) {
+        Ok(serde_json::Value::Object(sessions)) => sessions,
+        _ => serde_json::Map::new(),
+    }
+}
+
+/// The sessions in a [`sessions_view`] that have a leaf, by the rule of the
+/// `list_paths` walk this replaced: the session itself is an atom or an empty
+/// map, or one of its children is an atom or an empty map.
+fn session_ids_in(
+    view: &serde_json::Map<String, serde_json::Value>,
+) -> std::collections::HashSet<String> {
+    use serde_json::Value;
+    // A child two levels down: an atom is a value, a map or list a summary.
+    let child_is_leaf = |v: &Value| match v {
+        Value::Object(summary) => summary
+            .get("_keys")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty),
+        Value::Array(_) => false,
+        _ => true,
+    };
+    view.iter()
+        .filter(|(_, session)| match session {
+            Value::Object(children) => children.is_empty() || children.values().any(child_is_leaf),
+            Value::Array(items) => items.iter().any(child_is_leaf),
+            _ => true,
+        })
+        .map(|(id, _)| id.clone())
         .collect()
 }
 
@@ -1423,31 +1453,41 @@ async fn list_sessions(State(s): State<HubState>, ns: NamespaceId) -> impl IntoR
             }
         }
         snaps.retain(|snap| !placed.contains(&snap.session_id));
-    } else if let Ok(repo) = s.repo_for(&ns) {
-        let here = session_ids_with_nodes(&repo);
-        snaps.retain(|snap| here.contains(&snap.session_id));
     }
 
-    // Decorate with title/meta from the workspace being viewed.
+    // Decorate with title/meta from the workspace being viewed: one view of
+    // `/sessions` for titles and turns, and every meta in one batched read,
+    // instead of three reads per session.
     if let Ok(repo) = s.repo_for(&ns) {
-        for snap in &mut snaps {
-            snap.name = read_session_title(&repo, "main", &snap.session_id);
-            let meta = read_session_meta(&repo, "main", &snap.session_id);
+        let view = sessions_view(&repo);
+        if !is_default_ns {
+            let here = session_ids_in(&view);
+            snaps.retain(|snap| here.contains(&snap.session_id));
+        }
+        let meta_paths: Vec<String> = snaps
+            .iter()
+            .map(|snap| session_meta_path(&snap.session_id))
+            .collect();
+        let meta_paths: Vec<&str> = meta_paths.iter().map(String::as_str).collect();
+        let metas = repo
+            .get_json_many("main", &meta_paths)
+            .unwrap_or_else(|_| vec![None; meta_paths.len()]);
+        for (snap, meta) in snaps.iter_mut().zip(metas) {
+            let node = view.get(&snap.session_id);
+            snap.name = node
+                .and_then(|n| n.get("title"))
+                .and_then(|t| t.as_str())
+                .filter(|t| !t.is_empty())
+                .map(str::to_string);
+            let meta = session_meta_from(meta.as_ref());
             snap.source = meta.source;
             snap.started_at = meta.started_at;
             snap.updated_at = meta.updated_at;
             snap.models_used = meta.models_used;
-            // Cheap existence check (depth 1 returns an empty list for a present
-            // turns node — the leaves are one level deeper — and an error when
-            // the node is absent). Lets the Sessions view skip the first-turn
-            // title probe for turn-less sessions instead of 404-ing on each.
-            snap.has_turns = repo
-                .list_paths(
-                    "main",
-                    &format!("/sessions/{}/turns", snap.session_id),
-                    Some(1),
-                )
-                .is_ok();
+            // Whether a turns node exists. Lets the Sessions view skip the
+            // first-turn title probe for turn-less sessions instead of 404-ing
+            // on each.
+            snap.has_turns = node.and_then(|n| n.get("turns")).is_some();
         }
     }
     // Lend the workspace-aggregate ratio to sessions that spent tokens but have
@@ -3245,21 +3285,47 @@ async fn list_pinned(
     ns: NamespaceId,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
-    // If /memory/pinned doesn't exist yet, return an empty list instead of 500.
-    let paths = repo
-        .list_paths("main", "/memory/pinned", Some(20))
-        .unwrap_or_default();
-
+    // One read of the pinned subtree, flattened here: a read per pinned leaf
+    // was a round trip each on a remote store. If /memory/pinned doesn't
+    // exist yet, the list is empty instead of a 500.
     let mut out = Vec::new();
-    for p in &paths {
-        if let Ok(val) = repo.get_json("main", p) {
-            out.push(serde_json::json!({
-                "path": p,
-                "value": val,
-            }));
-        }
+    if let Ok(pinned) = repo.get_json("main", "/memory/pinned") {
+        pinned_leaves(&pinned, "/memory/pinned", 0, &mut out);
     }
     Ok(Json(out))
+}
+
+/// How deep [`list_pinned`] looks below `/memory/pinned`.
+const PINNED_MAX_DEPTH: usize = 20;
+/// The most pinned leaves listed, as `list_paths` caps its results.
+const PINNED_MAX_RESULTS: usize = 10_000;
+
+/// Every leaf of `value` as `{path, value}`, in `list_paths` order and by its
+/// rules: atoms and empty maps are leaves, maps (by key) and lists (by index)
+/// are walked, and nothing deeper than [`PINNED_MAX_DEPTH`] is listed.
+fn pinned_leaves(
+    value: &serde_json::Value,
+    path: &str,
+    depth: usize,
+    out: &mut Vec<serde_json::Value>,
+) {
+    use serde_json::Value;
+    if depth > PINNED_MAX_DEPTH || out.len() >= PINNED_MAX_RESULTS {
+        return;
+    }
+    match value {
+        Value::Object(map) if !map.is_empty() => {
+            for (key, child) in map {
+                pinned_leaves(child, &format!("{path}/{key}"), depth + 1, out);
+            }
+        }
+        Value::Array(items) => {
+            for (i, child) in items.iter().enumerate() {
+                pinned_leaves(child, &format!("{path}/{i}"), depth + 1, out);
+            }
+        }
+        _ => out.push(serde_json::json!({"path": path, "value": value})),
+    }
 }
 
 // -- Plan endpoints --------------------------------------------------
@@ -3703,16 +3769,18 @@ async fn list_plans(
     for ns_name in namespaces {
         let repo = s.repo_for(&NamespaceId(ns_name.clone()))?;
         let store = plan_tools::make_store(repo, DEFAULT_AGENT_ID);
-        let plans = match store.list_plans_by_status(&q.ref_name, filter) {
+        // Every plan with its tasks from one read of the plans tree; a
+        // `list_tasks` per plan was a round trip each on a remote store.
+        let plans = match store.list_plans_with_tasks(&q.ref_name) {
             Ok(p) => p,
             // A namespace with no ref/data yet shouldn't abort the whole listing.
             Err(_) if q.all_namespaces => continue,
             Err(e) => return Err(substrate_error_to_response(e)),
         };
-        for plan in plans {
-            let tasks = store
-                .list_tasks(&q.ref_name, &plan.name)
-                .unwrap_or_default();
+        for (plan, tasks) in plans {
+            if filter.is_some_and(|status| plan.status != status) {
+                continue;
+            }
             let mut pj = plan_tools::plan_to_json(&plan, &tasks, false);
             if q.all_namespaces
                 && let Some(obj) = pj.as_object_mut()
@@ -3750,14 +3818,21 @@ fn plan_link_path(plan: &str, task: &str) -> String {
 
 /// Read the `plan/task` targets a task satisfies (empty if none/unset).
 fn read_satisfies(repo: &Repository, ref_name: &str, plan: &str, task: &str) -> Vec<String> {
-    repo.get_json(ref_name, &plan_link_path(plan, task))
-        .ok()
-        .and_then(|v| {
-            v.get("satisfies").and_then(|s| s.as_array()).map(|a| {
-                a.iter()
-                    .filter_map(|x| x.as_str().map(str::to_string))
-                    .collect()
-            })
+    satisfies_in(
+        repo.get_json(ref_name, &plan_link_path(plan, task))
+            .ok()
+            .as_ref(),
+    )
+}
+
+/// The `satisfies` targets in a task's `/plan_links/{plan}/{task}` value.
+fn satisfies_in(link: Option<&serde_json::Value>) -> Vec<String> {
+    link.and_then(|v| v.get("satisfies"))
+        .and_then(|s| s.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
         })
         .unwrap_or_default()
 }
@@ -3824,11 +3899,15 @@ async fn get_plan(
         .map_err(substrate_error_to_response)?;
     let tasks = store.list_tasks(&q.ref_name, &name).unwrap_or_default();
     let mut out = plan_tools::plan_to_json(&plan, &tasks, true);
-    // Attach cross-plan "satisfies" links to each task from the graph.
+    // Attach cross-plan "satisfies" links to each task from the graph: the
+    // plan's links in one read, not one per task.
+    let plan_links = repo
+        .get_json(&q.ref_name, &format!("/plan_links/{name}"))
+        .unwrap_or(serde_json::Value::Null);
     if let Some(arr) = out["tasks"].as_array_mut() {
         for tj in arr.iter_mut() {
             if let Some(id) = tj["id"].as_str() {
-                let links = read_satisfies(&repo, &q.ref_name, &name, id);
+                let links = satisfies_in(plan_links.get(id));
                 if !links.is_empty()
                     && let Some(obj) = tj.as_object_mut()
                 {
@@ -6021,7 +6100,16 @@ struct SessionMeta {
 }
 
 fn read_session_meta(repo: &Repository, ref_name: &str, sid: &str) -> SessionMeta {
-    let Ok(v) = repo.get_json(ref_name, &session_meta_path(sid)) else {
+    session_meta_from(
+        repo.get_json(ref_name, &session_meta_path(sid))
+            .ok()
+            .as_ref(),
+    )
+}
+
+/// A session's meta from the value at `/sessions/{id}/meta`, if any.
+fn session_meta_from(v: Option<&serde_json::Value>) -> SessionMeta {
+    let Some(v) = v else {
         return SessionMeta {
             source: None,
             started_at: None,
@@ -7216,6 +7304,86 @@ fn blocked_file_access_hint() -> &'static str {
 mod tests {
     use super::*;
     use agentstategraph_storage::SqliteStorage;
+
+    // ── Batched reads match the per-item reads they replaced ─────────────────
+
+    fn repo_with(state: serde_json::Value) -> Repository {
+        let repo = Repository::new(Box::new(SqliteStorage::in_memory().unwrap()));
+        repo.init().unwrap();
+        repo.set_json(
+            "main",
+            "/",
+            &state,
+            CommitOptions::new("test", IntentCategory::Custom("Seed".into()), "seed"),
+        )
+        .unwrap();
+        repo
+    }
+
+    /// The `list_paths` walk at depth 2 that session discovery used to be.
+    fn sessions_by_list_paths(repo: &Repository) -> std::collections::HashSet<String> {
+        let prefix = format!("{SESSION_NODE_ROOT}/");
+        repo.list_paths("main", SESSION_NODE_ROOT, Some(SESSION_DISCOVERY_MAX_DEPTH))
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|p| p.strip_prefix(prefix.as_str()))
+            .filter_map(|rest| rest.split('/').next())
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn session_discovery_keeps_the_list_paths_rule() {
+        let repo = repo_with(serde_json::json!({
+            "sessions": {
+                "titled": {"title": "x", "meta": {"source": "claude"}, "turns": {"t0001": {"text": "hi"}}},
+                "turns-only": {"turns": {"t0001": {"text": "hi"}}},
+                "meta-only": {"meta": {"source": "codex"}},
+                "empty-child": {"links": {}},
+                "atom": "a string",
+                "empty": {},
+                "list": ["a"],
+                "list-of-maps": [{"a": 1}],
+                "empty-list": [],
+            }
+        }));
+        let new = session_ids_with_nodes(&repo);
+        assert_eq!(new, sessions_by_list_paths(&repo));
+        let mut ids: Vec<_> = new.into_iter().collect();
+        ids.sort();
+        assert_eq!(ids, ["atom", "empty", "empty-child", "list", "titled"]);
+        // No sessions at all.
+        let bare = repo_with(serde_json::json!({"memory": {}}));
+        assert!(session_ids_with_nodes(&bare).is_empty());
+    }
+
+    #[test]
+    fn pinned_leaves_match_list_paths_then_get_json() {
+        let repo = repo_with(serde_json::json!({
+            "memory": {"pinned": {
+                "rules": {"title": "Be brief", "body": "Short answers.", "weight": 3},
+                "flags": {"on": true, "off": false, "unset": null},
+                "steps": ["one", {"two": 2}, [], {}],
+                "empty": {},
+                "deep": {"a": {"b": {"c": "d"}}},
+            }}
+        }));
+        let old: Vec<serde_json::Value> = repo
+            .list_paths("main", "/memory/pinned", Some(PINNED_MAX_DEPTH))
+            .unwrap()
+            .iter()
+            .map(|p| serde_json::json!({"path": p, "value": repo.get_json("main", p).unwrap()}))
+            .collect();
+        let mut new = Vec::new();
+        pinned_leaves(
+            &repo.get_json("main", "/memory/pinned").unwrap(),
+            "/memory/pinned",
+            0,
+            &mut new,
+        );
+        assert_eq!(new, old);
+        assert_eq!(new.len(), 11);
+    }
 
     // ── MergeGuard: one merge at a time per (workspace, target) ──────────────
 
