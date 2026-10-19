@@ -10,9 +10,9 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agentstategraph"
-version = "1.3.1"
+version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da55a229a4aeb43371f6a34e546d7b9986966a7b2d376b596e1095f10a7b2542"
+checksum = "70d7c2382bc6dadb35f6dfff1229c748bd4633b594e526ad0b81a61bb0cb98ab"
 dependencies = [
  "agentstategraph-core",
  "agentstategraph-reminders",
@@ -29,9 +29,9 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-core"
-version = "1.3.1"
+version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7cefb5299243fa39f2c9a4ccc25a1f96e03da374b58b5071891f9c8419a311c"
+checksum = "cc9a61e1b67223df50394212a3c73b05deee467199e43c85273311e49d037410"
 dependencies = [
  "blake3",
  "chrono",
@@ -43,9 +43,9 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-migrate"
-version = "1.3.1"
+version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f08243e1fdb56fe1046560d25fcd0ec4e9ab8393a8f666517f4c1d1930232d84"
+checksum = "75708652b3fd74ce0f2e2bdc23009da0af2b8d5622bece38731bebc29e3bc020"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -57,9 +57,9 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-reminders"
-version = "1.3.1"
+version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87218a684510fc799b542dc16f2e163ad640cac3808abe4c95ef71dc951b20f4"
+checksum = "d087e3f2ca6d068d8e7b35595664c6628e85bc300f295976de0e513d60336d83"
 dependencies = [
  "agentstategraph-core",
  "chrono",
@@ -71,9 +71,9 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-storage"
-version = "1.3.1"
+version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3da5e193da10160beeabeab4abc9354c829f746cc3635f3f847ae9e580aa97ee"
+checksum = "66a064ca9ec8967efa44c825fcc14c94820a5ffed3bd18dce47ff30908a14c19"
 dependencies = [
  "agentstategraph-core",
  "agentstategraph-reminders",
@@ -92,9 +92,9 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-taint"
-version = "1.3.1"
+version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f917bcecef9a25013b7d4f5c0ad3b2ead44c78204f44487a2271b51438f4cfab"
+checksum = "6ae06a767b6eb18567ca770325362ef51ca3c31d877d9962d1874534899f6c03"
 dependencies = [
  "agentstategraph-core",
  "chrono",
@@ -106,9 +106,9 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-tasks"
-version = "1.3.1"
+version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b1b49113bab997b822a4902b9b5060878c8f0d9809e6f2e92bb105eb114f8f4"
+checksum = "5465c6d425b0c14970a145b0ddac26117f6b128ad21439eb8b39651674ecff41"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
