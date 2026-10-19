@@ -986,3 +986,97 @@ async fn archive_absent_on_branch_present_on_main_404s() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+/// Plan show reads the plan's cross-plan links once and puts each task's on
+/// that task only.
+#[tokio::test]
+async fn plan_show_carries_each_tasks_satisfies_links() {
+    let router = test_router();
+    for plan in ["a", "b"] {
+        call_json(
+            router.clone(),
+            post_json_with_agent("/api/plans", "test", json!({"name": plan})),
+        )
+        .await;
+    }
+    for (plan, title) in [("a", "one"), ("a", "two"), ("a", "three"), ("b", "target")] {
+        call_json(
+            router.clone(),
+            post_json_with_agent(
+                &format!("/api/plans/{plan}/tasks"),
+                "test",
+                json!({"title": title}),
+            ),
+        )
+        .await;
+    }
+    for (task, target) in [("t-001", "b/t-001"), ("t-003", "b/t-001")] {
+        let (status, body) = call_json(
+            router.clone(),
+            post_json_with_agent(
+                &format!("/api/plans/a/tasks/{task}/link"),
+                "test",
+                json!({"target": target}),
+            ),
+        )
+        .await;
+        assert!(status.is_success(), "{status}: {body}");
+    }
+
+    let (status, body) = call_json(router.clone(), get("/api/plans/a")).await;
+    assert_eq!(status, StatusCode::OK);
+    let tasks = body["tasks"].as_array().unwrap();
+    assert_eq!(tasks.len(), 3);
+    assert_eq!(tasks[0]["satisfies"], json!(["b/t-001"]));
+    assert!(tasks[1].get("satisfies").is_none(), "{}", tasks[1]);
+    assert_eq!(tasks[2]["satisfies"], json!(["b/t-001"]));
+
+    // A plan with no links shows none.
+    let (_, body) = call_json(router, get("/api/plans/b")).await;
+    assert!(body["tasks"][0].get("satisfies").is_none(), "{body}");
+}
+
+/// The plan list carries each plan's tasks, read with the plans in one pass.
+#[tokio::test]
+async fn plan_list_counts_each_plans_tasks() {
+    let router = test_router();
+    for (plan, tasks) in [("busy", 4), ("idle", 0), ("some", 2)] {
+        call_json(
+            router.clone(),
+            post_json_with_agent("/api/plans", "test", json!({"name": plan})),
+        )
+        .await;
+        for i in 0..tasks {
+            call_json(
+                router.clone(),
+                post_json_with_agent(
+                    &format!("/api/plans/{plan}/tasks"),
+                    "test",
+                    json!({"title": format!("t{i}")}),
+                ),
+            )
+            .await;
+        }
+    }
+    let (status, body) = call_json(router, get("/api/plans")).await;
+    assert_eq!(status, StatusCode::OK);
+    let counts: Vec<(String, u64)> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            (
+                p["name"].as_str().unwrap().to_string(),
+                p["task_counts"]["total"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        counts,
+        [
+            ("busy".to_string(), 4),
+            ("idle".to_string(), 0),
+            ("some".to_string(), 2)
+        ]
+    );
+}
