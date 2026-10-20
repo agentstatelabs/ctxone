@@ -270,6 +270,10 @@ ctxone-hub --http --storage postgres \
   and behind an ingress, or under DNS rebinding, `Host` is whatever the caller
   sent.
 
+A hub serves one tenant (`--tenant`), so serving several users takes one hub
+per user. One hub serving many users is a proposed design:
+[design/MULTI_TENANT_HUB.md](design/MULTI_TENANT_HUB.md).
+
 ### Postgres over TLS
 
 The hub reaches Postgres over verified TLS, set in `DATABASE_URL` the way libpq
