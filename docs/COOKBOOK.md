@@ -215,8 +215,8 @@ Run the Hub against a Postgres instance so multiple developers (or multiple
 machines) see the same memory graph.
 
 ```bash
-# Start the Hub pointing at Postgres
-export DATABASE_URL=postgres://ctxone:secret@db.internal:5432/ctxone
+# Start the Hub pointing at Postgres, over verified TLS
+export DATABASE_URL='postgres://ctxone:secret@db.internal:5432/ctxone?sslmode=verify-full'
 ctx serve --http --storage postgres
 ```
 
@@ -240,7 +240,9 @@ services:
     image: ghcr.io/agentstatelabs/ctxone:latest
     command: ["ctxone-hub", "--http", "--port", "3001", "--storage", "postgres"]
     environment:
-      DATABASE_URL: postgres://ctxone:secret@db:5432/ctxone
+      # Plaintext on the compose network, said explicitly. A database you
+      # reach over a network you don't control takes sslmode=verify-full.
+      DATABASE_URL: postgres://ctxone:secret@db:5432/ctxone?sslmode=disable
     depends_on: [db]
     ports:
       - "3001:3001"
@@ -248,6 +250,9 @@ services:
 volumes:
   ctxone-pg-data:
 ```
+
+For TLS to a managed Postgres, and providers with their own CA, see
+[Postgres over TLS](DEPLOYMENT.md#postgres-over-tls).
 
 The project registry (`ctx project add`) and session stats live in the
 same database, in `ctxone_*` tables, so they survive a restart and a new

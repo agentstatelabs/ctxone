@@ -17,6 +17,7 @@ pub mod mcp_http;
 pub mod memory_tools;
 pub mod migrations;
 pub mod plan_tools;
+pub mod postgres_url;
 pub mod project;
 pub mod rate_limit;
 pub mod reminder_tools;

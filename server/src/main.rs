@@ -569,11 +569,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 error!("--database-url or DATABASE_URL required for postgres storage");
                 std::process::exit(1);
             }
+            // Never the URL itself: it may carry a password.
+            let tls = ctxone_hub::postgres_url::TlsIntent::of(&database_url);
             info!(
                 storage = "postgres",
                 tenant = %tenant_id,
+                tls = tls.label(),
                 "Storage: postgres"
             );
+            if let Some(warning) = tls.warning() {
+                warn!("{warning}");
+            }
             let rt = tokio::runtime::Runtime::new()?;
             let storage = rt.block_on(async {
                 agentstategraph_storage::PostgresStorage::connect_tenant(&database_url, &tenant_id)

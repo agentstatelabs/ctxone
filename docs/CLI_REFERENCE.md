@@ -509,6 +509,9 @@ OPTIONS:
 For the Postgres backend, the connection string is read from the
 `DATABASE_URL` environment variable, not a flag:
 `export DATABASE_URL=postgres://… && ctx serve --http --storage postgres`.
+Add `?sslmode=verify-full` for a database on another machine (and
+`&sslrootcert=<CA file>` for a provider with its own CA); see
+[Postgres over TLS](DEPLOYMENT.md#postgres-over-tls).
 
 **ASD code intelligence.** The ASD code-pool flags `--asd-path` and
 `--asd-url` are **not** on `ctx serve` — they're passthrough flags on the

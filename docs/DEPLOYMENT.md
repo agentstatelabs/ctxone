@@ -270,6 +270,31 @@ ctxone-hub --http --storage postgres \
   and behind an ingress, or under DNS rebinding, `Host` is whatever the caller
   sent.
 
+### Postgres over TLS
+
+The hub reaches Postgres over verified TLS, set in `DATABASE_URL` the way libpq
+does it:
+
+```bash
+export DATABASE_URL='postgres://ctxone:secret@db.example.com:5432/ctxone?sslmode=verify-full'
+```
+
+- `sslmode=verify-full` (or `require`, or `verify-ca`): TLS, with the server's
+  certificate checked against Mozilla's roots and its host name. There is no
+  unverified TLS.
+- A provider that signs with its own CA (Amazon RDS, Google Cloud SQL, …):
+  download its CA bundle and add `&sslrootcert=/path/to/ca.pem`, or set
+  `PGSSLROOTCERT=/path/to/ca.pem`.
+- No `sslmode`, or `sslmode=disable`, is plaintext: fine for a database on the
+  same machine, and on a private network if you mean it, in which case say
+  `sslmode=disable`. For a database on another machine with no `sslmode`, or
+  with `prefer`, the hub logs a warning at startup.
+
+The startup line says which mode the hub connected with
+(`Storage: postgres … tls=verify-full`); it never logs the URL, which may
+carry a password. `scripts/test-postgres-tls.sh` runs the hub's TLS tests
+against a throwaway Postgres that accepts only TLS.
+
 ### Cross-origin (CSRF / DNS-rebinding)
 
 Independent of the token, the hub rejects **browser** requests whose `Origin`
