@@ -861,6 +861,31 @@ Completing the last open task auto-promotes the plan to `completed`.
 
 Record the task as abandoned. `--reason` is required.
 
+### `ctx plan edit <plan> <task-id> [options]`
+
+Change a task after it was added. Only the options given change; status,
+proof and timestamps never do.
+
+Options:
+
+- `--title <text>` — new title; the task's description is kept
+- `-d, --description <text>` — new description (`""` removes it); the
+  title is kept
+- `--priority <p>` — `low`, `medium`, `high` or `critical`
+- `-b, --blocks <task-id>` — the task's new blockers, replacing the old
+  list; repeat for several. Each must be a task in the same plan, and the
+  list can't form a cycle
+- `--clear-blockers` — remove every blocker
+- `--force` — edit a task that is already done or abandoned
+
+An abandoned blocker never counts as done, so after abandoning a task, edit
+its dependents' blockers:
+
+```bash
+ctx plan abandon website-v2 t-004 --reason "superseded by t-009"
+ctx plan edit website-v2 t-007 -b t-009
+```
+
 ### `ctx plan next <plan>`
 
 Show the next pickable task.

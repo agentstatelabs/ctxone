@@ -441,6 +441,39 @@ pub const REGISTRY: &[HelpDoc] = &[
         related: &["plan_done", "plan_complete", "plan_start"],
     },
     HelpDoc {
+        feature: "plan_edit",
+        group: "plans",
+        synopsis: "Change a task's title, description, priority or blockers after it was added; status, proof and timestamps never change.",
+        syntax: "ctx plan edit <plan> <task_id> [--title <t>] [-d <desc>] [--priority <p>] [-b <id>]... [--clear-blockers] [--force]",
+        params: &[
+            p!("plan_id", true, "Plan holding the task."),
+            p!("task_id", true, "Task to edit."),
+            p!("--title", false, "New title; the description is kept."),
+            p!(
+                "--description",
+                false,
+                "New description; \"\" removes it, and the title is kept."
+            ),
+            p!("--priority", false, "low|medium|high|critical."),
+            p!(
+                "--blocks",
+                false,
+                "The new blocker list, replacing the old one; repeat for several."
+            ),
+            p!("--clear-blockers", false, "Remove every blocker."),
+            p!("--force", false, "Edit a done or abandoned task."),
+        ],
+        examples: &[
+            "ctx plan edit website-v2 t-004 --title \"Rewrite the hero for the new brand\"",
+            "ctx plan edit website-v2 t-007 -b t-009   # t-004 was abandoned; wait on t-009 instead",
+        ],
+        gotchas: &[
+            "An abandoned blocker never counts as done: edit the dependents' blockers instead of leaving them blocked.",
+            "Blockers must be tasks in the same plan and can't form a cycle; use plan_link across plans.",
+        ],
+        related: &["plan_add", "plan_abandon", "plan_link"],
+    },
+    HelpDoc {
         feature: "plan_show",
         group: "plans",
         synopsis: "Fetch one plan with full task list, statuses, proofs, and per-task assignment.",

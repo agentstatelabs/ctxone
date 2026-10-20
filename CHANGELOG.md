@@ -24,6 +24,13 @@ the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
   SQLite got faster too: the session list went from 1.1 s to 0.14 s. Requires AgentStateGraph 1.3.2 (`agentstategraph*` = "1.3.2"), whose tree reads and writes are batched as well; `Cargo.lock` moves only the seven agentstategraph crates.
 
 ### Added
+- **Tasks can be edited after they're added.** It's available as the `plan_edit` MCP tool, `PATCH /api/plans/{name}/tasks/{task_id}` and `ctx plan edit`. It changes a task's title, description, priority or blockers, and leaves its status, proof, assignment and timestamps as they are.
+  - Before, revising a plan meant adding new tasks beside the old ones. Abandoning the old ones didn't help, because an abandoned blocker never counts as done, so its dependents stayed blocked; now their blockers can be edited.
+  - `blocked_by` replaces the whole list. Each blocker must be a task in the plan, and a list that would form a cycle is refused (409).
+  - `title` keeps the task's description, and `description` keeps its title (`""` removes it).
+  - Done and abandoned tasks need `force`.
+  - The response's `changed` lists what changed. Each changed field is one commit, made as the calling agent.
+  - Requires AgentStateGraph 1.4.0 (`TaskStore::set_title`, and the cycle check in `set_blockers`).
 - **The Hub connects to Postgres over verified TLS.** It builds AgentStateGraph's storage with `postgres-tls` (rustls with the ring backend and Mozilla's roots, crates the Hub already used), so `DATABASE_URL` can ask for `sslmode=verify-full`; a provider with its own CA takes `sslrootcert=<CA file>` or `PGSSLROOTCERT`. Before, any TLS setting was refused with an error naming the feature, so the Hub couldn't reach a managed Postgres that requires TLS. The startup line now says which TLS mode is in use (`tls=verify-full`, never the URL), and a database on another machine with no `sslmode`, or `prefer`, gets a warning; `sslmode=disable` says plaintext is intended. `scripts/test-postgres-tls.sh` runs the TLS tests against a throwaway Postgres that accepts only TLS. See docs/DEPLOYMENT.md, "Postgres over TLS".
 - **Logs, traces and metrics through [oxtel](https://github.com/agentstatelabs/oxtel).** The Hub's hand-built `tracing-subscriber` setup is replaced.
   - Logs still go to stderr. They're text on a terminal and one JSON object per line otherwise, so a log file or container gets JSON. `OXTEL_LOG_FORMAT` (`text`, `json`, `ecs`, `none`) chooses. One startup line says where logs go and whether anything is exported.

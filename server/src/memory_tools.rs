@@ -3552,6 +3552,37 @@ impl CtxOneServer {
     }
 
     #[tool(
+        description = "Change a task after it was added: its title, description, priority or blockers. Pass only the fields to change; status, proof, assignment and timestamps never change. \
+        \
+        CALL THIS WHEN a task's scope or wording changed, or its blockers need fixing — for example when a blocker was abandoned, which never counts as done, so its dependents stay blocked until their blockers are edited. `blocked_by` replaces the whole list (`[]` clears it); each id must be a task in this plan, and the list must not form a cycle. `title` keeps the task's description, and `description` keeps its title (`\"\"` removes it). Done and abandoned tasks are refused unless `force=true`. The result's `changed` lists what changed."
+    )]
+    async fn plan_edit(&self, params: Parameters<crate::plan_tools::PlanEditParams>) -> String {
+        if let Some(msg) = self.namespace_write_block() {
+            return msg;
+        }
+        use crate::plan_tools as pt;
+        let p = params.0;
+        let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        let edit = pt::TaskEdit {
+            title: p.title.as_deref(),
+            description: p.description.as_deref(),
+            priority: p.priority.as_deref(),
+            blocked_by: p.blocked_by,
+            force: p.force,
+        };
+        match pt::edit_task(&store, &p.ref_name, &p.plan_id, &p.task_id, edit) {
+            Ok(edited) => {
+                if !edited.changed.is_empty() {
+                    self.session.mark_dirty();
+                }
+                serde_json::to_string(&pt::edited_task_to_json(&edited))
+                    .unwrap_or_else(|_| "{}".into())
+            }
+            Err(e) => pt::err_json(e),
+        }
+    }
+
+    #[tool(
         description = "Return the highest-priority `pending` task whose blockers are all `done`. \
         \
         CALL THIS WHEN you need to know what to work on next. Pass `assigned_to='me'` (or your agent id) to filter to tasks addressed to you — this is the state-driven orchestration primitive. Without that, any agent sees any pickable task. `include_unassigned` (default true) lets assigned agents also pick up unowned work; set `assigned_only=true` to restrict strictly. Returns `null` if nothing is pickable."

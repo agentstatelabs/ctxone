@@ -880,6 +880,29 @@ unknown.
 Body: `{ "reason": "superseded" }`. Reason is required (empty
 reasons return `400`).
 
+### `PATCH /api/plans/{name}/tasks/{task_id}`
+
+Change a task's title, description, priority or blockers. Send only the
+fields to change:
+
+```json
+{ "title": "Rewrite the hero", "blocked_by": ["t-009"], "ref": "main" }
+```
+
+- `title` keeps the task's description, and `description` keeps its title
+  (`""` removes the description).
+- `blocked_by` replaces the whole list (`[]` clears it).
+- `force: true` allows editing a done or abandoned task.
+
+Status, proof, assignment and timestamps never change. Returns the task
+with `changed`, the fields that changed (empty when nothing did).
+
+Errors:
+- `400`: an empty edit, a blank title, or an unknown priority.
+- `404`: an unknown task, or a blocker that isn't in the plan.
+- `409`: blockers that would form a cycle, or a finished task without
+  `force`.
+
 ### `POST /api/plans/{name}/archive`
 
 Soft-archive a plan.
