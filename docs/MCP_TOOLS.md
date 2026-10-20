@@ -1,16 +1,20 @@
 # MCP Tools Reference
 
-The CTXone Hub exposes **56 MCP tools**, served over HTTP at `/mcp` (the
-standard setup) and over stdio, in eight groups:
+The CTXone Hub exposes **67 MCP tools**, served over HTTP at `/mcp` (the
+standard setup) and over stdio, in ten groups:
 
 - **Memory** (8): `remember`, `recall`, `prime`, `context`,
   `summarize_session`, `what_changed_since`, `why_did_we`,
   `project_status`
-- **Plans** (14): `plan_new`, `plan_add`, `plan_start`,
+- **Curation** (5): `session_segments`, `draft_stage`, `drafts_list`,
+  `draft_promote`, `draft_discard`
+- **Plans** (15): `plan_new`, `plan_add`, `plan_start`,
   `plan_done`, `plan_abandon`, `plan_next`, `plan_list`,
   `plan_show`, `plan_tasks`, `plan_link`, `plan_stale`, `plan_move`,
-  `plan_complete`, `plan_archive`
-- **Docs** (1): `docs_find`
+  `plan_close`, `plan_complete`, `plan_archive`
+- **Sessions and workspaces** (4): `session_info`, `session_link_plan`,
+  `namespace_for_plan`, `namespace_for_task`
+- **Docs and help** (2): `docs_find`, `help`
 - **Reminders** (9): `reminder_create`, `remind_me`, `reminder_list`,
   `reminder_get`, `reminder_snooze`, `reminder_approve`, `reminder_cancel`,
   `reminder_start`, `reminder_record`
@@ -367,9 +371,102 @@ unambiguous.
 
 ---
 
+## Curation
+
+Five tools turn a session into durable memory, with the user deciding what's
+kept. Split the session into arcs, stage candidate memories from the arcs
+worth keeping, then keep or drop each candidate. Drafts live under
+`/drafts/<session>/` and aren't recalled until they're promoted. The
+session's turns stay in the archive either way.
+
+### `session_segments`
+
+Split a session into topic **arcs**: contiguous stretches of turns on one git
+branch and working directory. An arc ends at a branch change, a
+working-directory change, or an idle gap. No LLM is involved.
+
+**When to call:** before drafting memories from a session. A session is
+rarely one topic, so keep the arcs that matter and drop whole tangents.
+
+**Parameters:** `session_id`, `gap?` (idle minutes that start a new arc;
+default 30, and `0` turns the rule off), `ref?`.
+
+**Returns:** `{ session_id, gap_minutes, segment_count, segments }`. Each
+segment has its turn range (`start`, `end`, `turn_count`), `branch`, `cwd`,
+start and end times, `tokens`, a `label`, and the `reason` it started
+(`start`, `branch`, `cwd` or `gap`).
+
+---
+
+### `draft_stage`
+
+Stage a **candidate** memory distilled from an arc. It isn't durable: it waits
+in `/drafts/<session>/` for the user to keep, edit or drop.
+
+**When to call:** after `session_segments`, once for each decision, gotcha or
+open thread worth keeping. The user decides what matters; you surface
+candidates.
+
+**Parameters:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `session_id` | string | yes | Session the candidate came from |
+| `content` | string | yes | The candidate memory |
+| `kind` | string | no | `decision`, `gotcha`, `open_thread` or `fact` |
+| `turns` | [int, int] | no | Source turn range, carried onto the memory as provenance |
+| `arc` | string | no | Label of the arc it came from |
+| `context` | string | no | Suggested memory context for promotion |
+| `pin` | bool | no | Suggest pinning on promotion |
+| `ref` | string | no | Branch (default `main`) |
+
+**Returns:** the staged draft, with its `draft_id` and `path`.
+
+---
+
+### `drafts_list`
+
+List a session's staged drafts for review, each with its content, kind,
+source turn range, and suggested context and pin.
+
+**Parameters:** `session_id`, `ref?`.
+
+**Returns:** `{ session_id, drafts }`.
+
+---
+
+### `draft_promote`
+
+Promote a draft to **durable memory**, the "keep" half of curation. Writes its
+content under `/memory/<context>/`, or `/memory/pinned/curated/` when it's
+pinned, records the source session and turn range in the commit, and removes
+the draft.
+
+**When to call:** only for drafts the user chose to keep.
+
+**Parameters:** `session_id`, `draft_id`, `context?` (overrides the draft's
+suggestion; default `facts`), `importance?` (`high` 0.95, `medium` 0.7 by
+default, `low` 0.4), `ref?`.
+
+**Returns:** `{ status: "promoted", path, pinned, source: { session, turns } }`.
+
+---
+
+### `draft_discard`
+
+Drop a staged draft, the "drop" half of curation. It never reaches durable
+memory, and the session's turns stay in the archive.
+
+**Parameters:** `session_id`, `draft_id`, `reason?` (recorded in blame),
+`ref?`.
+
+**Returns:** `{ status: "discarded", draft_id }`.
+
+---
+
 ## Plan tools
 
-Fourteen MCP tools wrap the plan primitives from the
+Fifteen MCP tools wrap the plan primitives from the
 `agentstategraph-tasks` crate and surface them with proactive
 "CALL THIS WHEN" descriptions. Plans persist under `/plans/<name>/`
 and survive session boundaries — the same plan can be picked up by
@@ -531,14 +628,29 @@ target ref.
 
 ---
 
+### `plan_close`
+
+Close a finished plan with a **required summary** of what it achieved, the
+plan-level analog of a task's proof. Refuses unless every task is done or
+abandoned. Prefer it to `plan_complete`, which force-closes a plan that still
+has open tasks.
+
+**When to call:** the plan's last task is finished. Afterwards, push the
+plan's commits and open an MR for its branch.
+
+**Parameters:** `plan_id`, `summary`, `ref?`.
+
+---
+
 ### `plan_complete`
 
-**Force-complete an entire plan in one shot** — marks every remaining
-task done with a "force-complete" reason and closes the plan. Use
-when remaining work is no longer relevant (scope cut, plan
-superseded). For incremental progress, prefer `plan_done` per task.
+**Force-close a whole plan in one shot**: abandons every still-open task with
+a reason, then closes the plan with a required summary. Use it when the
+remaining work no longer matters (scope cut, plan superseded). When every task
+is already finished, use `plan_close`; for progress, use `plan_done` per task.
 
-**Parameters:** `plan_id`, `reason`, `ref?`.
+**Parameters:** `plan_id`, `summary`, `reason?` (stamped on each abandoned
+task; default "Plan force-completed by user"), `ref?`.
 
 ---
 
@@ -576,7 +688,70 @@ task and never shows what's in progress.
 
 ---
 
-## Docs
+## Sessions and workspaces
+
+### `session_info`
+
+Describe a session: the workspace it lives in, the git branches it touched
+(with turn counts), and the plan tasks it worked on.
+
+**When to call:** before acting on a session, to confirm it's in the workspace
+you expect or to see what plans it advanced. A session belongs to the
+workspace of the repo it ran in; if this reports another one, you're
+connected to the wrong workspace (reconnect with `?namespace=<name>`, or set
+`CTX_NAMESPACE` for the CLI).
+
+**Parameters:** `session_id`, `ref?`.
+
+**Returns:** `{ session_id, namespace, present_in_this_workspace, provenance,
+links }`. `provenance` and `links` are `null` for sessions recorded before
+they were captured.
+
+---
+
+### `session_link_plan`
+
+Record that a session worked on a plan task. Links from commit messages that
+name a task (a `(plan t-NNN)` trailer) are derived automatically; this records
+the rest, such as a refactor with no trailer, or work discussed but not
+committed.
+
+**Parameters:** `session_id`, `plan`, `task` (`t-4` or `t-004`), `note?` (kept
+as the link's evidence), `ref?`.
+
+**Returns:** `{ status, plan, task, validated, already_linked }`.
+`validated: false` means the plan or task isn't in this workspace. The link is
+still recorded, but you're probably connected to the wrong workspace.
+
+---
+
+### `namespace_for_plan`
+
+Find which workspace holds a plan, by scanning every workspace.
+
+**When to call:** you have a plan id but not its workspace, for example after
+a write was refused because no workspace could be derived, or when resuming
+with a plan id from another session.
+
+**Parameters:** `plan_id`.
+
+**Returns:** `{ plan_id, namespaces, hint }`. Pass the workspace as
+`CTX_NAMESPACE`, `--namespace` or `?namespace=`.
+
+---
+
+### `namespace_for_task`
+
+Find which workspace holds a task, by scanning every workspace for the task
+under its plan.
+
+**Parameters:** `plan_id`, `task_id`.
+
+**Returns:** `{ plan_id, task_id, namespaces, hint }`.
+
+---
+
+## Docs and help
 
 ### `docs_find`
 
@@ -589,6 +764,22 @@ topic is already documented. Distinct from `prime`, which imports doc *content*
 into `recall`.
 
 **Parameters:** `query?`, `ref?`.
+
+---
+
+### `help`
+
+Exact syntax, examples and gotchas for a `ctx` or `asd` feature, on demand
+(about 150-250 tokens), instead of carrying every tool's full docs in context.
+The docs are compiled into the Hub, so they match the running code.
+
+**When to call:** before using a feature whose exact syntax you're unsure of.
+Omit `topic` for the grouped catalog of every feature, to discover ones you'd
+otherwise miss.
+
+**Parameters:** `topic?`: a feature name (`remember`) or a phrase ("save a
+memory"); it fuzzy-matches. A topic that isn't here may be an `asd` feature,
+and the response says so.
 
 ---
 
@@ -1032,6 +1223,38 @@ List symbols called by the given symbol (outbound call edges).
   { "qname": "payments.get_balance", "kind": "function", "file": "payments.py" }
 ]
 ```
+
+---
+
+### `code_cross_repo_edges`
+
+Map the service edges between every repo registered with ASD: a client call
+in one repo matched to the route that serves it in another. It runs
+`asd repo edges` over the shared repo registry, so index each repo first to
+keep its contracts current.
+
+**When to call:** before a cross-service change, or to find hidden
+dependencies between repos. For one endpoint's blast radius, use
+`code_impact`; this returns every edge.
+
+**Parameters:** none.
+
+**Returns:** every cross-repo edge, as JSON from `asd`.
+
+---
+
+### `code_impact`
+
+Given an endpoint you're about to change, return its consumers in other repos
+and the invariants and hazards each consumer's own ledger records: what
+breaks if it changes, and what those callers were promised. It runs
+`asd repo impact <target>`.
+
+**Parameters:** `target`: a route-handler qname (`get_orders` or
+`app.routes.get_orders`) or a contract (`http:GET /api/orders/{}`).
+
+**Returns:** the consumers and their invariants and hazards, as JSON from
+`asd`.
 
 ---
 

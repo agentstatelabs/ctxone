@@ -6971,4 +6971,80 @@ mod tests {
         let r = SessionRegistry::new();
         assert_eq!(r.capacity(), MAX_SESSIONS_DEFAULT);
     }
+
+    /// The names in backticks in `text` that look like tool names.
+    fn tool_names_in(text: &str) -> Vec<String> {
+        text.split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
+            .map(String::from)
+            .collect()
+    }
+
+    /// docs/MCP_TOOLS.md documents exactly the tools the router serves: a
+    /// `### \`name\`` section for each, each in one group of the summary at
+    /// the top, and the counts there, in FEATURES.md and in WALKTHROUGH.md
+    /// right. Adding or removing a tool fails this until the docs follow.
+    #[test]
+    fn the_tool_docs_match_the_tools_served() {
+        use std::collections::BTreeSet;
+        let served: BTreeSet<String> = CtxOneServer::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        let n = served.len();
+        let doc = include_str!("../../docs/MCP_TOOLS.md");
+
+        let sections: BTreeSet<String> = doc
+            .lines()
+            .filter_map(|l| l.strip_prefix("### `")?.strip_suffix('`'))
+            .map(String::from)
+            .collect();
+        let missing: Vec<_> = served.difference(&sections).collect();
+        let extra: Vec<_> = sections.difference(&served).collect();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "MCP_TOOLS.md needs a section for {missing:?} and has sections for tools that aren't served: {extra:?}"
+        );
+
+        // The summary: "- **Group** (k): `a`, `b`, …", each group's
+        // count right and every tool in exactly one group. A group's
+        // trailing "_(…)_" note can name tools without listing them.
+        let summary = doc.split("\n## ").next().unwrap();
+        let mut grouped = Vec::new();
+        for group in summary.split("\n- **").skip(1) {
+            let group = group.split("\n\n").next().unwrap();
+            let (title, rest) = group.split_once("** (").expect("- **Group** (count): …");
+            let (count, list) = rest.split_once("):").expect("- **Group** (count): …");
+            let names = tool_names_in(list.split("_(").next().unwrap());
+            assert_eq!(
+                count.parse::<usize>().unwrap(),
+                names.len(),
+                "group {title:?} lists {names:?}"
+            );
+            grouped.extend(names);
+        }
+        let mut sorted = grouped.clone();
+        sorted.sort();
+        let unique: Vec<_> = served.iter().cloned().collect();
+        assert_eq!(sorted, unique, "every served tool in exactly one group");
+
+        assert!(
+            doc.contains(&format!("**{n} MCP tools**")),
+            "MCP_TOOLS.md should say **{n} MCP tools**"
+        );
+        let features = include_str!("../../docs/FEATURES.md");
+        assert!(
+            features.contains(&format!("MCP server ({n} tools)"))
+                && features.contains(&format!("**{n} MCP tools**")),
+            "FEATURES.md should count {n} tools"
+        );
+        let walkthrough = include_str!("../../docs/WALKTHROUGH.md");
+        assert!(
+            walkthrough.contains(&format!("{n} tools in total")),
+            "WALKTHROUGH.md should count {n} tools"
+        );
+    }
 }
