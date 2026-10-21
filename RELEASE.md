@@ -90,8 +90,11 @@ green:
    GitHub. The tag fires `release.yml`, which builds all five targets (~10 min)
    and publishes the release in `ctxone-releases`.
 3. **`homebrew`** — starts 10 minutes later (delayed, so it doesn't hold a
-   runner), polls for the release assets, renders `Formula/ctxone.rb` with their
-   `sha256`s and commits it to the GitLab tap, which mirrors to GitHub. It only
+   runner), polls for the release assets, downloads them, renders
+   `Formula/ctxone.rb` with their `sha256`s and commits it to the GitLab tap,
+   which mirrors to GitHub. Each download is retried for about two minutes,
+   because an asset can 404 for a minute after GitHub publishes the release
+   (v1.0.14 and v1.0.15 each needed a manual re-run of the job). It only
    moves the formula forward: a tag older than the tap's version (a re-run of
    an older tag's pipeline, or a patch on an older line) leaves the tap alone
    and logs `formula already at X; not moving it to vY`.
