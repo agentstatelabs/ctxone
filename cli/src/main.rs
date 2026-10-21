@@ -1665,6 +1665,33 @@ enum PlanAction {
         #[arg(long, short)]
         reason: String,
     },
+    /// Change a task's title, description, priority or blockers.
+    ///
+    /// Only the options given change. Status, proof and timestamps never
+    /// do. Done and abandoned tasks need --force.
+    Edit {
+        plan_id: String,
+        task_id: String,
+        /// New title. The task's description is kept.
+        #[arg(long)]
+        title: Option<String>,
+        /// New description ("" removes it). The title is kept.
+        #[arg(long, short)]
+        description: Option<String>,
+        /// New priority: low|medium|high|critical
+        #[arg(long)]
+        priority: Option<String>,
+        /// The task's new blockers, replacing the old list. May be passed
+        /// multiple times.
+        #[arg(long = "blocks", short = 'b', conflicts_with = "clear_blockers")]
+        blocks: Vec<String>,
+        /// Remove every blocker.
+        #[arg(long = "clear-blockers")]
+        clear_blockers: bool,
+        /// Edit a task that is already done or abandoned.
+        #[arg(long)]
+        force: bool,
+    },
     /// Show the next pickable task
     Next {
         plan_id: String,
@@ -8538,6 +8565,72 @@ async fn handle_plan(
                     v["title"].as_str().unwrap_or("")
                 );
                 println!("  reason: {}", v["abandoned_reason"].as_str().unwrap_or(""));
+            });
+        }
+        PlanAction::Edit {
+            plan_id,
+            task_id,
+            title,
+            description,
+            priority,
+            blocks,
+            clear_blockers,
+            force,
+        } => {
+            let mut body = serde_json::json!({"ref": branch});
+            if let Some(t) = title {
+                body["title"] = serde_json::json!(t);
+            }
+            if let Some(d) = description {
+                body["description"] = serde_json::json!(d);
+            }
+            if let Some(p) = priority {
+                body["priority"] = serde_json::json!(p);
+            }
+            if clear_blockers || !blocks.is_empty() {
+                body["blocked_by"] = serde_json::json!(blocks);
+            }
+            if force {
+                body["force"] = serde_json::json!(true);
+            }
+            let url = format!(
+                "{}/api/plans/{}/tasks/{}",
+                server,
+                urlencoding(&plan_id),
+                urlencoding(&task_id),
+            );
+            let resp = match client
+                .patch(&url)
+                .header("X-CTXone-Agent", &agent_id)
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "plan edit failed").await;
+            }
+            let parsed: Value = resp.json().await?;
+            emit(format, &parsed, |v| {
+                let id = v["id"].as_str().unwrap_or("");
+                let changed: Vec<&str> = v["changed"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+                    .unwrap_or_default();
+                if changed.is_empty() {
+                    println!("No change to {id}: it already has those values");
+                } else {
+                    println!("Edited {id} ({})", changed.join(", "));
+                }
+                println!("  title: {}", v["title"].as_str().unwrap_or(""));
+                if let Some(b) = v["blocked_by"].as_array()
+                    && !b.is_empty()
+                {
+                    let ids: Vec<&str> = b.iter().filter_map(|x| x.as_str()).collect();
+                    println!("  blocked by: {}", ids.join(", "));
+                }
             });
         }
         PlanAction::Next {

@@ -1,6 +1,6 @@
 # MCP Tools Reference
 
-The CTXone Hub exposes **67 MCP tools**, served over HTTP at `/mcp` (the
+The CTXone Hub exposes **68 MCP tools**, served over HTTP at `/mcp` (the
 standard setup) and over stdio, in ten groups:
 
 - **Memory** (8): `remember`, `recall`, `prime`, `context`,
@@ -8,8 +8,8 @@ standard setup) and over stdio, in ten groups:
   `project_status`
 - **Curation** (5): `session_segments`, `draft_stage`, `drafts_list`,
   `draft_promote`, `draft_discard`
-- **Plans** (15): `plan_new`, `plan_add`, `plan_start`,
-  `plan_done`, `plan_abandon`, `plan_next`, `plan_list`,
+- **Plans** (16): `plan_new`, `plan_add`, `plan_start`,
+  `plan_done`, `plan_abandon`, `plan_edit`, `plan_next`, `plan_list`,
   `plan_show`, `plan_tasks`, `plan_link`, `plan_stale`, `plan_move`,
   `plan_close`, `plan_complete`, `plan_archive`
 - **Sessions and workspaces** (4): `session_info`, `session_link_plan`,
@@ -466,7 +466,7 @@ memory, and the session's turns stay in the archive.
 
 ## Plan tools
 
-Fifteen MCP tools wrap the plan primitives from the
+Sixteen MCP tools wrap the plan primitives from the
 `agentstategraph-tasks` crate and surface them with proactive
 "CALL THIS WHEN" descriptions. Plans persist under `/plans/<name>/`
 and survive session boundaries — the same plan can be picked up by
@@ -555,6 +555,32 @@ Mark a task as abandoned. Requires a reason.
 no longer wanted. Legal from both `pending` and `in_progress`.
 
 **Parameters:** `plan_id`, `task_id`, `reason`, `ref?`.
+
+---
+
+### `plan_edit`
+
+Change a task's title, description, priority or blockers after it was
+added. Status, proof, assignment and timestamps never change.
+
+**When to call:** a task's scope or wording changed, or its blockers need
+fixing. An abandoned blocker never counts as done, so after abandoning a
+task, edit its dependents' blockers.
+
+**Parameters:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `plan_id` | string | yes | Plan name |
+| `task_id` | string | yes | Task to edit |
+| `title` | string | no | New title; the description is kept |
+| `description` | string | no | New description, or `""` to remove it; the title is kept |
+| `priority` | string | no | `low`, `medium`, `high` or `critical` |
+| `blocked_by` | string[] | no | The whole new blocker list (`[]` clears it). Each must be a task in this plan, and the list can't form a cycle |
+| `force` | bool | no | Edit a done or abandoned task (default false) |
+| `ref` | string | no | Branch (default `main`) |
+
+Returns the task with `changed`, the fields that changed.
 
 ---
 

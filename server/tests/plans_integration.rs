@@ -1080,3 +1080,145 @@ async fn plan_list_counts_each_plans_tasks() {
         ]
     );
 }
+
+fn patch_json_with_agent(uri: &str, agent: &str, body: Value) -> Request<Body> {
+    Request::builder()
+        .uri(uri)
+        .method("PATCH")
+        .header("content-type", "application/json")
+        .header("x-ctxone-agent", agent)
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap()
+}
+
+/// Status and plain-text body, for error responses.
+async fn call_text(router: axum::Router, req: Request<Body>) -> (StatusCode, String) {
+    let resp = router.oneshot(req).await.expect("router call");
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Plan `p1` with t-001 and t-002, where t-002 ("two — why") waits on t-001.
+async fn plan_with_two_tasks(router: &axum::Router) {
+    let _ = call_json(
+        router.clone(),
+        post_json_with_agent("/api/plans", "test", json!({"name": "p1"})),
+    )
+    .await;
+    let _ = call_json(
+        router.clone(),
+        post_json_with_agent("/api/plans/p1/tasks", "test", json!({"title": "one"})),
+    )
+    .await;
+    let (status, _) = call_json(
+        router.clone(),
+        post_json_with_agent(
+            "/api/plans/p1/tasks",
+            "test",
+            json!({"title": "two", "description": "why", "blocked_by": ["t-001"]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn patch_task_changes_only_the_fields_given() {
+    let router = test_router();
+    plan_with_two_tasks(&router).await;
+
+    let (status, body) = call_json(
+        router.clone(),
+        patch_json_with_agent(
+            "/api/plans/p1/tasks/t-002",
+            "editor",
+            json!({"title": "two, retitled", "priority": "critical", "blocked_by": []}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["title"], "two, retitled — why");
+    assert_eq!(body["priority"], "critical");
+    assert_eq!(body["blocked_by"], json!([]));
+    assert_eq!(body["status"], "pending");
+    assert_eq!(body["created_by"], "test");
+    assert_eq!(body["changed"], json!(["title", "blocked_by", "priority"]));
+
+    // The edit is stored, and the task is no longer blocked.
+    let (_, fetched) = call_json(router.clone(), get("/api/plans/p1/tasks/t-002")).await;
+    assert_eq!(fetched["title"], "two, retitled — why");
+    let (status, _) = call_json(
+        router,
+        post_json_with_agent("/api/plans/p1/tasks/t-002/start", "test", json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn patch_task_refusals() {
+    let router = test_router();
+    plan_with_two_tasks(&router).await;
+    let patch = |id: &str, body: Value| {
+        patch_json_with_agent(&format!("/api/plans/p1/tasks/{id}"), "editor", body)
+    };
+
+    // A cycle: t-002 waits on t-001.
+    let (status, text) = call_text(
+        router.clone(),
+        patch("t-001", json!({"blocked_by": ["t-002"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{text}");
+    assert!(text.contains("cycle"), "{text}");
+
+    // A blocker that isn't in the plan.
+    let (status, text) = call_text(
+        router.clone(),
+        patch("t-001", json!({"blocked_by": ["t-009"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{text}");
+
+    // Nothing to change, a blank title, an unknown priority.
+    for body in [
+        json!({}),
+        json!({"title": " "}),
+        json!({"priority": "urgent"}),
+    ] {
+        let (status, text) = call_text(router.clone(), patch("t-001", body.clone())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {text}");
+    }
+
+    // An unknown task.
+    let (status, _) = call_text(router.clone(), patch("t-009", json!({"title": "x"}))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // A finished task needs force.
+    let (status, _) = call_json(
+        router.clone(),
+        post_json_with_agent(
+            "/api/plans/p1/tasks/t-001/abandon",
+            "test",
+            json!({"reason": "superseded"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, text) = call_text(
+        router.clone(),
+        patch("t-001", json!({"title": "one (gone)"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{text}");
+    assert!(text.contains("force=true"), "{text}");
+    let (status, body) = call_json(
+        router,
+        patch("t-001", json!({"title": "one (gone)", "force": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "abandoned");
+    assert_eq!(body["title"], "one (gone)");
+}

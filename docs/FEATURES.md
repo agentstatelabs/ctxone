@@ -8,7 +8,7 @@ a narrative "how do I actually use this" guide, read
 
 CTXone has four surfaces:
 
-- **CTXone Hub** (`server/`) — MCP server (67 tools) + HTTP API; the memory
+- **CTXone Hub** (`server/`) — MCP server (68 tools) + HTTP API; the memory
   interface for AI tools.
 - **CTXone Engine** (`engine/`) — the core memory + graph layer
   (AgentStateGraph).
@@ -116,7 +116,7 @@ CTXone has four surfaces:
 
 ## MCP tools & HTTP API
 
-The Hub exposes **67 MCP tools** to agents — memory (`remember`, `recall`,
+The Hub exposes **68 MCP tools** to agents — memory (`remember`, `recall`,
 `context`), plans (incl. `plan_link`, `plan_stale`), the docs registry
 (`docs_find`), branches, taint (`taint_*`), provenance (`why_did_we`,
 `summarize_session`), and token accounting (`record_llm_usage`). Full list:

@@ -893,7 +893,10 @@ fn router_with_config_inner(
             "/api/plans/{name}/tasks",
             get(list_plan_tasks).post(add_plan_task),
         )
-        .route("/api/plans/{name}/tasks/{task_id}", get(get_plan_task))
+        .route(
+            "/api/plans/{name}/tasks/{task_id}",
+            get(get_plan_task).patch(edit_plan_task),
+        )
         .route(
             "/api/plans/{name}/tasks/{task_id}/start",
             post(start_plan_task),
@@ -3425,6 +3428,20 @@ struct AbandonTaskRequest {
     ref_name: String,
 }
 
+/// `PATCH /api/plans/{name}/tasks/{task_id}`: the fields to change; see
+/// `plan_tools::TaskEdit`.
+#[derive(Deserialize)]
+struct EditTaskRequest {
+    title: Option<String>,
+    description: Option<String>,
+    priority: Option<String>,
+    blocked_by: Option<Vec<String>>,
+    #[serde(default)]
+    force: bool,
+    #[serde(default = "default_ref", rename = "ref")]
+    ref_name: String,
+}
+
 #[derive(Deserialize)]
 struct NextTaskQuery {
     #[serde(default = "default_ref", rename = "ref")]
@@ -3462,6 +3479,9 @@ fn plan_error_to_response(err: plan_tools::PlanToolError) -> (StatusCode, String
         plan_tools::PlanToolError::InvalidPriority(_) => StatusCode::BAD_REQUEST,
         plan_tools::PlanToolError::InvalidInput(_) => StatusCode::BAD_REQUEST,
         plan_tools::PlanToolError::Substrate(TE::InvalidBlockerId(_)) => StatusCode::BAD_REQUEST,
+        plan_tools::PlanToolError::Substrate(TE::TitleRequired) => StatusCode::BAD_REQUEST,
+        plan_tools::PlanToolError::Substrate(TE::BlockerCycle { .. }) => StatusCode::CONFLICT,
+        plan_tools::PlanToolError::TaskFinished { .. } => StatusCode::CONFLICT,
         // 423 Locked — plan is nearing completion and the
         // `CTXONE_PLAN_LOCK_RATIO` guard is engaged. Caller can pass
         // `force=true` to bypass.
@@ -4146,6 +4166,31 @@ async fn abandon_plan_task(
         .map_err(substrate_error_to_response)?;
     s.sessions.mark_all_dirty();
     Ok(Json(plan_tools::task_to_json(&task)))
+}
+
+#[instrument(skip_all, fields(name = %name, task_id = %task_id, agent = %agent_id.0))]
+async fn edit_plan_task(
+    State(s): State<HubState>,
+    ns: NamespaceId,
+    agent_id: AgentId,
+    Path((name, task_id)): Path<(String, String)>,
+    Json(req): Json<EditTaskRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
+    let store = plan_tools::make_store(repo.clone(), &agent_id.0);
+    let edit = plan_tools::TaskEdit {
+        title: req.title.as_deref(),
+        description: req.description.as_deref(),
+        priority: req.priority.as_deref(),
+        blocked_by: req.blocked_by,
+        force: req.force,
+    };
+    let edited = plan_tools::edit_task(&store, &req.ref_name, &name, &task_id, edit)
+        .map_err(plan_error_to_response)?;
+    if !edited.changed.is_empty() {
+        s.sessions.mark_all_dirty();
+    }
+    Ok(Json(plan_tools::edited_task_to_json(&edited)))
 }
 
 #[instrument(skip_all, fields(name = %name, ref_name = %q.ref_name, assigned_to = q.assigned_to.as_deref().unwrap_or("")))]
