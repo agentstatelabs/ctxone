@@ -4,24 +4,7 @@ All notable changes to CTXone are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
 
-## [Unreleased]
-
-### Changed
-- **The Hub's busiest reads take a handful of queries instead of one or more per item.** On a Postgres Hub each storage read is a round trip, and these endpoints read per item:
-  - the session list read each session's title, metadata and turns separately (Lens's Sessions view);
-  - the plan list read each plan's tasks;
-  - plan show read each task's cross-plan links;
-  - pinned memory read each pinned leaf.
-
-  Now the session list reads `/sessions` once two levels deep (titles, turns) plus every session's metadata in one `get_json_many`. The plan list uses `list_plans_with_tasks`, plan show reads the plan's links once, and pinned memory reads its subtree once and flattens it here. Results are unchanged; tests compare the new session discovery and pinned listing with the old reads.
-
-  Measured on a large real store (160 sessions in the registry) against local Postgres, before and after:
-  - session list (largest workspace): 3,773 queries (3.9 s) → 198 (0.23 s);
-  - plan list: 343 → 10;
-  - plan show: 132 → 22;
-  - pinned: 315 → 9.
-
-  SQLite got faster too: the session list went from 1.1 s to 0.14 s. Requires AgentStateGraph 1.3.2 (`agentstategraph*` = "1.3.2"), whose tree reads and writes are batched as well; `Cargo.lock` moves only the seven agentstategraph crates.
+## [v1.0.14] — 2026-10-20
 
 ### Added
 - **Tasks can be edited after they're added.** It's available as the `plan_edit` MCP tool, `PATCH /api/plans/{name}/tasks/{task_id}` and `ctx plan edit`. It changes a task's title, description, priority or blockers, and leaves its status, proof, assignment and timestamps as they are.
@@ -45,6 +28,22 @@ the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
 - **A Postgres Hub has a project registry and keeps its session stats.** With `--storage postgres`, the project endpoints returned 400, project detection reported `registry_unavailable` (so the stdio MCP server fell back to `default`), and session stats were lost at every restart. Both now live in the Hub's database, in `ctxone_projects`, `ctxone_project_paths` and `ctxone_sessions`. Every row carries the Hub's tenant (`--tenant`), so Hubs sharing a database never see each other's projects or stats. The tables use AgentStateGraph's connection pool, so they get its pool size and TLS, and a Hub holds one set of connections. The Hub creates them at startup, under an advisory lock so Hubs starting together don't collide. SQLite Hubs are unchanged.
 
 ### Changed
+- **The Hub's busiest reads take a handful of queries instead of one or more per item.** On a Postgres Hub each storage read is a round trip, and these endpoints read per item:
+  - the session list read each session's title, metadata and turns separately (Lens's Sessions view);
+  - the plan list read each plan's tasks;
+  - plan show read each task's cross-plan links;
+  - pinned memory read each pinned leaf.
+
+  Now the session list reads `/sessions` once two levels deep (titles, turns) plus every session's metadata in one `get_json_many`. The plan list uses `list_plans_with_tasks`, plan show reads the plan's links once, and pinned memory reads its subtree once and flattens it here. Results are unchanged; tests compare the new session discovery and pinned listing with the old reads.
+
+  Measured on a large real store (160 sessions in the registry) against local Postgres, before and after:
+  - session list (largest workspace): 3,773 queries (3.9 s) → 198 (0.23 s);
+  - plan list: 343 → 10;
+  - plan show: 132 → 22;
+  - pinned: 315 → 9.
+
+  SQLite got faster too: the session list went from 1.1 s to 0.14 s. Requires AgentStateGraph 1.3.2 (`agentstategraph*` = "1.3.2"), whose tree reads and writes are batched as well; `Cargo.lock` moves only the seven agentstategraph crates.
+
 - **docs/MCP_TOOLS.md documents all 67 MCP tools.** It said 56 (FEATURES.md said 52 in one place and 56 in another), and 13 served tools had no section: `help`, `plan_close`, the curation tools (`session_segments`, `draft_stage`, `drafts_list`, `draft_promote`, `draft_discard`), `session_info`, `session_link_plan`, `namespace_for_plan`, `namespace_for_task`, `code_cross_repo_edges` and `code_impact`. Each now has one, and the summary has two new groups, Curation and Sessions and workspaces. `plan_complete`'s entry said it marked the remaining tasks done; it abandons them and needs a `summary`. A test compares the docs with the tools the server serves, so adding a tool without documenting it now fails the tests.
 - **`ctx` reads the directory for project detection, so detection works with a Hub on another machine.** `ctx` sent its cwd to `GET /api/projects/detect` and the Hub looked for `.ctxproject` and ran `git remote get-url origin` there, on its own filesystem. A Hub on another machine (a hosted Hub) can't see that directory, so only a registered `local_path` could match. Now `ctx` reads the nearest `.ctxproject` and the git remote itself and sends them (`client_read=true&ctxproject=…&remote_url=…`, plus `ctxproject_error` for a marker it may not read); the Hub only looks them up and reads nothing. The read is bounded at 3 s, so one blocked by a macOS privacy prompt fails with exit `75` rather than hanging; the prompt is now for the app running `ctx`, usually your terminal. Requests without `client_read` (older `ctx`) are answered as before, and an older Hub ignores the new parameters. Covers every `ctx` command that detects, `ctx status`, `ctx project detect` and `ingest-session --all`.
 - **AgentStateGraph 1.3.1** (`agentstategraph*` = "1.3.1"), whose `PostgresStorage` shares its connection pool, so the Hub's own Postgres tables (above) use it.
