@@ -4,7 +4,7 @@ All notable changes to CTXone are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
 
-## [Unreleased]
+## [v1.0.15] — 2026-10-21
 
 ### Fixed
 - **The Docker image builds again.** The Dockerfile built with `rust:1.88-slim`, but the oxtel crates added in v1.0.14 need Rust 1.94, so the v1.0.14 image failed to build and `ghcr.io/agentstatelabs/ctxone` stayed at v1.0.12 (v1.0.13's build had failed on a Docker Hub rate limit). The builder is now `rust:1.96-slim-bookworm`, the Rust version CI uses, on the same Debian release as the runtime image; plain `rust:1.96-slim` is Debian trixie, whose glibc is newer than the bookworm runtime's. docs/WINDOWS.md said a source build needs Rust 1.88; it needs 1.94.
