@@ -23,7 +23,14 @@ COPY web/ ./
 RUN npm run build
 
 # -- Stage 2: Build Rust binaries --
-FROM rust:1.88-slim AS builder
+#
+# Rust 1.96 to match CI (rust:1.96-bookworm). The oxtel crates need 1.94, so
+# the old rust:1.88-slim stopped building at v1.0.14.
+#
+# -bookworm, not plain -slim: rust:*-slim is Debian trixie now, and binaries
+# linked against trixie's glibc may not start on the debian:bookworm-slim
+# runtime below. Builder and runtime must stay on the same Debian release.
+FROM rust:1.96-slim-bookworm AS builder
 
 WORKDIR /build
 

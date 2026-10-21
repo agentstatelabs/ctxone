@@ -79,7 +79,7 @@ Windows side, you just see `localhost:3001`.
 
 ### Option 3: Build from source
 
-You need Rust ≥1.88 and Git.
+You need Rust ≥1.94 and Git.
 
 ```powershell
 git clone --recursive https://github.com/AgentStateLabs/CTXone.git
