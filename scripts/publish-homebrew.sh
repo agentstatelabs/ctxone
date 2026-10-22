@@ -32,7 +32,7 @@
 #   GITLAB_RELEASE_TOKEN — write_repository on $TAP_PATH
 #
 # Exit: 0 pushed, already current, or the tap is on a newer release;
-#       1 assets never appeared; 2 misconfig.
+#       1 assets never appeared, or one never downloaded; 2 misconfig.
 set -euo pipefail
 
 : "${CI_COMMIT_TAG:?this job only runs on tag pipelines}"
@@ -81,12 +81,31 @@ if [ "$ready" != "1" ]; then
 fi
 
 # --- download + hash ---------------------------------------------------------
+# An asset can 404 for a minute after GitHub publishes the release, even once
+# the poll above has seen it: v1.0.14 and v1.0.15 both failed here, the poll's
+# HEAD passing and the GET for the same file 404ing at once, and both passed
+# when the job was re-run a minute later. So each download gets its own bounded
+# retry, and only an asset still missing after about two minutes fails the job.
+fetch_asset() {
+  local f="$1" attempt
+  for attempt in $(seq 1 8); do
+    if curl -fsSL -o "${WORK}/${f}" "${BASE}/${f}"; then
+      return 0
+    fi
+    if [ "$attempt" -lt 8 ]; then
+      echo "   ${f} not downloadable yet (attempt ${attempt}/8); retrying in 15s" >&2
+      sleep 15
+    fi
+  done
+  return 1
+}
+
 declare -a SHAS=()
 for i in "${!TARGETS[@]}"; do
   t="${TARGETS[$i]}"
   f="${ARTIFACT_PREFIX}-${TAG}-${t}.tar.gz"
-  curl -fsSL -o "${WORK}/${f}" "${BASE}/${f}" \
-    || { echo "   missing asset: ${f}" >&2; exit 1; }
+  fetch_asset "$f" \
+    || { echo "   missing asset: ${f} (8 attempts)" >&2; exit 1; }
   SHAS[$i]="$(sha256sum "${WORK}/${f}" | awk '{print $1}')"
   echo "   ${t}  ${SHAS[$i]}"
 done
