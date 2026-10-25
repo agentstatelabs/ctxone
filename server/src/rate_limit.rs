@@ -1,16 +1,19 @@
-//! Per-IP rate limiting for the Hub HTTP API.
+//! Rate limiting for the Hub HTTP API: per tenant on a multi-tenant Hub,
+//! per peer IP otherwise.
 //!
 //! Backed by `tower_governor` (which is itself backed by the `governor`
-//! crate). Token-bucket scheme, keyed by peer IP. When a client exceeds
-//! their quota the layer returns `429 Too Many Requests` with
-//! `X-RateLimit-*` headers so well-behaved clients back off.
+//! crate). Token-bucket scheme, keyed by the request's tenant or peer IP.
+//! When a client exceeds their quota the layer returns `429 Too Many
+//! Requests` with `X-RateLimit-*` headers so well-behaved clients back off.
 //!
-//! ## Why per-IP and not per-agent?
+//! ## Per tenant or per IP
 //!
-//! Until HTTP auth (T1) lands there's no authenticated identity to
-//! rate-limit against. The best we can do is peer IP, which protects
-//! the Hub from runaway local loops and simple abuse. Once T1 is in
-//! place, this module can switch to keying on the API key / agent ID.
+//! A multi-tenant Hub knows every request's tenant (the auth middleware
+//! attached it), so each tenant gets one bucket wherever its requests come
+//! from, and there's no loopback exemption: behind a tunnel or proxy on
+//! 127.0.0.1, every request is loopback. A single-tenant Hub has no identity
+//! to key on beyond the peer IP, which protects it from runaway loops and
+//! simple abuse.
 //!
 //! ## Defaults
 //!
@@ -45,9 +48,12 @@ use tower_governor::governor::{GovernorConfig, GovernorConfigBuilder};
 use tower_governor::key_extractor::KeyExtractor;
 use tracing::{info, warn};
 
-/// Rate-limit key extractor that **exempts loopback traffic**.
+use crate::tenant::Tenant;
+
+/// Rate-limit key extractor. On a multi-tenant Hub it keys by the request's
+/// [`Tenant`]. Otherwise it keys by peer IP and **exempts loopback traffic**.
 ///
-/// The limiter exists to protect the Hub from *remote* abuse. Requests
+/// The per-IP limiter exists to protect the Hub from *remote* abuse. Requests
 /// originating on the same machine — local agents, the `ctx` CLI, the
 /// Lens dev proxy, and `/api/sessions/sync` (which fires thousands of
 /// loopback POSTs via the spawned CLI) — are trusted and must not be
@@ -60,12 +66,14 @@ use tracing::{info, warn};
 #[derive(Clone)]
 pub struct LoopbackExemptKeyExtractor {
     counter: Arc<AtomicU64>,
+    by_tenant: bool,
 }
 
 impl LoopbackExemptKeyExtractor {
-    fn new() -> Self {
+    fn new(by_tenant: bool) -> Self {
         Self {
             counter: Arc::new(AtomicU64::new(0)),
+            by_tenant,
         }
     }
 }
@@ -79,6 +87,14 @@ impl KeyExtractor for LoopbackExemptKeyExtractor {
     }
 
     fn extract<T>(&self, req: &Request<T>) -> Result<Self::Key, GovernorError> {
+        if self.by_tenant {
+            // Auth runs first and attaches the tenant; without one, fail closed.
+            return req
+                .extensions()
+                .get::<Tenant>()
+                .map(|t| format!("tenant:{t}"))
+                .ok_or(GovernorError::UnableToExtractKey);
+        }
         let addr = req
             .extensions()
             .get::<ConnectInfo<SocketAddr>>()
@@ -108,19 +124,20 @@ pub type PeerIpGovernorLayer =
     GovernorLayer<LoopbackExemptKeyExtractor, NoOpMiddleware, axum::body::Body>;
 
 /// Build a rate limiter layer that enforces `rpm` requests per minute
-/// per peer IP, or `None` when rate limiting is disabled (rpm = 0).
+/// per tenant (`by_tenant`) or per peer IP, or `None` when rate limiting is
+/// disabled (rpm = 0).
 ///
 /// Returns an owned layer — tower_governor's `GovernorLayer::new`
 /// takes the config by value, not by `Arc`.
-pub fn build_layer(rpm: u32) -> Option<PeerIpGovernorLayer> {
-    let config = build_config(rpm)?;
-    info!(rpm, "rate limiter layer attached");
+pub fn build_layer(rpm: u32, by_tenant: bool) -> Option<PeerIpGovernorLayer> {
+    let config = build_config(rpm, by_tenant)?;
+    info!(rpm, by_tenant, "rate limiter layer attached");
     Some(GovernorLayer::new(config))
 }
 
 /// Build just the governor config. Split out so tests can verify the
 /// math without instantiating a live layer.
-pub fn build_config(rpm: u32) -> Option<PeerIpGovernorConfig> {
+pub fn build_config(rpm: u32, by_tenant: bool) -> Option<PeerIpGovernorConfig> {
     if rpm == 0 {
         info!("rate limiting disabled (--rate-limit-rpm 0)");
         return None;
@@ -141,7 +158,7 @@ pub fn build_config(rpm: u32) -> Option<PeerIpGovernorConfig> {
     let config = GovernorConfigBuilder::default()
         .period(std::time::Duration::from_millis(period_ms))
         .burst_size(burst)
-        .key_extractor(LoopbackExemptKeyExtractor::new())
+        .key_extractor(LoopbackExemptKeyExtractor::new(by_tenant))
         .finish();
 
     match config {
@@ -172,13 +189,13 @@ mod tests {
 
     #[test]
     fn build_config_rpm_zero_disables() {
-        assert!(build_config(0).is_none());
+        assert!(build_config(0, false).is_none());
     }
 
     #[test]
     fn build_config_rpm_60_yields_valid_config() {
         // 60 rpm = 1 request per second
-        let _cfg = build_config(60).expect("60 rpm should yield a config");
+        let _cfg = build_config(60, false).expect("60 rpm should yield a config");
         // The config itself is opaque; we trust a successful build
         // with the computed math is correct, and cover the behavior
         // end-to-end with an integration test against a live server.
@@ -189,19 +206,19 @@ mod tests {
         // Very low rpm still needs a minimum burst so a single user
         // can send a handful of requests in a row without getting
         // clobbered. 5 is our floor.
-        assert!(build_config(1).is_some());
-        assert!(build_config(10).is_some());
-        assert!(build_config(100).is_some());
+        assert!(build_config(1, false).is_some());
+        assert!(build_config(10, false).is_some());
+        assert!(build_config(100, false).is_some());
     }
 
     #[test]
     fn build_layer_rpm_zero_is_none() {
-        assert!(build_layer(0).is_none());
+        assert!(build_layer(0, false).is_none());
     }
 
     #[test]
     fn build_layer_non_zero_is_some() {
-        assert!(build_layer(300).is_some());
+        assert!(build_layer(300, false).is_some());
     }
 
     fn req_from(addr: &str) -> Request<()> {
@@ -213,7 +230,7 @@ mod tests {
 
     #[test]
     fn loopback_gets_unique_keys_remote_is_stable() {
-        let ex = LoopbackExemptKeyExtractor::new();
+        let ex = LoopbackExemptKeyExtractor::new(false);
         // Two loopback requests → distinct keys (each its own bucket).
         let a = ex.extract(&req_from("127.0.0.1:5001")).unwrap();
         let b = ex.extract(&req_from("127.0.0.1:5002")).unwrap();
@@ -228,7 +245,27 @@ mod tests {
 
     #[test]
     fn missing_connect_info_errors() {
-        let ex = LoopbackExemptKeyExtractor::new();
+        let ex = LoopbackExemptKeyExtractor::new(false);
         assert!(ex.extract(&Request::new(())).is_err());
+    }
+
+    #[test]
+    fn by_tenant_keys_by_tenant_wherever_the_request_comes_from() {
+        let ex = LoopbackExemptKeyExtractor::new(true);
+        let with_tenant = |addr: &str, name: &str| {
+            let mut r = req_from(addr);
+            r.extensions_mut().insert(Tenant::new(name).unwrap());
+            r
+        };
+        let a1 = ex.extract(&with_tenant("127.0.0.1:5001", "alice")).unwrap();
+        let a2 = ex
+            .extract(&with_tenant("203.0.113.7:40000", "alice"))
+            .unwrap();
+        let b = ex.extract(&with_tenant("127.0.0.1:5001", "bob")).unwrap();
+        assert_eq!(a1, "tenant:alice");
+        assert_eq!(a1, a2, "one tenant shares one bucket, loopback or not");
+        assert_ne!(a1, b, "two tenants on one address get their own buckets");
+        // No tenant on a multi-tenant Hub: fail closed.
+        assert!(ex.extract(&req_from("127.0.0.1:5001")).is_err());
     }
 }

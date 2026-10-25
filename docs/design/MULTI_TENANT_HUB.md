@@ -1,6 +1,8 @@
 # Design: One Hub, many tenants
 
-**Status:** Proposed. Not implemented.
+**Status:** In progress. AgentStateGraph's shared pool (t-001) and tenant
+identity (t-002) are in; per-tenant state (t-003) is next. Until it lands,
+`--tenants-file` checks the file and exits.
 **Plan:** CTX plan `ctx-multi-tenant-hub` (tasks listed at the end).
 **Goal:** One `ctxone-hub` process serves many users ("tenants"), each with
 their own memory, plans, sessions and project registry, on one Postgres

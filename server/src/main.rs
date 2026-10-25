@@ -21,7 +21,7 @@
 //! nothing is exported unless the hub is built with the `otlp` feature and
 //! `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
 
-use ctxone_hub::{asd_pool, backup, http, lockfile, memory_tools, migrations};
+use ctxone_hub::{asd_pool, backup, http, lockfile, memory_tools, migrations, tenant};
 
 use std::sync::Arc;
 
@@ -142,6 +142,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut auth_token_file: Option<String> = std::env::var("CTXONE_AUTH_TOKEN_FILE")
         .ok()
         .filter(|s| !s.is_empty());
+    // Multi-tenant mode: tenants and the hashes of their tokens, re-read while
+    // the hub runs. From --tenants-file or CTXONE_TENANTS_FILE.
+    let mut tenants_file: Option<String> = std::env::var("CTXONE_TENANTS_FILE")
+        .ok()
+        .filter(|s| !s.is_empty());
     // Make loopback peers send the token too (a proxy or sidecar on 127.0.0.1
     // in front of the hub). From --require-auth-on-loopback or
     // CTXONE_REQUIRE_AUTH_ON_LOOPBACK.
@@ -256,6 +261,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 i += 1;
                 if i < args.len() {
                     auth_token_file = Some(args[i].clone()).filter(|s| !s.is_empty());
+                }
+            }
+            "--tenants-file" => {
+                i += 1;
+                if i < args.len() {
+                    tenants_file = Some(args[i].clone()).filter(|s| !s.is_empty());
                 }
             }
             "--require-auth-on-loopback" => {
@@ -391,6 +402,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "                           Re-read every second, so tokens rotate without a restart."
                 );
                 eprintln!(
+                    "      --tenants-file <PATH>  Multi-tenant mode: `<tenant> <sha256 of a token>` lines"
+                );
+                eprintln!(
+                    "                           (env: CTXONE_TENANTS_FILE). Not usable yet: the hub checks"
+                );
+                eprintln!(
+                    "                           the file and exits, until per-tenant data is in place."
+                );
+                eprintln!(
                     "      --require-auth-on-loopback  Loopback peers must send the token too, for a proxy or"
                 );
                 eprintln!(
@@ -502,6 +522,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         None => None,
     };
+    // Multi-tenant mode can't serve yet: the router still has one repository,
+    // so every tenant would reach the same data until per-tenant state lands
+    // (ctx-multi-tenant-hub t-003). Check the file, so it's ready, and stop.
+    if let Some(path) = &tenants_file {
+        if auth_token.is_some() || auth_token_file.is_some() {
+            eprintln!(
+                "ctxone-hub: --tenants-file replaces --auth-token and --auth-token-file; use one"
+            );
+            std::process::exit(64);
+        }
+        let file = match tenant::TenantsFile::open(path) {
+            Ok(file) => file,
+            Err(e) => {
+                eprintln!("ctxone-hub: --tenants-file: {e}");
+                std::process::exit(66);
+            }
+        };
+        let (tenants, tokens) = file.counts();
+        eprintln!(
+            "ctxone-hub: --tenants-file {path} is valid ({tenants} tenants, {tokens} tokens), but \
+             multi-tenant mode isn't available yet: per-tenant data isn't in place, so every \
+             tenant would share one store. Not starting."
+        );
+        std::process::exit(64);
+    }
     if require_auth_on_loopback && auth_token.is_none() && auth_token_file.is_none() {
         eprintln!(
             "ctxone-hub: --require-auth-on-loopback needs a token (--auth-token or \
@@ -884,6 +929,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             self_base_url: Some(self_base_url),
             autosync: Some(autosync.clone()),
             postgres_tables: postgres_tables.clone(),
+            // --tenants-file is refused above until per-tenant data exists.
+            tenants: None,
         };
 
         // Values for the background session-sweep task (below). Cloned before

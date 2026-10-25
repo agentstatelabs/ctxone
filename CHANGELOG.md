@@ -6,6 +6,12 @@ the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
 
 ## [Unreleased]
 
+### Added
+- **Tenant identity for a multi-tenant Hub,** the first part of one Hub serving many tenants (docs/design/MULTI_TENANT_HUB.md). It isn't usable yet: `ctxone-hub --tenants-file <PATH>` checks the file and exits, because each tenant doesn't have its own data yet and every tenant would share one store.
+  - The tenants file has a line per token, `<tenant> <sha256 of the token>`, and a tenant may have several. Only hashes are stored. It's re-read every second, so tenants and tokens change without a restart. A bad line stops the Hub at startup; later it's skipped with a warning, so a typo locks out only that line. A hash listed for two tenants is refused for both.
+  - Every request needs a token that belongs to a tenant, loopback included. An unknown token is a 401. The hash of the presented token is compared in constant time. A `TenantResolver` trait decides the tenant, so an account service can replace the file; one that can't answer gives a 503.
+  - The tenant is attached to the request. Rate limits are per tenant instead of per peer IP. Request log lines carry `ctxone.tenant`, never the token. `GET /api/tenant` reports the request's tenant (`null` on a single-tenant Hub).
+
 ### Changed
 - **AgentStateGraph 1.4.2** (`agentstategraph*` = "1.4.2", from 1.4.0). Its `PostgresStorage::for_tenant` opens another tenant on the same connection pool, which the multi-tenant Hub's per-tenant state builds on; nothing in CTXone calls it yet. `Cargo.lock` moves only the seven agentstategraph crates.
 
