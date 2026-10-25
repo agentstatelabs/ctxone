@@ -4,6 +4,11 @@ All notable changes to CTXone are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
 
+## [Unreleased]
+
+### Changed
+- **AgentStateGraph 1.4.2** (`agentstategraph*` = "1.4.2", from 1.4.0). Its `PostgresStorage::for_tenant` opens another tenant on the same connection pool, which the multi-tenant Hub's per-tenant state builds on; nothing in CTXone calls it yet. `Cargo.lock` moves only the seven agentstategraph crates.
+
 ## [v1.0.15] — 2026-10-21
 
 ### Fixed
