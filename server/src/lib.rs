@@ -25,3 +25,4 @@ pub mod segments;
 pub mod session_links;
 pub mod starter;
 pub mod tenant;
+pub mod tenant_cache;

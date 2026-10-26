@@ -12,8 +12,15 @@ the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
   - Every request needs a token that belongs to a tenant, loopback included. An unknown token is a 401. The hash of the presented token is compared in constant time. A `TenantResolver` trait decides the tenant, so an account service can replace the file; one that can't answer gives a 503.
   - The tenant is attached to the request. Rate limits are per tenant instead of per peer IP. Request log lines carry `ctxone.tenant`, never the token. `GET /api/tenant` reports the request's tenant (`null` on a single-tenant Hub).
 
+- **Each tenant's own data on a multi-tenant Hub,** the second part. `ctxone-hub --tenants-file` still checks the file and exits, now because the Hub still runs features that read its own machine's disk, which remote tenants mustn't reach.
+  - A request reaches only its tenant's repository, project registry, session statistics and MCP sessions. Handlers get them from `HubState`, now built for each request from the request's tenant, so on a multi-tenant Hub nothing reaches data except through it. Tenants can use the same workspace names, project ids and session ids.
+  - A tenant opens on its first request that needs its data. On Postgres every tenant shares one connection pool and the `ctxone_*` tables. Opening a tenant creates it if it's new, runs the AgentStateGraph and CTXone migrations for it and loads its session statistics, holding an advisory lock so two Hubs opening the same tenant take turns. A tenant that can't be opened gives a 503, and the next request tries again.
+  - An idle tenant can be closed after its statistics are flushed (`TenantCache::evict_idle`); never while a request is using it. The Hub will run this once multi-tenant mode can serve.
+  - The Hub Home's workspace summary, reused for 15 seconds, is kept per tenant. It was process-wide, so one tenant could have been served another's.
+  - For library users: `http::multi_tenant_router(config, MultiTenant { resolver, data })` builds a multi-tenant Hub and replaces `HubConfig::tenants`. The new `tenant_cache` module has `TenantCache`, the `TenantOpener` trait, `PostgresTenants` and `MemoryTenants`. `migrations::migrate_asg` is the AgentStateGraph schema step that startup and each tenant's open share. `deadpool-postgres` 0.14, already in the build through AgentStateGraph, is now a direct dependency.
+
 ### Changed
-- **AgentStateGraph 1.4.2** (`agentstategraph*` = "1.4.2", from 1.4.0). Its `PostgresStorage::for_tenant` opens another tenant on the same connection pool, which the multi-tenant Hub's per-tenant state builds on; nothing in CTXone calls it yet. `Cargo.lock` moves only the seven agentstategraph crates.
+- **AgentStateGraph 1.4.2** (`agentstategraph*` = "1.4.2", from 1.4.0). Its `PostgresStorage::for_tenant` opens another tenant on the same connection pool, which the multi-tenant Hub's per-tenant state builds on. `Cargo.lock` moves only the seven agentstategraph crates.
 
 ## [v1.0.15] — 2026-10-21
 

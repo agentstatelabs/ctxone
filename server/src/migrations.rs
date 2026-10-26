@@ -53,6 +53,69 @@ impl From<agentstategraph::RepoError> for MigrationError {
     }
 }
 
+/// The AgentStateGraph schema [`migrate_asg`] left on `main`.
+#[derive(Debug)]
+pub enum AsgSchema {
+    /// It was already this binary's version.
+    UpToDate(String),
+    /// It was older, or unversioned, and is now this binary's version.
+    Migrated(String),
+}
+
+/// Why [`migrate_asg`] stopped. Each has the exit status the Hub uses for it.
+#[derive(Debug, thiserror::Error)]
+pub enum AsgMigrationError {
+    #[error("the AgentStateGraph schema ({db}) is newer than this binary's ({binary})")]
+    Downgrade { db: String, binary: String },
+    #[error("AgentStateGraph's /_meta is corrupt: {0}")]
+    Corrupt(String),
+    #[error("the AgentStateGraph schema needs migrating, but ASG_MIGRATE is never")]
+    Required,
+    #[error("AgentStateGraph migration failed: {0}")]
+    Failed(String),
+}
+
+impl AsgMigrationError {
+    pub fn exit_code(&self) -> i32 {
+        use agentstategraph_migrate::exit;
+        match self {
+            Self::Downgrade { .. } => exit::DOWNGRADE_REFUSED,
+            Self::Corrupt(_) => exit::CORRUPT_META,
+            Self::Required => exit::UPGRADE_REQUIRED,
+            Self::Failed(_) => exit::MIGRATION_FAILED,
+        }
+    }
+}
+
+/// Bring the AgentStateGraph schema on `main` up to this binary's version.
+/// Run it before [`run_migrations`], since CTXone's plan and task state sits on
+/// it. A newer or corrupt schema is refused, and `ASG_MIGRATE=never` refuses to
+/// migrate.
+pub fn migrate_asg(repo: &Repository) -> Result<AsgSchema, AsgMigrationError> {
+    use agentstategraph_migrate::{CheckResult, Registry, RunMode, binary_version, check};
+    let registry = Registry::builtin();
+    let target = binary_version();
+    match check(repo, "main", &target, &registry) {
+        Ok(CheckResult::UpToDate { version }) => Ok(AsgSchema::UpToDate(version.to_string())),
+        Ok(CheckResult::Downgrade { db, binary }) => Err(AsgMigrationError::Downgrade {
+            db: db.to_string(),
+            binary: binary.to_string(),
+        }),
+        Ok(CheckResult::Corrupt(msg)) => Err(AsgMigrationError::Corrupt(msg.to_string())),
+        Ok(CheckResult::UpgradeAvailable { .. } | CheckResult::Unversioned { .. }) => {
+            if std::env::var("ASG_MIGRATE").is_ok_and(|policy| policy == "never") {
+                return Err(AsgMigrationError::Required);
+            }
+            info!("running ASG schema migrations");
+            registry
+                .run(repo, "main", &target, RunMode::Apply)
+                .map_err(|e| AsgMigrationError::Failed(e.to_string()))?;
+            Ok(AsgSchema::Migrated(target.to_string()))
+        }
+        Err(e) => Err(AsgMigrationError::Failed(e.to_string())),
+    }
+}
+
 /// Read the schema version currently recorded in the graph. Returns 0
 /// if the path doesn't exist (i.e., this is a fresh graph or one that
 /// predates schema tracking).

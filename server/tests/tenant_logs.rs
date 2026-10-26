@@ -13,10 +13,9 @@ use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
-use agentstategraph::Repository;
-use agentstategraph_storage::MemoryStorage;
+use ctxone_hub::http;
 use ctxone_hub::tenant::{TenantsFile, TokenHash};
-use ctxone_hub::{http, memory_tools::SessionRegistry};
+use ctxone_hub::tenant_cache::{MemoryTenants, TenantCache};
 
 /// Log output captured by a test subscriber.
 #[derive(Clone, Default)]
@@ -56,14 +55,11 @@ async fn request_logs_carry_the_tenant_and_never_the_token() {
     std::fs::write(&path, format!("alice {}\n", TokenHash::of(token).to_hex())).unwrap();
     let file = TenantsFile::open_with_reload(&path, Duration::ZERO).unwrap();
 
-    let repo = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
-    repo.init().expect("repo init");
-    let app = http::router_with_config(
-        repo,
-        Arc::new(SessionRegistry::new()),
-        http::HubConfig {
-            tenants: Some(Arc::new(file)),
-            ..Default::default()
+    let app = http::multi_tenant_router(
+        http::HubConfig::default(),
+        http::MultiTenant {
+            resolver: Arc::new(file),
+            data: TenantCache::new(Arc::new(MemoryTenants::default())),
         },
     );
 

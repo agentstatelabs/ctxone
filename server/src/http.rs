@@ -34,6 +34,7 @@ use crate::plan_tools;
 use crate::rate_limit;
 use crate::reminder_tools;
 use crate::session_links;
+use crate::tenant_cache::{Tenancy, TenantCache, TenantState};
 
 /// Hub-wide HTTP configuration.
 ///
@@ -108,17 +109,23 @@ pub struct HubConfig {
     /// constructs it from the persisted preference + env seed and keeps a clone
     /// for the sweep loop.
     pub autosync: Option<Autosync>,
-    /// A Postgres hub's tables for the project registry and session stats,
-    /// on AgentStateGraph's pool (see [`crate::hub_store`]). `None` for SQLite
-    /// (whose tables live in `db_path`) and memory.
+    /// A single-tenant Postgres hub's tables for the project registry and
+    /// session stats, on AgentStateGraph's pool (see [`crate::hub_store`]).
+    /// `None` for SQLite (whose tables live in `db_path`) and memory. A
+    /// multi-tenant Hub's tenants get theirs from their opener.
     pub postgres_tables: Option<crate::hub_store::PgStore>,
-    /// Multi-tenant mode: every request needs a bearer token this resolves to
-    /// a tenant, loopback included, and the tenant is attached to the request
-    /// (see [`crate::tenant`]). Rate limits are then per tenant. Replaces
-    /// `auth_token` and `auth_token_file`. Per-tenant data isn't wired yet
-    /// (ctx-multi-tenant-hub t-003): until it is, every tenant reaches the
-    /// router's one repository, so the Hub binary refuses `--tenants-file`.
-    pub tenants: Option<Arc<dyn crate::tenant::TenantResolver>>,
+}
+
+/// What makes a Hub multi-tenant (see [`multi_tenant_router`]).
+#[derive(Clone, Debug)]
+pub struct MultiTenant {
+    /// Maps each request's bearer token to its tenant. Every request needs
+    /// one, loopback included, and rate limits are per tenant (see
+    /// [`crate::tenant`]). Replaces `auth_token` and `auth_token_file`.
+    pub resolver: Arc<dyn crate::tenant::TenantResolver>,
+    /// Each tenant's data, opened on its first request (see
+    /// [`crate::tenant_cache`]).
+    pub data: TenantCache,
 }
 
 /// Runtime state of the background session sweep, shared between the HTTP
@@ -197,17 +204,12 @@ impl Autosync {
     }
 }
 
-#[derive(Clone)]
-pub struct HubState {
-    pub repo: Arc<Repository>,
-    pub sessions: Arc<SessionRegistry>,
+/// What every tenant of the Hub shares.
+pub struct HubShared {
     /// Background session-sweep toggle (Lens autosync).
     pub autosync: Autosync,
     /// Path to the live sqlite db file, or None for memory/postgres.
     pub db_path: Option<String>,
-    /// Where the project registry and session stats live: the sqlite file, or
-    /// the Postgres tables. `None` for the memory backend.
-    pub store: Option<crate::hub_store::HubStore>,
     /// Named ASD repos with pre-known base URLs (static, no pool).
     pub asd_repos: Arc<Vec<(String, String)>>,
     /// Process pool for dynamically spawned `asd-serve` instances.
@@ -219,12 +221,55 @@ pub struct HubState {
     /// The tokens the hub accepts, so its own `ctx` subprocesses can be given
     /// one (`CTX_TOKEN`) and get through the auth it enforces.
     pub ctx_auth: AuthTokens,
-    /// Merges currently running, keyed by (namespace, target ref). See
-    /// [`MergeGuard`].
-    pub merges_in_flight: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// Project detections still running on the blocking pool, including ones
     /// whose request already timed out. See [`run_detect_bounded`].
     pub detects_in_flight: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// The REST router's state. It holds no data of its own: handlers take a
+/// [`HubState`], built for each request from the request's tenant.
+#[derive(Clone)]
+pub struct Hub {
+    tenancy: Tenancy,
+    shared: Arc<HubShared>,
+}
+
+/// A request's view of the Hub: its tenant's data, and what every tenant
+/// shares. Handlers take it as an extractor. On a multi-tenant Hub it comes
+/// from the tenant the auth layer attached to the request, so a handler has no
+/// way to reach another tenant's data.
+#[derive(Clone)]
+pub struct HubState {
+    pub repo: Arc<Repository>,
+    pub sessions: Arc<SessionRegistry>,
+    /// Where the project registry and session stats live: the sqlite file, or
+    /// the Postgres tables. `None` for the memory backend.
+    pub store: Option<crate::hub_store::HubStore>,
+    /// The request's tenant. `None` on a single-tenant Hub.
+    pub tenant: Option<crate::tenant::Tenant>,
+    /// The tenant's state, which `repo`, `sessions` and `store` come from.
+    /// Holding it keeps the tenant open while the request runs.
+    pub data: Arc<TenantState>,
+    pub hub: Arc<HubShared>,
+}
+
+impl axum::extract::FromRequestParts<Hub> for HubState {
+    type Rejection = (StatusCode, &'static str);
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        hub: &Hub,
+    ) -> Result<Self, Self::Rejection> {
+        let (tenant, data) = hub.tenancy.state_for(&parts.extensions).await?;
+        Ok(HubState {
+            repo: data.repo.clone(),
+            sessions: data.sessions.clone(),
+            store: data.store.clone(),
+            tenant,
+            data,
+            hub: hub.shared.clone(),
+        })
+    }
 }
 
 impl HubState {
@@ -449,6 +494,18 @@ pub fn router_with_config(
     config: HubConfig,
 ) -> Router {
     router_with_config_inner(repo, sessions, config, None)
+}
+
+/// Build a multi-tenant Hub's router: each request reaches the data of the
+/// tenant its bearer token belongs to (docs/design/MULTI_TENANT_HUB.md).
+/// `config.auth_token`, `auth_token_file` and `postgres_tables` don't apply.
+pub fn multi_tenant_router(config: HubConfig, tenants: MultiTenant) -> Router {
+    build_router(
+        Tenancy::Many(tenants.data),
+        Some(tenants.resolver),
+        config,
+        None,
+    )
 }
 
 /// How often an [`AuthTokenFile`] is re-read.
@@ -785,6 +842,27 @@ fn router_with_config_inner(
     config: HubConfig,
     db_path: Option<String>,
 ) -> Router {
+    let store = db_path
+        .clone()
+        .map(crate::hub_store::HubStore::Sqlite)
+        .or_else(|| {
+            config
+                .postgres_tables
+                .clone()
+                .map(crate::hub_store::HubStore::Postgres)
+        });
+    let tenant = TenantState::new(repo, sessions, store);
+    build_router(Tenancy::One(Arc::new(tenant)), None, config, db_path)
+}
+
+/// The router for either kind of Hub. `resolver` is set exactly when the Hub
+/// is multi-tenant.
+fn build_router(
+    tenancy: Tenancy,
+    resolver: Option<Arc<dyn crate::tenant::TenantResolver>>,
+    config: HubConfig,
+    db_path: Option<String>,
+) -> Router {
     // CORS reflects an Origin only when it's same-origin or explicitly allowed
     // (never `Any`), so cross-origin pages can't read API responses. The
     // Origin-guard middleware below additionally blocks such requests from
@@ -823,7 +901,7 @@ fn router_with_config_inner(
 
     // Rate limiter — returns None when rpm=0 (disabled). Keyed by tenant in
     // multi-tenant mode, by peer IP otherwise.
-    let governor = rate_limit::build_layer(config.rate_limit_rpm, config.tenants.is_some());
+    let governor = rate_limit::build_layer(config.rate_limit_rpm, resolver.is_some());
 
     let asd_repos = Arc::new(config.asd_repos.clone());
 
@@ -840,52 +918,39 @@ fn router_with_config_inner(
         )))
     };
 
-    // Prepare the MCP-over-HTTP state before `repo`/`asd_*` move into HubState.
-    // Only built when enabled (the daemon path); library/test callers leave
-    // `mcp_http` false and get a plain REST router.
+    // Prepare the MCP-over-HTTP state before `asd_*` move into the shared
+    // state. Only built when enabled (the daemon path); library/test callers
+    // leave `mcp_http` false and get a plain REST router. Its services use each
+    // tenant's own session registry, so MCP recall/savings land in the same
+    // rows the REST side flushes.
     let mcp_state = config.mcp_http.then(|| {
         crate::mcp_http::McpHttpState::new(
-            repo.clone(),
+            tenancy.clone(),
             config.agent_id.clone(),
             asd_repos.clone(),
             asd_pool.clone(),
             // When a bearer token guards the surface, the auth middleware is the
             // real gate, so relax rmcp's loopback-only Host allow-list to let
             // authenticated remote clients reach /mcp.
-            config.auth_token.is_some()
-                || config.auth_token_file.is_some()
-                || config.tenants.is_some(),
-            // Share the REST hub's session registry so MCP recall/savings land in
-            // the same rows the process flushes to SQLite.
-            sessions.clone(),
+            config.auth_token.is_some() || config.auth_token_file.is_some() || resolver.is_some(),
         )
     });
 
-    let store = db_path
-        .clone()
-        .map(crate::hub_store::HubStore::Sqlite)
-        .or_else(|| {
-            config
-                .postgres_tables
+    let state = Hub {
+        tenancy,
+        shared: Arc::new(HubShared {
+            db_path,
+            asd_repos,
+            asd_pool,
+            ctx_binary: config.ctx_binary.clone(),
+            self_base_url: config.self_base_url.clone(),
+            ctx_auth: AuthTokens::new(config.auth_token.clone(), config.auth_token_file.clone()),
+            detects_in_flight: Arc::default(),
+            autosync: config
+                .autosync
                 .clone()
-                .map(crate::hub_store::HubStore::Postgres)
-        });
-    let state = HubState {
-        repo,
-        sessions,
-        db_path,
-        store,
-        asd_repos,
-        asd_pool,
-        ctx_binary: config.ctx_binary.clone(),
-        self_base_url: config.self_base_url.clone(),
-        ctx_auth: AuthTokens::new(config.auth_token.clone(), config.auth_token_file.clone()),
-        merges_in_flight: Arc::default(),
-        detects_in_flight: Arc::default(),
-        autosync: config
-            .autosync
-            .clone()
-            .unwrap_or_else(|| Autosync::new(None, 0)),
+                .unwrap_or_else(|| Autosync::new(None, 0)),
+        }),
     };
 
     let mut router = Router::new()
@@ -1079,7 +1144,7 @@ fn router_with_config_inner(
 
     // Mount ASD repo registry + per-repo proxy routes when any repos are configured
     // (either static URLs or pool-managed repos).
-    if !state.asd_repos.is_empty() || state.asd_pool.is_some() {
+    if !state.shared.asd_repos.is_empty() || state.shared.asd_pool.is_some() {
         router = router
             .route("/api/code", get(list_asd_repos))
             .route("/api/code/{repo}/prefetch", post(prefetch_asd_repo))
@@ -1122,7 +1187,7 @@ fn router_with_config_inner(
     let auth_state = AuthState {
         tokens: AuthTokens::new(config.auth_token.clone(), config.auth_token_file.clone()),
         loopback_exempt: !config.require_auth_on_loopback,
-        tenants: config.tenants.clone(),
+        tenants: resolver,
     };
     router = router.layer(axum::middleware::from_fn_with_state(
         auth_state,
@@ -1159,8 +1224,9 @@ struct AsdRepoInfo {
 
 /// GET /api/code — list all configured ASD repos (static + pool-managed),
 /// each annotated with its `source` and live `status`.
-async fn list_asd_repos(State(s): State<HubState>) -> Json<Vec<AsdRepoInfo>> {
+async fn list_asd_repos(s: HubState) -> Json<Vec<AsdRepoInfo>> {
     let mut out: Vec<AsdRepoInfo> = s
+        .hub
         .asd_repos
         .iter()
         .map(|(name, url)| AsdRepoInfo {
@@ -1171,9 +1237,9 @@ async fn list_asd_repos(State(s): State<HubState>) -> Json<Vec<AsdRepoInfo>> {
         })
         .collect();
     // Append pool repos (without resolving their port — they may not be running yet).
-    if let Some(pool) = &s.asd_pool {
+    if let Some(pool) = &s.hub.asd_pool {
         let static_names: std::collections::HashSet<&str> =
-            s.asd_repos.iter().map(|(n, _)| n.as_str()).collect();
+            s.hub.asd_repos.iter().map(|(n, _)| n.as_str()).collect();
         for name in pool.repo_names().await {
             if static_names.contains(name.as_str()) {
                 continue;
@@ -1197,10 +1263,7 @@ async fn list_asd_repos(State(s): State<HubState>) -> Json<Vec<AsdRepoInfo>> {
 /// POST /api/code/{repo}/prefetch — warm a pool-managed repo by spawning its
 /// `asd-serve` child (if not already running). Returns 200 with the base URL
 /// once /health passes. Idempotent.
-async fn prefetch_asd_repo(
-    State(s): State<HubState>,
-    Path(repo): Path<String>,
-) -> axum::response::Response {
+async fn prefetch_asd_repo(s: HubState, Path(repo): Path<String>) -> axum::response::Response {
     match resolve_asd_base(&s, &repo).await {
         Ok(base) => (
             StatusCode::OK,
@@ -1218,11 +1281,11 @@ async fn prefetch_asd_repo(
 /// Resolve the base URL for a repo, trying static URLs first then the pool.
 async fn resolve_asd_base(s: &HubState, repo: &str) -> Result<String, String> {
     // Static URL wins (user-configured, no process management needed)
-    if let Some((_, url)) = s.asd_repos.iter().find(|(n, _)| n == repo) {
+    if let Some((_, url)) = s.hub.asd_repos.iter().find(|(n, _)| n == repo) {
         return Ok(url.trim_end_matches('/').to_string());
     }
     // Fall back to process pool
-    if let Some(pool) = &s.asd_pool {
+    if let Some(pool) = &s.hub.asd_pool {
         return pool.base_url(repo).await;
     }
     Err(format!("unknown ASD repo: {repo}"))
@@ -1231,7 +1294,7 @@ async fn resolve_asd_base(s: &HubState, repo: &str) -> Result<String, String> {
 /// Forward GET/POST /api/code/{repo}/{*path} → <asd_url>/api/v1/{path}.
 /// Routes to the ASD instance registered under {repo} name (static or pool).
 async fn proxy_asd(
-    State(s): State<HubState>,
+    s: HubState,
     Path((repo, path)): Path<(String, String)>,
     axum::extract::RawQuery(query): axum::extract::RawQuery,
 ) -> axum::response::Response {
@@ -1348,7 +1411,7 @@ async fn request_tenant(
 /// For backward compat this endpoint keeps returning a single
 /// snapshot-shaped object. The shape matches `SessionSnapshot`, with
 /// `session_id = "_aggregate"` to make the roll-up obvious.
-async fn token_stats(State(s): State<HubState>) -> impl IntoResponse {
+async fn token_stats(s: HubState) -> impl IntoResponse {
     // Refresh the default session's flat-size cache. Since graph size
     // is process-global we only need to populate one cache — the
     // aggregate reads the max across sessions.
@@ -1363,7 +1426,7 @@ async fn token_stats(State(s): State<HubState>) -> impl IntoResponse {
 /// registry auto-creates sessions on header read, so once a client
 /// has touched the Hub once, its ID is valid here.)
 async fn session_token_stats(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(session_id): Path<String>,
 ) -> Result<Json<SessionSnapshot>, (StatusCode, String)> {
@@ -1471,7 +1534,7 @@ fn session_ids_in(
 /// [`list_sessions`] does to compute "placed elsewhere", but returned whole
 /// rather than used as a filter. Namespace-agnostic by design, so the request's
 /// namespace header is ignored.
-async fn imported_session_ids(State(s): State<HubState>) -> impl IntoResponse {
+async fn imported_session_ids(s: HubState) -> impl IntoResponse {
     let mut ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Ok(names) = s.repo.list_namespaces() {
         for name in names {
@@ -1507,7 +1570,7 @@ async fn imported_session_ids(State(s): State<HubState>) -> impl IntoResponse {
 /// workspace shows the sessions whose nodes are actually there. `default` is
 /// computed as the complement over named namespaces (each small, one
 /// `list_paths` apiece) so a registry-only session is never orphaned.
-async fn list_sessions(State(s): State<HubState>, ns: NamespaceId) -> impl IntoResponse {
+async fn list_sessions(s: HubState, ns: NamespaceId) -> impl IntoResponse {
     let default_session = s.sessions.get_or_create(DEFAULT_SESSION_ID);
     ensure_flat_size(&s.repo, &default_session, "main");
     let mut snaps = s.sessions.snapshot_all();
@@ -1709,7 +1772,7 @@ fn backfill_one_session(
 }
 
 async fn backfill_by_model(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Query(q): Query<BackfillByModelQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -1868,7 +1931,7 @@ struct LlmUsageRequest {
 /// are rejected by the JSON parser.
 #[instrument(skip_all, fields(session = %session_id.0, model = req.model.as_deref().unwrap_or("")))]
 async fn record_llm_usage(
-    State(s): State<HubState>,
+    s: HubState,
     session_id: SessionId,
     Json(req): Json<LlmUsageRequest>,
 ) -> Result<Json<SessionSnapshot>, (StatusCode, String)> {
@@ -1900,7 +1963,7 @@ async fn record_llm_usage(
 }
 
 async fn stats(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(ref_name): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -2000,7 +2063,7 @@ fn plan_cost_rollup(
 /// worked multiple plans counts toward each — accurate in the plan=worktree
 /// model where one session works one plan.
 async fn plan_cost(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(plan): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -2027,7 +2090,7 @@ struct PathQuery {
 }
 
 async fn get_state(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(ref_name): Path<String>,
     Query(q): Query<PathQuery>,
@@ -2049,7 +2112,7 @@ struct PrefixQuery {
 }
 
 async fn list_paths(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(ref_name): Path<String>,
     Query(q): Query<PrefixQuery>,
@@ -2071,7 +2134,7 @@ struct ExportQuery {
 /// portable, human-editable snapshot: prune it, then `import` into a fresh db to
 /// keep only what you want.
 async fn export_graph(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Query(q): Query<ExportQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -2114,7 +2177,7 @@ struct FsckRequest {
 /// fully-readable ancestor. Because no GC ever deletes objects, that ancestor's
 /// tree is guaranteed intact and the completed work below the break survives.
 async fn fsck(
-    State(s): State<HubState>,
+    s: HubState,
     Json(req): Json<FsckRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     // Every namespace, plus `default` (which list_namespaces omits — it is the
@@ -2206,7 +2269,7 @@ struct DbUpgradeRequest {
 /// snapshot-and-fsck-wrapped path the CLI drives. Refuses (409) if the graph is
 /// from a NEWER hub than this binary — never downgrades a schema.
 async fn db_upgrade(
-    State(s): State<HubState>,
+    s: HubState,
     Json(req): Json<DbUpgradeRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let current = crate::migrations::current_schema_version(&s.repo);
@@ -2247,7 +2310,7 @@ struct ImportRequest {
 /// `POST /api/import` — write a `{path: value}` map onto a ref, to seed a fresh
 /// db from a (pruned) export snapshot.
 async fn import_graph(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     agent_id: AgentId,
     Json(req): Json<ImportRequest>,
@@ -2308,7 +2371,7 @@ struct DocRegisterRequest {
 /// find docs without scanning the repo. Keeps the repo file canonical; this is
 /// just the index/pointer.
 async fn register_doc(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     agent_id: AgentId,
     Json(req): Json<DocRegisterRequest>,
@@ -2339,7 +2402,7 @@ async fn register_doc(
 
 /// `GET /api/docs` — list all registered doc entries.
 async fn list_docs(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Query(q): Query<ExportQuery>,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
@@ -2375,7 +2438,7 @@ struct SearchQuery {
 }
 
 async fn search_values(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(ref_name): Path<String>,
     Query(q): Query<SearchQuery>,
@@ -2430,7 +2493,7 @@ const ACTIVITY_SCAN_LIMIT: usize = 50_000;
 /// true when the scan hit its cap before reaching the requested cutoff, so
 /// the UI can say the history is partial instead of implying a quiet period.
 async fn activity_stats(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(ref_name): Path<String>,
     Query(q): Query<ActivityQuery>,
@@ -2494,7 +2557,7 @@ async fn activity_stats(
 }
 
 async fn get_log(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(ref_name): Path<String>,
     Query(q): Query<LogQuery>,
@@ -2525,7 +2588,7 @@ async fn get_log(
 }
 
 async fn blame(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(ref_name): Path<String>,
     Query(q): Query<PathQuery>,
@@ -2537,7 +2600,7 @@ async fn blame(
 }
 
 async fn list_branches(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
@@ -2579,7 +2642,7 @@ struct CreateBranchRequest {
 }
 
 async fn create_branch(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     agent_id: AgentId,
     Json(req): Json<CreateBranchRequest>,
@@ -2625,7 +2688,7 @@ async fn create_branch(
 /// forgets the label. `deleted:false` means the branch was already absent
 /// (idempotent, so re-running a prune is safe).
 async fn delete_branch(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -2659,7 +2722,7 @@ struct ResetBranchRequest {
 /// retaining the old target as a timestamped recovery ref so the reset is
 /// auditable and reversible without direct storage surgery.
 async fn reset_branch(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Json(req): Json<ResetBranchRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -2704,7 +2767,7 @@ struct DiffQuery {
 }
 
 async fn diff_refs(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Query(q): Query<DiffQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -2749,13 +2812,13 @@ fn default_merge_description() -> String {
 
 #[instrument(skip_all, fields(source = %req.source, target = %req.target, agent = %agent_id.0))]
 async fn merge_refs(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     agent_id: AgentId,
     Json(req): Json<MergeRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
-    let guard = MergeGuard::acquire(&s.merges_in_flight, &ns.0, &req.target).ok_or_else(|| {
+    let guard = MergeGuard::acquire(&s.data.merges_in_flight, &ns.0, &req.target).ok_or_else(|| {
         (
             StatusCode::CONFLICT,
             serde_json::json!({
@@ -2961,7 +3024,7 @@ fn default_ref() -> String {
     )
 )]
 async fn remember(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     agent_id: AgentId,
     session_id: SessionId,
@@ -3039,7 +3102,7 @@ fn default_forget_reason() -> String {
 
 #[instrument(skip_all, fields(path = %req.path, ref_name = %req.ref_name, agent = %agent_id.0))]
 async fn forget(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     agent_id: AgentId,
     Json(req): Json<ForgetRequest>,
@@ -3071,7 +3134,7 @@ struct RecallQuery {
 
 #[instrument(skip_all, fields(ref_name = %q.ref_name, budget = q.budget.unwrap_or(1500), session = %session_id.0))]
 async fn recall(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     session_id: SessionId,
     Query(q): Query<RecallQuery>,
@@ -3108,7 +3171,7 @@ struct ContextQuery {
 }
 
 async fn context(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     session_id: SessionId,
     Path(project): Path<String>,
@@ -3157,7 +3220,7 @@ struct SummarizeSessionRequest {
 /// is echoed in the response so a caller can catch that rather than have it
 /// pass silently.
 async fn summarize_session(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     agent_id: AgentId,
     Json(req): Json<SummarizeSessionRequest>,
@@ -3215,7 +3278,7 @@ struct WhatChangedQuery {
 }
 
 async fn what_changed_since(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Query(q): Query<WhatChangedQuery>,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
@@ -3242,7 +3305,7 @@ struct WhyDidWeQuery {
 }
 
 async fn why_did_we(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Query(q): Query<WhyDidWeQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -3323,7 +3386,7 @@ struct PrimeRequest {
     )
 )]
 async fn prime(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     session_id: SessionId,
     agent_id: AgentId,
@@ -3356,7 +3419,7 @@ async fn prime(
 }
 
 async fn list_pinned(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
@@ -3585,7 +3648,7 @@ fn default_stale_days() -> i64 {
 /// `started_at` (fallback `created_at`) is older than N days. Surfaces stale
 /// in-progress state so agents/humans notice work that stopped mid-flight.
 async fn stale_plan_tasks(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Query(q): Query<StaleQuery>,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
@@ -3669,7 +3732,7 @@ async fn stale_plan_tasks(
 /// graph); a workspace has only a handful of plans, so this stays well under
 /// the request timeout. Scoped to the request namespace (`X-CTXone-Namespace`).
 async fn backfill_plan_epochs(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
@@ -3719,7 +3782,7 @@ struct EpochListQuery {
 /// its workspace by the `plan:<ns>:` id prefix (the same scheme the hub count
 /// uses). Newest-sealed first.
 async fn list_epochs(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Query(q): Query<EpochListQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -3794,7 +3857,7 @@ async fn list_epochs(
 /// independently-verifiable audit bundle (epoch metadata + full commit records)
 /// as a JSON attachment.
 async fn export_epoch(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(id): Path<String>,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
@@ -3826,7 +3889,7 @@ async fn export_epoch(
 
 #[instrument(skip_all, fields(ref_name = %q.ref_name, status = q.status.as_deref().unwrap_or("")))]
 async fn list_plans(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Query(q): Query<PlanListQuery>,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
@@ -3887,7 +3950,7 @@ async fn list_plans(
 
 #[instrument(skip_all, fields(name = %req.name, ref_name = %req.ref_name, agent = %agent_id.0))]
 async fn create_plan(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     agent_id: AgentId,
     Json(req): Json<CreatePlanRequest>,
@@ -3940,7 +4003,7 @@ struct LinkRequest {
 /// `POST /api/plans/{name}/tasks/{id}/link` — record that this task, when done,
 /// satisfies a task in another plan (a cross-plan dependency pointer).
 async fn link_plan_task(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     agent_id: AgentId,
     Path((name, task_id)): Path<(String, String)>,
@@ -3979,7 +4042,7 @@ async fn link_plan_task(
 
 #[instrument(skip_all, fields(name = %name, ref_name = %q.ref_name))]
 async fn get_plan(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(name): Path<String>,
     Query(q): Query<RefQuery>,
@@ -4017,7 +4080,7 @@ async fn get_plan(
 /// the decisions recorded under the plan (why), and the token cost (t-002).
 /// "Not only see what the agent did, but prove it and prove why."
 async fn plan_provenance(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(name): Path<String>,
     Query(q): Query<RefQuery>,
@@ -4091,7 +4154,7 @@ async fn plan_provenance(
 
 #[instrument(skip_all, fields(name = %name, ref_name = %q.ref_name, agent = %agent_id.0))]
 async fn delete_plan(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     agent_id: AgentId,
     Path(name): Path<String>,
@@ -4112,7 +4175,7 @@ async fn delete_plan(
 
 #[instrument(skip_all, fields(name = %name, ref_name = %q.ref_name))]
 async fn list_plan_tasks(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(name): Path<String>,
     Query(q): Query<RefQuery>,
@@ -4128,7 +4191,7 @@ async fn list_plan_tasks(
 
 #[instrument(skip_all, fields(name = %name, title = %req.title, agent = %agent_id.0))]
 async fn add_plan_task(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     agent_id: AgentId,
     Path(name): Path<String>,
@@ -4158,7 +4221,7 @@ async fn add_plan_task(
 
 #[instrument(skip_all, fields(name = %name, task_id = %task_id, ref_name = %q.ref_name))]
 async fn get_plan_task(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path((name, task_id)): Path<(String, String)>,
     Query(q): Query<RefQuery>,
@@ -4174,7 +4237,7 @@ async fn get_plan_task(
 
 #[instrument(skip_all, fields(name = %name, task_id = %task_id, agent = %agent_id.0))]
 async fn start_plan_task(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     agent_id: AgentId,
     Path((name, task_id)): Path<(String, String)>,
@@ -4195,7 +4258,7 @@ async fn start_plan_task(
 
 #[instrument(skip_all, fields(name = %name, task_id = %task_id, agent = %agent_id.0))]
 async fn complete_plan_task(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     agent_id: AgentId,
     Path((name, task_id)): Path<(String, String)>,
@@ -4224,7 +4287,7 @@ async fn complete_plan_task(
 
 #[instrument(skip_all, fields(name = %name, task_id = %task_id, agent = %agent_id.0))]
 async fn abandon_plan_task(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     agent_id: AgentId,
     Path((name, task_id)): Path<(String, String)>,
@@ -4242,7 +4305,7 @@ async fn abandon_plan_task(
 
 #[instrument(skip_all, fields(name = %name, task_id = %task_id, agent = %agent_id.0))]
 async fn edit_plan_task(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     agent_id: AgentId,
     Path((name, task_id)): Path<(String, String)>,
@@ -4267,7 +4330,7 @@ async fn edit_plan_task(
 
 #[instrument(skip_all, fields(name = %name, ref_name = %q.ref_name, assigned_to = q.assigned_to.as_deref().unwrap_or("")))]
 async fn next_plan_task(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     agent_id: AgentId,
     Path(name): Path<String>,
@@ -4313,7 +4376,7 @@ async fn next_plan_task(
 
 #[instrument(skip_all, fields(name = %name, agent = %agent_id.0))]
 async fn archive_plan(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     agent_id: AgentId,
     Path(name): Path<String>,
@@ -4349,7 +4412,7 @@ struct MovePlanBody {
 
 #[instrument(skip_all, fields(name = %name, ref_name = %q.ref_name, agent = %agent_id.0))]
 async fn move_plan_handler(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     agent_id: AgentId,
     Path(name): Path<String>,
@@ -4397,7 +4460,7 @@ struct ClosePlanBody {
 /// `POST /api/plans/{name}/close` — the gated close: requires every task
 /// terminal and a non-empty summary. Does not abandon open tasks.
 async fn close_plan_handler(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     agent_id: AgentId,
     Path(name): Path<String>,
@@ -4419,7 +4482,7 @@ async fn close_plan_handler(
 
 #[instrument(skip_all, fields(name = %name, ref_name = %q.ref_name, agent = %agent_id.0))]
 async fn force_complete_plan(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     agent_id: AgentId,
     Path(name): Path<String>,
@@ -4458,7 +4521,7 @@ struct ListTaintsResponse {
 }
 
 async fn list_taints_handler(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Query(q): Query<ListTaintsQuery>,
 ) -> Result<Json<ListTaintsResponse>, (StatusCode, String)> {
@@ -4495,7 +4558,7 @@ struct CheckTaintResponse {
 }
 
 async fn check_taint_handler(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Query(q): Query<CheckTaintQuery>,
 ) -> Result<Json<CheckTaintResponse>, (StatusCode, String)> {
@@ -4569,7 +4632,7 @@ struct ApplyTaintResponse {
 }
 
 async fn apply_taint_handler(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Json(body): Json<ApplyTaintBody>,
 ) -> Result<Json<ApplyTaintResponse>, (StatusCode, String)> {
@@ -4652,7 +4715,7 @@ struct RemoveTaintResponse {
 }
 
 async fn remove_taint_handler(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(id): Path<String>,
     Json(body): Json<RemoveTaintBody>,
@@ -4792,7 +4855,7 @@ const SESSION_TURNS_BULK_MAX_BYTES: usize = 128 * 1024 * 1024;
 /// re-written when its transcript changed (the fingerprint skip), and then
 /// every turn is re-derived, so there is nothing to preserve.
 async fn put_session_turns_bulk(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(sid): Path<String>,
     agent_id: AgentId,
@@ -4841,7 +4904,7 @@ async fn put_session_turns_bulk(
 }
 
 async fn put_session_turn(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path((sid, idx)): Path<(String, u32)>,
     agent_id: AgentId,
@@ -4888,7 +4951,7 @@ async fn put_session_turn(
 }
 
 async fn get_session_turn(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path((sid, idx)): Path<(String, u32)>,
     Query(q): Query<SessionTurnQuery>,
@@ -4901,7 +4964,7 @@ async fn get_session_turn(
 }
 
 async fn list_session_turns(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(sid): Path<String>,
     Query(q): Query<SessionTurnQuery>,
@@ -4944,7 +5007,7 @@ fn default_gap_minutes() -> i64 {
 /// topic arcs (t-003). No LLM: arcs break on branch/cwd change or an idle gap.
 /// The foundation for curated summaries — segment, then draft per arc.
 async fn session_segments(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(sid): Path<String>,
     Query(q): Query<SegmentsQuery>,
@@ -4968,7 +5031,7 @@ async fn session_segments(
 /// payload the "roll to a new session" nudge hands off when a session goes
 /// burning — carrying what the user said, not what the agent surmised.
 async fn session_starter(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(sid): Path<String>,
     Query(q): Query<SegmentsQuery>,
@@ -4989,10 +5052,7 @@ async fn session_starter(
 /// each recall injected into this session (t-004): topic, paths, tokens,
 /// savings. "Prove what the agent was told." Lightweight and non-durable
 /// (recall runs every prompt); empty for a session with no live recalls.
-async fn session_recall_log(
-    State(s): State<HubState>,
-    Path(sid): Path<String>,
-) -> Json<serde_json::Value> {
+async fn session_recall_log(s: HubState, Path(sid): Path<String>) -> Json<serde_json::Value> {
     let session = s.sessions.get_or_create(&sid);
     Json(serde_json::json!({
         "session_id": sid,
@@ -5023,7 +5083,7 @@ fn read_session_title(repo: &Repository, ref_name: &str, sid: &str) -> Option<St
 /// re-ingesting a transcript overwrites the prior title. Written into the
 /// request's namespace at `/sessions/{sid}/title`.
 async fn put_session_title(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(sid): Path<String>,
     agent_id: AgentId,
@@ -5080,7 +5140,7 @@ async fn put_session_title(
 }
 
 async fn get_session_title(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(sid): Path<String>,
     Query(q): Query<SessionTurnQuery>,
@@ -5119,7 +5179,7 @@ fn session_analysis_path(sid: &str) -> String {
 /// read by `ctx analyze` and the Lens analyze view, and by ingest to avoid
 /// re-analyzing turns already done on another machine.
 async fn get_session_analysis(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(sid): Path<String>,
     Query(q): Query<SessionTurnQuery>,
@@ -5135,7 +5195,7 @@ async fn get_session_analysis(
 
 /// `PUT /api/sessions/{sid}/analysis` — store the session's analysis record.
 async fn put_session_analysis(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(sid): Path<String>,
     agent_id: AgentId,
@@ -5177,7 +5237,7 @@ async fn put_session_analysis(
 /// re-scanning every transcript. Stored verbatim like meta/provenance, so the
 /// CLI can add fields without a lockstep hub rebuild.
 async fn put_session_burn(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(sid): Path<String>,
     agent_id: AgentId,
@@ -5253,7 +5313,7 @@ struct DeleteSessionQuery {
 /// disk. Without it "delete" means "delete until the next sync", which is not
 /// a deletion. Pass `no_tombstone=true` to deliberately allow re-import.
 async fn delete_session(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(sid): Path<String>,
     agent_id: AgentId,
@@ -5336,7 +5396,7 @@ fn session_links_path(sid: &str) -> String {
 /// `/api/projects`, and there was no `ctx workspace` command at all. This is
 /// the direct enumeration agents and the CLI need to answer "which workspaces
 /// exist and how much is in each".
-async fn list_namespaces(State(s): State<HubState>) -> impl IntoResponse {
+async fn list_namespaces(s: HubState) -> impl IntoResponse {
     let mut out = Vec::new();
     match s.repo.list_namespaces() {
         Ok(names) => {
@@ -5451,28 +5511,22 @@ fn representative_model(
         .map(|(m, _)| m.to_string())
 }
 
-/// `GET /api/namespaces/summary` — hub-global per-workspace rollup for the Hub
-/// Home. One call returns token + graph aggregates for every workspace so the
-/// home page needs no N+1 fan-out. Purely namespace-derived; project metadata
+/// `GET /api/namespaces/summary` — per-workspace rollup of the tenant's
+/// workspaces for the Hub Home. One call returns token + graph aggregates for
+/// every workspace so the home page needs no N+1 fan-out. Purely namespace-derived; project metadata
 /// (display_name / remote) is joined client-side from `/api/projects`.
-/// Short-TTL memo for the hub-global workspace rollup (t-003). Each miss fans
-/// `repo.stats("main")` out across every namespace, and `stats()` walks up to
-/// 10k commits per namespace — ~1.9s on a large db. The rollup is a dashboard
-/// aggregate with no per-request inputs, so a few seconds of staleness is fine;
-/// this collapses a burst of Home page loads to one computation.
-fn namespaces_summary_cache()
--> &'static std::sync::Mutex<Option<(std::time::Instant, serde_json::Value)>> {
-    static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<Option<(std::time::Instant, serde_json::Value)>>,
-    > = std::sync::OnceLock::new();
-    CACHE.get_or_init(|| std::sync::Mutex::new(None))
-}
-
+///
+/// The rollup is memoized for a few seconds, per tenant
+/// (`TenantState::namespaces_summary`). Each miss fans `repo.stats("main")` out
+/// across every namespace, and `stats()` walks up to 10k commits per namespace —
+/// ~1.9s on a large db. The rollup is a dashboard aggregate with no per-request
+/// inputs, so a few seconds of staleness is fine; this collapses a burst of Home
+/// page loads to one computation.
 const NAMESPACES_SUMMARY_TTL: std::time::Duration = std::time::Duration::from_secs(15);
 
-async fn namespaces_summary(State(s): State<HubState>) -> impl IntoResponse {
+async fn namespaces_summary(s: HubState) -> impl IntoResponse {
     // Serve a fresh-enough cached rollup if we have one.
-    if let Ok(guard) = namespaces_summary_cache().lock()
+    if let Ok(guard) = s.data.namespaces_summary.lock()
         && let Some((computed_at, payload)) = guard.as_ref()
         && computed_at.elapsed() < NAMESPACES_SUMMARY_TTL
     {
@@ -5558,7 +5612,7 @@ async fn namespaces_summary(State(s): State<HubState>) -> impl IntoResponse {
         }));
     }
     let payload = serde_json::json!({ "workspaces": out });
-    if let Ok(mut guard) = namespaces_summary_cache().lock() {
+    if let Ok(mut guard) = s.data.namespaces_summary.lock() {
         *guard = Some((std::time::Instant::now(), payload.clone()));
     }
     Json(payload).into_response()
@@ -5583,7 +5637,7 @@ struct AddSessionLinkRequest {
 /// validated against this workspace and the link is merged into the same
 /// `/session_links/{sid}` sidecar, so both sources read the same way.
 async fn add_session_link(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(sid): Path<String>,
     agent_id: AgentId,
@@ -5683,7 +5737,7 @@ fn normalize_task_ref(raw: &str) -> Option<String> {
 /// actually existing in this namespace, and writes a sidecar the whole system
 /// can read. Re-runnable and idempotent — a re-derive overwrites the node.
 async fn derive_session_links(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(sid): Path<String>,
     agent_id: AgentId,
@@ -5947,7 +6001,7 @@ struct MovePlanRequest {
 /// equal-or-newer copy is left untouched, so a re-run cannot clobber a plan
 /// that moved on in its new home.
 async fn relocate_plan(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(name): Path<String>,
     agent_id: AgentId,
@@ -6028,7 +6082,7 @@ async fn relocate_plan(
 /// equal or newer, the source is removed but the target is left untouched, so
 /// a re-run cannot clobber a target that has moved on.
 async fn move_session(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(sid): Path<String>,
     agent_id: AgentId,
@@ -6110,7 +6164,7 @@ async fn move_session(
 /// are typed wrappers over the same guarded core (`move_subtree_verified`), so
 /// every cross-namespace move shares the same no-data-loss guarantee.
 async fn move_subtree(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     agent_id: AgentId,
     Json(req): Json<MoveSubtreeRequest>,
@@ -6184,7 +6238,7 @@ async fn move_subtree(
 /// Read once per run by `ctx ingest-session`; returning the whole list beats
 /// probing per session, since a machine-wide sync considers hundreds.
 async fn list_session_tombstones(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Query(q): Query<SessionTurnQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -6267,7 +6321,7 @@ fn session_meta_from(v: Option<&serde_json::Value>) -> SessionMeta {
 /// Stored verbatim, like `meta`, so a newer CLI can add fields without
 /// needing the hub rebuilt in lockstep.
 async fn put_session_provenance(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(sid): Path<String>,
     agent_id: AgentId,
@@ -6311,7 +6365,7 @@ async fn put_session_provenance(
 /// request namespace at `/sessions/{sid}/meta`. Written by `ctx
 /// ingest-session` alongside the title.
 async fn put_session_meta(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(sid): Path<String>,
     agent_id: AgentId,
@@ -6566,21 +6620,26 @@ pub async fn run_session_sync(
 }
 
 async fn sync_sessions(
-    State(s): State<HubState>,
+    s: HubState,
     // Deliberately not used to target the import: sync is machine-wide and
     // each transcript routes to its own workspace. Kept so the extractor still
     // validates the header and the handler signature documents the choice.
     _ns: NamespaceId,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let ctx_bin = s.ctx_binary.clone().unwrap_or_else(|| "ctx".to_string());
+    let ctx_bin = s
+        .hub
+        .ctx_binary
+        .clone()
+        .unwrap_or_else(|| "ctx".to_string());
     // Fall back to the conventional default port if the binary wasn't built
     // with a self URL (library/test callers). The Hub binary always sets this.
     let base_url = s
+        .hub
         .self_base_url
         .clone()
         .unwrap_or_else(|| "http://127.0.0.1:3001".to_string());
 
-    let child_token = s.ctx_auth.for_children();
+    let child_token = s.hub.ctx_auth.for_children();
     let (sessions, turns, tokens, elapsed_ms) =
         run_session_sync(&ctx_bin, &base_url, child_token.as_deref()).await?;
     info!(
@@ -6680,8 +6739,13 @@ async fn run_ctx(
 }
 
 fn ctx_bin_and_base(s: &HubState) -> (String, String) {
-    let ctx_bin = s.ctx_binary.clone().unwrap_or_else(|| "ctx".to_string());
+    let ctx_bin = s
+        .hub
+        .ctx_binary
+        .clone()
+        .unwrap_or_else(|| "ctx".to_string());
     let base_url = s
+        .hub
         .self_base_url
         .clone()
         .unwrap_or_else(|| "http://127.0.0.1:3001".to_string());
@@ -6693,7 +6757,7 @@ fn ctx_bin_and_base(s: &HubState) -> (String, String) {
 /// `ctx session list --json`; the CLI is the single source of truth for
 /// discovery, so the Lens panel and the terminal agree on what exists.
 async fn discoverable_sessions(
-    State(s): State<HubState>,
+    s: HubState,
     _ns: NamespaceId,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let (ctx_bin, base_url) = ctx_bin_and_base(&s);
@@ -6704,7 +6768,7 @@ async fn discoverable_sessions(
         "--server".into(),
         base_url,
     ];
-    let stdout = run_ctx(&ctx_bin, &args, s.ctx_auth.for_children().as_deref()).await?;
+    let stdout = run_ctx(&ctx_bin, &args, s.hub.ctx_auth.for_children().as_deref()).await?;
     // The list is the last JSON array line (a "no sessions" run prints prose).
     let items: serde_json::Value = stdout
         .lines()
@@ -6735,7 +6799,7 @@ struct SessionIdsBody {
 /// follows up with `POST /api/sessions/{id}/move`), keeping this endpoint a thin
 /// pass-through to the engine.
 async fn import_sessions(
-    State(s): State<HubState>,
+    s: HubState,
     _ns: NamespaceId,
     Json(body): Json<SessionIdsBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -6759,7 +6823,7 @@ async fn import_sessions(
     args.push(base_url);
     args.push("--branch".into());
     args.push("main".into());
-    let stdout = run_ctx(&ctx_bin, &args, s.ctx_auth.for_children().as_deref()).await?;
+    let stdout = run_ctx(&ctx_bin, &args, s.hub.ctx_auth.for_children().as_deref()).await?;
     // `session import` fans out with --all semantics, so its final stdout line is
     // the machine-readable `{sessions,turns,tokens}` object.
     let summary = stdout
@@ -6783,7 +6847,7 @@ async fn import_sessions(
 /// `POST /api/sessions/ignore` — add ids to the privacy skip-list so neither a
 /// manual import nor the background sweep will ingest them.
 async fn ignore_sessions(
-    State(s): State<HubState>,
+    s: HubState,
     _ns: NamespaceId,
     Json(body): Json<SessionIdsBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -6792,7 +6856,7 @@ async fn ignore_sessions(
 
 /// `POST /api/sessions/unignore` — remove ids from the privacy skip-list.
 async fn unignore_sessions(
-    State(s): State<HubState>,
+    s: HubState,
     _ns: NamespaceId,
     Json(body): Json<SessionIdsBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -6810,7 +6874,7 @@ async fn session_skiplist_edit(
     let (ctx_bin, _base) = ctx_bin_and_base(s);
     let mut args: Vec<String> = vec!["session".into(), verb.into()];
     args.extend(ids.iter().cloned());
-    let stdout = run_ctx(&ctx_bin, &args, s.ctx_auth.for_children().as_deref()).await?;
+    let stdout = run_ctx(&ctx_bin, &args, s.hub.ctx_auth.for_children().as_deref()).await?;
     Ok(Json(serde_json::json!({
         "status": "ok",
         "verb": verb,
@@ -6820,10 +6884,10 @@ async fn session_skiplist_edit(
 }
 
 /// `GET /api/sessions/autosync` — current background-sweep state.
-async fn get_autosync(State(s): State<HubState>) -> Json<serde_json::Value> {
+async fn get_autosync(s: HubState) -> Json<serde_json::Value> {
     Json(serde_json::json!({
-        "enabled": s.autosync.enabled(),
-        "interval_secs": s.autosync.interval_secs(),
+        "enabled": s.hub.autosync.enabled(),
+        "interval_secs": s.hub.autosync.interval_secs(),
     }))
 }
 
@@ -6839,19 +6903,19 @@ struct AutosyncBody {
 /// its cadence at runtime. Persisted (survives restart) and honoured by the
 /// running sweep loop without a bounce.
 async fn set_autosync(
-    State(s): State<HubState>,
+    s: HubState,
     _ns: NamespaceId,
     Json(body): Json<AutosyncBody>,
 ) -> Json<serde_json::Value> {
     if let Some(secs) = body.interval_secs {
-        s.autosync.set_interval_secs(secs);
+        s.hub.autosync.set_interval_secs(secs);
     }
-    s.autosync.set_enabled(body.enabled);
-    s.autosync.persist();
+    s.hub.autosync.set_enabled(body.enabled);
+    s.hub.autosync.persist();
     Json(serde_json::json!({
         "status": "ok",
-        "enabled": s.autosync.enabled(),
-        "interval_secs": s.autosync.interval_secs(),
+        "enabled": s.hub.autosync.enabled(),
+        "interval_secs": s.hub.autosync.interval_secs(),
     }))
 }
 
@@ -6862,7 +6926,7 @@ fn reminder_error_to_response(e: reminder_tools::ReminderToolError) -> (StatusCo
 }
 
 async fn list_reminders_handler(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Query(q): Query<reminder_tools::ReminderListParams>,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
@@ -6878,7 +6942,7 @@ async fn list_reminders_handler(
 }
 
 async fn create_reminder_handler(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     agent_id: AgentId,
     Json(req): Json<reminder_tools::ReminderCreateParams>,
@@ -6894,7 +6958,7 @@ async fn create_reminder_handler(
 }
 
 async fn remind_me_handler(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
@@ -6911,7 +6975,7 @@ async fn remind_me_handler(
 }
 
 async fn get_reminder_handler(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -6933,7 +6997,7 @@ struct SnoozeBody {
 }
 
 async fn snooze_reminder_handler(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(id): Path<String>,
     Json(body): Json<SnoozeBody>,
@@ -6953,7 +7017,7 @@ struct ApproveBody {
 }
 
 async fn approve_reminder_handler(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     agent_id: AgentId,
     Path(id): Path<String>,
@@ -6969,7 +7033,7 @@ async fn approve_reminder_handler(
 }
 
 async fn cancel_reminder_handler(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -6987,7 +7051,7 @@ struct StartBody {
 }
 
 async fn start_reminder_handler(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     agent_id: AgentId,
     Path(id): Path<String>,
@@ -7003,7 +7067,7 @@ async fn start_reminder_handler(
 }
 
 async fn record_reminder_handler(
-    State(s): State<HubState>,
+    s: HubState,
     ns: NamespaceId,
     agent_id: AgentId,
     Path(path_id): Path<String>,
@@ -7034,10 +7098,10 @@ struct AdminBackupRequest {
 /// path to back up). Used by `ctx db backup`.
 #[instrument(skip_all)]
 async fn admin_backup(
-    State(s): State<HubState>,
+    s: HubState,
     body: Option<Json<AdminBackupRequest>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let db_path = s.db_path.as_deref().ok_or((
+    let db_path = s.hub.db_path.as_deref().ok_or((
         StatusCode::BAD_REQUEST,
         "backup requires sqlite storage (db_path is unset)".to_string(),
     ))?;
@@ -7086,7 +7150,7 @@ fn registry_error(e: crate::project::RegistryError) -> (StatusCode, String) {
 /// is what binds it.
 async fn project_to_json(s: &HubState, p: crate::project::Project) -> serde_json::Value {
     let mut asd_repos: Vec<String> = Vec::new();
-    if let Some(pool) = &s.asd_pool {
+    if let Some(pool) = &s.hub.asd_pool {
         for (name, db_path) in pool.repo_paths().await {
             if p.local_paths.iter().any(|lp| db_path.starts_with(lp)) {
                 asd_repos.push(name);
@@ -7117,7 +7181,7 @@ struct RegisterProjectRequest {
 
 #[instrument(skip_all, fields(id = %req.id))]
 async fn register_project_handler(
-    State(s): State<HubState>,
+    s: HubState,
     Json(req): Json<RegisterProjectRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let db = registry(&s)?;
@@ -7154,7 +7218,7 @@ async fn register_project_handler(
 }
 
 async fn list_projects_handler(
-    State(s): State<HubState>,
+    s: HubState,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
     let db = registry(&s)?;
     let projects = db.list_projects().map_err(registry_error)?;
@@ -7166,7 +7230,7 @@ async fn list_projects_handler(
 }
 
 async fn get_project_handler(
-    State(s): State<HubState>,
+    s: HubState,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let db = registry(&s)?;
@@ -7183,7 +7247,7 @@ struct AddProjectPathRequest {
 }
 
 async fn add_project_path_handler(
-    State(s): State<HubState>,
+    s: HubState,
     Path(id): Path<String>,
     Json(req): Json<AddProjectPathRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -7304,7 +7368,7 @@ where
 /// `503` `busy`, `504` `timeout` — and the body's `error` says why. Callers
 /// must not treat those as "no project": the directory may well have one.
 async fn detect_project_handler(
-    State(s): State<HubState>,
+    s: HubState,
     Query(q): Query<DetectQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     use crate::project::DetectResult;
@@ -7325,7 +7389,7 @@ async fn detect_project_handler(
             }
         },
         DETECT_TIMEOUT,
-        &s.detects_in_flight,
+        &s.hub.detects_in_flight,
         MAX_DETECTS_IN_FLIGHT,
     )
     .await;

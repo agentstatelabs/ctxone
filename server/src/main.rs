@@ -408,8 +408,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "                           (env: CTXONE_TENANTS_FILE). Not usable yet: the hub checks"
                 );
                 eprintln!(
-                    "                           the file and exits, until per-tenant data is in place."
+                    "                           the file and exits, until it can turn off what reads its"
                 );
+                eprintln!("                           own machine's disk.");
                 eprintln!(
                     "      --require-auth-on-loopback  Loopback peers must send the token too, for a proxy or"
                 );
@@ -522,9 +523,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         None => None,
     };
-    // Multi-tenant mode can't serve yet: the router still has one repository,
-    // so every tenant would reach the same data until per-tenant state lands
-    // (ctx-multi-tenant-hub t-003). Check the file, so it's ready, and stop.
+    // Multi-tenant mode can't serve yet. Each tenant gets its own data
+    // (`http::multi_tenant_router`), but the Hub still runs features that act
+    // on its own machine: project detection reads its disk, and there's the
+    // ASD process pool, the transcript sweep and SQLite backups. Remote
+    // tenants mustn't reach those, and turning them off is
+    // ctx-multi-tenant-hub t-004. Check the file, so it's ready, and stop.
     if let Some(path) = &tenants_file {
         if auth_token.is_some() || auth_token_file.is_some() {
             eprintln!(
@@ -542,8 +546,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (tenants, tokens) = file.counts();
         eprintln!(
             "ctxone-hub: --tenants-file {path} is valid ({tenants} tenants, {tokens} tokens), but \
-             multi-tenant mode isn't available yet: per-tenant data isn't in place, so every \
-             tenant would share one store. Not starting."
+             multi-tenant mode isn't available yet: the Hub still runs features that read its own \
+             machine's disk, which remote tenants mustn't reach. Not starting."
         );
         std::process::exit(64);
     }
@@ -695,48 +699,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // reading or writing plan/task state.
     //
     // Policy: auto-migrate on UpgradeAvailable / Unversioned; refuse
-    // startup on Downgrade or Corrupt. Respect ASG_MIGRATE=prompt|never|auto
-    // for operators who want to gate the apply step.
-    {
-        use agentstategraph_migrate::{
-            CheckResult, Registry, RunMode, binary_version, check, exit as asg_exit,
-        };
-        let asg_registry = Registry::builtin();
-        let asg_target = binary_version();
-        let policy = std::env::var("ASG_MIGRATE").unwrap_or_else(|_| "auto".into());
-
-        match check(&repo, "main", &asg_target, &asg_registry) {
-            Ok(CheckResult::UpToDate { version }) => {
-                info!(schema_version = %version, "ASG schema up to date");
-            }
-            Ok(CheckResult::Downgrade { db, binary }) => {
-                error!(
-                    db_schema = %db,
-                    binary_schema = %binary,
-                    "ASG db schema is newer than this binary; refusing to start"
-                );
-                std::process::exit(asg_exit::DOWNGRADE_REFUSED);
-            }
-            Ok(CheckResult::Corrupt(msg)) => {
-                error!(error = %msg, "ASG /_meta is corrupt; refusing to start");
-                std::process::exit(asg_exit::CORRUPT_META);
-            }
-            Ok(CheckResult::UpgradeAvailable { .. } | CheckResult::Unversioned { .. }) => {
-                if policy == "never" {
-                    error!(policy = %policy, "ASG migration required but policy=never");
-                    std::process::exit(asg_exit::UPGRADE_REQUIRED);
-                }
-                info!(policy = %policy, "running ASG schema migrations");
-                if let Err(e) = asg_registry.run(&repo, "main", &asg_target, RunMode::Apply) {
-                    error!(error = %e, "ASG migration failed");
-                    std::process::exit(asg_exit::MIGRATION_FAILED);
-                }
-                info!(schema_version = %asg_target, "ASG schema migrations complete");
-            }
-            Err(e) => {
-                error!(error = %e, "ASG check failed");
-                std::process::exit(asg_exit::MIGRATION_FAILED);
-            }
+    // startup on Downgrade or Corrupt. ASG_MIGRATE=never refuses to migrate.
+    // A multi-tenant Hub runs the same step as each tenant opens.
+    match migrations::migrate_asg(&repo) {
+        Ok(migrations::AsgSchema::UpToDate(version)) => {
+            info!(schema_version = %version, "ASG schema up to date");
+        }
+        Ok(migrations::AsgSchema::Migrated(version)) => {
+            info!(schema_version = %version, "ASG schema migrations complete");
+        }
+        Err(e) => {
+            error!(error = %e, "refusing to start");
+            std::process::exit(e.exit_code());
         }
     }
 
@@ -929,8 +903,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             self_base_url: Some(self_base_url),
             autosync: Some(autosync.clone()),
             postgres_tables: postgres_tables.clone(),
-            // --tenants-file is refused above until per-tenant data exists.
-            tenants: None,
         };
 
         // Values for the background session-sweep task (below). Cloned before
