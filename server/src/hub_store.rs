@@ -6,8 +6,8 @@
 //! `ctxone_sessions`). A Postgres hub keeps them in `ctxone_*` tables of the
 //! same database, through AgentStateGraph's connection pool, so TLS and the
 //! pool size are the storage's and a hub pod holds one set of connections.
-//! Every Postgres row carries the hub's tenant, so hubs sharing a database
-//! (one per user) never see each other's registry or statistics.
+//! Every Postgres row carries its tenant, so tenants sharing a database, in
+//! one hub or in several, never see each other's registry or statistics.
 
 use agentstategraph_storage::PostgresStorage;
 use agentstategraph_storage::oxtel_sql::postgres::Pool;
@@ -100,6 +100,15 @@ impl PgStore {
         })
         .map_err(|e| format!("set up the hub's Postgres tables: {e}"))?;
         Ok(store)
+    }
+
+    /// The same tables for another tenant, on the same pool. Nothing to set
+    /// up: [`new`](Self::new) created the tables for every tenant.
+    pub fn for_tenant(&self, tenant: &str) -> Self {
+        Self {
+            pool: self.pool.clone(),
+            tenant: tenant.to_string(),
+        }
     }
 
     /// The tenant every row is scoped to.

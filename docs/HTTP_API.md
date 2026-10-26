@@ -1045,10 +1045,11 @@ its Lens origin and sets this.
 
 **Not usable yet.** One Hub serving many tenants is being built
 ([docs/design/MULTI_TENANT_HUB.md](design/MULTI_TENANT_HUB.md)). Tenant identity
-is in place; per-tenant data isn't, so `ctxone-hub --tenants-file <PATH>` (or
-`CTXONE_TENANTS_FILE`) checks the file and exits instead of letting every tenant
-share one store. It can't be combined with `--auth-token` or
-`--auth-token-file`.
+and each tenant's own data are in place, but the Hub still runs features that
+read its own machine's disk, such as project detection's filesystem fallback,
+which remote tenants mustn't reach. Until those are off in multi-tenant mode,
+`ctxone-hub --tenants-file <PATH>` (or `CTXONE_TENANTS_FILE`) checks the file and
+exits. It can't be combined with `--auth-token` or `--auth-token-file`.
 
 - **The tenants file** has a line per token: `<tenant> <sha256 of the token>`,
   the hash as 64 hex digits. A tenant may have several lines. Blank lines and
@@ -1065,6 +1066,13 @@ share one store. It can't be combined with `--auth-token` or
   carry it as `ctxone.tenant`, never the token.
 - A `TenantResolver` decides the tenant. The Hub's reads the tenants file; an
   account service can supply its own. One that can't answer gives a **503**.
+- **Each tenant has its own data:** memory, plans, workspaces, the project
+  registry, session statistics and MCP sessions. Tenants can use the same
+  workspace names, project ids and session ids without meeting, and an MCP
+  session belongs to the tenant that started it. A tenant opens on its first
+  request that needs its data, which creates the tenant if it's new and brings
+  its schema up to date. If it can't be opened, the request gets a **503** and
+  the next one tries again. `GET /api/health` needs no data and opens nothing.
 
 ---
 

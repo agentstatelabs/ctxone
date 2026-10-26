@@ -1,11 +1,12 @@
 //! Tenant identity on a multi-tenant Hub (ctx-multi-tenant-hub t-002).
 //!
-//! With `HubConfig::tenants` set, every request needs a bearer token that
-//! resolves to a tenant, loopback included, and the tenant is attached to the
-//! request: `GET /api/tenant` reports it and rate limits are keyed by it. The
-//! tenants file is re-read while the Hub runs. These oneshot tests inject
-//! `ConnectInfo` to set the peer. That logs carry the tenant is tested in
-//! `tenant_logs.rs`, in a process of its own.
+//! On a multi-tenant Hub (`http::multi_tenant_router`) every request needs a
+//! bearer token that resolves to a tenant, loopback included, and the tenant is
+//! attached to the request: `GET /api/tenant` reports it and rate limits are
+//! keyed by it. The tenants file is re-read while the Hub runs. These oneshot
+//! tests inject `ConnectInfo` to set the peer. That logs carry the tenant is
+//! tested in `tenant_logs.rs`, in a process of its own, and each tenant's own
+//! data in `tenant_data.rs`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -22,6 +23,7 @@ use agentstategraph_storage::MemoryStorage;
 use ctxone_hub::tenant::{
     Resolution, ResolveError, TenantResolver, TenantsFile, TenantsFileError, TokenHash,
 };
+use ctxone_hub::tenant_cache::{MemoryTenants, TenantCache};
 use ctxone_hub::{http, memory_tools::SessionRegistry};
 
 const LOOPBACK: &str = "127.0.0.1:5555";
@@ -40,17 +42,23 @@ fn tenants_file(contents: &str) -> (tempfile::TempDir, TenantsFile) {
     (dir, file)
 }
 
+/// A multi-tenant Hub with tenants in memory, or with no resolver a
+/// single-tenant one.
 fn router(tenants: Option<Arc<dyn TenantResolver>>, rate_limit_rpm: u32) -> axum::Router {
-    let repo = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
-    repo.init().expect("repo init");
-    let sessions = Arc::new(SessionRegistry::new());
-    http::router_with_config(
-        repo,
-        sessions,
-        http::HubConfig {
-            tenants,
-            rate_limit_rpm,
-            ..Default::default()
+    let config = http::HubConfig {
+        rate_limit_rpm,
+        ..Default::default()
+    };
+    let Some(resolver) = tenants else {
+        let repo = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
+        repo.init().expect("repo init");
+        return http::router_with_config(repo, Arc::new(SessionRegistry::new()), config);
+    };
+    http::multi_tenant_router(
+        config,
+        http::MultiTenant {
+            resolver,
+            data: TenantCache::new(Arc::new(MemoryTenants::default())),
         },
     )
 }
@@ -266,10 +274,10 @@ async fn rate_limits_are_per_tenant_and_spare_no_one_on_loopback() {
     assert_eq!(status, StatusCode::OK);
 }
 
-/// The Hub binary checks a tenants file but won't serve with one until each
-/// tenant gets its own data.
+/// The Hub binary checks a tenants file but won't serve with one until it can
+/// turn off the features that read its own machine's disk.
 #[test]
-fn the_hub_refuses_to_serve_tenants_until_per_tenant_data_exists() {
+fn the_hub_binary_checks_a_tenants_file_but_doesnt_serve_it_yet() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("tenants");
     let hub = |args: &[&str]| {

@@ -609,6 +609,7 @@ dependencies = [
  "agentstategraph-tasks",
  "axum",
  "chrono",
+ "deadpool-postgres",
  "governor",
  "http-body-util",
  "lru",

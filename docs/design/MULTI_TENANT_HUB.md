@@ -1,8 +1,9 @@
 # Design: One Hub, many tenants
 
-**Status:** In progress. AgentStateGraph's shared pool (t-001) and tenant
-identity (t-002) are in; per-tenant state (t-003) is next. Until it lands,
-`--tenants-file` checks the file and exits.
+**Status:** In progress. AgentStateGraph's shared pool (t-001), tenant identity
+(t-002) and per-tenant state (t-003) are in. Next, t-004 turns off the features
+that act on the Hub machine's own disk; until then, `--tenants-file` checks the
+file and exits.
 **Plan:** CTX plan `ctx-multi-tenant-hub` (tasks listed at the end).
 **Goal:** One `ctxone-hub` process serves many users ("tenants"), each with
 their own memory, plans, sessions and project registry, on one Postgres
@@ -87,10 +88,22 @@ is up to 32 connections, which a small database runs out of after a few users.
   `ctxone_sessions` when the tenant opens;
 - **MCP services:** one per (workspace, session), as today.
 
-A tenant opens on its first request. Opening runs the AgentStateGraph and CTXone
-schema migrations for that tenant under a per-tenant advisory lock, so two Hubs
-opening the same tenant can't race, then loads its statistics. A tenant idle for
-a while (30 minutes, say) is evicted after its statistics are flushed.
+A tenant opens on its first request that needs its data. Opening runs the
+AgentStateGraph and CTXone schema migrations for that tenant under a per-tenant
+advisory lock, so two Hubs opening the same tenant can't race, then loads its
+statistics. A tenant idle for a while (30 minutes, say) is evicted after its
+statistics are flushed.
+
+As built (`server/src/tenant_cache.rs`):
+
+- The lock is `pg_advisory_lock(OPEN_LOCK_CLASS, hashtext(<tenant>))`, taken on
+  a connection detached from the pool. Closing that connection releases the lock
+  however the open ends, and the pool keeps its full size for the migrations.
+- A Hub opens one tenant at a time, so requests arriving together for a new
+  tenant open it once.
+- Eviction skips a tenant a request is holding, and one a request reached while
+  its statistics were flushing.
+- The Hub Home's workspace summary, reused for 15 seconds, is kept per tenant.
 
 Still process-wide: the connection pool, the cap on concurrent project
 detections, and the rate limiter (now keyed by tenant). Merge guards are keyed
@@ -131,6 +144,10 @@ service.
 
 The statistics flush loop walks the open tenants every 30 seconds. Evicting a
 tenant and shutting down flush it too.
+
+The main graph's size refresher publishes one number for the whole process, which
+fits a single-tenant Hub. A multi-tenant Hub runs one per open tenant, or none, in
+which case each session computes its own, throttled.
 
 ### Administration
 

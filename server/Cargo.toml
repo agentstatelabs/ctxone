@@ -63,6 +63,9 @@ oxtel-rmcp = { workspace = true }
 thiserror = { workspace = true }
 lru = "0.12"
 sha2 = "0.10"
+# The version AgentStateGraph's storage uses, for a connection the multi-tenant
+# Hub takes out of that pool (tenant_cache::PostgresTenants).
+deadpool-postgres = "0.14"
 rusqlite = { workspace = true }
 rust-embed = { version = "8", features = ["mime-guess"] }
 reqwest = { workspace = true }

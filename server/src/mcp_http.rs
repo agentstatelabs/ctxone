@@ -15,6 +15,11 @@
 //! one `StreamableHttpService` *per namespace*, created lazily and cached. Each
 //! service's factory captures a repo already forked to that namespace.
 //!
+//! Each tenant has its own cache of services, in its
+//! [`TenantState`](crate::tenant_cache::TenantState): on a multi-tenant Hub a
+//! request reaches the services of the tenant its token belongs to, built on
+//! that tenant's repository and session statistics.
+//!
 //! Branch auto-mirroring (stdio-only, cwd-derived) does not apply here: the
 //! default ref is `main` unless a tool call targets a branch explicitly.
 
@@ -30,24 +35,28 @@ use tokio::sync::RwLock;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 
-use agentstategraph::Repository;
 use agentstategraph_core::Namespace;
+use tracing::Instrument;
 
 use crate::asd_pool::AsdProcessPool;
-use crate::memory_tools::{CtxOneServer, DEFAULT_SESSION_ID, SessionRegistry};
+use crate::memory_tools::{CtxOneServer, DEFAULT_SESSION_ID};
+use crate::tenant_cache::{Tenancy, TenantState};
 
 /// Each MCP request gets a span and `mcp.server.operation.duration`, per the
 /// OpenTelemetry MCP conventions.
 type McpService =
     StreamableHttpService<oxtel_rmcp::Instrumented<CtxOneServer>, LocalSessionManager>;
 
-/// State for the `/mcp` route: everything needed to build a namespace-scoped
-/// MCP service, plus the per-namespace service cache.
-#[derive(Clone)]
-pub struct McpHttpState {
-    /// Root (default-namespace) repo. Forked per namespace on demand; the
-    /// forked `Arc` is captured by that namespace's service factory.
-    repo: Arc<Repository>,
+/// One MCP service per (namespace, session id), built on first use. Keyed by
+/// both because the service captures a namespace-scoped repo AND a specific
+/// session's stats; a stable per-project `X-CTXone-Session` header keeps the
+/// cardinality bounded (one entry per project, not per request). Each tenant
+/// has its own.
+#[derive(Default)]
+pub(crate) struct McpServices(RwLock<HashMap<String, Arc<McpService>>>);
+
+/// What every tenant's MCP services share.
+struct McpConfig {
     /// Agent id stamped on commits made through MCP (parity with
     /// `ctxone-hub --agent-id`). Reported as `X-CTXone-Agent` on the REST side.
     agent_id: String,
@@ -59,60 +68,62 @@ pub struct McpHttpState {
     /// remote clients can reach `/mcp`. Set when a bearer token guards the
     /// surface (the auth middleware is then the real gate). See [`crate::http`].
     allow_remote_hosts: bool,
-    /// The SHARED session registry — the same `Arc` the REST hub uses and the
-    /// process flushes to SQLite. MCP services back their `CtxOneServer.session`
-    /// with `registry.get_or_create(<X-CTXone-Session>)` so recall/savings from
-    /// the plan-gate and tools persist under the caller's real session id,
-    /// instead of an ephemeral per-connection counter that never gets flushed.
-    registry: Arc<SessionRegistry>,
-    /// One MCP service per (namespace, session-id), built on first use. Keyed by
-    /// both because the service captures a namespace-scoped repo AND a specific
-    /// session's stats; a stable per-project `X-CTXone-Session` header keeps the
-    /// cardinality bounded (one entry per project, not per request).
-    services: Arc<RwLock<HashMap<String, Arc<McpService>>>>,
+}
+
+/// State for the `/mcp` route: where each request's tenant data comes from,
+/// and what every tenant's services share.
+#[derive(Clone)]
+pub struct McpHttpState {
+    tenancy: Tenancy,
+    config: Arc<McpConfig>,
 }
 
 impl McpHttpState {
-    pub fn new(
-        repo: Arc<Repository>,
+    pub(crate) fn new(
+        tenancy: Tenancy,
         agent_id: String,
         asd_repos: Arc<Vec<(String, String)>>,
         asd_pool: Option<Arc<AsdProcessPool>>,
         allow_remote_hosts: bool,
-        registry: Arc<SessionRegistry>,
     ) -> Self {
         Self {
-            repo,
-            agent_id,
-            asd_repos,
-            asd_pool,
-            allow_remote_hosts,
-            registry,
-            services: Arc::new(RwLock::new(HashMap::new())),
+            tenancy,
+            config: Arc::new(McpConfig {
+                agent_id,
+                asd_repos,
+                asd_pool,
+                allow_remote_hosts,
+            }),
         }
     }
 
-    /// Get (or lazily create) the MCP service for `(ns, session_id)`. Double-
-    /// checked under the write lock so concurrent first-hits don't build twice.
-    async fn service_for(&self, ns: &str, session_id: &str) -> Arc<McpService> {
+    /// Get (or lazily create) `tenant`'s MCP service for `(ns, session_id)`.
+    /// Double-checked under the write lock so concurrent first-hits don't
+    /// build twice.
+    async fn service_for(
+        &self,
+        tenant: &TenantState,
+        ns: &str,
+        session_id: &str,
+    ) -> Arc<McpService> {
         // NUL can't appear in a header value, so it's a safe composite delimiter.
         let key = format!("{ns}\u{0}{session_id}");
-        if let Some(svc) = self.services.read().await.get(&key) {
+        if let Some(svc) = tenant.mcp.0.read().await.get(&key) {
             return svc.clone();
         }
-        let mut guard = self.services.write().await;
+        let mut guard = tenant.mcp.0.write().await;
         if let Some(svc) = guard.get(&key) {
             return svc.clone();
         }
-        let svc = Arc::new(self.build_service(ns, session_id));
+        let svc = Arc::new(self.build_service(tenant, ns, session_id));
         guard.insert(key, svc.clone());
         svc
     }
 
-    /// Build a fresh `StreamableHttpService` scoped to `ns` and `session_id`. The
-    /// repo is forked once here; the factory clones the `Arc` and the shared
-    /// session for each new MCP session.
-    fn build_service(&self, ns: &str, session_id: &str) -> McpService {
+    /// Build a fresh `StreamableHttpService` on `tenant`'s data, scoped to `ns`
+    /// and `session_id`. The repo is forked once here; the factory clones the
+    /// `Arc` and the shared session for each new MCP session.
+    fn build_service(&self, tenant: &TenantState, ns: &str, session_id: &str) -> McpService {
         let repo = match Namespace::new(ns) {
             Ok(namespace) if ns != Namespace::DEFAULT => {
                 // Fork + init so the namespace has a `main` branch, mirroring the
@@ -120,28 +131,27 @@ impl McpHttpState {
                 // create the namespace on first use (unlike the REST extractor,
                 // which assumes it already exists). On error, fall back to the
                 // root repo so a bad namespace can't wedge the session.
-                let forked = self.repo.fork_namespace(namespace);
+                let forked = tenant.repo.fork_namespace(namespace);
                 match forked.init() {
                     Ok(_) => Arc::new(forked),
                     Err(e) => {
                         tracing::warn!(namespace = ns, error = %e, "namespace init failed; serving MCP in default namespace");
-                        self.repo.clone()
+                        tenant.repo.clone()
                     }
                 }
             }
             // "default" or (defensively) an invalid name → root repo.
-            _ => self.repo.clone(),
+            _ => tenant.repo.clone(),
         };
-        let agent_id = self.agent_id.clone();
-        let asd_repos = (*self.asd_repos).clone();
-        let asd_pool = self.asd_pool.clone();
-        let ns_label = ns.to_string();
-        // Back this service's sessions with the SHARED, flushed registry, keyed
-        // by the caller's X-CTXone-Session id. Every MCP session rmcp spins up
-        // for this (ns, session) pair shares this one `SessionStats`, so recall
-        // and savings persist under the real session instead of a per-connection
-        // counter that dies unflushed.
-        let session = self.registry.get_or_create(session_id);
+        let agent_id = self.config.agent_id.clone();
+        let asd_repos = (*self.config.asd_repos).clone();
+        let asd_pool = self.config.asd_pool.clone();
+        // Back this service's sessions with the tenant's SHARED, flushed
+        // registry, keyed by the caller's X-CTXone-Session id. Every MCP session
+        // rmcp spins up for this (ns, session) pair shares this one
+        // `SessionStats`, so recall and savings persist under the real session
+        // instead of a per-connection counter that dies unflushed.
+        let session = tenant.sessions.get_or_create(session_id);
         // Owned: the factory closure outlives this method's borrows.
         let session_id_owned = session_id.to_string();
 
@@ -171,7 +181,7 @@ impl McpHttpState {
         // allow-list, matching a localhost daemon. The struct is
         // `#[non_exhaustive]`, so build from Default rather than a literal.
         let mut config = StreamableHttpServerConfig::default();
-        if self.allow_remote_hosts {
+        if self.config.allow_remote_hosts {
             // Bearer auth gates access; let non-loopback Host headers through so
             // authenticated remote clients aren't rejected by the DNS-rebinding
             // guard before the auth layer even runs.
@@ -333,19 +343,33 @@ fn percent_decode(s: &str) -> String {
 /// dispatches GET (SSE stream) / POST (JSON-RPC) / DELETE (session close)
 /// internally, so we route all methods here.
 async fn mcp_handler(State(state): State<McpHttpState>, req: Request) -> Response {
-    let (ns, session_id) = match (resolve_namespace(&req), resolve_session(&req)) {
-        (Ok(ns), Ok(sid)) => (ns, sid),
-        (Err(e), _) | (_, Err(e)) => {
-            let msg = e.message();
-            // Warn, not error: this is a misconfigured client, not a hub fault —
-            // but it must be visible, because the symptom on the client side is
-            // silence rather than a stack trace.
-            tracing::warn!(reason = %msg, "mcp request refused: identity");
-            return (axum::http::StatusCode::BAD_REQUEST, msg).into_response();
-        }
+    let (tenant, data) = match state.tenancy.state_for(req.extensions()).await {
+        Ok(found) => found,
+        Err(refusal) => return refusal.into_response(),
     };
-    let svc = state.service_for(&ns, &session_id).await;
-    svc.handle(req).await.into_response()
+    // The `/mcp` route has no HTTP request span, so this one carries the
+    // tenant for what's logged here.
+    let span = tracing::info_span!(
+        "mcp_request",
+        ctxone.tenant = tenant.as_ref().map(|t| t.as_str())
+    );
+    async move {
+        let (ns, session_id) = match (resolve_namespace(&req), resolve_session(&req)) {
+            (Ok(ns), Ok(sid)) => (ns, sid),
+            (Err(e), _) | (_, Err(e)) => {
+                let msg = e.message();
+                // Warn, not error: this is a misconfigured client, not a hub
+                // fault — but it must be visible, because the symptom on the
+                // client side is silence rather than a stack trace.
+                tracing::warn!(reason = %msg, "mcp request refused: identity");
+                return (axum::http::StatusCode::BAD_REQUEST, msg).into_response();
+            }
+        };
+        let svc = state.service_for(&data, &ns, &session_id).await;
+        svc.handle(req).await.into_response()
+    }
+    .instrument(span)
+    .await
 }
 
 /// Build the `/mcp` router. Merged into the main hub router; kept separate so
@@ -360,6 +384,8 @@ pub fn mcp_router(state: McpHttpState) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory_tools::SessionRegistry;
+    use agentstategraph::Repository;
     use agentstategraph_storage::SqliteStorage;
 
     // Part B: a session named in the request must be registered in the SHARED
@@ -372,19 +398,19 @@ mod tests {
         )));
         repo.init().unwrap();
         let registry = Arc::new(SessionRegistry::new());
+        let tenant = Arc::new(TenantState::new(repo, registry.clone(), None));
         let state = McpHttpState::new(
-            repo,
+            Tenancy::One(tenant.clone()),
             "agent".to_string(),
             Arc::new(Vec::new()),
             None,
             false,
-            registry.clone(),
         );
 
         assert!(registry.snapshot("proj-sess").is_none());
         // Building the service for this (ns, session) must get_or_create the
         // session in the shared registry.
-        let _svc = state.service_for("default", "proj-sess").await;
+        let _svc = state.service_for(&tenant, "default", "proj-sess").await;
         assert!(
             registry.snapshot("proj-sess").is_some(),
             "MCP service must back its session with the shared, flushed registry"
