@@ -5,7 +5,9 @@
 //! its session statistics and its MCP services. A single-tenant Hub has one,
 //! made at startup. A multi-tenant Hub keeps a [`TenantCache`]: a tenant opens
 //! on its first request, through a [`TenantOpener`], and closes when
-//! [`TenantCache::evict_idle`] finds it idle.
+//! [`TenantCache::evict_idle`] finds it idle. [`TenantCache::spawn_upkeep`]
+//! does that, and flushes the open tenants' session statistics, in the
+//! background.
 //!
 //! Handlers reach data only through the request's `TenantState` (`HubState` in
 //! [`crate::http`] is built from it), so on a multi-tenant Hub every path to a
@@ -261,7 +263,38 @@ impl TenantCache {
         evicted.sort();
         evicted
     }
+
+    /// Every `every`, close the tenants idle for `idle` and flush the session
+    /// statistics of the rest, on a blocking thread. Runs until the runtime
+    /// stops; flushing when the Hub stops is the caller's.
+    pub fn spawn_upkeep(&self, every: Duration, idle: Duration) -> tokio::task::JoinHandle<()> {
+        let cache = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(every);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            interval.tick().await; // the first tick is immediate
+            loop {
+                interval.tick().await;
+                let cache = cache.clone();
+                // Closing a tenant flushes it, so flush what's still open after.
+                let pass = tokio::task::spawn_blocking(move || {
+                    cache.evict_idle(idle);
+                    cache.flush_all();
+                });
+                if let Err(e) = pass.await {
+                    warn!(error = %e, "tenant upkeep failed");
+                }
+            }
+        })
+    }
 }
+
+/// How often a multi-tenant Hub flushes its open tenants' session statistics
+/// and looks for idle ones.
+pub const UPKEEP_EVERY: Duration = Duration::from_secs(30);
+
+/// How long a tenant stays open after its last request.
+pub const IDLE_AFTER: Duration = Duration::from_secs(30 * 60);
 
 /// Where a request's data comes from.
 #[derive(Clone, Debug)]
@@ -273,6 +306,15 @@ pub(crate) enum Tenancy {
 }
 
 impl Tenancy {
+    /// Whether requests may reach what acts on the Hub machine itself: its
+    /// disk, its transcripts and the programs it runs. Only on a single-tenant
+    /// Hub, whose user is that machine's; a multi-tenant Hub's requests come
+    /// from elsewhere (docs/design/MULTI_TENANT_HUB.md, "What multi-tenant mode
+    /// turns off").
+    pub(crate) fn machine_local(&self) -> bool {
+        matches!(self, Self::One(_))
+    }
+
     /// The tenant of a request the auth layer let through, and its data. A
     /// single-tenant Hub has no tenant to report.
     pub(crate) async fn state_for(
@@ -320,6 +362,11 @@ pub const OPEN_LOCK_CLASS: i32 = 0x6374_7874;
 /// How long opening a tenant waits for another Hub that's opening it.
 const OPEN_LOCK_TIMEOUT: &str = "30s";
 
+/// The tenant of the storage [`PostgresTenants::connect`] connects with. It
+/// isn't a valid tenant name, so no tenant's data is kept under it: it holds
+/// only the `default` namespace that connecting creates.
+pub const ROOT_TENANT: &str = "_hub";
+
 /// Tenants on one Postgres pool: each gets AgentStateGraph's `for_tenant`
 /// storage and [`PgStore::for_tenant`] hub tables, every row carrying its
 /// tenant.
@@ -342,6 +389,17 @@ impl PostgresTenants {
     pub fn new(root: PostgresStorage) -> Result<Self, String> {
         let tables = PgStore::new(&root)?;
         Ok(Self { root, tables })
+    }
+
+    /// Tenants of the database at `url`, on one pool of at most `pool_size`
+    /// connections, connected as [`ROOT_TENANT`].
+    pub async fn connect(url: &str, pool_size: usize) -> Result<Self, String> {
+        let root = PostgresStorage::connect_tenant_with_pool_size(url, ROOT_TENANT, pool_size)
+            .await
+            .map_err(|e| e.to_string())?;
+        tokio::task::spawn_blocking(move || Self::new(root))
+            .await
+            .map_err(|e| e.to_string())?
     }
 
     /// Wait until no other Hub is opening `tenant`, and keep it that way

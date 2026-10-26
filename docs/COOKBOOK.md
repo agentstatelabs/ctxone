@@ -272,9 +272,10 @@ ctx --branch team/backend remember "..."
 ctx --branch team/frontend remember "..."
 ```
 
-**Caveat:** Postgres auth in the Hub is single-tenant right now. For
-multi-tenant deployments with per-team isolation, wait for a future release
-or run separate Hub instances.
+**Caveat:** a Hub started this way serves one tenant. To keep teams apart
+on one Hub, give each its own tenant with
+[multi-tenant mode](HTTP_API.md#multi-tenant-mode) (Lens can't sign in to it
+yet), or run separate Hub instances.
 
 ---
 

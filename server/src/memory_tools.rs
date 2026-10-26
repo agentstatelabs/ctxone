@@ -1442,7 +1442,9 @@ pub fn estimate_flat_size(repo: &Repository, ref_name: &str) -> usize {
 /// background refresher (`spawn_flat_size_refresher`) so no REQUEST ever
 /// serializes the whole graph — the -32001 write/recall latency. 0 = not yet
 /// computed (before the first background pass), which falls back to the
-/// throttled synchronous compute.
+/// throttled synchronous compute. One number for the process, so a
+/// multi-tenant Hub runs no refresher and leaves it at 0: each session then
+/// computes its own tenant's size.
 static GRAPH_FLAT_SIZE_CHARS: AtomicU64 = AtomicU64::new(0);
 
 /// Spawn a background loop that recomputes the `main` flat size every
@@ -2754,6 +2756,10 @@ pub struct CtxOneServer {
     /// Process pool for dynamically spawned `asd-serve` instances.
     /// Used when --asd-repo flags are given; provides lazy-spawn + idle eviction.
     pub asd_pool: Option<Arc<AsdProcessPool>>,
+    /// Whether tools may act on the machine the server runs on: run the `asd`
+    /// CLI, or ask other tools' binaries for help. True unless a multi-tenant
+    /// Hub, whose callers are elsewhere, turns it off.
+    pub machine_local: bool,
     /// The caller's session id (the `X-CTXone-Session` header). Needed because
     /// [`SessionStats`] itself is anonymous — the registry keys it externally —
     /// yet the session NODE must be filed under this exact id for the workspace
@@ -2796,6 +2802,7 @@ impl CtxOneServer {
             namespace_explicit: false,
             asd_repos: Arc::new(asd_repos),
             asd_pool: None,
+            machine_local: true,
             session_id: String::new(),
             session_node_minted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tool_router: Self::tool_router(),
@@ -2806,6 +2813,12 @@ impl CtxOneServer {
     /// when `--asd-repo` flags were supplied.
     pub fn with_pool(mut self, pool: Arc<AsdProcessPool>) -> Self {
         self.asd_pool = Some(pool);
+        self
+    }
+
+    /// Set [`Self::machine_local`].
+    pub fn with_machine_local(mut self, machine_local: bool) -> Self {
+        self.machine_local = machine_local;
         self
     }
 
@@ -3244,9 +3257,10 @@ impl CtxOneServer {
     )]
     async fn help(&self, params: Parameters<HelpParams>) -> String {
         let p = params.0;
-        // allow_proxy=true: an unknown topic falls through to `asd help` so the
-        // agent sees one seamless manual across both binaries.
-        let result = crate::help::resolve(p.topic.as_deref(), true);
+        // An unknown topic falls through to `asd help` so the agent sees one
+        // seamless manual across both binaries, where those binaries are this
+        // machine's to run.
+        let result = crate::help::resolve(p.topic.as_deref(), self.machine_local);
         serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string())
     }
 
@@ -4748,6 +4762,9 @@ impl CtxOneServer {
         code_impact instead; this tool returns ALL edges."
     )]
     async fn code_cross_repo_edges(&self, _params: Parameters<CrossRepoEdgesParams>) -> String {
+        if let Some(refusal) = self.asd_cli_refusal() {
+            return refusal;
+        }
         run_asd_json(vec!["repo".into(), "edges".into(), "--agent".into()]).await
     }
 
@@ -4759,6 +4776,9 @@ impl CtxOneServer {
         ledger. Answers \"what breaks if I change this, and what did those callers promise?\""
     )]
     async fn code_impact(&self, params: Parameters<CodeImpactParams>) -> String {
+        if let Some(refusal) = self.asd_cli_refusal() {
+            return refusal;
+        }
         run_asd_json(vec![
             "repo".into(),
             "impact".into(),
@@ -5150,7 +5170,17 @@ impl CtxOneServer {
     }
 }
 
+/// Why the code tools have nothing on a multi-tenant Hub.
+const NOT_MACHINE_LOCAL: &str = "this Hub serves many tenants, so it doesn't reach the ASD repos \
+                                 or run the asd CLI of its own machine for them";
+
 impl CtxOneServer {
+    /// Why a tool that runs the `asd` CLI can't, when the CLI isn't this
+    /// server's to run (see [`Self::machine_local`]).
+    fn asd_cli_refusal(&self) -> Option<String> {
+        (!self.machine_local).then(|| serde_json::json!({ "error": NOT_MACHINE_LOCAL }).to_string())
+    }
+
     /// Resolve a repo name to a base URL, trying static URLs first then the
     /// process pool.  Returns an owned `String` so callers can `.await` it.
     ///
@@ -5193,6 +5223,9 @@ impl CtxOneServer {
             return pool.base_url(&name).await;
         }
         // Neither static nor pool
+        if !self.machine_local {
+            return Err(NOT_MACHINE_LOCAL.to_string());
+        }
         Err(
             "No ASD repos registered. Pass --asd-url name=http://... or --asd-path name=/path/db."
                 .to_string(),
