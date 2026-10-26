@@ -66,6 +66,17 @@ Simple liveness check.
 
 Used by `ctx status` and `ctx doctor`.
 
+### `GET /api/tenant`
+
+The tenant the request's bearer token belongs to, so a client can check a
+token (see [Multi-tenant mode](#multi-tenant-mode)). `null` on a single-tenant
+Hub.
+
+**Response (200):**
+```json
+{ "tenant": "alice" }
+```
+
 ---
 
 ## Stats
@@ -740,7 +751,9 @@ The body is plain text, not JSON. Clients should log and retry on 5xx.
 
 The Hub enforces a **per-peer-IP token-bucket rate limit** in HTTP mode.
 Default: **600 requests/minute per IP** (permissive — catches runaway
-loops without bothering real agents).
+loops without bothering real agents). Loopback peers aren't limited. In
+[multi-tenant mode](#multi-tenant-mode) the limit is per tenant instead,
+wherever its requests come from, loopback included.
 
 Clients that exceed the bucket get:
 
@@ -1028,9 +1041,30 @@ an `Origin` matching the request's `Host` isn't enough, since behind an ingress
 or under DNS rebinding `Host` is whatever the caller sent. A hosted hub lists
 its Lens origin and sets this.
 
-For multi-tenant / keyed isolation beyond a single shared token, the engine's
-`agentstategraph-mcp` binary supports `--auth` and `--keys-file`; CTXone Hub's
-bearer token is a single-secret gate over the whole surface.
+### Multi-tenant mode
+
+**Not usable yet.** One Hub serving many tenants is being built
+([docs/design/MULTI_TENANT_HUB.md](design/MULTI_TENANT_HUB.md)). Tenant identity
+is in place; per-tenant data isn't, so `ctxone-hub --tenants-file <PATH>` (or
+`CTXONE_TENANTS_FILE`) checks the file and exits instead of letting every tenant
+share one store. It can't be combined with `--auth-token` or
+`--auth-token-file`.
+
+- **The tenants file** has a line per token: `<tenant> <sha256 of the token>`,
+  the hash as 64 hex digits. A tenant may have several lines. Blank lines and
+  `#` comments are ignored. Tenant names are 1 to 63 of `a-z`, `0-9` and `-`.
+  Only hashes are stored, so the file doesn't reveal a token.
+- **It's re-read every second,** so adding a tenant or rotating a token needs no
+  restart. A file with a bad line stops the hub at startup. Later, a bad line is
+  skipped with a warning and the rest apply, so a typo locks out only that line.
+  A hash listed for two tenants is refused for both. If the file can't be read,
+  the tenants last read stay in force; an empty file refuses every token.
+- **Every request needs a token that belongs to a tenant,** loopback included,
+  since there's no local user. An unknown token is a **401**. The tenant is
+  attached to the request, rate limits are per tenant, and request log lines
+  carry it as `ctxone.tenant`, never the token.
+- A `TenantResolver` decides the tenant. The Hub's reads the tenants file; an
+  account service can supply its own. One that can't answer gives a **503**.
 
 ---
 

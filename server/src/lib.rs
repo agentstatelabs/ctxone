@@ -24,3 +24,4 @@ pub mod reminder_tools;
 pub mod segments;
 pub mod session_links;
 pub mod starter;
+pub mod tenant;

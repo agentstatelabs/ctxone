@@ -28,6 +28,7 @@ tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 reqwest = { workspace = true }
 tokio-stream = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
 
 [features]
 # Send traces, metrics and logs over OTLP/HTTP once OTEL_EXPORTER_OTLP_ENDPOINT
@@ -61,6 +62,7 @@ oxtel-tower = { workspace = true }
 oxtel-rmcp = { workspace = true }
 thiserror = { workspace = true }
 lru = "0.12"
+sha2 = "0.10"
 rusqlite = { workspace = true }
 rust-embed = { version = "8", features = ["mime-guess"] }
 reqwest = { workspace = true }

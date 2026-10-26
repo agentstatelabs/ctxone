@@ -112,6 +112,13 @@ pub struct HubConfig {
     /// on AgentStateGraph's pool (see [`crate::hub_store`]). `None` for SQLite
     /// (whose tables live in `db_path`) and memory.
     pub postgres_tables: Option<crate::hub_store::PgStore>,
+    /// Multi-tenant mode: every request needs a bearer token this resolves to
+    /// a tenant, loopback included, and the tenant is attached to the request
+    /// (see [`crate::tenant`]). Rate limits are then per tenant. Replaces
+    /// `auth_token` and `auth_token_file`. Per-tenant data isn't wired yet
+    /// (ctx-multi-tenant-hub t-003): until it is, every tenant reaches the
+    /// router's one repository, so the Hub binary refuses `--tenants-file`.
+    pub tenants: Option<Arc<dyn crate::tenant::TenantResolver>>,
 }
 
 /// Runtime state of the background session sweep, shared between the HTTP
@@ -597,6 +604,8 @@ struct AuthState {
     tokens: AuthTokens,
     /// Let loopback peers through without a token (the default).
     loopback_exempt: bool,
+    /// Multi-tenant mode: resolve the token to a tenant instead.
+    tenants: Option<Arc<dyn crate::tenant::TenantResolver>>,
 }
 
 /// The authority (`host[:port]`) of an `Origin` header value, lowercased and
@@ -690,11 +699,38 @@ fn constant_time_eq(provided: &str, expected: &str) -> bool {
 /// configured, nothing is enforced here (the binary warns at startup if it
 /// bound to a non-loopback address). A request whose peer address is unknown
 /// (no `ConnectInfo`) is treated as untrusted — fail closed.
+///
+/// In multi-tenant mode every request needs a token, loopback included, since
+/// there's no local user. The token's tenant is attached to the request; an
+/// unknown token is a 401, and a resolver that can't answer is a 503.
 async fn require_auth(
     State(auth): State<AuthState>,
-    req: axum::extract::Request,
+    mut req: axum::extract::Request,
     next: Next,
 ) -> axum::response::Response {
+    if let Some(tenants) = &auth.tenants {
+        // Owned, so the request isn't borrowed across the await.
+        let resolved = match bearer_token(&req).map(str::to_owned) {
+            Some(token) if !token.is_empty() => tenants.resolve(&token).await,
+            _ => Ok(None),
+        };
+        return match resolved {
+            Ok(Some(tenant)) => {
+                req.extensions_mut().insert(tenant);
+                next.run(req).await
+            }
+            Ok(None) => unauthorized(),
+            Err(e) => {
+                warn!(error = %e, "tenant lookup failed");
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "can't look up the token's tenant right now; try again",
+                )
+                    .into_response()
+            }
+        };
+    }
+
     if !auth.tokens.is_configured() {
         // No token configured → no per-request enforcement.
         return next.run(req).await;
@@ -712,20 +748,35 @@ async fn require_auth(
         return next.run(req).await;
     }
 
-    let presented = req
-        .headers()
+    match bearer_token(&req) {
+        Some(t) if auth.tokens.accepts(t) => next.run(req).await,
+        _ => unauthorized(),
+    }
+}
+
+/// The token of an `Authorization: Bearer <token>` header.
+fn bearer_token(req: &axum::extract::Request) -> Option<&str> {
+    req.headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "));
+        .and_then(|s| s.strip_prefix("Bearer "))
+}
 
-    match presented {
-        Some(t) if auth.tokens.accepts(t) => next.run(req).await,
-        _ => (
-            StatusCode::UNAUTHORIZED,
-            "missing or invalid bearer token (Authorization: Bearer <token>)",
-        )
-            .into_response(),
+fn unauthorized() -> axum::response::Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        "missing or invalid bearer token (Authorization: Bearer <token>)",
+    )
+        .into_response()
+}
+
+/// Put the request's tenant on its span, so its log lines and trace carry
+/// the tenant (never the token). Runs inside the request span.
+async fn record_tenant(req: axum::extract::Request, next: Next) -> axum::response::Response {
+    if let Some(tenant) = req.extensions().get::<crate::tenant::Tenant>() {
+        tracing::Span::current().record("ctxone.tenant", tenant.as_str());
     }
+    next.run(req).await
 }
 
 fn router_with_config_inner(
@@ -761,10 +812,18 @@ fn router_with_config_inner(
     // At `debug` you also get the request body, at `trace` the response body.
     // A span, a request log line and duration metrics for every request,
     // named by the OpenTelemetry HTTP conventions.
-    let trace = oxtel_tower::HttpServerLayer::new();
+    // The span declares `ctxone.tenant` for `record_tenant` to fill in.
+    let trace = oxtel_tower::HttpServerLayer::new().with_span(|info| {
+        oxtel_tower::server_span!(
+            info,
+            otel.status_description = tracing::field::Empty,
+            ctxone.tenant = tracing::field::Empty,
+        )
+    });
 
-    // Rate limiter — returns None when rpm=0 (disabled).
-    let governor = rate_limit::build_layer(config.rate_limit_rpm);
+    // Rate limiter — returns None when rpm=0 (disabled). Keyed by tenant in
+    // multi-tenant mode, by peer IP otherwise.
+    let governor = rate_limit::build_layer(config.rate_limit_rpm, config.tenants.is_some());
 
     let asd_repos = Arc::new(config.asd_repos.clone());
 
@@ -793,7 +852,9 @@ fn router_with_config_inner(
             // When a bearer token guards the surface, the auth middleware is the
             // real gate, so relax rmcp's loopback-only Host allow-list to let
             // authenticated remote clients reach /mcp.
-            config.auth_token.is_some() || config.auth_token_file.is_some(),
+            config.auth_token.is_some()
+                || config.auth_token_file.is_some()
+                || config.tenants.is_some(),
             // Share the REST hub's session registry so MCP recall/savings land in
             // the same rows the process flushes to SQLite.
             sessions.clone(),
@@ -830,6 +891,7 @@ fn router_with_config_inner(
     let mut router = Router::new()
         // Health + stats
         .route("/api/health", get(health))
+        .route("/api/tenant", get(request_tenant))
         .route("/api/stats/tokens", get(token_stats))
         .route("/api/stats/tokens/{session_id}", get(session_token_stats))
         .route("/api/stats/sessions", get(list_sessions))
@@ -1030,6 +1092,7 @@ fn router_with_config_inner(
     // apply. The handler still enforces SESSION_TURNS_BULK_MAX_BYTES.
     let mut router = router
         .layer(DefaultBodyLimit::max(SESSION_TURNS_BULK_MAX_BYTES))
+        .layer(axum::middleware::from_fn(record_tenant))
         .layer(trace)
         .layer(cors)
         .with_state(state);
@@ -1059,6 +1122,7 @@ fn router_with_config_inner(
     let auth_state = AuthState {
         tokens: AuthTokens::new(config.auth_token.clone(), config.auth_token_file.clone()),
         loopback_exempt: !config.require_auth_on_loopback,
+        tenants: config.tenants.clone(),
     };
     router = router.layer(axum::middleware::from_fn_with_state(
         auth_state,
@@ -1269,6 +1333,14 @@ fn timestamp_id() -> String {
 
 async fn health() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok", "service": "ctxone-hub" }))
+}
+
+/// `GET /api/tenant`: the tenant the request's token belongs to, so a client
+/// can check a token. `null` on a single-tenant Hub.
+async fn request_tenant(
+    tenant: Option<axum::Extension<crate::tenant::Tenant>>,
+) -> impl IntoResponse {
+    Json(serde_json::json!({ "tenant": tenant.map(|t| t.0.to_string()) }))
 }
 
 /// `GET /api/stats/tokens` — process-wide aggregate across every session.
