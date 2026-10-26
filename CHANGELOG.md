@@ -24,6 +24,10 @@ the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
   - Nothing acts on the Hub's own machine, whose disk, transcripts and programs aren't the tenants'. Session sync, import and autosync, the admin backup and the ASD code proxy answer 404. Project detection needs `client_read=true`, which `ctx` sends, and is a 400 without it. Help asks no other tool's binary. The MCP code tools, which run the `asd` CLI or reach ASD repos, say there's nothing to reach. Flags for those features are refused at startup, and the Hub logs what's off. A single-tenant Hub is unchanged.
   - The graph-size refresher doesn't run, since its one number for the process can't be every tenant's; each session computes its tenant's, throttled.
 
+- **Isolation tests across every route and MCP tool,** the fourth part. Two tenants hold data under the same names: workspace, project id and remote, session ids, plans, branch, document and memory contexts. One then calls every REST route and MCP tool with those names and with the other's ids (fact paths, commit, reminder, taint and draft ids, its MCP session), and must get none of its data, open none of it and change none of it. A route or tool added without a probe fails the test. It runs on Postgres in CI. Two things it found shared across tenants are now each tenant's own:
+  - The recall result cache was one for the process, keyed by graph state without a tenant. A cached result could only match the tenant whose graph made it, since the key's commit id is a hash of that graph, but nothing else kept it there. Each tenant has its own now, and the key also names the workspace.
+  - The "request has no namespace" warning was deduplicated in a set of request paths, which carry the plan names and session ids clients choose: any client could grow it without bound, and on a multi-tenant Hub one tenant's requests muted the warning for others. It keeps routes now.
+
 - **`--pg-pool-size <N>`** (or `CTXONE_PG_POOL_SIZE`) caps the Postgres connections the Hub holds, 32 by default. A multi-tenant Hub's tenants share them.
 
 ### Changed

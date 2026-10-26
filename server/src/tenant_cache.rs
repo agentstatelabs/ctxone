@@ -24,7 +24,7 @@ use axum::http::{Extensions, StatusCode};
 use tracing::{info, warn};
 
 use crate::hub_store::{HubStore, PgStore, pg_error};
-use crate::memory_tools::SessionRegistry;
+use crate::memory_tools::{RecallCache, SessionRegistry};
 use crate::tenant::Tenant;
 
 /// One tenant's data, and what the Hub keeps for it.
@@ -40,6 +40,8 @@ pub struct TenantState {
     pub(crate) mcp: crate::mcp_http::McpServices,
     /// The last `GET /api/namespaces/summary`, reused for a few seconds.
     pub(crate) namespaces_summary: Mutex<Option<(Instant, serde_json::Value)>>,
+    /// The tenant's recall results, for REST and MCP alike.
+    pub recall_cache: Arc<RecallCache>,
     /// Requests that have reached the tenant, so eviction can tell whether
     /// one arrived while it flushed.
     uses: AtomicU64,
@@ -59,6 +61,7 @@ impl TenantState {
             merges_in_flight: Arc::default(),
             mcp: Default::default(),
             namespaces_summary: Mutex::new(None),
+            recall_cache: Arc::default(),
             uses: AtomicU64::new(0),
             last_used: Mutex::new(Instant::now()),
         }

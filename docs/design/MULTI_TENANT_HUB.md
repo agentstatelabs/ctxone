@@ -1,10 +1,10 @@
 # Design: One Hub, many tenants
 
 **Status:** In progress. AgentStateGraph's shared pool (t-001), tenant identity
-(t-002), per-tenant state (t-003), and background work with the machine-local
-features off (t-004) are in, so `ctxone-hub --http --tenants-file` serves. Next:
-isolation tests across every endpoint (t-005), tenant administration (t-006) and
-Lens (t-007).
+(t-002), per-tenant state (t-003), background work with the machine-local
+features off (t-004), and isolation tests across every route and MCP tool
+(t-005) are in, so `ctxone-hub --http --tenants-file` serves. Next: tenant
+administration (t-006) and Lens (t-007).
 **Plan:** CTX plan `ctx-multi-tenant-hub` (tasks listed at the end).
 **Goal:** One `ctxone-hub` process serves many users ("tenants"), each with
 their own memory, plans, sessions and project registry, on one Postgres
@@ -186,9 +186,38 @@ The main risk is a request reaching another tenant's data. The defences:
 2. **Tests.** For every REST endpoint and MCP tool, tenant B tries to read, list,
    search and write tenant A's data, using the same workspace names, project ids
    and session ids, and must see nothing.
+
+   As built (`server/tests/tenant_isolation.rs`, on Postgres): both tenants
+   hold data under the same workspace, project id and remote, session ids,
+   plans, branch, document and memory contexts, each text carrying its tenant's
+   marker, plus one session of its own whose id carries the marker (with only
+   shared ids, another tenant's session would hide behind one's own). B's probes use those names and A's own ids (fact paths, commit ids,
+   reminder, taint and draft ids, A's MCP session). No answer may carry A's
+   marker or ids; where B has data of its own the answer must carry B's marker;
+   none of B's requests may open A; and A's reads before and after must match.
+   The test reads the routes `build_router` mounts, and the tools MCP lists,
+   so a route or tool without a probe fails it. Mutations that share storage,
+   drop a `tenant_id` filter, share MCP services or share the recall cache are
+   each caught.
 3. **Storage.** AgentStateGraph filters every query by `tenant_id` today;
    Postgres row-level security follows.
 4. **Logs** carry the tenant name and never a token.
+
+What tenants still share holds none of their data:
+
+- **The recall cache** was one for the process, keyed by graph state without a
+  tenant. A result could only be served to the tenant whose graph made it,
+  because the key's commit id is a hash of that graph, but nothing else kept it
+  there. Each tenant has its own now (`TenantState::recall_cache`).
+- **The "no namespace" warning** was deduplicated in a set of request paths,
+  which carry names clients choose: any client could grow it without bound, and
+  one tenant's requests muted the warning for others. It keeps routes now.
+- **Capacity:** the connection pool, the blocking thread pool, the limit of 16
+  project detections running at once, and the lock under which one tenant
+  opens at a time. A busy tenant can slow the others; per-tenant limits are
+  later work. Each tenant keeps an MCP service per (workspace, session) with no
+  cap, and closing an idle tenant ends its MCP sessions, so their clients start
+  new ones.
 
 ## Deployment shape
 

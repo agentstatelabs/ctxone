@@ -382,39 +382,47 @@ where
                 // how a ranking got rendered under the wrong branch. Falling
                 // back is still the compatible behaviour, but it is no longer
                 // a secret.
-                warn_implicit_namespace(parts.uri.path());
+                let route = parts
+                    .extensions
+                    .get::<axum::extract::MatchedPath>()
+                    .map_or_else(|| parts.uri.path(), |route| route.as_str());
+                warn_implicit_namespace(route);
                 Ok(NamespaceId(Namespace::DEFAULT.to_string()))
             }
         }
     }
 }
 
-/// Warn once per path that a namespace-scoped request arrived without one.
+/// Warn once per route (`/api/plans/{name}`) that a namespace-scoped request
+/// arrived without one.
 ///
 /// Deduped because a polling client would otherwise bury the log in identical
-/// lines; the first occurrence per path is what tells you which caller still
-/// needs updating.
-fn warn_implicit_namespace(path: &str) {
-    if first_time_for_path(path) {
+/// lines; the first occurrence per route is what tells you which caller still
+/// needs updating. By route, not by path: paths carry the plan names and
+/// session ids clients choose, so a set of them would grow without bound, and
+/// on a multi-tenant Hub one tenant's requests would mute the warning for
+/// another's.
+fn warn_implicit_namespace(route: &str) {
+    if first_time_for_route(route) {
         tracing::warn!(
-            path,
+            route,
             "request has no namespace; assuming 'default'. Send X-CTXone-Namespace \
              (or ?namespace=) to name the workspace explicitly."
         );
     }
 }
 
-/// True the first time `path` is seen this process.
+/// True the first time `route` is seen this process.
 ///
 /// Split out from the warning so the dedup can be tested without capturing
 /// log output.
-fn first_time_for_path(path: &str) -> bool {
+fn first_time_for_route(route: &str) -> bool {
     use std::collections::HashSet;
     use std::sync::{Mutex, OnceLock};
     static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
     let seen = SEEN.get_or_init(|| Mutex::new(HashSet::new()));
     match seen.lock() {
-        Ok(mut s) => s.insert(path.to_string()),
+        Ok(mut s) => s.insert(route.to_string()),
         // A poisoned lock must not take the request down; warning twice is
         // strictly better than failing here.
         Err(_) => true,
@@ -3197,7 +3205,14 @@ async fn recall(
     let repo = s.repo_for(&ns)?;
     let budget = q.budget.unwrap_or(1500);
     let session = s.session_for(&session_id);
-    let result = run_recall(&repo, &session, &q.topic, budget, &q.ref_name);
+    let result = run_recall(
+        &repo,
+        &session,
+        &s.data.recall_cache,
+        &q.topic,
+        budget,
+        &q.ref_name,
+    );
     // Log savings inline — at info level this gives one line per recall
     // showing the topic and the ratio. Useful for seeing the memory layer
     // earning its keep in real time.
@@ -8313,12 +8328,34 @@ mod tests {
     }
 
     #[test]
-    fn implicit_namespace_warning_is_deduped_per_path() {
-        // First hit for a path warns, later ones stay quiet — a polling client
+    fn implicit_namespace_warning_is_deduped_per_route() {
+        // First hit for a route warns, later ones stay quiet — a polling client
         // must not bury the log.
-        assert!(first_time_for_path("/api/test/dedupe/a"));
-        assert!(!first_time_for_path("/api/test/dedupe/a"));
-        assert!(first_time_for_path("/api/test/dedupe/b"));
+        assert!(first_time_for_route("/api/test/dedupe/a"));
+        assert!(!first_time_for_route("/api/test/dedupe/a"));
+        assert!(first_time_for_route("/api/test/dedupe/b"));
+    }
+
+    #[tokio::test]
+    async fn the_namespace_warning_keeps_routes_not_the_ids_in_paths() {
+        use tower::ServiceExt;
+        let app: Router = Router::new().route(
+            "/api/test/plans/{name}",
+            get(|ns: NamespaceId| async move { ns.0 }),
+        );
+        for name in ["alpha", "beta"] {
+            let req = axum::http::Request::get(format!("/api/test/plans/{name}"))
+                .body(axum::body::Body::empty())
+                .unwrap();
+            assert_eq!(
+                app.clone().oneshot(req).await.unwrap().status(),
+                StatusCode::OK
+            );
+        }
+        // The route was seen; the paths, which carry names clients choose,
+        // weren't kept.
+        assert!(!first_time_for_route("/api/test/plans/{name}"));
+        assert!(first_time_for_route("/api/test/plans/alpha"));
     }
 
     #[test]
