@@ -68,6 +68,9 @@ struct McpConfig {
     /// remote clients can reach `/mcp`. Set when a bearer token guards the
     /// surface (the auth middleware is then the real gate). See [`crate::http`].
     allow_remote_hosts: bool,
+    /// Whether tools may act on the Hub machine itself; false on a
+    /// multi-tenant Hub. See [`CtxOneServer::machine_local`].
+    machine_local: bool,
 }
 
 /// State for the `/mcp` route: where each request's tenant data comes from,
@@ -86,6 +89,7 @@ impl McpHttpState {
         asd_pool: Option<Arc<AsdProcessPool>>,
         allow_remote_hosts: bool,
     ) -> Self {
+        let machine_local = tenancy.machine_local();
         Self {
             tenancy,
             config: Arc::new(McpConfig {
@@ -93,6 +97,7 @@ impl McpHttpState {
                 asd_repos,
                 asd_pool,
                 allow_remote_hosts,
+                machine_local,
             }),
         }
     }
@@ -146,6 +151,7 @@ impl McpHttpState {
         let agent_id = self.config.agent_id.clone();
         let asd_repos = (*self.config.asd_repos).clone();
         let asd_pool = self.config.asd_pool.clone();
+        let machine_local = self.config.machine_local;
         // Back this service's sessions with the tenant's SHARED, flushed
         // registry, keyed by the caller's X-CTXone-Session id. Every MCP session
         // rmcp spins up for this (ns, session) pair shares this one
@@ -169,7 +175,8 @@ impl McpHttpState {
             // /mcp hit with no namespace once services aren't cached per-ns.
             .with_namespace_explicit(true)
             .with_session_id(session_id_owned.clone())
-            .with_session(session.clone());
+            .with_session(session.clone())
+            .with_machine_local(machine_local);
             if let Some(pool) = asd_pool.clone() {
                 server = server.with_pool(pool);
             }

@@ -6,6 +6,7 @@
 //! Run as HTTP server:         ctxone-hub --http
 //! Options:                    ctxone-hub --storage memory
 //!                             ctxone-hub --path /data/ctxone.db
+//! Many tenants, one database: ctxone-hub --http --tenants-file <PATH> --database-url <URL>
 //!
 //! Default sqlite path is `./target/ctxone.db` — that's the natural
 //! ephemeral zone for cargo workspaces. Production deployments should
@@ -21,7 +22,9 @@
 //! nothing is exported unless the hub is built with the `otlp` feature and
 //! `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
 
-use ctxone_hub::{asd_pool, backup, http, lockfile, memory_tools, migrations, tenant};
+use ctxone_hub::{
+    asd_pool, backup, http, lockfile, memory_tools, migrations, tenant, tenant_cache,
+};
 
 use std::sync::Arc;
 
@@ -98,7 +101,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `rm` files in the repo root. Production setups always pass --path.
     let mut db_path = "./target/ctxone.db".to_string();
     let mut database_url = String::new();
-    let mut tenant_id = "default".to_string();
+    // The Postgres tenant of a single-tenant hub. None → "default".
+    let mut tenant_id: Option<String> = None;
+    // Most connections the Postgres pool holds, however many tenants share it.
+    // From --pg-pool-size or CTXONE_PG_POOL_SIZE.
+    let mut pg_pool_size: usize = match std::env::var("CTXONE_PG_POOL_SIZE") {
+        Ok(v) if !v.is_empty() => parse_pool_size(&v),
+        _ => agentstategraph_storage::postgres::DEFAULT_POOL_SIZE,
+    };
     let mut http_mode = false;
     let mut lens_mode = false;
     let mut http_port: u16 = 3001;
@@ -215,7 +225,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--tenant" => {
                 i += 1;
                 if i < args.len() {
-                    tenant_id = args[i].clone();
+                    tenant_id = Some(args[i].clone());
+                }
+            }
+            "--pg-pool-size" => {
+                i += 1;
+                if i < args.len() {
+                    pg_pool_size = parse_pool_size(&args[i]);
                 }
             }
             "--http" => {
@@ -377,7 +393,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 eprintln!("      --database-url <URL>  Postgres connection URL");
                 eprintln!(
-                    "      --tenant <ID>     Tenant ID for multi-tenant Postgres (default: \"default\")"
+                    "      --tenant <ID>     The Postgres tenant this hub serves (default: \"default\")"
+                );
+                eprintln!(
+                    "      --pg-pool-size <N>  Most Postgres connections the hub holds (default: 32;"
+                );
+                eprintln!(
+                    "                        env: CTXONE_PG_POOL_SIZE). A multi-tenant hub's tenants share them."
                 );
                 eprintln!("      --port <PORT>     HTTP port (default: 3001, requires --http)");
                 eprintln!(
@@ -405,12 +427,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "      --tenants-file <PATH>  Multi-tenant mode: `<tenant> <sha256 of a token>` lines"
                 );
                 eprintln!(
-                    "                           (env: CTXONE_TENANTS_FILE). Not usable yet: the hub checks"
+                    "                           (env: CTXONE_TENANTS_FILE), re-read every second. Each"
                 );
                 eprintln!(
-                    "                           the file and exits, until it can turn off what reads its"
+                    "                           request's token picks its tenant. Needs --http and"
                 );
-                eprintln!("                           own machine's disk.");
+                eprintln!(
+                    "                           Postgres (or --storage memory to try it); turns off what"
+                );
+                eprintln!(
+                    "                           acts on this machine (ASD repos, session sync, backups)."
+                );
                 eprintln!(
                     "      --require-auth-on-loopback  Loopback peers must send the token too, for a proxy or"
                 );
@@ -523,35 +550,72 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         None => None,
     };
-    // Multi-tenant mode can't serve yet. Each tenant gets its own data
-    // (`http::multi_tenant_router`), but the Hub still runs features that act
-    // on its own machine: project detection reads its disk, and there's the
-    // ASD process pool, the transcript sweep and SQLite backups. Remote
-    // tenants mustn't reach those, and turning them off is
-    // ctx-multi-tenant-hub t-004. Check the file, so it's ready, and stop.
-    if let Some(path) = &tenants_file {
-        if auth_token.is_some() || auth_token_file.is_some() {
-            eprintln!(
-                "ctxone-hub: --tenants-file replaces --auth-token and --auth-token-file; use one"
-            );
-            std::process::exit(64);
+    // Check for DATABASE_URL env var as fallback for postgres
+    if database_url.is_empty()
+        && let Ok(url) = std::env::var("DATABASE_URL")
+    {
+        database_url = url;
+        if storage_type == "sqlite" {
+            storage_type = "postgres";
         }
-        let file = match tenant::TenantsFile::open(path) {
-            Ok(file) => file,
-            Err(e) => {
-                eprintln!("ctxone-hub: --tenants-file: {e}");
-                std::process::exit(66);
-            }
-        };
-        let (tenants, tokens) = file.counts();
-        eprintln!(
-            "ctxone-hub: --tenants-file {path} is valid ({tenants} tenants, {tokens} tokens), but \
-             multi-tenant mode isn't available yet: the Hub still runs features that read its own \
-             machine's disk, which remote tenants mustn't reach. Not starting."
-        );
-        std::process::exit(64);
     }
-    if require_auth_on_loopback && auth_token.is_none() && auth_token_file.is_none() {
+
+    // Multi-tenant mode: each request's token picks its tenant, every
+    // tenant's data is on one database, and nothing acts on this machine,
+    // since the tenants are elsewhere (docs/design/MULTI_TENANT_HUB.md).
+    // Settings that can't apply are refused rather than ignored.
+    let tenants = match &tenants_file {
+        None => None,
+        Some(path) => {
+            if auth_token.is_some() || auth_token_file.is_some() {
+                refuse_tenants_file("replaces --auth-token and --auth-token-file; use one");
+            }
+            if !http_mode {
+                refuse_tenants_file("needs --http: tenants reach the hub over HTTP");
+            }
+            if storage_type == "sqlite" {
+                refuse_tenants_file(
+                    "needs Postgres (--storage postgres and --database-url, or DATABASE_URL), or \
+                     --storage memory to try it",
+                );
+            }
+            if tenant_id.is_some() {
+                refuse_tenants_file("replaces --tenant: each request's token picks its tenant");
+            }
+            if lens_mode {
+                refuse_tenants_file("can't serve Lens yet: Lens can't send a tenant's token");
+            }
+            if !asd_repos.is_empty()
+                || !asd_pool_repos.is_empty()
+                || asd_serve_binary.is_some()
+                || asd_idle_timeout_secs.is_some()
+            {
+                refuse_tenants_file(
+                    "turns off ASD code intelligence, which is this machine's: drop --asd-url, \
+                     --asd-path, --asd-serve-binary and --asd-idle-timeout (and \
+                     CTXONE_ASD_SERVE_BINARY)",
+                );
+            }
+            if ctx_binary.is_some() {
+                refuse_tenants_file(
+                    "turns off session sync and import, which read this machine's transcripts: \
+                     drop --ctx-binary (and CTXONE_CTX_BINARY)",
+                );
+            }
+            match tenant::TenantsFile::open(path) {
+                Ok(file) => Some((path.clone(), file)),
+                Err(e) => {
+                    eprintln!("ctxone-hub: --tenants-file: {e}");
+                    std::process::exit(66);
+                }
+            }
+        }
+    };
+    if require_auth_on_loopback
+        && auth_token.is_none()
+        && auth_token_file.is_none()
+        && tenants.is_none()
+    {
         eprintln!(
             "ctxone-hub: --require-auth-on-loopback needs a token (--auth-token or \
              --auth-token-file)"
@@ -563,6 +627,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _telemetry = init_telemetry()?;
 
     info!(version = env!("CARGO_PKG_VERSION"), "CtxOne Hub starting");
+
+    if let Some((path, file)) = tenants {
+        return serve_tenants(TenantsRun {
+            path,
+            file,
+            database_url: (storage_type == "postgres").then_some(database_url),
+            pg_pool_size,
+            port: http_port,
+            rate_limit_rpm,
+            agent_id,
+            allowed_origins,
+            strict_origin,
+        });
+    }
 
     // Auto-discovery: when the user gave no --asd-url / --asd-path flags,
     // populate the pool from ~/.config/asd/repos.toml so `ctxone-hub --http`
@@ -585,15 +663,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Check for DATABASE_URL env var as fallback for postgres
-    if database_url.is_empty()
-        && let Ok(url) = std::env::var("DATABASE_URL")
-    {
-        database_url = url;
-        if storage_type == "sqlite" {
-            storage_type = "postgres";
-        }
-    }
+    let tenant_id = tenant_id.unwrap_or_else(|| "default".to_string());
 
     // Epoch seal enforcement is ON (ASG's default) as of agentstategraph
     // v1.1.0. It used to be disabled everywhere: the epoch store was global, so
@@ -631,8 +701,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let rt = tokio::runtime::Runtime::new()?;
             let storage = rt.block_on(async {
-                agentstategraph_storage::PostgresStorage::connect_tenant(&database_url, &tenant_id)
-                    .await
+                agentstategraph_storage::PostgresStorage::connect_tenant_with_pool_size(
+                    &database_url,
+                    &tenant_id,
+                    pg_pool_size,
+                )
+                .await
             })?;
             match ctxone_hub::hub_store::PgStore::new(&storage) {
                 Ok(tables) => postgres_tables = Some(tables),
@@ -827,19 +901,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                  exposing this hub beyond localhost."
             );
         }
-        if strict_origin {
-            if allowed_origins.is_empty() {
-                warn!(
-                    "--strict-origin with no --allowed-origin: no browser page can call the API, \
-                     Lens included"
-                );
-            } else {
-                info!(
-                    origins = ?allowed_origins,
-                    "Strict origins: browsers may call the API only from these origins"
-                );
-            }
-        }
+        log_strict_origin(strict_origin, &allowed_origins);
 
         // Session registry: load persisted stats (SQLite file or Postgres
         // tables), so token savings survive hub restarts. Empty in memory mode.
@@ -1312,6 +1374,147 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Hub shut down");
     Ok(())
+}
+
+/// Log what `--strict-origin` allows.
+fn log_strict_origin(strict_origin: bool, allowed_origins: &[String]) {
+    if !strict_origin {
+        return;
+    }
+    if allowed_origins.is_empty() {
+        warn!(
+            "--strict-origin with no --allowed-origin: no browser page can call the API, \
+             Lens included"
+        );
+    } else {
+        info!(
+            origins = ?allowed_origins,
+            "Strict origins: browsers may call the API only from these origins"
+        );
+    }
+}
+
+/// Refuse a `--tenants-file` setting that can't apply, and exit EX_USAGE.
+fn refuse_tenants_file(why: &str) -> ! {
+    eprintln!("ctxone-hub: --tenants-file {why}");
+    std::process::exit(64);
+}
+
+/// A `--pg-pool-size` (or `CTXONE_PG_POOL_SIZE`) value: a whole number of
+/// connections, at least 1. Anything else exits EX_USAGE.
+fn parse_pool_size(value: &str) -> usize {
+    match value.trim().parse::<usize>() {
+        Ok(n) if n > 0 => n,
+        _ => {
+            eprintln!("ctxone-hub: --pg-pool-size needs a whole number above 0, got: {value}");
+            std::process::exit(64);
+        }
+    }
+}
+
+/// What a multi-tenant hub starts with.
+struct TenantsRun {
+    path: String,
+    file: tenant::TenantsFile,
+    /// The tenants' database, or None to keep them in memory.
+    database_url: Option<String>,
+    pg_pool_size: usize,
+    port: u16,
+    rate_limit_rpm: u32,
+    agent_id: String,
+    allowed_origins: Vec<String>,
+    strict_origin: bool,
+}
+
+/// Serve a multi-tenant hub until Ctrl-C or SIGTERM: every request's token
+/// picks its tenant, a tenant opens on its first request and closes when it's
+/// idle, and the open tenants' session statistics are flushed every 30 seconds
+/// and on the way out. Nothing here acts on this machine: no ASD repos, no
+/// session sweep, no backups, and no flat-size refresher, whose one number
+/// would be one tenant's graph size reported to all of them.
+fn serve_tenants(run: TenantsRun) -> Result<(), Box<dyn std::error::Error>> {
+    let (tenants, tokens) = run.file.counts();
+    info!(
+        path = %run.path,
+        tenants,
+        tokens,
+        "multi-tenant mode: each request's token picks its tenant, loopback included"
+    );
+    info!(
+        "off in multi-tenant mode, because it acts on this machine: ASD code intelligence, \
+         session sync, import and autosync, help from other tools' binaries, project detection \
+         reading this machine's disk, and SQLite backups"
+    );
+    log_strict_origin(run.strict_origin, &run.allowed_origins);
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async move {
+            let opener: Arc<dyn tenant_cache::TenantOpener> = match &run.database_url {
+                Some(url) => {
+                    // Never the URL itself: it may carry a password.
+                    let tls = ctxone_hub::postgres_url::TlsIntent::of(url);
+                    info!(
+                        storage = "postgres",
+                        tls = tls.label(),
+                        pool_size = run.pg_pool_size,
+                        "Storage: postgres, every tenant on one pool"
+                    );
+                    if let Some(warning) = tls.warning() {
+                        warn!("{warning}");
+                    }
+                    Arc::new(tenant_cache::PostgresTenants::connect(url, run.pg_pool_size).await?)
+                }
+                None => {
+                    info!(
+                        storage = "memory",
+                        "Storage: in memory (ephemeral), for trying multi-tenant mode out"
+                    );
+                    Arc::new(tenant_cache::MemoryTenants::default())
+                }
+            };
+            let data = tenant_cache::TenantCache::new(opener);
+            let config = http::HubConfig {
+                rate_limit_rpm: run.rate_limit_rpm,
+                mcp_http: true,
+                agent_id: run.agent_id,
+                allowed_origins: run.allowed_origins,
+                strict_origin: run.strict_origin,
+                ..Default::default()
+            };
+            let app = http::multi_tenant_router(
+                config,
+                http::MultiTenant {
+                    resolver: Arc::new(run.file),
+                    data: data.clone(),
+                },
+            );
+            let upkeep = data.spawn_upkeep(tenant_cache::UPKEEP_EVERY, tenant_cache::IDLE_AFTER);
+
+            let addr = format!("0.0.0.0:{}", run.port);
+            let listener = tokio::net::TcpListener::bind(&addr).await?;
+            info!(port = run.port, addr = %addr, rate_limit_rpm = run.rate_limit_rpm, "HTTP API listening");
+            let result = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .with_graceful_shutdown(shutdown_signal())
+            .await;
+
+            upkeep.abort();
+            info!("Flushing open tenants' session stats on shutdown");
+            let flushing = data.clone();
+            if let Err(e) = tokio::task::spawn_blocking(move || flushing.flush_all()).await {
+                error!(error = %e, "flushing the open tenants failed");
+            }
+            if let Err(e) = result {
+                error!(error = %e, "HTTP server error");
+                return Err::<(), Box<dyn std::error::Error>>(e.into());
+            }
+            info!("Hub shut down");
+            Ok(())
+        })
 }
 
 /// Whether environment variable `name` is set to a true value (`1`, `true`,

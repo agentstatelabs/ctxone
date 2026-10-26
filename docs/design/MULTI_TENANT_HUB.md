@@ -1,9 +1,10 @@
 # Design: One Hub, many tenants
 
 **Status:** In progress. AgentStateGraph's shared pool (t-001), tenant identity
-(t-002) and per-tenant state (t-003) are in. Next, t-004 turns off the features
-that act on the Hub machine's own disk; until then, `--tenants-file` checks the
-file and exits.
+(t-002), per-tenant state (t-003), and background work with the machine-local
+features off (t-004) are in, so `ctxone-hub --http --tenants-file` serves. Next:
+isolation tests across every endpoint (t-005), tenant administration (t-006) and
+Lens (t-007).
 **Plan:** CTX plan `ctx-multi-tenant-hub` (tasks listed at the end).
 **Goal:** One `ctxone-hub` process serves many users ("tenants"), each with
 their own memory, plans, sessions and project registry, on one Postgres
@@ -129,9 +130,18 @@ These act on the Hub machine's own disk, which means nothing to a remote user:
   the Hub machine's transcripts;
 - SQLite backups and the lockfile (Postgres has its own backups);
 - project detection's filesystem fallback. `ctx` sends what it found in the
-  directory (`client_read=true`, [HTTP_API.md](../HTTP_API.md)).
+  directory (`client_read=true`, [HTTP_API.md](../HTTP_API.md));
+- help from other tools: `help` reads the machine's help index and runs the
+  binaries it names;
+- the MCP code tools that run the `asd` CLI (`code_impact`,
+  `code_cross_repo_edges`).
 
 All of them stay as they are in single-tenant mode.
+
+As built: the HTTP routes for these answer 404 with the reason
+(`http::MACHINE_LOCAL_ROUTES`), detection without `client_read` is a 400, and
+the MCP code tools say there's nothing to reach. A multi-tenant router ignores
+the configuration for them, and the binary refuses their flags at startup.
 
 ### Lens
 
@@ -145,9 +155,13 @@ service.
 The statistics flush loop walks the open tenants every 30 seconds. Evicting a
 tenant and shutting down flush it too.
 
+As built: `TenantCache::spawn_upkeep` closes the tenants idle for 30 minutes,
+then flushes the rest, every 30 seconds. The binary flushes every open tenant
+after the server stops.
+
 The main graph's size refresher publishes one number for the whole process, which
-fits a single-tenant Hub. A multi-tenant Hub runs one per open tenant, or none, in
-which case each session computes its own, throttled.
+fits a single-tenant Hub. A multi-tenant Hub runs none, so each session computes
+its own tenant's, throttled.
 
 ### Administration
 

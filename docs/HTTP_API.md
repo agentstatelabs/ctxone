@@ -103,7 +103,7 @@ Cumulative token savings **aggregated across every session**.
 - `session_tokens_saved` — sum of `(recalls × flat_baseline) - used`
   across all sessions
 - `total_graph_size_chars` — **max** observed across sessions (graph
-  size is process-global, not summable)
+  size is the whole graph's, not summable)
 - `total_graph_size_tokens` — `chars ÷ 4`
 - `cumulative_ratio` — `(used + saved) / used`
 
@@ -496,7 +496,8 @@ machine:
 | `remote_url=<url>` | `git remote get-url origin` as git prints it (the Hub normalizes it) |
 
 Without `client_read` (older clients), the Hub reads `cwd` on its own
-machine.
+machine. A [multi-tenant](#multi-tenant-mode) Hub reads nothing of its own
+and answers **400**.
 
 **Response (200):**
 ```json
@@ -1043,13 +1044,19 @@ its Lens origin and sets this.
 
 ### Multi-tenant mode
 
-**Not usable yet.** One Hub serving many tenants is being built
-([docs/design/MULTI_TENANT_HUB.md](design/MULTI_TENANT_HUB.md)). Tenant identity
-and each tenant's own data are in place, but the Hub still runs features that
-read its own machine's disk, such as project detection's filesystem fallback,
-which remote tenants mustn't reach. Until those are off in multi-tenant mode,
-`ctxone-hub --tenants-file <PATH>` (or `CTXONE_TENANTS_FILE`) checks the file and
-exits. It can't be combined with `--auth-token` or `--auth-token-file`.
+One Hub can serve many tenants, each with its own data, from one Postgres
+database ([docs/design/MULTI_TENANT_HUB.md](design/MULTI_TENANT_HUB.md)):
+
+```bash
+ctxone-hub --http --tenants-file /etc/ctxone/tenants \
+  --storage postgres --database-url "$DATABASE_URL"
+```
+
+`--tenants-file <PATH>` (or `CTXONE_TENANTS_FILE`) turns it on. It needs `--http`
+and Postgres; `--storage memory` keeps the tenants in memory, to try it out. It
+replaces `--auth-token`, `--auth-token-file` and `--tenant`, and Lens can't use it
+yet. Every tenant shares one connection pool of `--pg-pool-size` connections
+(or `CTXONE_PG_POOL_SIZE`; default 32).
 
 - **The tenants file** has a line per token: `<tenant> <sha256 of the token>`,
   the hash as 64 hex digits. A tenant may have several lines. Blank lines and
@@ -1073,6 +1080,19 @@ exits. It can't be combined with `--auth-token` or `--auth-token-file`.
   request that needs its data, which creates the tenant if it's new and brings
   its schema up to date. If it can't be opened, the request gets a **503** and
   the next one tries again. `GET /api/health` needs no data and opens nothing.
+- **A tenant closes when it's idle,** 30 minutes after its last request. Its
+  session statistics are saved every 30 seconds while it's open, when it closes
+  and when the Hub stops.
+- **Nothing acts on the Hub's own machine,** since the tenants are elsewhere.
+  These answer **404**: `POST /api/sessions/sync`, `GET
+  /api/sessions/discoverable`, `POST /api/sessions/import`, `ignore` and
+  `unignore`, `/api/sessions/autosync`, `POST /api/admin/backup` and
+  `/api/code`. Project detection needs `client_read=true` (a **400** without
+  it). `GET /api/help` and the MCP `help` tool answer from the Hub's own docs
+  and ask no other program. The MCP code tools say there's nothing to reach.
+  The flags for those features (`--asd-url`, `--asd-path`, `--asd-serve-binary`,
+  `--asd-idle-timeout`, `--ctx-binary`) are refused at startup, and the Hub logs
+  what's off.
 
 ---
 

@@ -7,17 +7,24 @@ the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
 ## [Unreleased]
 
 ### Added
-- **Tenant identity for a multi-tenant Hub,** the first part of one Hub serving many tenants (docs/design/MULTI_TENANT_HUB.md). It isn't usable yet: `ctxone-hub --tenants-file <PATH>` checks the file and exits, because each tenant doesn't have its own data yet and every tenant would share one store.
+- **Tenant identity for a multi-tenant Hub,** the first part of one Hub serving many tenants (docs/design/MULTI_TENANT_HUB.md).
   - The tenants file has a line per token, `<tenant> <sha256 of the token>`, and a tenant may have several. Only hashes are stored. It's re-read every second, so tenants and tokens change without a restart. A bad line stops the Hub at startup; later it's skipped with a warning, so a typo locks out only that line. A hash listed for two tenants is refused for both.
   - Every request needs a token that belongs to a tenant, loopback included. An unknown token is a 401. The hash of the presented token is compared in constant time. A `TenantResolver` trait decides the tenant, so an account service can replace the file; one that can't answer gives a 503.
   - The tenant is attached to the request. Rate limits are per tenant instead of per peer IP. Request log lines carry `ctxone.tenant`, never the token. `GET /api/tenant` reports the request's tenant (`null` on a single-tenant Hub).
 
-- **Each tenant's own data on a multi-tenant Hub,** the second part. `ctxone-hub --tenants-file` still checks the file and exits, now because the Hub still runs features that read its own machine's disk, which remote tenants mustn't reach.
+- **Each tenant's own data on a multi-tenant Hub,** the second part.
   - A request reaches only its tenant's repository, project registry, session statistics and MCP sessions. Handlers get them from `HubState`, now built for each request from the request's tenant, so on a multi-tenant Hub nothing reaches data except through it. Tenants can use the same workspace names, project ids and session ids.
   - A tenant opens on its first request that needs its data. On Postgres every tenant shares one connection pool and the `ctxone_*` tables. Opening a tenant creates it if it's new, runs the AgentStateGraph and CTXone migrations for it and loads its session statistics, holding an advisory lock so two Hubs opening the same tenant take turns. A tenant that can't be opened gives a 503, and the next request tries again.
-  - An idle tenant can be closed after its statistics are flushed (`TenantCache::evict_idle`); never while a request is using it. The Hub will run this once multi-tenant mode can serve.
+  - An idle tenant is closed after its statistics are flushed (`TenantCache::evict_idle`), never while a request is using it.
   - The Hub Home's workspace summary, reused for 15 seconds, is kept per tenant. It was process-wide, so one tenant could have been served another's.
   - For library users: `http::multi_tenant_router(config, MultiTenant { resolver, data })` builds a multi-tenant Hub and replaces `HubConfig::tenants`. The new `tenant_cache` module has `TenantCache`, the `TenantOpener` trait, `PostgresTenants` and `MemoryTenants`. `migrations::migrate_asg` is the AgentStateGraph schema step that startup and each tenant's open share. `deadpool-postgres` 0.14, already in the build through AgentStateGraph, is now a direct dependency.
+
+- **A multi-tenant Hub serves,** the third part. `ctxone-hub --http --tenants-file <PATH>` with Postgres (`--storage postgres` and `--database-url`, or `DATABASE_URL`) serves every tenant from one process and one connection pool; `--storage memory` keeps the tenants in memory, to try it out. Lens can't sign in to it yet.
+  - The open tenants' session statistics are flushed every 30 seconds, and a tenant with no request for 30 minutes is closed after a flush (`TenantCache::spawn_upkeep`). Stopping the Hub flushes every open tenant.
+  - Nothing acts on the Hub's own machine, whose disk, transcripts and programs aren't the tenants'. Session sync, import and autosync, the admin backup and the ASD code proxy answer 404. Project detection needs `client_read=true`, which `ctx` sends, and is a 400 without it. Help asks no other tool's binary. The MCP code tools, which run the `asd` CLI or reach ASD repos, say there's nothing to reach. Flags for those features are refused at startup, and the Hub logs what's off. A single-tenant Hub is unchanged.
+  - The graph-size refresher doesn't run, since its one number for the process can't be every tenant's; each session computes its tenant's, throttled.
+
+- **`--pg-pool-size <N>`** (or `CTXONE_PG_POOL_SIZE`) caps the Postgres connections the Hub holds, 32 by default. A multi-tenant Hub's tenants share them.
 
 ### Changed
 - **AgentStateGraph 1.4.2** (`agentstategraph*` = "1.4.2", from 1.4.0). Its `PostgresStorage::for_tenant` opens another tenant on the same connection pool, which the multi-tenant Hub's per-tenant state builds on. `Cargo.lock` moves only the seven agentstategraph crates.

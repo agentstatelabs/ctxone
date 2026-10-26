@@ -177,6 +177,31 @@ async fn a_tenant_opens_on_its_first_request_and_closes_when_idle() {
 }
 
 #[tokio::test]
+async fn idle_tenants_close_in_the_background() {
+    let hub = memory_hub();
+    remember(&hub.app, ALICE, "Alice's fact before the upkeep").await;
+    let held = hub.data.get(&tenant("bob")).await.unwrap();
+    let upkeep = hub
+        .data
+        .spawn_upkeep(Duration::from_millis(20), Duration::ZERO);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while hub.data.open_tenants() != [tenant("bob")] {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "alice is still open: {:?}",
+            hub.data.open_tenants()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // Bob is in use, so he stays.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(hub.data.open_tenants(), [tenant("bob")]);
+    drop(held);
+    upkeep.abort();
+}
+
+#[tokio::test]
 async fn a_tenant_in_use_stays_open() {
     let hub = memory_hub();
     let held = hub.data.get(&tenant("alice")).await.unwrap();

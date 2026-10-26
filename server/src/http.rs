@@ -204,8 +204,13 @@ impl Autosync {
     }
 }
 
-/// What every tenant of the Hub shares.
+/// What every tenant of the Hub shares. On a multi-tenant Hub, what acts on
+/// the Hub machine itself is empty or off: no ASD repos, no `ctx` binary, no
+/// autosync, no SQLite file.
 pub struct HubShared {
+    /// Whether requests may reach what acts on the Hub machine itself (see
+    /// [`MACHINE_LOCAL_ROUTES`]). False on a multi-tenant Hub.
+    pub machine_local: bool,
     /// Background session-sweep toggle (Lens autosync).
     pub autosync: Autosync,
     /// Path to the live sqlite db file, or None for memory/postgres.
@@ -498,7 +503,10 @@ pub fn router_with_config(
 
 /// Build a multi-tenant Hub's router: each request reaches the data of the
 /// tenant its bearer token belongs to (docs/design/MULTI_TENANT_HUB.md).
-/// `config.auth_token`, `auth_token_file` and `postgres_tables` don't apply.
+/// `config.auth_token`, `auth_token_file` and `postgres_tables` don't apply,
+/// and neither does what acts on the Hub machine itself: the ASD repos, the
+/// `ctx` binary and autosync. Those routes answer 404 (see
+/// [`MACHINE_LOCAL_ROUTES`]).
 pub fn multi_tenant_router(config: HubConfig, tenants: MultiTenant) -> Router {
     build_router(
         Tenancy::Many(tenants.data),
@@ -855,6 +863,32 @@ fn router_with_config_inner(
     build_router(Tenancy::One(Arc::new(tenant)), None, config, db_path)
 }
 
+/// The routes that act on the Hub machine itself: session sync, import and
+/// autosync run the `ctx` CLI over its transcripts, the admin backup copies
+/// its SQLite file, and `/api/code` reaches its ASD repos. A multi-tenant Hub
+/// answers them with [`machine_local_off`].
+pub const MACHINE_LOCAL_ROUTES: &[&str] = &[
+    "/api/sessions/discoverable",
+    "/api/sessions/import",
+    "/api/sessions/ignore",
+    "/api/sessions/unignore",
+    "/api/sessions/autosync",
+    "/api/sessions/sync",
+    "/api/admin/backup",
+    "/api/code",
+    "/api/code/{*rest}",
+];
+
+/// A multi-tenant Hub's answer to [`MACHINE_LOCAL_ROUTES`]. Takes no state,
+/// so it opens no tenant.
+async fn machine_local_off() -> (StatusCode, &'static str) {
+    (
+        StatusCode::NOT_FOUND,
+        "this Hub serves many tenants, so it has nothing that acts on its own machine: no \
+         session sync or import, autosync, backups or ASD code intelligence",
+    )
+}
+
 /// The router for either kind of Hub. `resolver` is set exactly when the Hub
 /// is multi-tenant.
 fn build_router(
@@ -903,10 +937,17 @@ fn build_router(
     // multi-tenant mode, by peer IP otherwise.
     let governor = rate_limit::build_layer(config.rate_limit_rpm, resolver.is_some());
 
-    let asd_repos = Arc::new(config.asd_repos.clone());
+    // What acts on the Hub machine itself is configured only for a
+    // single-tenant Hub.
+    let machine_local = tenancy.machine_local();
+    let asd_repos = Arc::new(if machine_local {
+        config.asd_repos.clone()
+    } else {
+        Vec::new()
+    });
 
     // Build a process pool if any pool repos were configured.
-    let asd_pool = if config.asd_pool_repos.is_empty() {
+    let asd_pool = if config.asd_pool_repos.is_empty() || !machine_local {
         None
     } else {
         Some(Arc::new(AsdProcessPool::new(
@@ -939,16 +980,18 @@ fn build_router(
     let state = Hub {
         tenancy,
         shared: Arc::new(HubShared {
-            db_path,
+            machine_local,
+            db_path: db_path.filter(|_| machine_local),
             asd_repos,
             asd_pool,
-            ctx_binary: config.ctx_binary.clone(),
-            self_base_url: config.self_base_url.clone(),
+            ctx_binary: config.ctx_binary.clone().filter(|_| machine_local),
+            self_base_url: config.self_base_url.clone().filter(|_| machine_local),
             ctx_auth: AuthTokens::new(config.auth_token.clone(), config.auth_token_file.clone()),
             detects_in_flight: Arc::default(),
             autosync: config
                 .autosync
                 .clone()
+                .filter(|_| machine_local)
                 .unwrap_or_else(|| Autosync::new(None, 0)),
         }),
     };
@@ -961,14 +1004,6 @@ fn build_router(
         .route("/api/stats/tokens/{session_id}", get(session_token_stats))
         .route("/api/stats/sessions", get(list_sessions))
         .route("/api/sessions/imported", get(imported_session_ids))
-        .route("/api/sessions/discoverable", get(discoverable_sessions))
-        .route("/api/sessions/import", post(import_sessions))
-        .route("/api/sessions/ignore", post(ignore_sessions))
-        .route("/api/sessions/unignore", post(unignore_sessions))
-        .route(
-            "/api/sessions/autosync",
-            get(get_autosync).post(set_autosync),
-        )
         .route("/api/stats/backfill_by_model", post(backfill_by_model))
         .route("/api/stats/llm_usage", post(record_llm_usage))
         .route("/api/stats/plan/{plan}/cost", get(plan_cost))
@@ -1117,9 +1152,6 @@ fn build_router(
         .route("/api/namespaces", get(list_namespaces))
         .route("/api/namespaces/summary", get(namespaces_summary))
         .route("/api/session_tombstones", get(list_session_tombstones))
-        // Session sync (t-019): re-ingest local Claude Code transcripts by
-        // spawning the co-located `ctx ingest-session --all` CLI.
-        .route("/api/sessions/sync", post(sync_sessions))
         // Taint / quarantine / watch
         .route(
             "/api/taint",
@@ -1138,17 +1170,35 @@ fn build_router(
         )
         .route("/api/projects/detect", get(detect_project_handler))
         .route("/api/projects/{id}", get(get_project_handler))
-        .route("/api/projects/{id}/paths", post(add_project_path_handler))
-        // Admin endpoints
-        .route("/api/admin/backup", post(admin_backup));
+        .route("/api/projects/{id}/paths", post(add_project_path_handler));
 
-    // Mount ASD repo registry + per-repo proxy routes when any repos are configured
-    // (either static URLs or pool-managed repos).
-    if !state.shared.asd_repos.is_empty() || state.shared.asd_pool.is_some() {
+    if machine_local {
         router = router
-            .route("/api/code", get(list_asd_repos))
-            .route("/api/code/{repo}/prefetch", post(prefetch_asd_repo))
-            .route("/api/code/{repo}/{*path}", get(proxy_asd).post(proxy_asd));
+            .route("/api/sessions/discoverable", get(discoverable_sessions))
+            .route("/api/sessions/import", post(import_sessions))
+            .route("/api/sessions/ignore", post(ignore_sessions))
+            .route("/api/sessions/unignore", post(unignore_sessions))
+            .route(
+                "/api/sessions/autosync",
+                get(get_autosync).post(set_autosync),
+            )
+            // Session sync (t-019): re-ingest local Claude Code transcripts by
+            // spawning the co-located `ctx ingest-session --all` CLI.
+            .route("/api/sessions/sync", post(sync_sessions))
+            // Admin endpoints
+            .route("/api/admin/backup", post(admin_backup));
+        // Mount ASD repo registry + per-repo proxy routes when any repos are
+        // configured (either static URLs or pool-managed repos).
+        if !state.shared.asd_repos.is_empty() || state.shared.asd_pool.is_some() {
+            router = router
+                .route("/api/code", get(list_asd_repos))
+                .route("/api/code/{repo}/prefetch", post(prefetch_asd_repo))
+                .route("/api/code/{repo}/{*path}", get(proxy_asd).post(proxy_asd));
+        }
+    } else {
+        for path in MACHINE_LOCAL_ROUTES {
+            router = router.route(path, axum::routing::any(machine_local_off));
+        }
     }
 
     // Raise the request-body limit from Axum's 2 MB default: a whole-session
@@ -1983,9 +2033,14 @@ struct HelpQuery {
 
 /// `GET /api/help?topic=<feature|phrase>[&no_proxy=true]` — on-demand
 /// instruction disclosure. No repo/session: the docs are compiled into this
-/// binary (t-005). On a local miss it proxies to the owning binary (e.g. asd).
-async fn help_lookup(Query(q): Query<HelpQuery>) -> Json<serde_json::Value> {
-    Json(crate::help::resolve(q.topic.as_deref(), !q.no_proxy))
+/// binary (t-005). On a local miss it proxies to the owning binary (e.g. asd),
+/// except on a multi-tenant Hub, which runs no other programs.
+async fn help_lookup(
+    State(hub): State<Hub>,
+    Query(q): Query<HelpQuery>,
+) -> Json<serde_json::Value> {
+    let proxy = !q.no_proxy && hub.shared.machine_local;
+    Json(crate::help::resolve(q.topic.as_deref(), proxy))
 }
 
 /// `GET /api/help/manifest` — this binary's lightweight feature index, published
@@ -7272,7 +7327,8 @@ struct DetectQuery {
     /// The caller read `cwd` itself and sends what it found in the fields
     /// below, so the hub reads nothing on its own filesystem. `ctx` always
     /// does this; without it (older clients) the hub reads `cwd` itself, which
-    /// only works when the caller is on this machine.
+    /// only works when the caller is on this machine, and a multi-tenant hub
+    /// refuses.
     #[serde(default)]
     client_read: bool,
     /// The id in the nearest `.ctxproject`.
@@ -7367,11 +7423,22 @@ where
 /// answer. Anything else means detection did not finish — `500` `error`,
 /// `503` `busy`, `504` `timeout` — and the body's `error` says why. Callers
 /// must not treat those as "no project": the directory may well have one.
+/// A multi-tenant Hub reads no directory of its own, so there a request
+/// without `client_read` is a `400` `error`.
 async fn detect_project_handler(
     s: HubState,
     Query(q): Query<DetectQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     use crate::project::DetectResult;
+    if !q.client_read && !s.hub.machine_local {
+        return detect_failure(
+            StatusCode::BAD_REQUEST,
+            "error",
+            "this Hub serves many tenants and reads no directory of its own: read the \
+             directory where it is and send what you found, with client_read=true (ctx does)"
+                .to_string(),
+        );
+    }
     let store = s.store.clone();
     let cwd = q.cwd.clone();
     let clues = q.client_read.then(|| crate::project::Clues {

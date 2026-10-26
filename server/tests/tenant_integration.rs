@@ -4,9 +4,10 @@
 //! bearer token that resolves to a tenant, loopback included, and the tenant is
 //! attached to the request: `GET /api/tenant` reports it and rate limits are
 //! keyed by it. The tenants file is re-read while the Hub runs. These oneshot
-//! tests inject `ConnectInfo` to set the peer. That logs carry the tenant is
-//! tested in `tenant_logs.rs`, in a process of its own, and each tenant's own
-//! data in `tenant_data.rs`.
+//! tests inject `ConnectInfo` to set the peer; the last ones run the Hub
+//! binary. That logs carry the tenant is tested in `tenant_logs.rs`, in a
+//! process of its own, each tenant's own data in `tenant_data.rs`, and that
+//! nothing reaches the Hub's machine in `tenant_machine_local.rs`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -274,41 +275,144 @@ async fn rate_limits_are_per_tenant_and_spare_no_one_on_loopback() {
     assert_eq!(status, StatusCode::OK);
 }
 
-/// The Hub binary checks a tenants file but won't serve with one until it can
-/// turn off the features that read its own machine's disk.
+/// `ctxone-hub` with `args`, its environment cleared of the settings these
+/// tests mustn't inherit and `HOME` set to `home`.
+fn hub_command(args: &[&str], home: &std::path::Path) -> std::process::Command {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_ctxone-hub"));
+    command.args(args).env("HOME", home);
+    for var in [
+        "CTXONE_TENANTS_FILE",
+        "CTXONE_AUTH_TOKEN",
+        "CTXONE_AUTH_TOKEN_FILE",
+        "CTXONE_CTX_BINARY",
+        "CTXONE_ASD_SERVE_BINARY",
+        "CTXONE_PG_POOL_SIZE",
+        "DATABASE_URL",
+    ] {
+        command.env_remove(var);
+    }
+    command
+}
+
+/// The Hub binary refuses, before it starts, a tenants file it can't read and
+/// the settings that can't apply to tenants.
 #[test]
-fn the_hub_binary_checks_a_tenants_file_but_doesnt_serve_it_yet() {
+fn the_hub_binary_refuses_what_cant_apply_to_tenants() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("tenants");
-    let hub = |args: &[&str]| {
-        std::process::Command::new(env!("CARGO_BIN_EXE_ctxone-hub"))
-            .args(args)
-            .env("HOME", dir.path())
-            .env_remove("CTXONE_TENANTS_FILE")
-            .env_remove("CTXONE_AUTH_TOKEN")
-            .env_remove("CTXONE_AUTH_TOKEN_FILE")
-            .output()
-            .expect("run ctxone-hub")
-    };
-    let p = path.to_str().unwrap();
-
     std::fs::write(&path, line("alice", "a") + &line("bob", "b")).unwrap();
-    let out = hub(&["--http", "--tenants-file", p]);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(64), "{stderr}");
-    assert!(
-        stderr.contains("is valid (2 tenants, 2 tokens)"),
-        "{stderr}"
+    let p = path.to_str().unwrap();
+    let refused = |args: &[&str], code: i32, why: &str| {
+        let out = hub_command(args, dir.path())
+            .output()
+            .expect("run ctxone-hub");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(code), "{args:?}: {stderr}");
+        assert!(stderr.contains(why), "{args:?}: {stderr}");
+    };
+    let memory = ["--http", "--storage", "memory", "--tenants-file", p];
+    let with = |extra: &[&'static str]| [&memory[..], extra].concat();
+
+    refused(
+        &["--tenants-file", p, "--storage", "memory"],
+        64,
+        "needs --http",
     );
-    assert!(stderr.contains("Not starting"), "{stderr}");
+    refused(&["--http", "--tenants-file", p], 64, "needs Postgres");
+    refused(&with(&["--auth-token", "x"]), 64, "replaces --auth-token");
+    refused(&with(&["--tenant", "acme"]), 64, "replaces --tenant");
+    refused(&with(&["--lens"]), 64, "can't serve Lens");
+    refused(&with(&["--asd-url", "app=http://127.0.0.1:9"]), 64, "ASD");
+    refused(&with(&["--asd-path", "app=/tmp/app.db"]), 64, "ASD");
+    refused(&with(&["--ctx-binary", "ctx"]), 64, "session sync");
+    refused(&with(&["--pg-pool-size", "0"]), 64, "--pg-pool-size");
 
     std::fs::write(&path, "Alice abc\n").unwrap();
-    let out = hub(&["--http", "--tenants-file", p]);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(66), "{stderr}");
-    assert!(stderr.contains("line 1"), "{stderr}");
+    refused(&memory, 66, "line 1");
+}
 
-    let out = hub(&["--http", "--tenants-file", p, "--auth-token", "x"]);
-    assert_eq!(out.status.code(), Some(64));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("replaces --auth-token"));
+/// A Hub process, killed when the test ends however it ends: a failed
+/// assertion mustn't leave it serving.
+struct Running(std::process::Child);
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// A port nothing is listening on, probably still free when the Hub binds it.
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// The Hub binary serves a tenants file, here with tenants in memory, and has
+/// none of what acts on its own machine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_hub_binary_serves_a_tenants_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tenants");
+    std::fs::write(&path, line("alice", "alice-token")).unwrap();
+    let port = free_port().to_string();
+    let log = std::fs::File::create(dir.path().join("hub.log")).unwrap();
+    let args = [
+        "--http",
+        "--storage",
+        "memory",
+        "--port",
+        &port,
+        "--tenants-file",
+        path.to_str().unwrap(),
+    ];
+    let mut hub = Running(
+        hub_command(&args, dir.path())
+            .stdout(std::process::Stdio::null())
+            .stderr(log)
+            .spawn()
+            .expect("start ctxone-hub"),
+    );
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+    let get = |uri: &str, token: Option<&str>| {
+        let mut req = client.get(format!("{base}{uri}"));
+        if let Some(token) = token {
+            req = req.bearer_auth(token);
+        }
+        req.send()
+    };
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        match get("/api/tenant", Some("alice-token")).await {
+            Ok(resp) => {
+                assert_eq!(resp.status(), StatusCode::OK);
+                assert_eq!(resp.text().await.unwrap(), r#"{"tenant":"alice"}"#);
+                break;
+            }
+            Err(e) => {
+                if let Some(status) = hub.0.try_wait().unwrap() {
+                    let log = std::fs::read_to_string(dir.path().join("hub.log")).unwrap();
+                    panic!("the hub exited ({status}): {log}");
+                }
+                assert!(std::time::Instant::now() < deadline, "no hub: {e}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+    let status = get("/api/health", None).await.unwrap().status();
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let resp = get("/api/sessions/autosync", Some("alice-token"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    drop(hub);
+    let log = std::fs::read_to_string(dir.path().join("hub.log")).unwrap();
+    assert!(log.contains("multi-tenant mode"), "{log}");
+    assert!(log.contains("off in multi-tenant mode"), "{log}");
 }
