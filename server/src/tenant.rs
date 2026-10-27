@@ -4,7 +4,8 @@
 //! A [`TenantResolver`] maps a token to a [`Tenant`]. The Hub ships one, the
 //! [`TenantsFile`] (`--tenants-file`): lines of `<tenant> <sha256 of a token>`,
 //! re-read every second so tenants and tokens change without a restart. An
-//! account service can supply its own resolver.
+//! account service can supply its own resolver. `ctxone-hub tenant` edits the
+//! file ([`crate::tenant_admin`]).
 //!
 //! The auth middleware in [`crate::http`] resolves every request's token and
 //! attaches the `Tenant` to the request, so nothing downstream chooses one.
@@ -123,6 +124,16 @@ pub trait TenantResolver: Send + Sync + std::fmt::Debug {
     /// The tenant `token` belongs to, or `None` when no tenant holds it (the
     /// request gets a 401).
     fn resolve<'a>(&'a self, token: &'a str) -> Resolution<'a>;
+
+    /// Whether `tenant` still holds a token this resolver accepts. The Hub asks
+    /// about each open tenant every upkeep pass and closes one that doesn't,
+    /// after flushing it, so a disabled or deleted tenant leaves the Hub's
+    /// memory within a pass. A resolver that can't tell answers `true`, and its
+    /// tenants close when they're idle.
+    fn admits(&self, tenant: &Tenant) -> bool {
+        let _ = tenant;
+        true
+    }
 }
 
 /// How often a [`TenantsFile`] is re-read.
@@ -131,7 +142,9 @@ const TENANTS_FILE_RELOAD: std::time::Duration = std::time::Duration::from_secs(
 /// Tenants and their tokens, read from a file of `<tenant> <sha256 of a
 /// token>` lines. A tenant may have several lines (one per device, say), and
 /// blank lines and `#` comments are ignored. Only hashes are stored, so a
-/// token is shown once, when it's made.
+/// token is shown once, when it's made. A line `disabled <tenant> <sha256 of a
+/// token>` keeps a token and refuses it, which is how `ctxone-hub tenant
+/// disable` turns a tenant away and keeps its data.
 ///
 /// The file is re-read at most once a second, so adding, rotating or removing
 /// a tenant needs no restart. Opening refuses a file with a bad line. A later
@@ -157,9 +170,13 @@ struct TenantsFileState {
     read_at: std::time::Instant,
 }
 
-struct Entry {
-    hash: TokenHash,
-    tenant: Tenant,
+/// A line of a tenants file that holds a token.
+#[derive(Clone)]
+pub(crate) struct Entry {
+    pub(crate) hash: TokenHash,
+    pub(crate) tenant: Tenant,
+    /// A `disabled` line: the token is kept, and refused.
+    pub(crate) disabled: bool,
 }
 
 /// A line of a tenants file that can't be used, and why.
@@ -244,20 +261,31 @@ impl TenantsFile {
         let presented = TokenHash::of(token);
         let mut found = None;
         for entry in self.entries().iter() {
-            if entry.hash.ct_eq(&presented) {
+            // Every hash is compared, disabled or not, so the time taken
+            // doesn't tell a disabled token from an unknown one.
+            if entry.hash.ct_eq(&presented) && !entry.disabled {
                 found = Some(entry.tenant.clone());
             }
         }
         found
     }
 
-    /// How many tenants the file lists, and how many tokens they hold.
+    /// How many tenants hold a token the file accepts, and how many such
+    /// tokens there are. Disabled tokens aren't counted.
     pub fn counts(&self) -> (usize, usize) {
         let entries = self.entries();
-        let mut tenants: Vec<&Tenant> = entries.iter().map(|e| &e.tenant).collect();
+        let accepted: Vec<&Entry> = entries.iter().filter(|e| !e.disabled).collect();
+        let mut tenants: Vec<&Tenant> = accepted.iter().map(|e| &e.tenant).collect();
         tenants.sort();
         tenants.dedup();
-        (tenants.len(), entries.len())
+        (tenants.len(), accepted.len())
+    }
+
+    /// Whether `tenant` holds a token the file accepts.
+    pub fn admits(&self, tenant: &Tenant) -> bool {
+        self.entries()
+            .iter()
+            .any(|e| !e.disabled && e.tenant == *tenant)
     }
 
     fn entries(&self) -> Arc<[Entry]> {
@@ -296,6 +324,10 @@ impl TenantResolver for TenantsFile {
     fn resolve<'a>(&'a self, token: &'a str) -> Resolution<'a> {
         Box::pin(std::future::ready(Ok(self.lookup(token))))
     }
+
+    fn admits(&self, tenant: &Tenant) -> bool {
+        TenantsFile::admits(self, tenant)
+    }
 }
 
 fn read(path: &Path) -> Result<String, TenantsFileError> {
@@ -305,46 +337,57 @@ fn read(path: &Path) -> Result<String, TenantsFileError> {
     })
 }
 
+/// The word that starts a disabled token's line.
+pub(crate) const DISABLED: &str = "disabled";
+
+/// Read one line of a tenants file: `None` for a blank line or a comment,
+/// otherwise its token or why the line can't be used.
+pub(crate) fn parse_line(raw: &str) -> Option<Result<Entry, String>> {
+    let content = raw.trim();
+    if content.is_empty() || content.starts_with('#') {
+        return None;
+    }
+    let fields: Vec<&str> = content.split_whitespace().collect();
+    let (name, hash, disabled) = match fields[..] {
+        [name, hash] => (name, hash, false),
+        [DISABLED, name, hash] => (name, hash, true),
+        _ => {
+            return Some(Err(
+                "expected `<tenant> <sha256 of a token>` or `disabled <tenant> <sha256 of a token>`"
+                    .into(),
+            ));
+        }
+    };
+    let tenant = match Tenant::new(name) {
+        Ok(t) => t,
+        Err(e) => return Some(Err(e.to_string())),
+    };
+    let Some(hash) = TokenHash::from_hex(hash) else {
+        return Some(Err("the token hash isn't 64 hex digits (a SHA-256)".into()));
+    };
+    Some(Ok(Entry {
+        hash,
+        tenant,
+        disabled,
+    }))
+}
+
 /// The usable entries of a tenants file, and the lines that aren't.
-fn parse(text: &str) -> (Vec<Entry>, Vec<LineProblem>) {
+pub(crate) fn parse(text: &str) -> (Vec<Entry>, Vec<LineProblem>) {
     let mut lines: Vec<(usize, Entry)> = Vec::new();
     let mut problems = Vec::new();
     for (i, raw) in text.lines().enumerate() {
         let line = i + 1;
-        let content = raw.trim();
-        if content.is_empty() || content.starts_with('#') {
-            continue;
+        match parse_line(raw) {
+            None => {}
+            Some(Ok(entry)) => lines.push((line, entry)),
+            Some(Err(reason)) => problems.push(LineProblem { line, reason }),
         }
-        let mut fields = content.split_whitespace();
-        let (Some(name), Some(hash), None) = (fields.next(), fields.next(), fields.next()) else {
-            problems.push(LineProblem {
-                line,
-                reason: "expected `<tenant> <sha256 of a token>`".into(),
-            });
-            continue;
-        };
-        let tenant = match Tenant::new(name) {
-            Ok(t) => t,
-            Err(e) => {
-                problems.push(LineProblem {
-                    line,
-                    reason: e.to_string(),
-                });
-                continue;
-            }
-        };
-        let Some(hash) = TokenHash::from_hex(hash) else {
-            problems.push(LineProblem {
-                line,
-                reason: "the token hash isn't 64 hex digits (a SHA-256)".into(),
-            });
-            continue;
-        };
-        lines.push((line, Entry { hash, tenant }));
     }
 
     // A hash listed for two tenants would give one token both: refuse it for
-    // each. The same hash twice for one tenant is harmless; keep one.
+    // each, whether or not either line is disabled. The same hash twice for
+    // one tenant is harmless; keep one, refused if either line is disabled.
     let mut tenants_by_hash: HashMap<TokenHash, Vec<(usize, &Tenant)>> = HashMap::new();
     for (line, entry) in &lines {
         tenants_by_hash
@@ -374,12 +417,20 @@ fn parse(text: &str) -> (Vec<Entry>, Vec<LineProblem>) {
     problems.extend(ambiguous);
     problems.sort_by_key(|p| p.line);
 
-    let mut seen = std::collections::HashSet::new();
-    let entries = lines
-        .into_iter()
-        .filter(|(line, entry)| !refused.contains(line) && seen.insert(entry.hash))
-        .map(|(_, entry)| entry)
-        .collect();
+    let mut entries: Vec<Entry> = Vec::new();
+    let mut index: HashMap<TokenHash, usize> = HashMap::new();
+    for (line, entry) in lines {
+        if refused.contains(&line) {
+            continue;
+        }
+        match index.get(&entry.hash) {
+            Some(&i) => entries[i].disabled |= entry.disabled,
+            None => {
+                index.insert(entry.hash, entries.len());
+                entries.push(entry);
+            }
+        }
+    }
     (entries, problems)
 }
 
@@ -465,5 +516,73 @@ mod tests {
         // alice's own token, listed twice, is kept once.
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].tenant.as_str(), "alice");
+    }
+
+    fn file_with(text: &str) -> (tempfile::TempDir, TenantsFile) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tenants");
+        std::fs::write(&path, text).unwrap();
+        let file = TenantsFile::open(&path).unwrap();
+        (dir, file)
+    }
+
+    #[test]
+    fn a_disabled_line_keeps_its_token_and_refuses_it() {
+        let text = format!(
+            "alice {}\ndisabled bob {}\ncarol {}\ndisabled carol {}\n",
+            hash("a"),
+            hash("b"),
+            hash("c1"),
+            hash("c2")
+        );
+        let (_dir, file) = file_with(&text);
+        assert_eq!(file.lookup("a").unwrap().as_str(), "alice");
+        assert_eq!(file.lookup("b"), None);
+        assert_eq!(file.lookup("c1").unwrap().as_str(), "carol");
+        assert_eq!(file.lookup("c2"), None);
+        // Accepted tenants and tokens only.
+        assert_eq!(file.counts(), (2, 2));
+        let admits = |name| file.admits(&Tenant::new(name).unwrap());
+        assert!(admits("alice"));
+        assert!(!admits("bob"));
+        assert!(admits("carol"));
+        assert!(!admits("dave"));
+    }
+
+    #[test]
+    fn a_hash_shared_with_a_disabled_line_goes_to_neither() {
+        let shared = hash("shared");
+        let text = format!("alice {shared}\ndisabled bob {shared}\n");
+        let (entries, problems) = parse(&text);
+        let lines: Vec<usize> = problems.iter().map(|p| p.line).collect();
+        assert_eq!(lines, [1, 2]);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn a_token_listed_twice_is_refused_if_either_line_is_disabled() {
+        let text = format!("alice {}\ndisabled alice {}\n", hash("a"), hash("a"));
+        let (entries, problems) = parse(&text);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].disabled);
+    }
+
+    #[test]
+    fn disabled_lines_are_checked_like_the_others() {
+        let text = format!(
+            "disabled Bob {}\ndisabled carol nope\ndisabled dave\ndisabled erin {} more\n",
+            hash("b"),
+            hash("e")
+        );
+        let (entries, problems) = parse(&text);
+        let lines: Vec<usize> = problems.iter().map(|p| p.line).collect();
+        assert_eq!(lines, [1, 2, 3, 4]);
+        assert!(entries.is_empty());
+        // `disabled` alone is a tenant name like any other.
+        let (entries, problems) = parse(&format!("disabled {}\n", hash("d")));
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(entries[0].tenant.as_str(), "disabled");
+        assert!(!entries[0].disabled);
     }
 }

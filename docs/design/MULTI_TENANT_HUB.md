@@ -2,9 +2,10 @@
 
 **Status:** In progress. AgentStateGraph's shared pool (t-001), tenant identity
 (t-002), per-tenant state (t-003), background work with the machine-local
-features off (t-004), and isolation tests across every route and MCP tool
-(t-005) are in, so `ctxone-hub --http --tenants-file` serves. Next: tenant
-administration (t-006) and Lens (t-007).
+features off (t-004), isolation tests across every route and MCP tool (t-005)
+and tenant administration (t-006) are in, so `ctxone-hub --http
+--tenants-file` serves and `ctxone-hub tenant` manages its tenants. Next: Lens
+(t-007).
 **Plan:** CTX plan `ctx-multi-tenant-hub` (tasks listed at the end).
 **Goal:** One `ctxone-hub` process serves many users ("tenants"), each with
 their own memory, plans, sessions and project registry, on one Postgres
@@ -155,9 +156,9 @@ service.
 The statistics flush loop walks the open tenants every 30 seconds. Evicting a
 tenant and shutting down flush it too.
 
-As built: `TenantCache::spawn_upkeep` closes the tenants idle for 30 minutes,
-then flushes the rest, every 30 seconds. The binary flushes every open tenant
-after the server stops.
+As built: every 30 seconds, `TenantCache::spawn_upkeep` closes the tenants
+none of whose tokens is accepted any more and those idle for 30 minutes, then
+flushes the rest. The binary flushes every open tenant after the server stops.
 
 The main graph's size refresher publishes one number for the whole process, which
 fits a single-tenant Hub. A multi-tenant Hub runs none, so each session computes
@@ -176,6 +177,37 @@ its own tenant's, throttled.
 | `purge <name>` | Delete every row for the tenant, in AgentStateGraph's tables and the `ctxone_*` tables. Asks for confirmation |
 
 `export <name>` follows with AgentStateGraph's store export.
+
+As built (`server/src/tenant_admin.rs`):
+
+- A disabled token is a line `disabled <tenant> <sha256 of a token>`: kept, and
+  refused. The duplicate-hash check counts it, so a hash listed for another
+  tenant is refused for both.
+- `add` and `rotate` print the token alone on stdout, `ctx_` and 64 hex digits
+  from the system's random source, and everything else on stderr. `add`
+  refuses a tenant the file has; `rotate` refuses a disabled one.
+- Edits keep comments and other lines, wait for each other on `<file>.lock`,
+  and replace the file with one rename (through a symlink, to its target). A
+  new file is `0600`; an existing one keeps its permissions. A file with a line
+  a Hub can't use is left alone until it's fixed, and only `add` makes a
+  missing file.
+- A Hub closes a tenant once no token of its is accepted, at the next upkeep
+  pass and after flushing it (`TenantResolver::admits`,
+  `TenantCache::close_refused`). Purge depends on this: a flush writes every
+  session's statistics, so a Hub still holding a purged tenant open would
+  write its `ctxone_sessions` rows back, and keep serving its memory if the
+  name were added again.
+- `purge` takes only a tenant the file lists with every token disabled, so a
+  mistyped `--tenants-file` can't delete a tenant in use, and asks for the
+  tenant's name unless given `--yes`. Then it waits 61 seconds (two upkeep passes and a
+  re-read of the file), so every Hub has closed the tenant, and checks again
+  that no token was enabled meanwhile. It deletes in one transaction, holding
+  the tenant's open lock, from a fixed list of tables: AgentStateGraph's, then
+  `ctxone_project_paths` before the `ctxone_projects` they refer to, then
+  `ctxone_sessions`. A table with a `tenant_id` column that isn't on the list
+  stops it before anything is deleted, so a schema the Hub doesn't know can't
+  keep a tenant's rows, and a test checks the list against the schema. The
+  tenant's lines leave the file last.
 
 ## Isolation
 
