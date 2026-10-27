@@ -129,7 +129,10 @@ impl McpHttpState {
     /// and `session_id`. The repo is forked once here; the factory clones the
     /// `Arc` and the shared session for each new MCP session.
     fn build_service(&self, tenant: &TenantState, ns: &str, session_id: &str) -> McpService {
-        let repo = match Namespace::new(ns) {
+        // The repo and the name of the workspace it actually serves, which is
+        // "default" whenever the fork falls back to the root repo. Tools report
+        // that name, and plan closes seal their epochs under it.
+        let (repo, served) = match Namespace::new(ns) {
             Ok(namespace) if ns != Namespace::DEFAULT => {
                 // Fork + init so the namespace has a `main` branch, mirroring the
                 // stdio path. `init()` is idempotent; a shared daemon must
@@ -138,16 +141,17 @@ impl McpHttpState {
                 // root repo so a bad namespace can't wedge the session.
                 let forked = tenant.repo.fork_namespace(namespace);
                 match forked.init() {
-                    Ok(_) => Arc::new(forked),
+                    Ok(_) => (Arc::new(forked), ns),
                     Err(e) => {
                         tracing::warn!(namespace = ns, error = %e, "namespace init failed; serving MCP in default namespace");
-                        tenant.repo.clone()
+                        (tenant.repo.clone(), Namespace::DEFAULT)
                     }
                 }
             }
             // "default" or (defensively) an invalid name → root repo.
-            _ => tenant.repo.clone(),
+            _ => (tenant.repo.clone(), Namespace::DEFAULT),
         };
+        let served = served.to_string();
         let agent_id = self.config.agent_id.clone();
         let asd_repos = (*self.config.asd_repos).clone();
         let asd_pool = self.config.asd_pool.clone();
@@ -167,6 +171,7 @@ impl McpHttpState {
                 agent_id.clone(),
                 asd_repos.clone(),
             )
+            .with_namespace(served.clone())
             // HTTP MCP callers select their workspace via ?namespace= / the
             // X-CTXone-Namespace header (baked in by `ctx init --transport
             // http`), so treat it as explicit — the fallback-default write
