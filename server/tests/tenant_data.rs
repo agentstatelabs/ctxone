@@ -19,6 +19,7 @@ use tower::ServiceExt;
 
 use ctxone_hub::http;
 use ctxone_hub::tenant::{Tenant, TenantsFile, TokenHash};
+use ctxone_hub::tenant_admin::Roster;
 use ctxone_hub::tenant_cache::{MemoryTenants, OpenedTenant, TenantCache, TenantOpener};
 
 const ALICE: &str = "alice-token-3b8e";
@@ -27,6 +28,8 @@ const BOB: &str = "bob-token-71c2";
 struct TestHub {
     app: axum::Router,
     data: TenantCache,
+    /// The tenants file, re-read on every lookup.
+    file: TenantsFile,
     _dir: tempfile::TempDir,
 }
 
@@ -37,6 +40,7 @@ fn hub(opener: Arc<dyn TenantOpener>, mcp_http: bool) -> TestHub {
     let lines = [("alice", ALICE), ("bob", BOB)]
         .map(|(t, token)| format!("{t} {}\n", TokenHash::of(token).to_hex()));
     std::fs::write(&path, lines.concat()).unwrap();
+    let file = TenantsFile::open_with_reload(&path, Duration::ZERO).unwrap();
     let data = TenantCache::new(opener);
     let app = http::multi_tenant_router(
         http::HubConfig {
@@ -45,13 +49,14 @@ fn hub(opener: Arc<dyn TenantOpener>, mcp_http: bool) -> TestHub {
             ..Default::default()
         },
         http::MultiTenant {
-            resolver: Arc::new(TenantsFile::open(&path).unwrap()),
+            resolver: Arc::new(file.clone()),
             data: data.clone(),
         },
     );
     TestHub {
         app,
         data,
+        file,
         _dir: dir,
     }
 }
@@ -181,9 +186,11 @@ async fn idle_tenants_close_in_the_background() {
     let hub = memory_hub();
     remember(&hub.app, ALICE, "Alice's fact before the upkeep").await;
     let held = hub.data.get(&tenant("bob")).await.unwrap();
-    let upkeep = hub
-        .data
-        .spawn_upkeep(Duration::from_millis(20), Duration::ZERO);
+    let upkeep = hub.data.spawn_upkeep(
+        Duration::from_millis(20),
+        Duration::ZERO,
+        Arc::new(hub.file.clone()),
+    );
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while hub.data.open_tenants() != [tenant("bob")] {
@@ -198,6 +205,60 @@ async fn idle_tenants_close_in_the_background() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(hub.data.open_tenants(), [tenant("bob")]);
     drop(held);
+    upkeep.abort();
+}
+
+#[tokio::test]
+async fn a_disabled_tenant_is_refused_and_closed_and_keeps_its_data() {
+    let hub = memory_hub();
+    remember(&hub.app, ALICE, "Alice's fact from before disabling").await;
+    remember(&hub.app, BOB, "Bob's fact").await;
+    let disable = |disabled| {
+        Roster::edit(hub.file.path(), |r| {
+            r.set_disabled(&tenant("alice"), disabled)
+        })
+        .unwrap()
+    };
+
+    assert_eq!(disable(true), 1);
+    let req = request("GET", "/api/memory/recall?topic=fact", ALICE, None);
+    assert_eq!(call(&hub.app, req).await.0, StatusCode::UNAUTHORIZED);
+    // Closed at the next pass though not idle; bob stays open.
+    assert_eq!(hub.data.close_refused(&hub.file), [tenant("alice")]);
+    assert_eq!(hub.data.open_tenants(), [tenant("bob")]);
+
+    assert_eq!(disable(false), 1);
+    assert!(
+        recall(&hub.app, ALICE, "fact")
+            .await
+            .contains("Alice's fact from before disabling")
+    );
+}
+
+#[tokio::test]
+async fn the_upkeep_closes_a_tenant_whose_tokens_are_refused() {
+    let hub = memory_hub();
+    remember(&hub.app, ALICE, "Alice's fact").await;
+    remember(&hub.app, BOB, "Bob's fact").await;
+    // Never idle long enough to close for that.
+    let upkeep = hub.data.spawn_upkeep(
+        Duration::from_millis(20),
+        Duration::from_secs(3600),
+        Arc::new(hub.file.clone()),
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(hub.data.open_tenants(), [tenant("alice"), tenant("bob")]);
+
+    Roster::edit(hub.file.path(), |r| Ok(r.remove(&tenant("bob")))).unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while hub.data.open_tenants() != [tenant("alice")] {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "bob is still open: {:?}",
+            hub.data.open_tenants()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     upkeep.abort();
 }
 

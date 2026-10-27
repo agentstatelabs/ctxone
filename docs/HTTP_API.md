@@ -1059,9 +1059,18 @@ yet. Every tenant shares one connection pool of `--pg-pool-size` connections
 (or `CTXONE_PG_POOL_SIZE`; default 32).
 
 - **The tenants file** has a line per token: `<tenant> <sha256 of the token>`,
-  the hash as 64 hex digits. A tenant may have several lines. Blank lines and
-  `#` comments are ignored. Tenant names are 1 to 63 of `a-z`, `0-9` and `-`.
-  Only hashes are stored, so the file doesn't reveal a token.
+  the hash as 64 hex digits. A tenant may have several lines. A line
+  `disabled <tenant> <sha256 of the token>` keeps a token and refuses it. Blank
+  lines and `#` comments are ignored. Tenant names are 1 to 63 of `a-z`, `0-9`
+  and `-`. Only hashes are stored, so the file doesn't reveal a token.
+- **`ctxone-hub tenant`** edits the file (`--tenants-file`, or
+  `CTXONE_TENANTS_FILE`): `add <name>` creates a tenant and prints its token
+  once, `list` shows the tenants and their tokens, `rotate <name>` replaces a
+  tenant's tokens, and `disable <name>` and `enable <name>` refuse or accept
+  them, keeping the tenant's data. `purge <name>` deletes the data of a tenant
+  the file lists as disabled from the database (`--database-url`, or
+  `DATABASE_URL`), and then its tokens. It asks for the tenant's name first unless given `--yes`, and waits a
+  minute so that every Hub has closed the tenant.
 - **It's re-read every second,** so adding a tenant or rotating a token needs no
   restart. A file with a bad line stops the hub at startup. Later, a bad line is
   skipped with a warning and the rest apply, so a typo locks out only that line.
@@ -1080,9 +1089,10 @@ yet. Every tenant shares one connection pool of `--pg-pool-size` connections
   request that needs its data, which creates the tenant if it's new and brings
   its schema up to date. If it can't be opened, the request gets a **503** and
   the next one tries again. `GET /api/health` needs no data and opens nothing.
-- **A tenant closes when it's idle,** 30 minutes after its last request. Its
-  session statistics are saved every 30 seconds while it's open, when it closes
-  and when the Hub stops.
+- **A tenant closes when it's idle,** 30 minutes after its last request, and
+  within 30 seconds once none of its tokens is accepted. Its session statistics
+  are saved every 30 seconds while it's open, when it closes and when the Hub
+  stops.
 - **Nothing acts on the Hub's own machine,** since the tenants are elsewhere.
   These answer **404**: `POST /api/sessions/sync`, `GET
   /api/sessions/discoverable`, `POST /api/sessions/import`, `ignore` and

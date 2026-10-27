@@ -52,6 +52,7 @@ struct TestHub {
     data: TenantCache,
     /// The tenants and their tokens.
     tenants: Vec<(Tenant, String)>,
+    file: TenantsFile,
     _dir: tempfile::TempDir,
 }
 
@@ -77,10 +78,11 @@ async fn hub(url: &str, count: usize, pool_size: usize) -> TestHub {
         .map(|(t, token)| format!("{t} {}\n", TokenHash::of(token).to_hex()))
         .collect();
     std::fs::write(&path, lines).unwrap();
+    let file = TenantsFile::open(&path).unwrap();
     let app = http::multi_tenant_router(
         http::HubConfig::default(),
         http::MultiTenant {
-            resolver: Arc::new(TenantsFile::open(&path).unwrap()),
+            resolver: Arc::new(file.clone()),
             data: data.clone(),
         },
     );
@@ -88,6 +90,7 @@ async fn hub(url: &str, count: usize, pool_size: usize) -> TestHub {
         app,
         data,
         tenants,
+        file,
         _dir: dir,
     }
 }
@@ -231,9 +234,11 @@ async fn the_upkeep_flushes_open_tenants_statistics() {
 
     let db = other_hub(&url).await;
     assert!(!has_stats_row(&db, tenant, "flushed-session").await);
-    let upkeep = hub
-        .data
-        .spawn_upkeep(Duration::from_millis(100), Duration::from_secs(3600));
+    let upkeep = hub.data.spawn_upkeep(
+        Duration::from_millis(100),
+        Duration::from_secs(3600),
+        Arc::new(hub.file.clone()),
+    );
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     while !has_stats_row(&db, tenant, "flushed-session").await {
         assert!(

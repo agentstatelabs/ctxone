@@ -5,9 +5,9 @@
 //! its session statistics and its MCP services. A single-tenant Hub has one,
 //! made at startup. A multi-tenant Hub keeps a [`TenantCache`]: a tenant opens
 //! on its first request, through a [`TenantOpener`], and closes when
-//! [`TenantCache::evict_idle`] finds it idle. [`TenantCache::spawn_upkeep`]
-//! does that, and flushes the open tenants' session statistics, in the
-//! background.
+//! [`TenantCache::evict_idle`] finds it idle or [`TenantCache::close_refused`]
+//! finds its tokens refused. [`TenantCache::spawn_upkeep`] does both, and
+//! flushes the open tenants' session statistics, in the background.
 //!
 //! Handlers reach data only through the request's `TenantState` (`HubState` in
 //! [`crate::http`] is built from it), so on a multi-tenant Hub every path to a
@@ -25,7 +25,7 @@ use tracing::{info, warn};
 
 use crate::hub_store::{HubStore, PgStore, pg_error};
 use crate::memory_tools::{RecallCache, SessionRegistry};
-use crate::tenant::Tenant;
+use crate::tenant::{Tenant, TenantResolver};
 
 /// One tenant's data, and what the Hub keeps for it.
 pub struct TenantState {
@@ -230,17 +230,45 @@ impl TenantCache {
     /// stays open, and so does one a request reached while it flushed.
     /// Blocking: flushing writes to the tenants' stores.
     pub fn evict_idle(&self, idle: Duration) -> Vec<Tenant> {
-        let candidates: Vec<(Tenant, Arc<TenantState>, u64)> = self
+        self.close_where(|_, state| state.idle_for() >= idle, "idle")
+    }
+
+    /// Close the tenants `resolver` no longer admits, after flushing their
+    /// session statistics, and return them, sorted. A disabled or deleted
+    /// tenant can make no more requests, so this is the last write the Hub
+    /// makes for it, and `ctxone-hub tenant purge` waits for it. A request
+    /// that got in before keeps its tenant open until the next pass.
+    /// Blocking, like [`evict_idle`](Self::evict_idle).
+    pub fn close_refused(&self, resolver: &dyn TenantResolver) -> Vec<Tenant> {
+        self.close_where(
+            |tenant, _| !resolver.admits(tenant),
+            "its tokens are refused",
+        )
+    }
+
+    /// Close the open tenants `close` picks that no request is using.
+    fn close_where(
+        &self,
+        close: impl Fn(&Tenant, &TenantState) -> bool,
+        why: &'static str,
+    ) -> Vec<Tenant> {
+        let open: Vec<(Tenant, Arc<TenantState>, u64)> = self
             .inner
             .open
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
-            .filter(|(_, state)| Arc::strong_count(state) == 1 && state.idle_for() >= idle)
             .map(|(tenant, state)| {
                 let uses = state.uses.load(Ordering::Relaxed);
                 (tenant.clone(), state.clone(), uses)
             })
+            .collect();
+        // `close` runs without the lock, so a resolver that takes its time
+        // doesn't hold up tenants opening meanwhile. Held only by the cache
+        // and `open`, a tenant has no request using it.
+        let candidates: Vec<(Tenant, Arc<TenantState>, u64)> = open
+            .into_iter()
+            .filter(|(tenant, state, _)| Arc::strong_count(state) == 2 && close(tenant, state))
             .collect();
         let mut evicted = Vec::new();
         for (tenant, state, uses) in candidates {
@@ -259,7 +287,7 @@ impl TenantCache {
             });
             if untouched {
                 open.remove(&tenant);
-                info!(tenant = %tenant, "tenant closed after being idle");
+                info!(tenant = %tenant, why, "tenant closed");
                 evicted.push(tenant);
             }
         }
@@ -267,10 +295,16 @@ impl TenantCache {
         evicted
     }
 
-    /// Every `every`, close the tenants idle for `idle` and flush the session
-    /// statistics of the rest, on a blocking thread. Runs until the runtime
-    /// stops; flushing when the Hub stops is the caller's.
-    pub fn spawn_upkeep(&self, every: Duration, idle: Duration) -> tokio::task::JoinHandle<()> {
+    /// Every `every`, close the tenants `resolver` no longer admits and those
+    /// idle for `idle`, and flush the session statistics of the rest, on a
+    /// blocking thread. Runs until the runtime stops; flushing when the Hub
+    /// stops is the caller's.
+    pub fn spawn_upkeep(
+        &self,
+        every: Duration,
+        idle: Duration,
+        resolver: Arc<dyn TenantResolver>,
+    ) -> tokio::task::JoinHandle<()> {
         let cache = self.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(every);
@@ -279,8 +313,10 @@ impl TenantCache {
             loop {
                 interval.tick().await;
                 let cache = cache.clone();
+                let resolver = resolver.clone();
                 // Closing a tenant flushes it, so flush what's still open after.
                 let pass = tokio::task::spawn_blocking(move || {
+                    cache.close_refused(resolver.as_ref());
                     cache.evict_idle(idle);
                     cache.flush_all();
                 });

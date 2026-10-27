@@ -7,6 +7,7 @@
 //! Options:                    ctxone-hub --storage memory
 //!                             ctxone-hub --path /data/ctxone.db
 //! Many tenants, one database: ctxone-hub --http --tenants-file <PATH> --database-url <URL>
+//! Their tenants and tokens:   ctxone-hub tenant add|list|rotate|disable|enable|purge
 //!
 //! Default sqlite path is `./target/ctxone.db` — that's the natural
 //! ephemeral zone for cargo workspaces. Production deployments should
@@ -23,7 +24,7 @@
 //! `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
 
 use ctxone_hub::{
-    asd_pool, backup, http, lockfile, memory_tools, migrations, tenant, tenant_cache,
+    asd_pool, backup, http, lockfile, memory_tools, migrations, tenant, tenant_admin, tenant_cache,
 };
 
 use std::sync::Arc;
@@ -94,6 +95,11 @@ async fn shutdown_signal() {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
+    // `ctxone-hub tenant ...` edits a multi-tenant Hub's tenants; it serves
+    // nothing.
+    if args.get(1).map(String::as_str) == Some("tenant") {
+        std::process::exit(tenant_admin::main(&args[2..]));
+    }
 
     let mut storage_type = "sqlite";
     // Default lives under target/ so it shares the cargo "ephemeral
@@ -437,6 +443,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 eprintln!(
                     "                           acts on this machine (ASD repos, session sync, backups)."
+                );
+                eprintln!(
+                    "                           `ctxone-hub tenant --help` adds, disables and purges tenants."
                 );
                 eprintln!(
                     "      --require-auth-on-loopback  Loopback peers must send the token too, for a proxy or"
@@ -1483,14 +1492,19 @@ fn serve_tenants(run: TenantsRun) -> Result<(), Box<dyn std::error::Error>> {
                 strict_origin: run.strict_origin,
                 ..Default::default()
             };
+            let resolver: Arc<dyn tenant::TenantResolver> = Arc::new(run.file);
             let app = http::multi_tenant_router(
                 config,
                 http::MultiTenant {
-                    resolver: Arc::new(run.file),
+                    resolver: resolver.clone(),
                     data: data.clone(),
                 },
             );
-            let upkeep = data.spawn_upkeep(tenant_cache::UPKEEP_EVERY, tenant_cache::IDLE_AFTER);
+            let upkeep = data.spawn_upkeep(
+                tenant_cache::UPKEEP_EVERY,
+                tenant_cache::IDLE_AFTER,
+                resolver,
+            );
 
             let addr = format!("0.0.0.0:{}", run.port);
             let listener = tokio::net::TcpListener::bind(&addr).await?;
