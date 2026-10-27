@@ -162,6 +162,7 @@ impl McpHttpState {
         // `SessionStats`, so recall and savings persist under the real session
         // instead of a per-connection counter that dies unflushed.
         let session = tenant.sessions.get_or_create(session_id);
+        let recall_cache = tenant.recall_cache.clone();
         // Owned: the factory closure outlives this method's borrows.
         let session_id_owned = session_id.to_string();
 
@@ -181,6 +182,7 @@ impl McpHttpState {
             .with_namespace_explicit(true)
             .with_session_id(session_id_owned.clone())
             .with_session(session.clone())
+            .with_recall_cache(recall_cache.clone())
             .with_machine_local(machine_local);
             if let Some(pool) = asd_pool.clone() {
                 server = server.with_pool(pool);

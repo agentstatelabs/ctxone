@@ -356,3 +356,26 @@ async fn mcp_sessions_and_writes_stay_in_their_tenant() {
             .contains("Alice's MCP fact")
     );
 }
+
+/// Recall results are cached per tenant, for REST and MCP alike: a recall in
+/// one tenant fills no other tenant's cache, so a cached result can't reach
+/// another tenant whatever its key.
+#[tokio::test]
+async fn recall_results_are_cached_per_tenant() {
+    let hub = hub(Arc::new(MemoryTenants::default()), true);
+    remember(&hub.app, ALICE, "Alice caches recall results").await;
+    remember(&hub.app, BOB, "Bob caches nothing yet").await;
+    recall(&hub.app, ALICE, "caches").await;
+    let alice = hub.data.get(&tenant("alice")).await.unwrap();
+    let bob = hub.data.get(&tenant("bob")).await.unwrap();
+    assert_eq!(alice.recall_cache.len(), 1);
+    assert!(bob.recall_cache.is_empty());
+
+    let session = mcp_session(&hub.app, BOB).await;
+    let call_recall = tool_call("recall", json!({ "topic": "caches" }));
+    let (status, body) = call(&hub.app, mcp(BOB, Some(&session), call_recall)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("Bob caches"), "{body}");
+    assert_eq!(bob.recall_cache.len(), 1, "MCP recall missed bob's cache");
+    assert_eq!(alice.recall_cache.len(), 1);
+}

@@ -1591,11 +1591,12 @@ pub fn collect_pinned(repo: &Repository, ref_name: &str) -> Vec<PinnedEntry> {
 pub fn run_recall(
     repo: &Repository,
     session: &SessionStats,
+    cache: &RecallCache,
     topic: &str,
     budget: usize,
     ref_name: &str,
 ) -> serde_json::Value {
-    run_recall_scoped(repo, session, topic, budget, ref_name, None)
+    run_recall_scoped(repo, session, cache, topic, budget, ref_name, None)
 }
 
 /// The (path, value) candidates recall's topic search matches against, read
@@ -1643,6 +1644,7 @@ fn flatten_leaves(v: &serde_json::Value, path: &str, out: &mut Vec<(String, Stri
 pub fn run_recall_scoped(
     repo: &Repository,
     session: &SessionStats,
+    cache: &RecallCache,
     topic: &str,
     budget: usize,
     ref_name: &str,
@@ -1680,7 +1682,7 @@ pub fn run_recall_scoped(
     // `recall` always recomputes. The cheap, per-session tail (token stats +
     // recall log) is replayed on every call, hit or miss, in `assemble_recall`.
     let cache_key = recall_cache_key(repo, ref_name, topic, budget, &scope_normalized);
-    if let Some(core) = cache_key.as_ref().and_then(|k| recall_cache_get(k)) {
+    if let Some(core) = cache_key.as_ref().and_then(|k| cache.get(k)) {
         return assemble_recall(repo, session, topic, ref_name, &scope_normalized, core);
     }
 
@@ -1809,7 +1811,7 @@ pub fn run_recall_scoped(
         pinned_count,
     };
     if let Some(key) = cache_key {
-        recall_cache_put(key, core.clone());
+        cache.put(key, core.clone());
     }
     assemble_recall(repo, session, topic, ref_name, &scope_normalized, core)
 }
@@ -1825,16 +1827,42 @@ struct RecallCore {
     pinned_count: usize,
 }
 
-/// Process-global recall result cache. Small and bounded; entries fall out by
-/// LRU and are logically invalidated by the head-commit component of the key.
-fn recall_cache() -> &'static std::sync::Mutex<lru::LruCache<String, RecallCore>> {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<lru::LruCache<String, RecallCore>>> =
-        std::sync::OnceLock::new();
-    CACHE.get_or_init(|| {
-        std::sync::Mutex::new(lru::LruCache::new(
+/// Recall results already worked out, reused while the graph is unchanged.
+/// Small and bounded; entries fall out by LRU and are logically invalidated by
+/// the head-commit component of the key.
+///
+/// One per repository: each tenant of a Hub has its own (`TenantState`), so a
+/// result is only ever served to the tenant whose graph produced it, whatever
+/// the key.
+pub struct RecallCache(std::sync::Mutex<lru::LruCache<String, RecallCore>>);
+
+impl Default for RecallCache {
+    fn default() -> Self {
+        Self(std::sync::Mutex::new(lru::LruCache::new(
             std::num::NonZeroUsize::new(256).expect("256 != 0"),
-        ))
-    })
+        )))
+    }
+}
+
+impl RecallCache {
+    fn get(&self, key: &str) -> Option<RecallCore> {
+        self.0.lock().ok()?.get(key).cloned()
+    }
+
+    fn put(&self, key: String, core: RecallCore) {
+        if let Ok(mut cache) = self.0.lock() {
+            cache.put(key, core);
+        }
+    }
+
+    /// How many results it holds.
+    pub fn len(&self) -> usize {
+        self.0.lock().map_or(0, |cache| cache.len())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// Build the cache key. `None` (skip caching) when the ref can't be resolved to
@@ -1847,22 +1875,13 @@ fn recall_cache_key(
     scope: &Option<String>,
 ) -> Option<String> {
     let head = repo.head(ref_name).ok()?;
-    // \u{1} is a control char that can't appear in a ref/topic/scope, so the
-    // concatenation is unambiguous.
+    // \u{1} is a control char that can't appear in a namespace/ref/topic/scope,
+    // so the concatenation is unambiguous.
     Some(format!(
-        "{ref_name}\u{1}{head}\u{1}{budget}\u{1}{}\u{1}{topic}",
+        "{}\u{1}{ref_name}\u{1}{head}\u{1}{budget}\u{1}{}\u{1}{topic}",
+        repo.namespace(),
         scope.as_deref().unwrap_or("")
     ))
-}
-
-fn recall_cache_get(key: &str) -> Option<RecallCore> {
-    recall_cache().lock().ok()?.get(key).cloned()
-}
-
-fn recall_cache_put(key: String, core: RecallCore) {
-    if let Ok(mut cache) = recall_cache().lock() {
-        cache.put(key, core);
-    }
 }
 
 /// The cheap, always-run tail of a recall: fold in the live graph size, record
@@ -2769,6 +2788,9 @@ pub struct CtxOneServer {
     /// per service instance. Services are cached per (namespace, session id),
     /// so this is effectively once per session per workspace.
     session_node_minted: Arc<std::sync::atomic::AtomicBool>,
+    /// Where `recall` keeps results while the graph is unchanged: the
+    /// tenant's own on a Hub (see [`Self::with_recall_cache`]).
+    pub recall_cache: Arc<RecallCache>,
     #[allow(dead_code)] // used by rmcp tool_router macro
     tool_router: ToolRouter<Self>,
 }
@@ -2805,6 +2827,7 @@ impl CtxOneServer {
             machine_local: true,
             session_id: String::new(),
             session_node_minted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            recall_cache: Arc::default(),
             tool_router: Self::tool_router(),
         }
     }
@@ -2819,6 +2842,13 @@ impl CtxOneServer {
     /// Set [`Self::machine_local`].
     pub fn with_machine_local(mut self, machine_local: bool) -> Self {
         self.machine_local = machine_local;
+        self
+    }
+
+    /// Share `cache` with the rest of the server's repository: the Hub gives
+    /// every MCP session of a tenant the tenant's cache.
+    pub fn with_recall_cache(mut self, cache: Arc<RecallCache>) -> Self {
+        self.recall_cache = cache;
         self
     }
 
@@ -3052,6 +3082,7 @@ impl CtxOneServer {
         let result = run_recall_scoped(
             &self.repo,
             &self.session,
+            &self.recall_cache,
             topic,
             GATE_RECALL_BUDGET,
             ref_name,
@@ -3183,6 +3214,7 @@ impl CtxOneServer {
         let result = run_recall_scoped(
             &self.repo,
             &self.session,
+            &self.recall_cache,
             &p.topic,
             p.budget,
             &p.ref_name,
@@ -5581,7 +5613,14 @@ mod tests {
         )
         .unwrap();
 
-        let result = run_recall(&repo, &session, "licensing", 1500, "main");
+        let result = run_recall(
+            &repo,
+            &session,
+            &RecallCache::default(),
+            "licensing",
+            1500,
+            "main",
+        );
         let results = result["results"].as_array().unwrap();
         assert!(!results.is_empty(), "expected at least one match");
         assert_eq!(result["pinned_count"], 0);
@@ -5606,7 +5645,14 @@ mod tests {
         .unwrap();
 
         // Recall an unrelated topic
-        let result = run_recall(&repo, &session, "unrelated-topic-xyz", 1500, "main");
+        let result = run_recall(
+            &repo,
+            &session,
+            &RecallCache::default(),
+            "unrelated-topic-xyz",
+            1500,
+            "main",
+        );
         let results = result["results"].as_array().unwrap();
 
         // Pinned section should be in results even though topic doesn't match
@@ -5638,7 +5684,7 @@ mod tests {
         }
 
         // Budget of 100 tokens = 400 chars
-        let result = run_recall(&repo, &session, "BSL", 100, "main");
+        let result = run_recall(&repo, &session, &RecallCache::default(), "BSL", 100, "main");
         let sent = result["ctx_tokens_sent"].as_u64().unwrap_or(0);
 
         // Budget is approximate because entry-size accounting has overhead,
@@ -5671,7 +5717,14 @@ mod tests {
 
         // Multi-word query: "licensing decisions". The fact contains "licensing"
         // but not the full phrase. Pre-tokenization, this returned 0 matches.
-        let result = run_recall(&repo, &session, "licensing decisions", 1500, "main");
+        let result = run_recall(
+            &repo,
+            &session,
+            &RecallCache::default(),
+            "licensing decisions",
+            1500,
+            "main",
+        );
         let matches = result["topic_matches"].as_u64().unwrap_or(0);
         assert!(matches >= 1, "tokenized recall should match on 'licensing'");
     }
@@ -5855,7 +5908,14 @@ mod tests {
 
         // Before any LLM usage is reported, recall response omits
         // session_llm_stats (opt-in extension)
-        let pre = run_recall(&repo, &session, "licensing", 1500, "main");
+        let pre = run_recall(
+            &repo,
+            &session,
+            &RecallCache::default(),
+            "licensing",
+            1500,
+            "main",
+        );
         assert!(pre.get("session_llm_stats").is_none());
 
         // After reporting, it's present
@@ -5867,7 +5927,14 @@ mod tests {
             Some("claude".to_string()),
             Some("anthropic".to_string()),
         );
-        let post = run_recall(&repo, &session, "licensing", 1500, "main");
+        let post = run_recall(
+            &repo,
+            &session,
+            &RecallCache::default(),
+            "licensing",
+            1500,
+            "main",
+        );
         let llm_stats = post
             .get("session_llm_stats")
             .expect("recall should include session_llm_stats after usage report");
@@ -6446,6 +6513,7 @@ mod tests {
         let scoped = run_recall_scoped(
             &repo,
             &session,
+            &RecallCache::default(),
             "widgets",
             1500,
             "main",
@@ -6674,7 +6742,15 @@ mod tests {
         .unwrap();
 
         let session = SessionStats::new();
-        let _ = run_recall_scoped(&repo, &session, "sqlite", 1500, "main", None);
+        let _ = run_recall_scoped(
+            &repo,
+            &session,
+            &RecallCache::default(),
+            "sqlite",
+            1500,
+            "main",
+            None,
+        );
         let log = session.recall_log_snapshot();
         assert_eq!(log.len(), 1);
         assert_eq!(log[0].topic, "sqlite");
@@ -6682,7 +6758,15 @@ mod tests {
         assert!(log[0].tokens_sent > 0);
 
         // A second recall appends; the log preserves order.
-        let _ = run_recall_scoped(&repo, &session, "postgres", 1500, "main", None);
+        let _ = run_recall_scoped(
+            &repo,
+            &session,
+            &RecallCache::default(),
+            "postgres",
+            1500,
+            "main",
+            None,
+        );
         assert_eq!(session.recall_log_snapshot().len(), 2);
     }
 
@@ -6712,7 +6796,15 @@ mod tests {
         .unwrap();
 
         let session = SessionStats::new();
-        let r = run_recall_scoped(&repo, &session, "sqlite", 1500, "main", None);
+        let r = run_recall_scoped(
+            &repo,
+            &session,
+            &RecallCache::default(),
+            "sqlite",
+            1500,
+            "main",
+            None,
+        );
         let paths: Vec<&str> = r["results"]
             .as_array()
             .unwrap()
@@ -6958,7 +7050,15 @@ mod tests {
         .unwrap();
 
         let session = SessionStats::new();
-        let r = run_recall_scoped(&repo, &session, "alpha", 1500, "main", None);
+        let r = run_recall_scoped(
+            &repo,
+            &session,
+            &RecallCache::default(),
+            "alpha",
+            1500,
+            "main",
+            None,
+        );
         assert!(r["replay_guidance"].as_str().unwrap().contains("data"));
         assert!(r["scope"].is_null());
     }
