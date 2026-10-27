@@ -39,6 +39,7 @@ the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
   - A 401 opens token entry, which checks a token with `GET /api/tenant` before keeping it. A refused token is forgotten, so a rotated or disabled one brings token entry back. The sidebar names the tenant and can forget the token.
   - With `--lens` and `--strict-origin`, a multi-tenant Hub won't start without `--allowed-origin`: Lens calls from the Hub's own origin, which `--strict-origin` doesn't trust by `Host`, so it has to be listed.
   - The same token entry serves a single-tenant Hub with a token, reached from another machine, which needed an SSH tunnel until now. A local Hub never asks.
+  - Lens leaves out what a multi-tenant Hub turns off: the Code views (from the sidebar and the command palette, and a link to one says there's no code intelligence on this Hub), and session import, autosync and transcript sync on the Sessions page. It asks `GET /api/tenant` on every load which kind of Hub it's on: only a multi-tenant Hub names a tenant. A single-tenant Hub shows everything, as before.
 
 - **`--pg-pool-size <N>`** (or `CTXONE_PG_POOL_SIZE`) caps the Postgres connections the Hub holds, 32 by default. A multi-tenant Hub's tenants share them.
 

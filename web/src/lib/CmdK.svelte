@@ -21,6 +21,8 @@
 	import { listPlans, type Plan } from '$lib/plansApi';
 	import { branchStore } from '$lib/branchStore.svelte';
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
+	import { authStore } from '$lib/authStore.svelte';
+	import { isCodeRoute } from '$lib/codeApi';
 
 	type ResultKind = 'route' | 'plan' | 'path' | 'branch';
 	interface Result {
@@ -145,7 +147,11 @@
 			out.push({ kind, label, hint, score: sc, run });
 		};
 
-		for (const r of ROUTES) push('route', r.label, r.href, () => goto(r.href));
+		for (const r of ROUTES) {
+			// A multi-tenant Hub offers no Code views (see MachineLocal.svelte).
+			if (authStore.multiTenant && isCodeRoute(r.href)) continue;
+			push('route', r.label, r.href, () => goto(r.href));
+		}
 		for (const p of plans) {
 			push('plan', p.name, p.description || '', () => goto('/plans'));
 		}

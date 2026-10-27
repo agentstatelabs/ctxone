@@ -161,6 +161,12 @@ origin, which should be its own. The same token entry serves a single-tenant
 Hub with a token, reached from another machine, which needed an SSH tunnel
 before; a local Hub never asks.
 
+Lens asks `GET /api/tenant` on every load whether the Hub names a tenant, which
+only a multi-tenant Hub does, and then leaves out the views for what's off
+there: Code, session import, autosync and transcript sync (`MachineLocal.svelte`
+wraps them). A link to a Code view says there's no code intelligence on this
+Hub.
+
 ### Background work
 
 The statistics flush loop walks the open tenants every 30 seconds. Evicting a

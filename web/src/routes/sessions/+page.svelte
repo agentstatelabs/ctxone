@@ -5,6 +5,8 @@
 	import { namespaceStore } from '$lib/namespaceStore.svelte';
 	import ScopeBadge from '$lib/ScopeBadge.svelte';
 	import EmptyState from '$lib/EmptyState.svelte';
+	import MachineLocal from '$lib/MachineLocal.svelte';
+	import { authStore } from '$lib/authStore.svelte';
 	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
 	import { renderMarkdown } from '$lib/markdown';
 	import { estimateCost, formatUsd } from '$lib/pricing';
@@ -912,21 +914,23 @@
 		<button class="refresh-btn" onclick={load} disabled={loading}>
 			{loading ? 'Loading…' : 'Refresh'}
 		</button>
-		<button
-			class="sync-btn"
-			onclick={() => (showImport = true)}
-			title="Discover agent sessions on this machine and choose which to import"
-		>
-			＋ Import sessions
-		</button>
-		<button
-			class="sync-btn"
-			onclick={syncSessions}
-			disabled={syncing}
-			title="Re-scan Claude Code transcripts on this machine and pull them into the hub (local hub only)"
-		>
-			{syncing ? 'Syncing…' : '⟳ Sync transcripts'}
-		</button>
+		<MachineLocal>
+			<button
+				class="sync-btn"
+				onclick={() => (showImport = true)}
+				title="Discover agent sessions on this machine and choose which to import"
+			>
+				＋ Import sessions
+			</button>
+			<button
+				class="sync-btn"
+				onclick={syncSessions}
+				disabled={syncing}
+				title="Re-scan Claude Code transcripts on this machine and pull them into the hub (local hub only)"
+			>
+				{syncing ? 'Syncing…' : '⟳ Sync transcripts'}
+			</button>
+		</MachineLocal>
 		{#if syncMsg}
 			<span class="sync-msg" class:err={syncErr}>{syncMsg}</span>
 		{/if}
@@ -941,13 +945,21 @@
 	{:else if loading && sessions.length === 0}
 		<p class="muted">Loading sessions…</p>
 	{:else if sessions.length === 0}
-		<EmptyState
-			icon="🗂️"
-			title="No sessions in this workspace yet"
-			description="Sessions appear as agents run recall/remember here, or import existing ones from this machine."
-			actionLabel="Import sessions"
-			onAction={() => (showImport = true)}
-		/>
+		{#if authStore.multiTenant}
+			<EmptyState
+				icon="🗂️"
+				title="No sessions in this workspace yet"
+				description="Sessions appear as agents run recall/remember here."
+			/>
+		{:else}
+			<EmptyState
+				icon="🗂️"
+				title="No sessions in this workspace yet"
+				description="Sessions appear as agents run recall/remember here, or import existing ones from this machine."
+				actionLabel="Import sessions"
+				onAction={() => (showImport = true)}
+			/>
+		{/if}
 	{:else}
 		<div class="layout">
 			<div class="list-col">
@@ -1477,13 +1489,15 @@
 	{/if}
 </div>
 
-<SessionImport
-	bind:open={showImport}
-	onimported={() => {
-		derivedMeta = {};
-		void load();
-	}}
-/>
+<MachineLocal>
+	<SessionImport
+		bind:open={showImport}
+		onimported={() => {
+			derivedMeta = {};
+			void load();
+		}}
+	/>
+</MachineLocal>
 
 {#if openMemory}
 	<!-- svelte-ignore a11y_click_events_have_key_events -->

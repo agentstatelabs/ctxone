@@ -47,6 +47,12 @@ function createAuthStore() {
 		get tenant() {
 			return tenant;
 		},
+		/** True on a multi-tenant Hub, the only kind that names a tenant. It
+		 * has nothing on its own machine for a tenant (no code intelligence,
+		 * session import or transcript sync), so Lens hides those views. */
+		get multiTenant() {
+			return tenant !== null;
+		},
 		/** True once the Hub has refused a call: Lens shows token entry. */
 		get needed() {
 			return needed;
@@ -57,6 +63,12 @@ function createAuthStore() {
 			tenant = newTenant;
 			needed = false;
 			save(TOKEN_KEY, newToken);
+			save(TENANT_KEY, newTenant);
+		},
+		/** The Hub named the tenant this browser's calls belong to (null for
+		 * none: it serves one tenant). See refreshTenant in api.ts. */
+		named(newTenant: string | null) {
+			tenant = newTenant;
 			save(TENANT_KEY, newTenant);
 		},
 		/** The Hub answered 401 to a call that sent `sent` (null for none):
