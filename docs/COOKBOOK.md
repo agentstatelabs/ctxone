@@ -274,7 +274,7 @@ ctx --branch team/frontend remember "..."
 
 **Caveat:** a Hub started this way serves one tenant. To keep teams apart
 on one Hub, give each its own tenant with
-[multi-tenant mode](HTTP_API.md#multi-tenant-mode), or run separate Hub
+[multi-tenant mode](DEPLOYMENT.md#one-hub-for-many-users), or run separate Hub
 instances.
 
 ---

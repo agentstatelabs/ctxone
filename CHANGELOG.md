@@ -50,6 +50,18 @@ the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
 - **MCP over HTTP names the workspace it serves.** A session on `/mcp?namespace=<ns>` (or with `X-CTXone-Namespace`) read and wrote `<ns>`, but its tools said `default`. `project_status`, `remember`, `summarize_session` and `session_info` reported the `default` workspace. Closing a plan (`plan_close`, `plan_complete`, or `plan_done` on its last task) sealed its epoch as `plan:default:<plan>`. Workspaces closing plans of the same name collided on that id, so only the first got an epoch, and the epoch listed under its raw id instead of the plan's name. MCP over stdio and the REST API were right.
   - Epochs sealed this way keep their ids. `POST /api/plans/backfill_epochs` in the plan's workspace seals the plan again as `plan:<ns>:<plan>`; the old epoch stays, listed in that workspace under its raw id. While it's there, a plan of the same name in the `default` workspace can't seal its own epoch, since AgentStateGraph can't delete an epoch.
 
+### Docs
+- **docs/DEPLOYMENT.md covers one Hub for many users:**
+  - what it takes (Postgres, one hostname behind HTTPS, one Hub process);
+  - adding, rotating, disabling and purging tenants with `ctxone-hub tenant`, and who may edit the tenants file;
+  - running the Hub, with a systemd unit and the settings it refuses;
+  - sizing `--pg-pool-size` against Postgres's `max_connections`;
+  - what a proxy in front needs (no buffering for `/mcp`, a token for health checks);
+  - connecting `ctx`, AI tools and Lens with a tenant's token;
+  - what's off, and backups, upgrades and offboarding.
+
+  The flag and environment tables list `--tenants-file`, `--pg-pool-size`, `--database-url` and their variables. The design doc (docs/design/MULTI_TENANT_HUB.md) is marked implemented.
+
 ## [v1.0.15] — 2026-10-21
 
 ### Fixed
