@@ -2,10 +2,10 @@
 
 **Status:** In progress. AgentStateGraph's shared pool (t-001), tenant identity
 (t-002), per-tenant state (t-003), background work with the machine-local
-features off (t-004), isolation tests across every route and MCP tool (t-005)
-and tenant administration (t-006) are in, so `ctxone-hub --http
---tenants-file` serves and `ctxone-hub tenant` manages its tenants. Next: Lens
-(t-007).
+features off (t-004), isolation tests across every route and MCP tool (t-005),
+tenant administration (t-006) and Lens (t-007) are in, so `ctxone-hub --http
+--tenants-file` serves tenants their data and Lens, and `ctxone-hub tenant`
+manages them. Next: the deployment docs (t-008).
 **Plan:** CTX plan `ctx-multi-tenant-hub` (tasks listed at the end).
 **Goal:** One `ctxone-hub` process serves many users ("tenants"), each with
 their own memory, plans, sessions and project registry, on one Postgres
@@ -150,6 +150,16 @@ Lens asks for the tenant's token once and sends it as a bearer token on every
 call, kept in the browser's storage for the Hub's origin. `--strict-origin` with
 the Hub's own origin keeps other sites out. A real sign-in comes with an account
 service.
+
+As built: Lens's own files need no token; every call it makes to the API, the
+Code views' included, sends the token it keeps in `localStorage`. A 401 opens
+token entry, which checks a token with `GET /api/tenant` before keeping it. A
+refused token is forgotten, so a rotated or disabled one brings token entry
+back. The sidebar names the tenant and can forget the token. With `--lens` and
+`--strict-origin`, the Hub won't start unless `--allowed-origin` lists an
+origin, which should be its own. The same token entry serves a single-tenant
+Hub with a token, reached from another machine, which needed an SSH tunnel
+before; a local Hub never asks.
 
 ### Background work
 

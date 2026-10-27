@@ -591,8 +591,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if tenant_id.is_some() {
                 refuse_tenants_file("replaces --tenant: each request's token picks its tenant");
             }
-            if lens_mode {
-                refuse_tenants_file("can't serve Lens yet: Lens can't send a tenant's token");
+            // Lens is served from the Hub's own origin, which --strict-origin
+            // no longer trusts by `Host`, so it has to be listed.
+            if lens_mode && strict_origin && allowed_origins.is_empty() {
+                refuse_tenants_file(
+                    "with --lens and --strict-origin needs Lens's origin, which is this Hub's \
+                     own: add --allowed-origin https://<this Hub's host name>",
+                );
             }
             if !asd_repos.is_empty()
                 || !asd_pool_repos.is_empty()
@@ -648,6 +653,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             agent_id,
             allowed_origins,
             strict_origin,
+            lens: lens_mode,
         });
     }
 
@@ -897,10 +903,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if lens_mode {
                 info!(
-                    "Lens UI is served, but a remote browser can't send a bearer token — \
-                     for remote access tunnel it (ssh -L {port}:localhost:{port} <host>) so \
-                     the browser is loopback.",
-                    port = http_port
+                    "Lens UI is served: a browser that needs the token is asked for it once, \
+                     and Lens keeps it for this hub's origin and sends it with every call"
                 );
             }
         } else {
@@ -1433,6 +1437,8 @@ struct TenantsRun {
     agent_id: String,
     allowed_origins: Vec<String>,
     strict_origin: bool,
+    /// Serve Lens at `/`.
+    lens: bool,
 }
 
 /// Serve a multi-tenant hub until Ctrl-C or SIGTERM: every request's token
@@ -1455,6 +1461,12 @@ fn serve_tenants(run: TenantsRun) -> Result<(), Box<dyn std::error::Error>> {
          reading this machine's disk, and SQLite backups"
     );
     log_strict_origin(run.strict_origin, &run.allowed_origins);
+    if run.lens {
+        info!(
+            "Lens UI is served at /: it asks for a tenant's token once, keeps it for this hub's \
+             origin and sends it with every call"
+        );
+    }
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -1493,13 +1505,18 @@ fn serve_tenants(run: TenantsRun) -> Result<(), Box<dyn std::error::Error>> {
                 ..Default::default()
             };
             let resolver: Arc<dyn tenant::TenantResolver> = Arc::new(run.file);
-            let app = http::multi_tenant_router(
+            let mut app = http::multi_tenant_router(
                 config,
                 http::MultiTenant {
                     resolver: resolver.clone(),
                     data: data.clone(),
                 },
             );
+            // As in single-tenant mode, the fallback is added after the auth
+            // layer, so Lens's own files need no token; the API still does.
+            if run.lens {
+                app = app.fallback(ctxone_hub::lens::lens_handler);
+            }
             let upkeep = data.spawn_upkeep(
                 tenant_cache::UPKEEP_EVERY,
                 tenant_cache::IDLE_AFTER,

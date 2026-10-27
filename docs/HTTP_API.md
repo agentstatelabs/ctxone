@@ -1029,7 +1029,11 @@ token**:
   ends the exemption, for a hub fronted by a proxy or sidecar on 127.0.0.1,
   where every request arrives from loopback. It needs a token, and with it the
   hub hands its own `ctx` (session sync and import) the token as `CTX_TOKEN`.
-  Lens can't send a token, so it can't load data then.
+- **Lens** sends a token once the hub asks for one. On a **401** it asks for
+  the token, checks it with `GET /api/tenant`, keeps it in the browser's
+  storage for the hub's origin, and sends it as `Authorization: Bearer` on every
+  call. A refused token is forgotten and asked for again; *Forget token* in the
+  sidebar removes it. Its own files need no token.
 - When unset, there is no authentication. If the hub is bound to a non-loopback
   interface, it logs a warning that REST and `/mcp` are reachable unauthenticated
   — set a token before exposing it beyond loopback.
@@ -1054,9 +1058,12 @@ ctxone-hub --http --tenants-file /etc/ctxone/tenants \
 
 `--tenants-file <PATH>` (or `CTXONE_TENANTS_FILE`) turns it on. It needs `--http`
 and Postgres; `--storage memory` keeps the tenants in memory, to try it out. It
-replaces `--auth-token`, `--auth-token-file` and `--tenant`, and Lens can't use it
-yet. Every tenant shares one connection pool of `--pg-pool-size` connections
-(or `CTXONE_PG_POOL_SIZE`; default 32).
+replaces `--auth-token`, `--auth-token-file` and `--tenant`. Every tenant shares
+one connection pool of `--pg-pool-size` connections (or `CTXONE_PG_POOL_SIZE`;
+default 32). With `--lens`, Lens asks each browser for a tenant's token, as
+above, and shows that tenant's data. With `--strict-origin` too, list the Hub's
+own origin with `--allowed-origin`, since that's where Lens calls from; with no
+`--allowed-origin` the Hub refuses to start.
 
 - **The tenants file** has a line per token: `<tenant> <sha256 of the token>`,
   the hash as 64 hex digits. A tenant may have several lines. A line

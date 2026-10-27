@@ -274,8 +274,8 @@ ctx --branch team/frontend remember "..."
 
 **Caveat:** a Hub started this way serves one tenant. To keep teams apart
 on one Hub, give each its own tenant with
-[multi-tenant mode](HTTP_API.md#multi-tenant-mode) (Lens can't sign in to it
-yet), or run separate Hub instances.
+[multi-tenant mode](HTTP_API.md#multi-tenant-mode), or run separate Hub
+instances.
 
 ---
 

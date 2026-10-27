@@ -287,6 +287,8 @@ fn hub_command(args: &[&str], home: &std::path::Path) -> std::process::Command {
         "CTXONE_CTX_BINARY",
         "CTXONE_ASD_SERVE_BINARY",
         "CTXONE_PG_POOL_SIZE",
+        "CTXONE_STRICT_ORIGIN",
+        "CTXONE_ALLOWED_ORIGINS",
         "DATABASE_URL",
     ] {
         command.env_remove(var);
@@ -321,7 +323,11 @@ fn the_hub_binary_refuses_what_cant_apply_to_tenants() {
     refused(&["--http", "--tenants-file", p], 64, "needs Postgres");
     refused(&with(&["--auth-token", "x"]), 64, "replaces --auth-token");
     refused(&with(&["--tenant", "acme"]), 64, "replaces --tenant");
-    refused(&with(&["--lens"]), 64, "can't serve Lens");
+    refused(
+        &with(&["--lens", "--strict-origin"]),
+        64,
+        "needs Lens's origin, which is this Hub's own",
+    );
     refused(&with(&["--asd-url", "app=http://127.0.0.1:9"]), 64, "ASD");
     refused(&with(&["--asd-path", "app=/tmp/app.db"]), 64, "ASD");
     refused(&with(&["--ctx-binary", "ctx"]), 64, "session sync");
@@ -351,16 +357,15 @@ fn free_port() -> u16 {
         .port()
 }
 
-/// The Hub binary serves a tenants file, here with tenants in memory, and has
-/// none of what acts on its own machine.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_hub_binary_serves_a_tenants_file() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("tenants");
+/// A multi-tenant Hub binary serving alice (token `alice-token`) from memory,
+/// with `extra` arguments, and answering once this returns. `{port}` in an
+/// argument becomes its port. Logs go to `hub.log` in `dir`.
+async fn serve_alice(dir: &std::path::Path, extra: &[&str]) -> (Running, String) {
+    let path = dir.join("tenants");
     std::fs::write(&path, line("alice", "alice-token")).unwrap();
     let port = free_port().to_string();
-    let log = std::fs::File::create(dir.path().join("hub.log")).unwrap();
-    let args = [
+    let log = std::fs::File::create(dir.join("hub.log")).unwrap();
+    let mut args: Vec<String> = [
         "--http",
         "--storage",
         "memory",
@@ -368,15 +373,50 @@ async fn the_hub_binary_serves_a_tenants_file() {
         &port,
         "--tenants-file",
         path.to_str().unwrap(),
-    ];
+    ]
+    .map(String::from)
+    .to_vec();
+    args.extend(extra.iter().map(|a| a.replace("{port}", &port)));
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let mut hub = Running(
-        hub_command(&args, dir.path())
+        hub_command(&args, dir)
             .stdout(std::process::Stdio::null())
             .stderr(log)
             .spawn()
             .expect("start ctxone-hub"),
     );
     let base = format!("http://127.0.0.1:{port}");
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let tenant = reqwest::Client::new()
+            .get(format!("{base}/api/tenant"))
+            .bearer_auth("alice-token")
+            .send()
+            .await;
+        match tenant {
+            Ok(resp) => {
+                assert_eq!(resp.status(), StatusCode::OK);
+                assert_eq!(resp.text().await.unwrap(), r#"{"tenant":"alice"}"#);
+                return (hub, base);
+            }
+            Err(e) => {
+                if let Some(status) = hub.0.try_wait().unwrap() {
+                    let log = std::fs::read_to_string(dir.join("hub.log")).unwrap();
+                    panic!("the hub exited ({status}): {log}");
+                }
+                assert!(std::time::Instant::now() < deadline, "no hub: {e}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+}
+
+/// The Hub binary serves a tenants file, here with tenants in memory, and has
+/// none of what acts on its own machine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_hub_binary_serves_a_tenants_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let (hub, base) = serve_alice(dir.path(), &[]).await;
     let client = reqwest::Client::new();
     let get = |uri: &str, token: Option<&str>| {
         let mut req = client.get(format!("{base}{uri}"));
@@ -386,24 +426,6 @@ async fn the_hub_binary_serves_a_tenants_file() {
         req.send()
     };
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    loop {
-        match get("/api/tenant", Some("alice-token")).await {
-            Ok(resp) => {
-                assert_eq!(resp.status(), StatusCode::OK);
-                assert_eq!(resp.text().await.unwrap(), r#"{"tenant":"alice"}"#);
-                break;
-            }
-            Err(e) => {
-                if let Some(status) = hub.0.try_wait().unwrap() {
-                    let log = std::fs::read_to_string(dir.path().join("hub.log")).unwrap();
-                    panic!("the hub exited ({status}): {log}");
-                }
-                assert!(std::time::Instant::now() < deadline, "no hub: {e}");
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        }
-    }
     let status = get("/api/health", None).await.unwrap().status();
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     let resp = get("/api/sessions/autosync", Some("alice-token"))
@@ -415,4 +437,69 @@ async fn the_hub_binary_serves_a_tenants_file() {
     let log = std::fs::read_to_string(dir.path().join("hub.log")).unwrap();
     assert!(log.contains("multi-tenant mode"), "{log}");
     assert!(log.contains("off in multi-tenant mode"), "{log}");
+}
+
+/// Whether this build has a Lens to serve: `npm run build` in web/, or the
+/// copy a published crate ships. CI's test job always has one.
+fn lens_built() -> bool {
+    let server = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    server.join("../web/build/index.html").exists() || server.join("lens/index.html").exists()
+}
+
+/// With `--lens`, a multi-tenant Hub serves Lens's own files to anyone, and
+/// its API only for a tenant's token. With `--strict-origin`, the Hub's own
+/// origin is listed, so Lens's calls pass and another site's don't.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_hub_binary_serves_lens_to_tenants() {
+    let dir = tempfile::tempdir().unwrap();
+    let lens = [
+        "--lens",
+        "--strict-origin",
+        "--allowed-origin",
+        "http://127.0.0.1:{port}",
+    ];
+    let (hub, base) = serve_alice(dir.path(), &lens).await;
+    let client = reqwest::Client::new();
+
+    // The page and a client-side route, no token: index.html when there's a
+    // frontend build, and never a 401.
+    for page in ["/", "/plans/"] {
+        let resp = client.get(format!("{base}{page}")).send().await.unwrap();
+        if lens_built() {
+            assert_eq!(resp.status(), StatusCode::OK, "{page}");
+            let kind = resp.headers()[reqwest::header::CONTENT_TYPE]
+                .to_str()
+                .unwrap();
+            assert!(kind.starts_with("text/html"), "{page}: {kind}");
+        } else {
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{page}");
+        }
+    }
+
+    // Lens's calls: refused without the token, which sends Lens to token
+    // entry, and answered with it.
+    let call = |origin: &str, token: Option<&str>| {
+        let mut req = client
+            .get(format!("{base}/api/tenant"))
+            .header(reqwest::header::ORIGIN, origin);
+        if let Some(token) = token {
+            req = req.bearer_auth(token);
+        }
+        req.send()
+    };
+    let own = base.as_str();
+    let status = call(own, None).await.unwrap().status();
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let resp = call(own, Some("alice-token")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.text().await.unwrap(), r#"{"tenant":"alice"}"#);
+    let status = call("https://elsewhere.example", Some("alice-token"))
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    drop(hub);
+    let log = std::fs::read_to_string(dir.path().join("hub.log")).unwrap();
+    assert!(log.contains("Lens UI is served at /"), "{log}");
 }

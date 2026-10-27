@@ -10,7 +10,9 @@
 	import { namespaceStore, DEFAULT_NAMESPACE } from '$lib/namespaceStore.svelte';
 	import { themeStore, THEMES, type ThemeId } from '$lib/themeStore.svelte';
 	import { refreshStore, REFRESH_INTERVAL_MS } from '$lib/refreshStore.svelte';
+	import { authStore } from '$lib/authStore.svelte';
 	import CmdK from '$lib/CmdK.svelte';
+	import TokenEntry from '$lib/TokenEntry.svelte';
 	import '@agentstate/lens-core/tokens.css';
 	import '../app.css';
 
@@ -233,6 +235,10 @@
 
 <CmdK bind:open={cmdkOpen} />
 
+{#if authStore.needed}
+	<TokenEntry />
+{/if}
+
 <div class="app">
 	<nav class="sidebar">
 		<div class="brand">
@@ -396,6 +402,24 @@
 		</nav>
 
 		<div class="sidebar-footer">
+			{#if authStore.token !== null}
+				<div class="signed-in">
+					<span class="signed-in-name" title="The tenant this browser's token belongs to">
+						{authStore.tenant ?? 'Token in use'}
+					</span>
+					<button
+						type="button"
+						class="forget-token"
+						onclick={() => {
+							authStore.forget();
+							location.reload();
+						}}
+					>
+						Forget token
+					</button>
+				</div>
+			{/if}
+
 			<div class="refresh-toggle">
 				<label class="refresh-row">
 					<input
@@ -892,6 +916,35 @@
 		gap: var(--lens-space-3);
 		padding-top: var(--lens-space-3);
 		border-top: 1px solid var(--lens-border-subtle);
+	}
+
+	.signed-in {
+		display: flex;
+		align-items: center;
+		gap: var(--lens-space-2);
+		font-size: var(--lens-font-size-sm);
+	}
+	.signed-in-name {
+		flex: 1;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		color: var(--lens-text-secondary);
+		font-family: var(--lens-font-mono);
+	}
+	.forget-token {
+		background: transparent;
+		border: 1px solid var(--lens-border);
+		border-radius: var(--lens-radius-sm);
+		color: var(--lens-muted);
+		font-size: var(--lens-font-size-2xs);
+		padding: 0.15rem 0.45rem;
+		cursor: pointer;
+	}
+	.forget-token:hover {
+		color: var(--lens-text-strong);
+		border-color: var(--lens-border-strong);
 	}
 
 	.refresh-row {

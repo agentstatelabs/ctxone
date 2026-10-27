@@ -15,10 +15,15 @@
  */
 
 import { createAsdClient, createHttpTransport, type AsdClient } from '@agentstate/lens-core';
+import { tokenFetch } from './api';
 import type { AsdHealth, AsdRepoInfo, FileEntry, SymbolSummary } from './codeTypes';
 
 /** When VITE_ASD_API_URL is set we talk directly to one ASD process (dev mode). */
 const DIRECT_ASD: string | undefined = import.meta.env.VITE_ASD_API_URL as string | undefined;
+
+/** Calls through the Hub carry its token; a direct ASD process is another
+ *  server, which never gets it. */
+const asdFetch: typeof fetch = DIRECT_ASD ? fetch : tokenFetch;
 
 /** Resolve the API base for a given repo name. */
 function base(repo: string): string {
@@ -39,7 +44,7 @@ function base(repo: string): string {
 const LEGACY_CALLGRAPH_RE = /^\/symbols\/(.+)\/callgraph(?:\?(.*))?$/;
 
 function graphCompatTransport(baseUrl: string) {
-	const inner = createHttpTransport(baseUrl);
+	const inner = createHttpTransport(baseUrl, asdFetch);
 	return {
 		...inner,
 		fetchJson(path: string): Promise<unknown> {
@@ -67,7 +72,7 @@ export function codeClient(repo: string): AsdClient {
 
 async function getJson<T>(repo: string, path: string): Promise<T> {
 	const url = `${base(repo)}${path}`;
-	const res = await fetch(url);
+	const res = await asdFetch(url);
 	if (!res.ok) throw new Error(`ASD API ${res.status} — ${url}`);
 	return res.json() as Promise<T>;
 }
@@ -76,7 +81,7 @@ async function getJson<T>(repo: string, path: string): Promise<T> {
 export async function listAsdRepos(): Promise<AsdRepoInfo[]> {
 	if (DIRECT_ASD) return [];
 	try {
-		const res = await fetch('/api/code');
+		const res = await asdFetch('/api/code');
 		if (!res.ok) return [];
 		return res.json() as Promise<AsdRepoInfo[]>;
 	} catch {
@@ -89,7 +94,7 @@ export async function listAsdRepos(): Promise<AsdRepoInfo[]> {
 export async function prefetchAsdRepo(repo: string): Promise<void> {
 	if (DIRECT_ASD) return;
 	try {
-		await fetch(`/api/code/${encodeURIComponent(repo)}/prefetch`, { method: 'POST' });
+		await asdFetch(`/api/code/${encodeURIComponent(repo)}/prefetch`, { method: 'POST' });
 	} catch {
 		// best-effort warm — surfacing a fetch error here would be noisier than useful
 	}
