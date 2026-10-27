@@ -2,6 +2,7 @@
  * CtxOne Lens — HTTP client for the Hub REST API.
  */
 
+import { authStore } from './authStore.svelte';
 import { namespaceStore } from './namespaceStore.svelte';
 
 // Dev: default to Hub on 3001. Embedded (adapter-static build served from Hub):
@@ -10,15 +11,55 @@ const API_BASE: string = import.meta.env.VITE_CTXONE_API_URL
 	?? (import.meta.env.DEV ? 'http://localhost:3001' : '');
 
 /**
+ * `fetch` with the stored token as a bearer token; a 401 sends Lens to
+ * token entry (see authStore). Every call to the Hub goes through here:
+ * hubFetch, and the ASD `/api/code/*` proxy (codeApi.ts), which skips
+ * hubFetch's namespace header.
+ */
+export async function tokenFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+	const headers = new Headers(init?.headers);
+	const token = authStore.token;
+	if (token !== null) headers.set('Authorization', `Bearer ${token}`);
+	const resp = await fetch(input, { ...init, headers });
+	if (resp.status === 401) authStore.refused(token);
+	return resp;
+}
+
+/**
  * Single choke point for Hub requests: prefixes API_BASE and threads
  * the current namespace via the `X-CTXone-Namespace` header, so no
- * call site needs to know about namespaces. The ASD `/api/code/*`
- * proxy (codeApi.ts) intentionally does NOT go through here.
+ * call site needs to know about namespaces (or tokens: see tokenFetch).
+ * The ASD `/api/code/*` proxy (codeApi.ts) intentionally does NOT go
+ * through here.
  */
 export function hubFetch(path: string, init?: RequestInit): Promise<Response> {
 	const headers = new Headers(init?.headers);
 	headers.set('X-CTXone-Namespace', namespaceStore.current);
-	return fetch(`${API_BASE}${path}`, { ...init, headers });
+	return tokenFetch(`${API_BASE}${path}`, { ...init, headers });
+}
+
+export type TokenCheck = { ok: true; tenant: string | null } | { ok: false; error: string };
+
+/**
+ * Ask the Hub whether it accepts `token`, without storing it: the tenant
+ * the token belongs to (null on a single-tenant Hub), or why not.
+ */
+export async function checkToken(token: string): Promise<TokenCheck> {
+	let resp: Response;
+	try {
+		resp = await fetch(`${API_BASE}/api/tenant`, {
+			headers: { Authorization: `Bearer ${token}` }
+		});
+	} catch {
+		return { ok: false, error: "Can't reach the Hub." };
+	}
+	if (resp.status === 401) return { ok: false, error: "The Hub doesn't accept this token." };
+	if (!resp.ok) {
+		const why = (await resp.text().catch(() => '')).trim();
+		return { ok: false, error: why || `The Hub answered ${resp.status}.` };
+	}
+	const body = (await resp.json()) as { tenant?: string | null };
+	return { ok: true, tenant: body.tenant ?? null };
 }
 
 export interface StatsResponse {
