@@ -25,6 +25,12 @@ const DIRECT_ASD: string | undefined = import.meta.env.VITE_ASD_API_URL as strin
  *  server, which never gets it. */
 const asdFetch: typeof fetch = DIRECT_ASD ? fetch : tokenFetch;
 
+/** Whether `href` is one of Lens's Code views (`/code`, `/code/…`), which
+ *  need the Hub's own ASD repos; a multi-tenant Hub has none. */
+export function isCodeRoute(href: string): boolean {
+	return href === '/code' || href.startsWith('/code/');
+}
+
 /** Resolve the API base for a given repo name. */
 function base(repo: string): string {
 	if (DIRECT_ASD) return `${DIRECT_ASD.replace(/\/$/, '')}/api/v1`;

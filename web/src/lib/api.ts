@@ -62,6 +62,23 @@ export async function checkToken(token: string): Promise<TokenCheck> {
 	return { ok: true, tenant: body.tenant ?? null };
 }
 
+/**
+ * Ask the Hub which tenant this browser's calls belong to and remember it
+ * (authStore.named), so Lens knows whether the Hub serves many tenants. A
+ * Hub that refuses the call (token entry follows), predates `/api/tenant`
+ * or can't be reached leaves what Lens knew.
+ */
+export async function refreshTenant(): Promise<void> {
+	try {
+		const resp = await hubFetch('/api/tenant');
+		if (!resp.ok) return;
+		const body = (await resp.json()) as { tenant?: string | null };
+		authStore.named(body.tenant ?? null);
+	} catch {
+		// Unreachable: the views that need the Hub say so themselves.
+	}
+}
+
 export interface StatsResponse {
 	commit_count: number;
 	path_count: number;

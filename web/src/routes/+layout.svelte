@@ -2,7 +2,13 @@
 	import type { Snippet } from 'svelte';
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
-	import { getBranches, createBranch, listProjects, type Project } from '$lib/api';
+	import {
+		getBranches,
+		createBranch,
+		listProjects,
+		refreshTenant,
+		type Project
+	} from '$lib/api';
 	import { getAsdHealth, listAsdRepos, prefetchAsdRepo } from '$lib/codeApi';
 	import type { AsdHealth, AsdRepoInfo } from '$lib/codeTypes';
 	import { selectedRepo } from '$lib/repoStore';
@@ -174,10 +180,17 @@
 		$selectedRepo = initial ? initial.name : '';
 	}
 
+	// A multi-tenant Hub has no ASD repos of its own: it offers no Code views.
+	let navGroups = $derived(
+		authStore.multiTenant ? NAV_GROUPS.filter((g) => g.key !== 'code') : NAV_GROUPS
+	);
+
 	onMount(() => {
 		themeStore.hydrate();
 		loadProjects();
-		loadAsdRepos();
+		// Learns (or re-checks) whether the Hub serves many tenants.
+		void refreshTenant();
+		if (!authStore.multiTenant) loadAsdRepos();
 	});
 
 	// (Re)load the branch list on mount and whenever the namespace
@@ -348,7 +361,7 @@
 
 		<!-- ── Flat nav groups, scoped to workspace → branch ─────────────────── -->
 		<nav class="nav-groups">
-			{#each NAV_GROUPS as group}
+			{#each navGroups as group}
 				<div class="nav-group">
 					<div class="nav-group-head">
 						<span class="nav-group-label">{group.label}</span>

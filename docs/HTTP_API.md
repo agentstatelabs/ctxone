@@ -1061,7 +1061,8 @@ and Postgres; `--storage memory` keeps the tenants in memory, to try it out. It
 replaces `--auth-token`, `--auth-token-file` and `--tenant`. Every tenant shares
 one connection pool of `--pg-pool-size` connections (or `CTXONE_PG_POOL_SIZE`;
 default 32). With `--lens`, Lens asks each browser for a tenant's token, as
-above, and shows that tenant's data. With `--strict-origin` too, list the Hub's
+above, and shows that tenant's data, leaving out the Code views, session import
+and transcript sync, which are off. With `--strict-origin` too, list the Hub's
 own origin with `--allowed-origin`, since that's where Lens calls from; with no
 `--allowed-origin` the Hub refuses to start.
 
