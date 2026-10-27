@@ -78,6 +78,9 @@ is up to 32 connections, which a small database runs out of after a few users.
 - A `TenantResolver` trait is the seam. The file resolver ships with the Hub; an
   account service (sign-in, per-device tokens, suspension) can supply its own.
 - Rate limits are per tenant, not per peer IP.
+- As built: `GET /api/health` needs no token, so load balancers and container
+  health checks can probe the Hub. Its answer is fixed, so it opens no tenant,
+  and it skips the rate limiter. A token sent with it is still checked.
 - Tenant names are `[a-z0-9-]{1,63}`. A tenant name is the AgentStateGraph
   `tenant_id` and the `tenant_id` of the `ctxone_*` tables
   ([server/src/hub_store.rs](../../server/src/hub_store.rs)).

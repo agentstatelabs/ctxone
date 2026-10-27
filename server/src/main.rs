@@ -887,12 +887,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if auth_token.is_some() || auth_token_file.is_some() {
             if require_auth_on_loopback {
                 info!(
-                    "Bearer auth enabled: every request requires Authorization: Bearer <token>, \
-                     loopback included"
+                    "Bearer auth enabled: every request but GET /api/health requires \
+                     Authorization: Bearer <token>, loopback included"
                 );
             } else {
                 info!(
-                    "Bearer auth enabled: non-loopback requests require Authorization: Bearer <token> (loopback exempt)"
+                    "Bearer auth enabled: non-loopback requests require Authorization: Bearer <token> \
+                     (loopback and GET /api/health exempt)"
                 );
             }
             if let Some(file) = &auth_token_file {

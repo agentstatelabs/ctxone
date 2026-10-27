@@ -217,7 +217,8 @@ Behaviour:
 - **Loopback peers (127.0.0.1/::1) are exempt** — local CLI, Lens, and
   same-host agents keep working with no token — unless
   `--require-auth-on-loopback` is set (see *Hosted hub* below).
-- **Non-loopback requests must send** `Authorization: Bearer <token>` (else 401).
+- **Non-loopback requests must send** `Authorization: Bearer <token>` (else 401),
+  except `GET /api/health`, so health checks need no token.
 - Setting a token also relaxes `/mcp`'s loopback-only Host check so authenticated
   remote clients can connect (the bearer becomes the gate).
 
@@ -478,10 +479,10 @@ internet. Then:
 - **MCP responses can be long-lived event streams.** Don't buffer `/mcp`, and
   allow long requests (nginx: `proxy_buffering off;` and a long
   `proxy_read_timeout`).
-- **`/api/health` needs a tenant's token too,** like every request. Give your
-  health checks one, from a tenant kept for monitoring: `/api/health` reads no
-  tenant's data, so that tenant never opens. The container image's built-in
-  health check sends no token, so replace it.
+- **`/api/health` needs no token,** so a load balancer, a Kubernetes probe or
+  the container image's built-in health check can call it as it is. It answers
+  only that the hub is up, opens no tenant, and isn't rate limited. A token
+  sent with it is still checked, so a wrong one is a 401.
 
 ### Connect clients
 
@@ -605,8 +606,8 @@ launchctl load -w ~/Library/LaunchAgents/com.ctxone.hub.plist
   is running with `--http`. `curl http://localhost:3001/api/health`.
 - **Agent and Lens show different memory** — they're on different db paths
   (topology C). That's isolation working as configured.
-- **Every request to a multi-tenant hub is a 401, health checks included** —
-  there's no loopback exemption, so each request needs a tenant's token.
+- **Every request to a multi-tenant hub is a 401** — there's no loopback
+  exemption, so each request but `GET /api/health` needs a tenant's token.
   `ctxone-hub tenant list` shows whether the tenant is disabled; `rotate` gives
   it a new token.
 

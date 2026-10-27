@@ -776,11 +776,19 @@ fn constant_time_eq(provided: &str, expected: &str) -> bool {
 /// In multi-tenant mode every request needs a token, loopback included, since
 /// there's no local user. The token's tenant is attached to the request; an
 /// unknown token is a 401, and a resolver that can't answer is a 503.
+///
+/// Either way, a health check without a token gets through
+/// ([`is_tokenless_health_check`]), so load balancers and container health
+/// checks need no secret. It learns only that the Hub is up.
 async fn require_auth(
     State(auth): State<AuthState>,
     mut req: axum::extract::Request,
     next: Next,
 ) -> axum::response::Response {
+    if is_tokenless_health_check(&req) {
+        return next.run(req).await;
+    }
+
     if let Some(tenants) = &auth.tenants {
         // Owned, so the request isn't borrowed across the await.
         let resolved = match bearer_token(&req).map(str::to_owned) {
@@ -825,6 +833,24 @@ async fn require_auth(
         Some(t) if auth.tokens.accepts(t) => next.run(req).await,
         _ => unauthorized(),
     }
+}
+
+/// Where `build_router` mounts [`health`]. Its answer is fixed, so it reads no
+/// data and opens no tenant.
+const HEALTH_PATH: &str = "/api/health";
+
+/// A `GET` or `HEAD` of [`HEALTH_PATH`] with no `Authorization` header. One
+/// that sends a token has it checked like any other request, so a wrong token
+/// is a 401 here too.
+fn is_tokenless_health_check(req: &axum::extract::Request) -> bool {
+    req.uri().path() == HEALTH_PATH
+        && matches!(
+            *req.method(),
+            axum::http::Method::GET | axum::http::Method::HEAD
+        )
+        && !req
+            .headers()
+            .contains_key(axum::http::header::AUTHORIZATION)
 }
 
 /// The token of an `Authorization: Bearer <token>` header.
@@ -1005,8 +1031,7 @@ fn build_router(
     };
 
     let mut router = Router::new()
-        // Health + stats
-        .route("/api/health", get(health))
+        // Stats (the health check is mounted below, outside the rate limiter)
         .route("/api/tenant", get(request_tenant))
         .route("/api/stats/tokens", get(token_stats))
         .route("/api/stats/tokens/{session_id}", get(session_token_stats))
@@ -1209,6 +1234,15 @@ fn build_router(
         }
     }
 
+    // The health check reads nothing, so it skips the rate limiter: there's
+    // nothing to protect, and a limited probe could get a healthy Hub
+    // restarted. Its own copies of the layers keep its log line and tenant.
+    let health_check = Router::new()
+        .route("/api/health", get(health))
+        .layer(axum::middleware::from_fn(record_tenant))
+        .layer(trace.clone())
+        .layer(cors.clone());
+
     // Raise the request-body limit from Axum's 2 MB default: a whole-session
     // bulk turn write (or an /api/import seed) legitimately runs to many MB, and
     // the default silently 413'd them before the handler's own 128 MiB cap could
@@ -1238,6 +1272,7 @@ fn build_router(
     if let Some(layer) = governor {
         router = router.layer(layer);
     }
+    router = router.merge(health_check);
 
     // Bearer auth outermost — runs first, before rate limiting and routing, so
     // unauthenticated non-loopback traffic is rejected before doing any work.
@@ -1452,6 +1487,8 @@ fn timestamp_id() -> String {
 
 // -- Handlers --
 
+/// `GET /api/health`: the Hub is up. It needs no token
+/// ([`is_tokenless_health_check`]), so its answer is the same for everyone.
 async fn health() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok", "service": "ctxone-hub" }))
 }

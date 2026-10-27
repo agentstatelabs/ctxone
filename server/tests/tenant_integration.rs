@@ -1,8 +1,8 @@
 //! Tenant identity on a multi-tenant Hub (ctx-multi-tenant-hub t-002).
 //!
 //! On a multi-tenant Hub (`http::multi_tenant_router`) every request needs a
-//! bearer token that resolves to a tenant, loopback included, and the tenant is
-//! attached to the request: `GET /api/tenant` reports it and rate limits are
+//! bearer token that resolves to a tenant, loopback included, except a health
+//! check that sends none. The tenant is attached to the request: `GET /api/tenant` reports it and rate limits are
 //! keyed by it. The tenants file is re-read while the Hub runs. These oneshot
 //! tests inject `ConnectInfo` to set the peer; the last ones run the Hub
 //! binary. That logs carry the tenant is tested in `tenant_logs.rs`, in a
@@ -133,10 +133,10 @@ async fn a_request_without_a_known_token_is_refused_even_from_loopback() {
             Some(TokenHash::of("alice-laptop").to_hex().as_str()),
         ),
     ] {
-        let (status, _) = call(&app, get("/api/health", peer, token)).await;
+        let (status, _) = call(&app, get("/api/tenant", peer, token)).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{peer} with {token:?}");
     }
-    let (status, _) = call(&app, get("/api/health", LOOPBACK, Some("alice-laptop"))).await;
+    let (status, _) = call(&app, get("/api/tenant", LOOPBACK, Some("alice-laptop"))).await;
     assert_eq!(status, StatusCode::OK);
 }
 
@@ -231,11 +231,36 @@ impl TenantResolver for Unreachable {
 #[tokio::test]
 async fn a_resolver_that_cant_answer_is_a_503_not_a_401() {
     let app = router(Some(Arc::new(Unreachable)), 0);
-    let (status, _) = call(&app, get("/api/health", REMOTE, Some("any"))).await;
+    let (status, _) = call(&app, get("/api/tenant", REMOTE, Some("any"))).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    // Without a token there's nothing to look up.
-    let (status, _) = call(&app, get("/api/health", REMOTE, None)).await;
+    // Without a token there's nothing to look up, and a health check needs
+    // none.
+    let (status, _) = call(&app, get("/api/tenant", REMOTE, None)).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = call(&app, get("/api/health", REMOTE, None)).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_health_check_needs_no_token_and_no_tenants_budget() {
+    let (_dir, file) = tenants_file(&line("alice", "alice-1"));
+    // 60 a minute: a burst of 6, then one a second.
+    let app = router(Some(Arc::new(file)), 60);
+    for _ in 0..30 {
+        for peer in [LOOPBACK, REMOTE] {
+            let (status, body) = call(&app, get("/api/health", peer, None)).await;
+            assert_eq!(status, StatusCode::OK, "{peer}");
+            assert!(body.contains("ctxone-hub"), "{body}");
+        }
+        let (status, _) = call(&app, get("/api/health", REMOTE, Some("alice-1"))).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    // Alice's budget is untouched by her health checks.
+    assert_eq!(tenant_of(&app, Some("alice-1")).await, Ok("alice".into()));
+    // A token sent with one is still checked.
+    let (status, _) = call(&app, get("/api/health", REMOTE, Some("not-a-token"))).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(tenant_of(&app, None).await, Err(StatusCode::UNAUTHORIZED));
 }
 
 #[tokio::test]
@@ -252,7 +277,7 @@ async fn rate_limits_are_per_tenant_and_spare_no_one_on_loopback() {
     let app = router(Some(Arc::new(file)), 60);
     let mut alice = (0, 0);
     for _ in 0..30 {
-        match call(&app, get("/api/health", LOOPBACK, Some("alice-1")))
+        match call(&app, get("/api/tenant", LOOPBACK, Some("alice-1")))
             .await
             .0
         {
@@ -268,10 +293,10 @@ async fn rate_limits_are_per_tenant_and_spare_no_one_on_loopback() {
         alice.1
     );
     // Alice's other token, from another address, shares her bucket.
-    let (status, _) = call(&app, get("/api/health", REMOTE, Some("alice-2"))).await;
+    let (status, _) = call(&app, get("/api/tenant", REMOTE, Some("alice-2"))).await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     // Bob, from the same address, has his own.
-    let (status, _) = call(&app, get("/api/health", LOOPBACK, Some("bob-1"))).await;
+    let (status, _) = call(&app, get("/api/tenant", LOOPBACK, Some("bob-1"))).await;
     assert_eq!(status, StatusCode::OK);
 }
 
@@ -426,7 +451,10 @@ async fn the_hub_binary_serves_a_tenants_file() {
         req.send()
     };
 
+    // A health check needs no token; the rest of the API does.
     let status = get("/api/health", None).await.unwrap().status();
+    assert_eq!(status, StatusCode::OK);
+    let status = get("/api/tenant", None).await.unwrap().status();
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     let resp = get("/api/sessions/autosync", Some("alice-token"))
         .await
