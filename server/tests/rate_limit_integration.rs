@@ -26,7 +26,7 @@ use tower::ServiceExt;
 /// Build the Hub router in-process (no TCP) so tests can drive it via
 /// `oneshot` and inject an arbitrary peer `ConnectInfo` — the only way
 /// to exercise the limiter for a *remote* IP, since a real loopback
-/// connection is now exempt (see `LoopbackExemptKeyExtractor`).
+/// connection is now exempt (see `rate_limit::RateLimitLayer`).
 fn build_app(rate_limit_rpm: u32) -> Router {
     let repo = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
     repo.init().expect("repo init");
