@@ -1049,7 +1049,8 @@ its Lens origin and sets this.
 ### Multi-tenant mode
 
 One Hub can serve many tenants, each with its own data, from one Postgres
-database ([docs/design/MULTI_TENANT_HUB.md](design/MULTI_TENANT_HUB.md)):
+database ([docs/design/MULTI_TENANT_HUB.md](design/MULTI_TENANT_HUB.md); how to
+run one: [DEPLOYMENT.md](DEPLOYMENT.md#one-hub-for-many-users)):
 
 ```bash
 ctxone-hub --http --tenants-file /etc/ctxone/tenants \

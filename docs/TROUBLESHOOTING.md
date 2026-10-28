@@ -453,7 +453,8 @@ Usually it's one of three things:
    client and throttles hard. Configure the proxy to forward the real
    client IP via `X-Forwarded-For` (a future release will add support
    for trusted forwarded headers — today you can disable rate limiting
-   and let the proxy handle it).
+   and let the proxy handle it). A multi-tenant Hub limits each tenant
+   rather than each address, so a proxy doesn't affect it.
 2. **Running a parallel batch job** from a single IP. Bump the limit
    with `--rate-limit-rpm 3000` or disable it with `--rate-limit-rpm 0`
    during the batch.

@@ -1,41 +1,44 @@
 # Design: One Hub, many tenants
 
-**Status:** In progress. AgentStateGraph's shared pool (t-001), tenant identity
-(t-002), per-tenant state (t-003), background work with the machine-local
-features off (t-004), isolation tests across every route and MCP tool (t-005),
-tenant administration (t-006) and Lens (t-007) are in, so `ctxone-hub --http
---tenants-file` serves tenants their data and Lens, and `ctxone-hub tenant`
-manages them. Next: the deployment docs (t-008).
+**Status:** Implemented. `ctxone-hub --http --tenants-file` serves tenants
+their data and Lens, and `ctxone-hub tenant` manages them. That took:
+AgentStateGraph's shared pool (t-001), tenant identity (t-002), per-tenant
+state (t-003), background work with the machine-local features off (t-004),
+isolation tests across every route and MCP tool (t-005), tenant administration
+(t-006), Lens (t-007) and the deployment docs (t-008). How to run one:
+[DEPLOYMENT.md](../DEPLOYMENT.md#one-hub-for-many-users). Later work (t-009):
+Postgres row-level security as a backstop, and more than one Hub replica.
 **Plan:** CTX plan `ctx-multi-tenant-hub` (tasks listed at the end).
 **Goal:** One `ctxone-hub` process serves many users ("tenants"), each with
 their own memory, plans, sessions and project registry, on one Postgres
 database. A shared deployment becomes one Hub and one database instead of a Hub
 process, a route and a connection pool per user.
 
-## Today: one tenant per process
+## Before: one tenant per process
 
-A Hub serves exactly one tenant, fixed at startup:
+A Hub served exactly one tenant, fixed at startup, as a single-tenant Hub still
+does:
 
-- `--tenant` picks the tenant when the Postgres storage connects. `HubState`
-  holds one `repo`, one `SessionRegistry` and one `HubStore`
+- `--tenant` picked the tenant when the Postgres storage connected. `HubState`
+  held one `repo`, one `SessionRegistry` and one `HubStore`
   ([server/src/http.rs](../../server/src/http.rs)).
-- Tokens (`--auth-token`, `--auth-token-file`) are a flat set. Every accepted
-  token reaches the whole graph; nothing maps a token to a person.
-- 93 places in the REST handlers reach data through
-  `HubState::repo_for(namespace)`. About 60 more use `s.repo`, `s.sessions` or
-  `s.store` directly. MCP over HTTP caches one service per (workspace, session)
+- Tokens (`--auth-token`, `--auth-token-file`) were a flat set. Every accepted
+  token reached the whole graph; nothing mapped a token to a person.
+- 93 places in the REST handlers reached data through
+  `HubState::repo_for(namespace)`. About 60 more used `s.repo`, `s.sessions` or
+  `s.store` directly. MCP over HTTP cached one service per (workspace, session)
   on the same repository ([server/src/mcp_http.rs](../../server/src/mcp_http.rs)).
 - Process-wide by design: session statistics, merge guards, the rate limiter
   (keyed by peer IP), the ASD process pool, the transcript sweep and autosync,
   SQLite backups and the lockfile, and startup schema migrations.
-- Lens sends no credentials. It relies on the loopback exemption and
+- Lens sent no credentials. It relied on the loopback exemption and
   same-origin checks.
 
-A shared deployment therefore needs a Hub process per user, a hostname or route
+A shared deployment therefore needed a Hub process per user, a hostname or route
 per user to reach it, and a Postgres pool per process: AgentStateGraph's default
 is up to 32 connections, which a small database runs out of after a few users.
 
-## Target: the tenant comes with the request
+## Design: the tenant comes with the request
 
 ```
   Alice's agents ─ token A ─┐
@@ -269,6 +272,9 @@ What tenants still share holds none of their data:
 
 ## Deployment shape
 
+[DEPLOYMENT.md](../DEPLOYMENT.md#one-hub-for-many-users) is the operator's
+guide.
+
 - One Hub (a single replica to start), one Postgres, one hostname. Per-user
   subdomains become optional.
 - Adding a user is `ctxone-hub tenant add alice`.
@@ -301,3 +307,5 @@ CTX plan `ctx-multi-tenant-hub`:
 | t-007 | Lens on a multi-tenant Hub (token entry, bearer calls) | t-003 |
 | t-008 | Docs: DEPLOYMENT section, `--pg-pool-size`, CHANGELOG | t-004, t-006, t-007 |
 | t-009 | Later: Postgres row-level security; more than one replica | t-005 |
+
+t-001 to t-008 are done.
