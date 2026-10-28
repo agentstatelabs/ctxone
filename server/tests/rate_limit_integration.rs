@@ -3,7 +3,7 @@
 //! These spin up a real TCP listener + `axum::serve` with
 //! `into_make_service_with_connect_info::<SocketAddr>()` so the
 //! `PeerIpKeyExtractor` has a real client address to key on. We then
-//! hammer the Hub's `/api/health` endpoint with a small burst and
+//! hammer the Hub's `/api/tenant` endpoint with a small burst and
 //! assert that the limiter kicks in at the right point.
 //!
 //! Unit tests in `server/src/rate_limit.rs` cover the config builder
@@ -42,10 +42,12 @@ fn build_app(rate_limit_rpm: u32) -> Router {
 /// `ConnectInfo` extension (what `into_make_service_with_connect_info`
 /// would set on a real connection). Returns (status, has-ratelimit-header).
 async fn call_from(app: &Router, peer: &str) -> (StatusCode, bool) {
-    let mut req = Request::builder()
-        .uri("/api/health")
-        .body(Body::empty())
-        .unwrap();
+    call_at(app, peer, "/api/tenant").await
+}
+
+/// [`call_from`] for `uri`.
+async fn call_at(app: &Router, peer: &str, uri: &str) -> (StatusCode, bool) {
+    let mut req = Request::builder().uri(uri).body(Body::empty()).unwrap();
     req.extensions_mut()
         .insert(ConnectInfo(peer.parse::<SocketAddr>().unwrap()));
     let resp = app.clone().oneshot(req).await.expect("oneshot");
@@ -98,7 +100,7 @@ async fn rate_limit_zero_disables_limiter() {
 
     for _ in 0..30 {
         let resp = client
-            .get(format!("{}/api/health", base))
+            .get(format!("{}/api/tenant", base))
             .send()
             .await
             .expect("request");
@@ -164,5 +166,22 @@ async fn rate_limited_response_has_retry_after_header() {
     assert!(
         saw_429,
         "never hit rate limit within 30 rapid remote requests"
+    );
+}
+
+#[tokio::test]
+async fn a_health_check_is_never_rate_limited() {
+    // It reads nothing, and a limited probe could get a healthy Hub
+    // restarted, so a remote peer far past its burst still gets a 200.
+    let app = build_app(60);
+    for _ in 0..30 {
+        let (status, _) = call_at(&app, "203.0.113.11:40000", "/api/health").await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let (status, _) = call_from(&app, "203.0.113.11:40000").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "health checks used up the peer's budget"
     );
 }

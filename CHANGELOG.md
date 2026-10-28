@@ -45,6 +45,7 @@ the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
 
 ### Changed
 - **AgentStateGraph 1.4.2** (`agentstategraph*` = "1.4.2", from 1.4.0). Its `PostgresStorage::for_tenant` opens another tenant on the same connection pool, which the multi-tenant Hub's per-tenant state builds on. `Cargo.lock` moves only the seven agentstategraph crates.
+- **`GET /api/health` needs no token,** on any Hub, so a load balancer, a Kubernetes probe or the container image's own health check can call it. Its answer is fixed and it opens no tenant. It isn't rate limited either, so probes neither use up a tenant's or an address's budget nor get refused for one. A token sent with it is still checked, so a wrong one is a 401. Before, a multi-tenant Hub refused a health check without a tenant's token, which failed the image's health check, and so did a Hub with `--require-auth-on-loopback`.
 
 ### Fixed
 - **The rate limiter no longer keeps a bucket for every loopback request.** On a single-tenant Hub, each loopback request (local agents, the `ctx` CLI, session sync) got a bucket of its own so it would never be limited, and nothing ever dropped a bucket. The Hub's memory grew with its local traffic: 50 loopback requests left 50 buckets. Loopback requests now skip the limiter and leave nothing behind. A thread drops the buckets that have refilled every minute, so an address that stops calling is forgotten too. The limits themselves are unchanged.
@@ -57,7 +58,7 @@ the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
   - adding, rotating, disabling and purging tenants with `ctxone-hub tenant`, and who may edit the tenants file;
   - running the Hub, with a systemd unit and the settings it refuses;
   - sizing `--pg-pool-size` against Postgres's `max_connections`;
-  - what a proxy in front needs (no buffering for `/mcp`, a token for health checks);
+  - what a proxy in front needs (no buffering for `/mcp`);
   - connecting `ctx`, AI tools and Lens with a tenant's token;
   - what's off, and backups, upgrades and offboarding.
 

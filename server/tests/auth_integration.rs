@@ -2,8 +2,9 @@
 //!
 //! Posture: loopback peers are exempt unless `require_auth_on_loopback` is set;
 //! when a token is configured (fixed, or a token file re-read while the hub
-//! runs), every other request must carry `Authorization: Bearer <token>`. With
-//! no token configured, nothing is enforced. Peer address is normally attached
+//! runs), every other request must carry `Authorization: Bearer <token>`,
+//! except a health check that sends none. With no token configured, nothing is
+//! enforced. Peer address is normally attached
 //! by `into_make_service_with_connect_info`; these oneshot tests inject
 //! `ConnectInfo` into request extensions to drive both paths.
 
@@ -51,9 +52,15 @@ fn router_with_file(file: &http::AuthTokenFile) -> axum::Router {
 
 const REMOTE: Option<&str> = Some("10.0.0.5:5555");
 
-/// GET /api/health with an optional peer address and optional bearer token.
-fn health_req(peer: Option<&str>, bearer: Option<&str>) -> Request<Body> {
-    let mut b = Request::builder().uri("/api/health").method("GET");
+/// GET /api/tenant, which needs a token like every route but the health
+/// check, with an optional peer address and optional bearer token.
+fn api_req(peer: Option<&str>, bearer: Option<&str>) -> Request<Body> {
+    request("GET", "/api/tenant", peer, bearer)
+}
+
+/// `method uri` with an optional peer address and optional bearer token.
+fn request(method: &str, uri: &str, peer: Option<&str>, bearer: Option<&str>) -> Request<Body> {
+    let mut b = Request::builder().uri(uri).method(method);
     if let Some(tok) = bearer {
         b = b.header("authorization", format!("Bearer {tok}"));
     }
@@ -72,7 +79,7 @@ async fn status(router: axum::Router, req: Request<Body>) -> StatusCode {
 #[tokio::test]
 async fn no_token_allows_everything() {
     // No token configured → no enforcement, even from a remote peer.
-    let s = status(router(None), health_req(Some("10.0.0.5:5555"), None)).await;
+    let s = status(router(None), api_req(Some("10.0.0.5:5555"), None)).await;
     assert_eq!(s, StatusCode::OK);
 }
 
@@ -80,7 +87,7 @@ async fn no_token_allows_everything() {
 async fn loopback_is_exempt_even_with_token_set() {
     let s = status(
         router(Some("s3cret")),
-        health_req(Some("127.0.0.1:5555"), None),
+        api_req(Some("127.0.0.1:5555"), None),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "loopback peer must not need a token");
@@ -88,11 +95,7 @@ async fn loopback_is_exempt_even_with_token_set() {
 
 #[tokio::test]
 async fn remote_without_bearer_is_rejected() {
-    let s = status(
-        router(Some("s3cret")),
-        health_req(Some("10.0.0.5:5555"), None),
-    )
-    .await;
+    let s = status(router(Some("s3cret")), api_req(Some("10.0.0.5:5555"), None)).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
 }
 
@@ -100,7 +103,7 @@ async fn remote_without_bearer_is_rejected() {
 async fn remote_with_correct_bearer_is_allowed() {
     let s = status(
         router(Some("s3cret")),
-        health_req(Some("10.0.0.5:5555"), Some("s3cret")),
+        api_req(Some("10.0.0.5:5555"), Some("s3cret")),
     )
     .await;
     assert_eq!(s, StatusCode::OK);
@@ -110,7 +113,7 @@ async fn remote_with_correct_bearer_is_allowed() {
 async fn remote_with_wrong_bearer_is_rejected() {
     let s = status(
         router(Some("s3cret")),
-        health_req(Some("10.0.0.5:5555"), Some("nope")),
+        api_req(Some("10.0.0.5:5555"), Some("nope")),
     )
     .await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
@@ -119,7 +122,7 @@ async fn remote_with_wrong_bearer_is_rejected() {
 #[tokio::test]
 async fn unknown_peer_fails_closed_when_token_set() {
     // No ConnectInfo attached → treated as non-loopback → token required.
-    let s = status(router(Some("s3cret")), health_req(None, None)).await;
+    let s = status(router(Some("s3cret")), api_req(None, None)).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
 }
 
@@ -132,17 +135,17 @@ async fn loopback_must_send_the_token_when_not_exempt() {
     });
     for peer in ["127.0.0.1:5555", "[::1]:5555"] {
         assert_eq!(
-            status(r.clone(), health_req(Some(peer), None)).await,
+            status(r.clone(), api_req(Some(peer), None)).await,
             StatusCode::UNAUTHORIZED,
             "{peer} without a token"
         );
         assert_eq!(
-            status(r.clone(), health_req(Some(peer), Some("wrong"))).await,
+            status(r.clone(), api_req(Some(peer), Some("wrong"))).await,
             StatusCode::UNAUTHORIZED,
             "{peer} with a wrong token"
         );
         assert_eq!(
-            status(r.clone(), health_req(Some(peer), Some("s3cret"))).await,
+            status(r.clone(), api_req(Some(peer), Some("s3cret"))).await,
             StatusCode::OK,
             "{peer} with the token"
         );
@@ -155,25 +158,25 @@ async fn token_file_accepts_every_listed_token() {
     let r = router_with_file(&file);
     for tok in ["first", "second"] {
         assert_eq!(
-            status(r.clone(), health_req(REMOTE, Some(tok))).await,
+            status(r.clone(), api_req(REMOTE, Some(tok))).await,
             StatusCode::OK,
             "{tok}"
         );
     }
     for tok in ["# current, then the one being retired", "third"] {
         assert_eq!(
-            status(r.clone(), health_req(REMOTE, Some(tok))).await,
+            status(r.clone(), api_req(REMOTE, Some(tok))).await,
             StatusCode::UNAUTHORIZED,
             "{tok}"
         );
     }
     assert_eq!(
-        status(r.clone(), health_req(REMOTE, None)).await,
+        status(r.clone(), api_req(REMOTE, None)).await,
         StatusCode::UNAUTHORIZED
     );
     // Loopback stays exempt unless asked otherwise.
     assert_eq!(
-        status(r, health_req(Some("127.0.0.1:1"), None)).await,
+        status(r, api_req(Some("127.0.0.1:1"), None)).await,
         StatusCode::OK
     );
 }
@@ -183,33 +186,33 @@ async fn token_file_rotates_without_a_restart() {
     let (_dir, file) = token_file("old\n");
     let r = router_with_file(&file);
     assert_eq!(
-        status(r.clone(), health_req(REMOTE, Some("old"))).await,
+        status(r.clone(), api_req(REMOTE, Some("old"))).await,
         StatusCode::OK
     );
     assert_eq!(
-        status(r.clone(), health_req(REMOTE, Some("new"))).await,
+        status(r.clone(), api_req(REMOTE, Some("new"))).await,
         StatusCode::UNAUTHORIZED
     );
 
     // Add the new token beside the old one: both work while clients move over.
     std::fs::write(file.path(), "new\nold\n").unwrap();
     assert_eq!(
-        status(r.clone(), health_req(REMOTE, Some("new"))).await,
+        status(r.clone(), api_req(REMOTE, Some("new"))).await,
         StatusCode::OK
     );
     assert_eq!(
-        status(r.clone(), health_req(REMOTE, Some("old"))).await,
+        status(r.clone(), api_req(REMOTE, Some("old"))).await,
         StatusCode::OK
     );
 
     // Remove the old one: it stops working at once.
     std::fs::write(file.path(), "new\n").unwrap();
     assert_eq!(
-        status(r.clone(), health_req(REMOTE, Some("new"))).await,
+        status(r.clone(), api_req(REMOTE, Some("new"))).await,
         StatusCode::OK
     );
     assert_eq!(
-        status(r, health_req(REMOTE, Some("old"))).await,
+        status(r, api_req(REMOTE, Some("old"))).await,
         StatusCode::UNAUTHORIZED
     );
 }
@@ -219,11 +222,11 @@ async fn an_empty_token_file_accepts_no_token() {
     let (_dir, file) = token_file("# every token revoked\n");
     let r = router_with_file(&file);
     assert_eq!(
-        status(r.clone(), health_req(REMOTE, Some("anything"))).await,
+        status(r.clone(), api_req(REMOTE, Some("anything"))).await,
         StatusCode::UNAUTHORIZED
     );
     assert_eq!(
-        status(r, health_req(REMOTE, None)).await,
+        status(r, api_req(REMOTE, None)).await,
         StatusCode::UNAUTHORIZED
     );
 }
@@ -234,11 +237,11 @@ async fn an_unreadable_token_file_keeps_the_last_tokens() {
     let r = router_with_file(&file);
     std::fs::remove_file(file.path()).unwrap();
     assert_eq!(
-        status(r.clone(), health_req(REMOTE, Some("kept"))).await,
+        status(r.clone(), api_req(REMOTE, Some("kept"))).await,
         StatusCode::OK
     );
     assert_eq!(
-        status(r, health_req(REMOTE, Some("other"))).await,
+        status(r, api_req(REMOTE, Some("other"))).await,
         StatusCode::UNAUTHORIZED
     );
 }
@@ -292,4 +295,37 @@ async fn session_sync_hands_ctx_the_token() {
     )
     .await;
     assert_eq!(std::fs::read_to_string(&seen).unwrap(), "child-token");
+}
+
+#[tokio::test]
+async fn a_health_check_needs_no_token_but_a_sent_one_is_checked() {
+    let r = router_with(http::HubConfig {
+        auth_token: Some("s3cret".into()),
+        require_auth_on_loopback: true,
+        ..Default::default()
+    });
+    for peer in [REMOTE, Some("127.0.0.1:5555"), None] {
+        for method in ["GET", "HEAD"] {
+            let s = status(r.clone(), request(method, "/api/health", peer, None)).await;
+            assert_eq!(s, StatusCode::OK, "{method} from {peer:?}");
+        }
+        // The rest of the API still needs the token.
+        let s = status(r.clone(), api_req(peer, None)).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED, "{peer:?}");
+    }
+    let health = |bearer| request("GET", "/api/health", REMOTE, bearer);
+    assert_eq!(
+        status(r.clone(), health(Some("s3cret"))).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        status(r.clone(), health(Some("nope"))).await,
+        StatusCode::UNAUTHORIZED,
+        "a wrong token is refused, even on the health check"
+    );
+    // Only reading it is free; a POST needs the token before it's a 405.
+    assert_eq!(
+        status(r, request("POST", "/api/health", REMOTE, None)).await,
+        StatusCode::UNAUTHORIZED
+    );
 }

@@ -54,7 +54,9 @@ Rules:
 
 ### `GET /api/health`
 
-Simple liveness check.
+Simple liveness check. It needs no token on any Hub, so load balancers and
+container health checks can call it, and it isn't rate limited. A token sent
+with it is still checked: a wrong one is a **401**.
 
 **Response (200):**
 ```json
@@ -1023,12 +1025,13 @@ token**:
   read fails, the tokens last read stay in force; a file that can't be read at
   startup stops the hub.
 - When set, **non-loopback** requests must send `Authorization: Bearer <TOK>`;
-  requests are rejected with **401** otherwise. **Loopback peers are exempt** by
-  default, so a hub bound to `127.0.0.1` needs no token and local tools keep
-  working. `--require-auth-on-loopback` (or `CTXONE_REQUIRE_AUTH_ON_LOOPBACK=1`)
-  ends the exemption, for a hub fronted by a proxy or sidecar on 127.0.0.1,
-  where every request arrives from loopback. It needs a token, and with it the
-  hub hands its own `ctx` (session sync and import) the token as `CTX_TOKEN`.
+  requests are rejected with **401** otherwise. `GET /api/health` needs none.
+  **Loopback peers are exempt** by default, so a hub bound to `127.0.0.1` needs
+  no token and local tools keep working. `--require-auth-on-loopback` (or
+  `CTXONE_REQUIRE_AUTH_ON_LOOPBACK=1`) ends the exemption, for a hub fronted by
+  a proxy or sidecar on 127.0.0.1, where every request arrives from loopback.
+  It needs a token, and with it the hub hands its own `ctx` (session sync and
+  import) the token as `CTX_TOKEN`.
 - **Lens** sends a token once the hub asks for one. On a **401** it asks for
   the token, checks it with `GET /api/tenant`, keeps it in the browser's
   storage for the hub's origin, and sends it as `Authorization: Bearer` on every
@@ -1086,9 +1089,10 @@ own origin with `--allowed-origin`, since that's where Lens calls from; with no
   A hash listed for two tenants is refused for both. If the file can't be read,
   the tenants last read stay in force; an empty file refuses every token.
 - **Every request needs a token that belongs to a tenant,** loopback included,
-  since there's no local user. An unknown token is a **401**. The tenant is
-  attached to the request, rate limits are per tenant, and request log lines
-  carry it as `ctxone.tenant`, never the token.
+  since there's no local user. The exception is `GET /api/health`, which needs
+  none. An unknown token is a **401**. The tenant is attached to the request,
+  rate limits are per tenant, and request log lines carry it as
+  `ctxone.tenant`, never the token.
 - A `TenantResolver` decides the tenant. The Hub's reads the tenants file; an
   account service can supply its own. One that can't answer gives a **503**.
 - **Each tenant has its own data:** memory, plans, workspaces, the project
