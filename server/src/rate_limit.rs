@@ -15,6 +15,21 @@
 //! to key on beyond the peer IP, which protects it from runaway loops and
 //! simple abuse.
 //!
+//! ## Loopback
+//!
+//! On a single-tenant Hub, requests from the same machine — local agents, the
+//! `ctx` CLI, the Lens dev proxy, and `/api/sessions/sync` (which fires
+//! thousands of loopback POSTs via the spawned CLI) — are trusted and must not
+//! be throttled: a rate-limited sync silently drops writes. They skip the
+//! limiter ([`RateLimitLayer`]), so they leave nothing in it.
+//!
+//! ## Idle buckets
+//!
+//! The limiter keeps a bucket for every key it has seen and never drops one by
+//! itself. A thread drops the buckets that have refilled every
+//! [`CLEANUP_EVERY`], so an address that stopped calling doesn't stay in
+//! memory.
+//!
 //! ## Defaults
 //!
 //! The default is 600 requests/minute per IP (10/sec). This is
@@ -29,61 +44,49 @@
 //!
 //! ## Peer IP extraction
 //!
-//! `PeerIpKeyExtractor` reads the client address out of axum's
-//! `ConnectInfo<SocketAddr>` extension. This means `axum::serve` must
-//! be called via `into_make_service_with_connect_info::<SocketAddr>()`
-//! for rate limiting to actually see real peer IPs. The Hub's
-//! `main.rs` already does this.
+//! The peer address comes from axum's `ConnectInfo<SocketAddr>` extension.
+//! This means `axum::serve` must be called via
+//! `into_make_service_with_connect_info::<SocketAddr>()` for rate limiting to
+//! actually see real peer IPs. The Hub's `main.rs` already does this.
 
+use std::convert::Infallible;
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::{Context, Poll};
+use std::time::Duration;
 
 use ::governor::middleware::NoOpMiddleware;
+use axum::body::Body;
 use axum::extract::ConnectInfo;
-use axum::http::Request;
+use axum::http::{Request, Response};
+use tower::{Layer, Service, ServiceExt};
 use tower_governor::GovernorLayer;
 use tower_governor::errors::GovernorError;
-use tower_governor::governor::{GovernorConfig, GovernorConfigBuilder};
+use tower_governor::governor::{GovernorConfig, GovernorConfigBuilder, SharedRateLimiter};
 use tower_governor::key_extractor::KeyExtractor;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::tenant::Tenant;
 
-/// Rate-limit key extractor. On a multi-tenant Hub it keys by the request's
-/// [`Tenant`]. Otherwise it keys by peer IP and **exempts loopback traffic**.
-///
-/// The per-IP limiter exists to protect the Hub from *remote* abuse. Requests
-/// originating on the same machine — local agents, the `ctx` CLI, the
-/// Lens dev proxy, and `/api/sessions/sync` (which fires thousands of
-/// loopback POSTs via the spawned CLI) — are trusted and must not be
-/// throttled: a rate-limited sync silently drops writes.
-///
-/// Remote peers are keyed by IP (one shared token bucket per IP, exactly
-/// as `PeerIpKeyExtractor` did). Loopback peers get a **unique key per
-/// request** (a monotonic counter), so each lands in its own bucket and
-/// is never limited. governor's background GC reclaims those buckets.
+/// How often the limiter drops the buckets that have refilled. At the
+/// default limit a bucket refills 6 seconds after its last request.
+pub const CLEANUP_EVERY: Duration = Duration::from_secs(60);
+
+/// Rate-limit key extractor: the request's [`Tenant`] on a multi-tenant Hub,
+/// its peer IP otherwise, so each address shares one bucket.
 #[derive(Clone)]
-pub struct LoopbackExemptKeyExtractor {
-    counter: Arc<AtomicU64>,
+pub struct HubKeyExtractor {
     by_tenant: bool,
 }
 
-impl LoopbackExemptKeyExtractor {
-    fn new(by_tenant: bool) -> Self {
-        Self {
-            counter: Arc::new(AtomicU64::new(0)),
-            by_tenant,
-        }
-    }
-}
-
-impl KeyExtractor for LoopbackExemptKeyExtractor {
+impl KeyExtractor for HubKeyExtractor {
     type Key = String;
 
     #[cfg(feature = "tracing")]
     fn name(&self) -> &'static str {
-        "loopback-exempt peer IP"
+        "tenant or peer IP"
     }
 
     fn extract<T>(&self, req: &Request<T>) -> Result<Self::Key, GovernorError> {
@@ -95,18 +98,9 @@ impl KeyExtractor for LoopbackExemptKeyExtractor {
                 .map(|t| format!("tenant:{t}"))
                 .ok_or(GovernorError::UnableToExtractKey);
         }
-        let addr = req
-            .extensions()
-            .get::<ConnectInfo<SocketAddr>>()
-            .map(|ci| ci.0)
-            .ok_or(GovernorError::UnableToExtractKey)?;
-        if addr.ip().is_loopback() {
-            // Unique bucket per request → effectively unlimited for local.
-            let n = self.counter.fetch_add(1, Ordering::Relaxed);
-            Ok(format!("lo:{n}"))
-        } else {
-            Ok(addr.ip().to_string())
-        }
+        peer(req)
+            .map(|addr| addr.ip().to_string())
+            .ok_or(GovernorError::UnableToExtractKey)
     }
 
     #[cfg(feature = "tracing")]
@@ -115,29 +109,127 @@ impl KeyExtractor for LoopbackExemptKeyExtractor {
     }
 }
 
-/// Compiled config type for the loopback-exempt rate limiter.
-pub type PeerIpGovernorConfig = GovernorConfig<LoopbackExemptKeyExtractor, NoOpMiddleware>;
+/// The peer address `into_make_service_with_connect_info` attached, if any.
+fn peer<T>(req: &Request<T>) -> Option<SocketAddr> {
+    req.extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0)
+}
 
-/// Fully-pinned `GovernorLayer` type so callers can store it in a
-/// `Router::layer(...)` chain without wrestling with generics.
-pub type PeerIpGovernorLayer =
-    GovernorLayer<LoopbackExemptKeyExtractor, NoOpMiddleware, axum::body::Body>;
+/// Compiled config type for the Hub's rate limiter.
+pub type HubGovernorConfig = GovernorConfig<HubKeyExtractor, NoOpMiddleware>;
 
-/// Build a rate limiter layer that enforces `rpm` requests per minute
-/// per tenant (`by_tenant`) or per peer IP, or `None` when rate limiting is
-/// disabled (rpm = 0).
-///
-/// Returns an owned layer — tower_governor's `GovernorLayer::new`
-/// takes the config by value, not by `Arc`.
-pub fn build_layer(rpm: u32, by_tenant: bool) -> Option<PeerIpGovernorLayer> {
-    let config = build_config(rpm, by_tenant)?;
+type HubGovernorLayer = GovernorLayer<HubKeyExtractor, NoOpMiddleware, Body>;
+
+/// The Hub's rate limiter: a `tower_governor` layer, except that on a
+/// single-tenant Hub a loopback request skips it and leaves no bucket.
+#[derive(Clone)]
+pub struct RateLimitLayer {
+    governor: HubGovernorLayer,
+    config: Arc<HubGovernorConfig>,
+    by_tenant: bool,
+}
+
+impl RateLimitLayer {
+    /// How many buckets the limiter holds.
+    pub fn buckets(&self) -> usize {
+        self.config.limiter().len()
+    }
+}
+
+impl<S> Layer<S> for RateLimitLayer {
+    type Service = RateLimited<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        RateLimited {
+            inner,
+            governor: self.governor.clone(),
+            loopback_exempt: !self.by_tenant,
+        }
+    }
+}
+
+/// The service [`RateLimitLayer`] wraps around a route.
+#[derive(Clone)]
+pub struct RateLimited<S> {
+    inner: S,
+    governor: HubGovernorLayer,
+    loopback_exempt: bool,
+}
+
+impl<S> Service<Request<Body>> for RateLimited<S>
+where
+    S: Service<Request<Body>, Response = Response<Body>, Error = Infallible>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+{
+    type Response = Response<Body>;
+    type Error = Infallible;
+    type Future = Pin<Box<dyn Future<Output = Result<Response<Body>, Infallible>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // Each call waits for its own clone of `inner`.
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: Request<Body>) -> Self::Future {
+        let inner = self.inner.clone();
+        if self.loopback_exempt && peer(&req).is_some_and(|addr| addr.ip().is_loopback()) {
+            return Box::pin(inner.oneshot(req));
+        }
+        Box::pin(self.governor.layer(inner).oneshot(req))
+    }
+}
+
+/// Build the rate limiter for `rpm` requests per minute per tenant
+/// (`by_tenant`) or per peer IP, or `None` when rate limiting is disabled
+/// (rpm = 0). Starts the thread that drops its idle buckets.
+pub fn build_layer(rpm: u32, by_tenant: bool) -> Option<RateLimitLayer> {
+    let config = Arc::new(build_config(rpm, by_tenant)?);
+    spawn_cleanup(config.limiter(), CLEANUP_EVERY);
     info!(rpm, by_tenant, "rate limiter layer attached");
-    Some(GovernorLayer::new(config))
+    Some(RateLimitLayer {
+        governor: GovernorLayer::new(config.clone()),
+        config,
+        by_tenant,
+    })
+}
+
+/// Every `every`, drop the buckets of `limiter` that have refilled, which
+/// can't change a later decision. Stops once the limiter is dropped with its
+/// router.
+fn spawn_cleanup(
+    limiter: &SharedRateLimiter<String, NoOpMiddleware>,
+    every: Duration,
+) -> Option<std::thread::JoinHandle<()>> {
+    let limiter = Arc::downgrade(limiter);
+    let spawned = std::thread::Builder::new()
+        .name("rate-limit-cleanup".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(every);
+                let Some(limiter) = limiter.upgrade() else {
+                    return;
+                };
+                limiter.retain_recent();
+                limiter.shrink_to_fit();
+                debug!(buckets = limiter.len(), "rate limiter dropped idle buckets");
+            }
+        });
+    match spawned {
+        Ok(handle) => Some(handle),
+        Err(e) => {
+            warn!(error = %e, "can't start the rate limiter's cleanup; idle buckets stay");
+            None
+        }
+    }
 }
 
 /// Build just the governor config. Split out so tests can verify the
 /// math without instantiating a live layer.
-pub fn build_config(rpm: u32, by_tenant: bool) -> Option<PeerIpGovernorConfig> {
+pub fn build_config(rpm: u32, by_tenant: bool) -> Option<HubGovernorConfig> {
     if rpm == 0 {
         info!("rate limiting disabled (--rate-limit-rpm 0)");
         return None;
@@ -158,7 +250,7 @@ pub fn build_config(rpm: u32, by_tenant: bool) -> Option<PeerIpGovernorConfig> {
     let config = GovernorConfigBuilder::default()
         .period(std::time::Duration::from_millis(period_ms))
         .burst_size(burst)
-        .key_extractor(LoopbackExemptKeyExtractor::new(by_tenant))
+        .key_extractor(HubKeyExtractor { by_tenant })
         .finish();
 
     match config {
@@ -229,29 +321,26 @@ mod tests {
     }
 
     #[test]
-    fn loopback_gets_unique_keys_remote_is_stable() {
-        let ex = LoopbackExemptKeyExtractor::new(false);
-        // Two loopback requests → distinct keys (each its own bucket).
-        let a = ex.extract(&req_from("127.0.0.1:5001")).unwrap();
-        let b = ex.extract(&req_from("127.0.0.1:5002")).unwrap();
-        assert_ne!(a, b, "loopback requests must not share a bucket");
-        assert!(a.starts_with("lo:") && b.starts_with("lo:"));
-        // A remote peer → stable key across requests (shared bucket, limited).
+    fn each_address_shares_one_bucket() {
+        let ex = HubKeyExtractor { by_tenant: false };
         let r1 = ex.extract(&req_from("203.0.113.7:40000")).unwrap();
         let r2 = ex.extract(&req_from("203.0.113.7:40001")).unwrap();
         assert_eq!(r1, "203.0.113.7");
         assert_eq!(r1, r2, "same remote IP must share one bucket");
+        // Loopback has a key too; the layer, not the key, exempts it.
+        let lo = ex.extract(&req_from("127.0.0.1:5001")).unwrap();
+        assert_eq!(lo, "127.0.0.1");
     }
 
     #[test]
     fn missing_connect_info_errors() {
-        let ex = LoopbackExemptKeyExtractor::new(false);
+        let ex = HubKeyExtractor { by_tenant: false };
         assert!(ex.extract(&Request::new(())).is_err());
     }
 
     #[test]
     fn by_tenant_keys_by_tenant_wherever_the_request_comes_from() {
-        let ex = LoopbackExemptKeyExtractor::new(true);
+        let ex = HubKeyExtractor { by_tenant: true };
         let with_tenant = |addr: &str, name: &str| {
             let mut r = req_from(addr);
             r.extensions_mut().insert(Tenant::new(name).unwrap());
@@ -267,5 +356,86 @@ mod tests {
         assert_ne!(a1, b, "two tenants on one address get their own buckets");
         // No tenant on a multi-tenant Hub: fail closed.
         assert!(ex.extract(&req_from("127.0.0.1:5001")).is_err());
+    }
+
+    /// The statuses of `n` requests from `peer`, with `tenant` attached if
+    /// given, through `layer` around a handler that answers 200.
+    async fn statuses(
+        layer: &RateLimitLayer,
+        peer: &str,
+        tenant: Option<&str>,
+        n: usize,
+    ) -> Vec<u16> {
+        let ok = tower::service_fn(|_req: Request<Body>| async {
+            Ok::<_, Infallible>(Response::new(Body::empty()))
+        });
+        let service = layer.layer(ok);
+        let mut out = Vec::new();
+        for _ in 0..n {
+            let mut req = Request::new(Body::empty());
+            req.extensions_mut()
+                .insert(ConnectInfo(peer.parse::<SocketAddr>().unwrap()));
+            if let Some(tenant) = tenant {
+                req.extensions_mut().insert(Tenant::new(tenant).unwrap());
+            }
+            let resp = service.clone().oneshot(req).await.unwrap();
+            out.push(resp.status().as_u16());
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn loopback_skips_the_limiter_and_leaves_no_bucket() {
+        // 60 a minute: a burst of 6, then one a second.
+        let layer = build_layer(60, false).unwrap();
+        for peer in ["127.0.0.1:5001", "[::1]:5001"] {
+            let codes = statuses(&layer, peer, None, 50).await;
+            assert!(codes.iter().all(|&c| c == 200), "{peer}: {codes:?}");
+        }
+        assert_eq!(layer.buckets(), 0);
+        // A remote peer is limited, in one bucket.
+        let codes = statuses(&layer, "203.0.113.7:40000", None, 30).await;
+        assert!(codes.contains(&200) && codes.contains(&429), "{codes:?}");
+        assert_eq!(layer.buckets(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_multi_tenant_hub_limits_loopback_too() {
+        let layer = build_layer(60, true).unwrap();
+        let codes = statuses(&layer, "127.0.0.1:5001", Some("alice"), 30).await;
+        assert!(codes.contains(&200) && codes.contains(&429), "{codes:?}");
+        assert_eq!(layer.buckets(), 1);
+    }
+
+    /// Polls `done` every 10 ms for up to 2 seconds.
+    fn eventually(done: impl Fn() -> bool) -> bool {
+        (0..200).any(|_| {
+            std::thread::sleep(Duration::from_millis(10));
+            done()
+        })
+    }
+
+    #[test]
+    fn cleanup_drops_refilled_buckets_and_stops_with_the_limiter() {
+        // A bucket of one that refills in 10 ms.
+        let config = GovernorConfigBuilder::default()
+            .period(Duration::from_millis(10))
+            .burst_size(1)
+            .key_extractor(HubKeyExtractor { by_tenant: false })
+            .finish()
+            .unwrap();
+        let limiter = config.limiter().clone();
+        assert!(limiter.check_key(&"203.0.113.7".to_string()).is_ok());
+        assert_eq!(limiter.len(), 1);
+
+        let cleanup = spawn_cleanup(&limiter, Duration::from_millis(20)).unwrap();
+        assert!(eventually(|| limiter.is_empty()), "the idle bucket stayed");
+
+        drop(limiter);
+        drop(config);
+        assert!(
+            eventually(|| cleanup.is_finished()),
+            "the cleanup outlived its limiter"
+        );
     }
 }
