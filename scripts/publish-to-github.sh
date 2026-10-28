@@ -33,7 +33,11 @@ git remote add github "$GH_URL"
 # repo, catastrophically slow (a 476-commit full-history scan ran for minutes).
 #
 # Incremental only when GitHub's main is a true ancestor of HEAD (the normal
-# fast-forward case). First publish (no remote main) or any divergence falls
+# fast-forward case). When GitHub's main already contains HEAD (an
+# out-of-order pipeline, or a tag on a commit main already published), no
+# commit becomes public, so there is no history to scan; a full rescan there
+# checks only what GitHub already has, and failed a pipeline that had nothing
+# to push. First publish (no remote main) or any divergence falls
 # back to a full HEAD scan — fail safe, never fail open.
 echo ">> leak-scan: working tree"
 scripts/leak-scan.sh --tree
@@ -43,6 +47,9 @@ if [ -n "$GH_MAIN" ] && git cat-file -e "$GH_MAIN" 2>/dev/null \
      && git merge-base --is-ancestor "$GH_MAIN" HEAD 2>/dev/null; then
   echo ">> leak-scan: new commits ${GH_MAIN:0:12}..HEAD"
   scripts/leak-scan.sh --range "${GH_MAIN}..HEAD"
+elif [ -n "$GH_MAIN" ] && git cat-file -e "$GH_MAIN" 2>/dev/null \
+     && git merge-base --is-ancestor HEAD "$GH_MAIN" 2>/dev/null; then
+  echo ">> leak-scan: no new commits (github main ${GH_MAIN:0:12} already contains HEAD)"
 else
   echo ">> leak-scan: full history of HEAD (first publish or divergence)"
   scripts/leak-scan.sh --range HEAD
