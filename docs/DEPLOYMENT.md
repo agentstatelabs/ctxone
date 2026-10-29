@@ -90,6 +90,9 @@ The `?namespace=` is filled in from the project detected in the current director
 
 - ✅ One process, one lock, **startup order irrelevant** — the reboot race is gone.
   Lens always up, independent of any agent; multiple agents share one graph.
+- ✅ MCP sessions carry on across a hub restart and after five idle minutes: the
+  hub keeps how each began in its db, so a client needn't start a new one. A
+  session unused for 7 days is forgotten.
 - MCP clients reach the daemon two ways, and `ctx init --transport http` writes
   the right one per client:
   - **Native URL** — Claude Code, Cursor, VS Code get `{"type":"http","url":…}`.
@@ -496,8 +499,8 @@ needs no affinity: any replica can answer any request.
 - **Row-level security** is switched for the database:
   `ctxone-hub db row-security on` runs once, from anywhere.
 
-A single-tenant hub on Postgres keeps its MCP sessions in the database too, so
-they carry on across a restart.
+A single-tenant hub keeps its MCP sessions in its database too, on Postgres or
+in its SQLite file, so they carry on across a restart.
 
 ### Row-level security
 

@@ -1,12 +1,13 @@
 //! Where the hub keeps the state that lives outside the graph: the project
 //! registry ([`crate::project`]) and session statistics
-//! ([`crate::memory_tools::SessionRegistry`]), and on Postgres the MCP sessions
-//! another Hub process can continue ([`crate::mcp_sessions`]).
+//! ([`crate::memory_tools::SessionRegistry`]), and the MCP sessions another
+//! Hub process can continue ([`crate::mcp_sessions`]).
 //!
 //! A SQLite hub keeps them in its database file (`projects`, `project_paths`,
-//! `ctxone_sessions`). A Postgres hub keeps them in `ctxone_*` tables of the
-//! same database, through AgentStateGraph's connection pool, so TLS and the
-//! pool size are the storage's and a hub pod holds one set of connections.
+//! `ctxone_sessions`, `ctxone_mcp_sessions`). A Postgres hub keeps them in
+//! `ctxone_*` tables of the same database, through AgentStateGraph's
+//! connection pool, so TLS and the pool size are the storage's and a hub pod
+//! holds one set of connections.
 //! Every Postgres row carries its tenant, so tenants sharing a database, in
 //! one hub or in several, never see each other's registry or statistics.
 //! Each table has AgentStateGraph's tenant policy too, so with row-level
