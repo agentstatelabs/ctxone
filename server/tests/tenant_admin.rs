@@ -320,7 +320,10 @@ async fn pg_hub(url: &str) -> PgHub {
     std::fs::write(&path, "").unwrap();
     let file = TenantsFile::open_with_reload(&path, Duration::ZERO).unwrap();
     let app = http::multi_tenant_router(
-        http::HubConfig::default(),
+        http::HubConfig {
+            mcp_http: true,
+            ..Default::default()
+        },
         http::MultiTenant {
             resolver: Arc::new(file.clone()),
             data: data.clone(),
@@ -368,7 +371,7 @@ async fn ok(app: &axum::Router, token: &str, method: &str, uri: &str, body: Valu
 
 /// Give a tenant data in as many tables as the API reaches: a project and its
 /// path, facts and their search index, a closed plan's epoch, a reminder, a
-/// taint and session statistics.
+/// taint, session statistics and an MCP session.
 async fn seed(hub: &PgHub, token: &str, marker: &str) {
     let post = |uri: &'static str, body: Value| ok(&hub.app, token, "POST", uri, body);
     post(
@@ -417,6 +420,23 @@ async fn seed(hub: &PgHub, token: &str, marker: &str) {
     ] {
         ok(&hub.app, token, "GET", uri, Value::Null).await;
     }
+    let init = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": { "name": "itest", "version": "0" }
+        }
+    });
+    let mut req = request("POST", "/mcp", token, Some(init));
+    let headers = req.headers_mut();
+    headers.insert("host", "hub.example.test".parse().unwrap());
+    headers.insert(
+        "accept",
+        "application/json, text/event-stream".parse().unwrap(),
+    );
+    let (status, text) = call(&hub.app, req).await;
+    assert_eq!(status, StatusCode::OK, "initialize: {text}");
 }
 
 /// A connection of the test's own, to count rows.
@@ -522,6 +542,7 @@ async fn purge_deletes(url: &str, count_url: &str) {
         "ctxone_projects",
         "ctxone_project_paths",
         "ctxone_sessions",
+        "ctxone_mcp_sessions",
     ] {
         assert!(
             count(&alice_before, table) > 0,

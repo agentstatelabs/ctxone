@@ -393,6 +393,7 @@ pub const TENANT_TABLES: &[&str] = &[
     "ctxone_project_paths",
     "ctxone_projects",
     "ctxone_sessions",
+    "ctxone_mcp_sessions",
 ];
 
 /// How long a purge waits after it's confirmed, so that every Hub that had the

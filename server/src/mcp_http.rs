@@ -20,6 +20,9 @@
 //! request reaches the services of the tenant its token belongs to, built on
 //! that tenant's repository and session statistics.
 //!
+//! On Postgres each service keeps its sessions in the database too
+//! ([`crate::mcp_sessions`]), so another Hub process can continue one.
+//!
 //! Branch auto-mirroring (stdio-only, cwd-derived) does not apply here: the
 //! default ref is `main` unless a tool call targets a branch explicitly.
 
@@ -39,6 +42,8 @@ use agentstategraph_core::Namespace;
 use tracing::Instrument;
 
 use crate::asd_pool::AsdProcessPool;
+use crate::hub_store::HubStore;
+use crate::mcp_sessions::McpSessionStore;
 use crate::memory_tools::{CtxOneServer, DEFAULT_SESSION_ID};
 use crate::tenant_cache::{Tenancy, TenantState};
 
@@ -200,6 +205,11 @@ impl McpHttpState {
             // authenticated remote clients aren't rejected by the DNS-rebinding
             // guard before the auth layer even runs.
             config = config.disable_allowed_hosts();
+        }
+        // On Postgres a session can continue in any Hub process sharing the
+        // database: on another replica, or here after it was let go.
+        if let Some(HubStore::Postgres(pg)) = &tenant.store {
+            config.session_store = Some(Arc::new(McpSessionStore::new(pg.clone(), ns, session_id)));
         }
         StreamableHttpService::new(factory, Arc::new(LocalSessionManager::default()), config)
     }

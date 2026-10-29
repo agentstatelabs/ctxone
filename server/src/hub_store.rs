@@ -1,6 +1,7 @@
 //! Where the hub keeps the state that lives outside the graph: the project
 //! registry ([`crate::project`]) and session statistics
-//! ([`crate::memory_tools::SessionRegistry`]).
+//! ([`crate::memory_tools::SessionRegistry`]), and on Postgres the MCP sessions
+//! another Hub process can continue ([`crate::mcp_sessions`]).
 //!
 //! A SQLite hub keeps them in its database file (`projects`, `project_paths`,
 //! `ctxone_sessions`). A Postgres hub keeps them in `ctxone_*` tables of the
@@ -73,10 +74,24 @@ const SCHEMA: &str = "
         updated_at              TEXT NOT NULL,
         PRIMARY KEY (tenant_id, session_id)
     );
+    CREATE TABLE IF NOT EXISTS ctxone_mcp_sessions (
+        tenant_id   TEXT NOT NULL,
+        session_id  TEXT NOT NULL,
+        namespace   TEXT NOT NULL,
+        ctx_session TEXT NOT NULL,
+        state       TEXT NOT NULL,
+        seen_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (tenant_id, session_id)
+    );
 ";
 
 /// The hub's tables, each of which gets the tenant policy.
-pub const TABLES: &[&str] = &["ctxone_projects", "ctxone_project_paths", "ctxone_sessions"];
+pub const TABLES: &[&str] = &[
+    "ctxone_projects",
+    "ctxone_project_paths",
+    "ctxone_sessions",
+    "ctxone_mcp_sessions",
+];
 
 impl PgStore {
     /// The hub's tables for `storage`'s tenant, on its pool. Creates them if

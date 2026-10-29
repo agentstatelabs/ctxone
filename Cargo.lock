@@ -607,6 +607,7 @@ dependencies = [
  "agentstategraph-storage",
  "agentstategraph-taint",
  "agentstategraph-tasks",
+ "async-trait",
  "axum",
  "chrono",
  "deadpool-postgres",

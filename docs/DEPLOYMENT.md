@@ -367,9 +367,8 @@ How it's built and how tenants are kept apart:
   stops.
 - **One hostname with HTTPS** in front of the hub, from a reverse proxy or an
   ingress ([below](#https-in-front)). The hub itself speaks plain HTTP.
-- **One hub process.** A second hub on the same database would split a tenant's
-  MCP sessions between processes, and each would overwrite the other's session
-  statistics for the tenant.
+- **One hub process, or several:** replicas can share the database behind one
+  load balancer ([More than one replica](#more-than-one-replica)).
 
 ### Add tenants
 
@@ -459,6 +458,47 @@ own. Keep that, plus a couple for `ctxone-hub tenant purge` and whatever else
 uses the database, under the server's `max_connections` (100 by default on
 Postgres; managed plans often allow fewer). Lower the pool for a small plan.
 
+### More than one replica
+
+Several hubs can serve the same tenants from one database, so one can restart
+or fail while the others answer. Start each the same way, with the same flags,
+the same `DATABASE_URL` and the same tenants file. The load balancer in front
+needs no affinity: any replica can answer any request.
+
+- **MCP sessions continue on any replica.** A hub on Postgres keeps how each MCP
+  session began (the client's `initialize`) in the database. When a request
+  names a session the replica doesn't hold, because it began on another one or
+  this one let it go (after five idle minutes, when the tenant closed, or in a
+  restart), the replica takes it up and the client carries on. A session
+  continues only for its tenant, in the workspace and session it began in. One
+  unused for 7 days is forgotten, and its client is told to start a new one (a
+  404, which MCP clients answer by starting over).
+- **Session statistics add up.** Each replica saves what it counted since its
+  last save (every 30 seconds, when a tenant closes and when it stops) on top
+  of what the others saved, then takes in theirs, so the replicas agree within
+  a save or two. A session deleted through one replica is gone from all of
+  them.
+- **Rate limits are per replica.** A tenant can make `--rate-limit-rpm`
+  requests a minute to each replica, that many times the number of replicas in
+  all. Lower it to match, or limit at the load balancer.
+- **Connections add up too.** Each replica holds up to `--pg-pool-size`, plus
+  one while a tenant opens. Keep the sum under the server's `max_connections`.
+- **The tenants file:** run `ctxone-hub tenant` on the file the replicas read,
+  on a shared volume. Where each replica has a copy instead (a Kubernetes
+  Secret or ConfigMap, say), a change reaches a replica when its copy does,
+  which can take a minute or more. `purge` allows a minute for every hub to
+  stop serving the tenant, so `disable` first, and `purge` once every copy has
+  the change.
+- **Writes to a tenant's graph from two replicas at once** never lose a commit:
+  a branch moves only from the commit a write was built on. Recall results are
+  worked out again once the graph changes, whichever replica changed it, and
+  the workspace summary is at most 15 seconds old.
+- **Row-level security** is switched for the database:
+  `ctxone-hub db row-security on` runs once, from anywhere.
+
+A single-tenant hub on Postgres keeps its MCP sessions in the database too, so
+they carry on across a restart.
+
 ### Row-level security
 
 Every query the hub runs is filtered by its tenant. Row-level security has the
@@ -522,7 +562,8 @@ internet. Then:
   whatever the caller sent, so without `--strict-origin` a matching `Host`
   would be enough.
 - **Rate limits are per tenant** (`--rate-limit-rpm`, 600 a minute by default),
-  so a proxy that hides client addresses changes nothing.
+  so a proxy that hides client addresses changes nothing. With several
+  replicas, they're per replica too.
 - **MCP responses can be long-lived event streams.** Don't buffer `/mcp`, and
   allow long requests (nginx: `proxy_buffering off;` and a long
   `proxy_read_timeout`).
@@ -580,10 +621,10 @@ leaves those views out. A single-tenant hub keeps all of them.
 - **Someone leaves:** `disable` them, and `purge` once their data can go.
 - **Upgrades:** stop the hub, which saves every open tenant's statistics, and
   start the new one. Each tenant's schema is brought up to date on its first
-  request after that.
+  request after that, and MCP clients carry on with their sessions.
 - **Idle tenants** close after 30 minutes without a request, and open again on
-  the next one. An open tenant's session statistics are saved every 30
-  seconds.
+  the next one, their MCP sessions with them. An open tenant's session
+  statistics are saved every 30 seconds.
 
 ## Running as a service
 
