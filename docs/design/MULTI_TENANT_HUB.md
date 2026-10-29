@@ -9,8 +9,9 @@ isolation tests across every route and MCP tool (t-005), tenant administration
 [DEPLOYMENT.md](../DEPLOYMENT.md#one-hub-for-many-users). Postgres row-level
 security, a backstop behind every query's tenant filter, followed (t-009:
 AgentStateGraph's policies in t-010, the Hub's tables and
-`ctxone-hub db row-security` in t-011). Later work: more than one Hub replica
-(t-012).
+`ctxone-hub db row-security` in t-011), and then more than one Hub on the
+database (t-012): MCP sessions any of them can continue, and statistics
+flushes that add up ([More than one replica](#more-than-one-replica)).
 **Plan:** CTX plan `ctx-multi-tenant-hub` (tasks listed at the end).
 **Goal:** One `ctxone-hub` process serves many users ("tenants"), each with
 their own memory, plans, sessions and project registry, on one Postgres
@@ -278,21 +279,54 @@ What tenants still share holds none of their data:
   project detections running at once, and the lock under which one tenant
   opens at a time. A busy tenant can slow the others; per-tenant limits are
   later work. Each tenant keeps an MCP service per (workspace, session) with no
-  cap, and closing an idle tenant ends its MCP sessions, so their clients start
-  new ones.
+  cap. Closing an idle tenant ends its MCP services; on Postgres their sessions
+  continue when it opens again.
+
+## More than one replica
+
+Hubs on one database share it and nothing else (t-012). What a process kept to
+itself had to move to the database, or be safe to keep in each process:
+
+- **MCP sessions.** A streamable-HTTP MCP session lives in the process that
+  began it. rmcp (1.7) can continue one elsewhere from a `SessionStore` holding
+  the client's `initialize` parameters: a process asked about a session it
+  doesn't hold loads them and replays the handshake. `McpSessionStore`
+  ([server/src/mcp_sessions.rs](../../server/src/mcp_sessions.rs)) keeps them in
+  `ctxone_mcp_sessions`, by tenant and session id, with the workspace and
+  statistics session the session serves, and continues it only for those, so a
+  session id can't take a client into another tenant or workspace. That makes
+  affinity on `Mcp-Session-Id` unnecessary, and covers what affinity couldn't:
+  a session its own process let go (rmcp's five-minute idle timeout, a closed
+  tenant, a restart). A row unused for 7 days is deleted when the tenant's next
+  session is stored.
+- **Session statistics.** A flush wrote each session's totals, so two processes
+  overwrote each other's counts. Each `SessionStats` now remembers what its row
+  held when this process last read or wrote it, and a flush adds only what's
+  new. Under `pg_advisory_xact_lock(STATS_LOCK_CLASS, hashtext(<tenant>))` it
+  reads the rows of the sessions it holds and of those written in the last
+  minute, writes each row plus what's new here, and takes in what the others
+  added, sessions they began included (`SessionRegistry::flush_to_pg`). A
+  per-model split the backfill replaced is written whole. A session whose row
+  is gone was deleted elsewhere, and is dropped rather than written back;
+  deleting one takes the same lock. A SQLite hub is one process and still
+  writes totals.
+- **Kept in each process, and safe there:** the recall cache, keyed by the head
+  commit, so another process's write invalidates it; the workspace summary,
+  reused for 15 seconds; merge guards, behind which AgentStateGraph's ref
+  compare-and-swap is what keeps a commit from being lost; and the rate
+  limiter, which is per replica.
 
 ## Deployment shape
 
 [DEPLOYMENT.md](../DEPLOYMENT.md#one-hub-for-many-users) is the operator's
 guide.
 
-- One Hub (a single replica to start), one Postgres, one hostname. Per-user
+- One Hub (or several replicas), one Postgres, one hostname. Per-user
   subdomains become optional.
 - Adding a user is `ctxone-hub tenant add alice`.
 - One shared connection pool.
-- More than one replica later needs MCP session affinity (a streamable-HTTP MCP
-  session lives in one process) and additive statistics flushes (today a flush
-  overwrites the tenant's row).
+- Replicas need no affinity at the load balancer
+  ([More than one replica](#more-than-one-replica)).
 
 ## Not in scope
 
@@ -320,6 +354,6 @@ CTX plan `ctx-multi-tenant-hub`:
 | t-009 | Later: Postgres row-level security; more than one replica | t-005 |
 | t-010 | AgentStateGraph: row-level security policies, off until switched on; a tenant-scoped pool; release 1.5.0 | |
 | t-011 | Row-level security on the Hub's tables; `ctxone-hub db row-security` | t-010 |
-| t-012 | More than one Hub replica: MCP session affinity, additive statistics flushes | |
+| t-012 | More than one Hub replica: MCP sessions any replica continues, additive statistics flushes | |
 
-t-001 to t-008, t-010 and t-011 are done.
+Every task is done; t-010 to t-012 were t-009's parts.

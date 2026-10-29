@@ -16,9 +16,11 @@ use std::time::Duration;
 use agentstategraph_storage::PostgresStorage;
 use agentstategraph_storage::tokio_postgres;
 use ctxone_hub::hub_store::{self, HubStore, PgStore};
+use ctxone_hub::mcp_sessions::McpSessionStore;
 use ctxone_hub::memory_tools::SessionRegistry;
 use ctxone_hub::tenant::TokenHash;
 use ctxone_hub::tenant_admin::TENANT_TABLES;
+use rmcp::transport::streamable_http_server::session::store::{SessionState, SessionStore};
 use row_security::{Schema, connect};
 
 fn url() -> Option<String> {
@@ -193,8 +195,8 @@ async fn sent(db: &tokio_postgres::Client, tenant: &str) -> i64 {
     .get(0)
 }
 
-/// Rows of two tenants in each of the Hub's tables: a project with a path, and
-/// session statistics.
+/// Rows of two tenants in each of the Hub's tables: a project with a path,
+/// session statistics and an MCP session. Call it from a blocking thread.
 fn seed(store: &HubStore, session: &str) {
     store
         .register_project(
@@ -208,6 +210,21 @@ fn seed(store: &HubStore, session: &str) {
     let registry = SessionRegistry::new();
     registry.get_or_create(session).record(100, 10);
     registry.flush(store);
+    let HubStore::Postgres(pg) = store else {
+        unreachable!("a Postgres store")
+    };
+    let params = serde_json::from_value(serde_json::json!({
+        "protocolVersion": "2025-06-18",
+        "capabilities": {},
+        "clientInfo": { "name": "itest", "version": "0" }
+    }))
+    .unwrap();
+    tokio::runtime::Handle::current()
+        .block_on(
+            McpSessionStore::new(pg.clone(), "default", session)
+                .store(&format!("{session}-mcp"), &SessionState::new(params)),
+        )
+        .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -264,6 +281,8 @@ async fn with_it_on_a_connection_sees_and_writes_only_its_tenants_rows_in_the_hu
         "INSERT INTO ctxone_sessions (tenant_id, session_id, updated_at)
          VALUES ('bravo', 'x', 'now')",
         "UPDATE ctxone_sessions SET tenant_id = 'bravo'",
+        "INSERT INTO ctxone_mcp_sessions (tenant_id, session_id, namespace, ctx_session, state)
+         VALUES ('bravo', 'x', 'default', 'x', '{}')",
     ];
     for sql in refused {
         let err = app.batch_execute(sql).await.expect_err(sql);

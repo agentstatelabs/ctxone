@@ -3,7 +3,7 @@
 //! Higher-level memory operations built on top of AgentStateGraph primitives.
 //! Each tool includes token usage metadata (`_ctxone_stats`) for tracking savings.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -274,6 +274,15 @@ pub struct SessionStats {
     /// audit — recall runs on every prompt, so it is deliberately in-memory
     /// (no graph write per recall) and capped. Lost on restart by design.
     recall_log: RwLock<std::collections::VecDeque<RecallLogEntry>>,
+
+    /// On a Postgres hub, the counts this session's row held when this Hub
+    /// last read or wrote it (`None`: no row yet), so a flush adds only what
+    /// is new here and keeps what other Hubs added. See
+    /// [`SessionRegistry::flush_to_pg`].
+    synced: Mutex<Option<Counts>>,
+    /// Whether [`set_by_model`](Self::set_by_model) replaced `by_model` since
+    /// the last Postgres flush, which then writes it whole instead of adding.
+    by_model_replaced: AtomicBool,
 }
 
 /// One recorded recall injection (t-004).
@@ -361,6 +370,125 @@ impl ModelUsage {
         self.cache_create_tokens += other.cache_create_tokens;
         self.call_count += other.call_count;
     }
+
+    /// What this has that `base` doesn't, none below zero.
+    fn since(&self, base: &ModelUsage) -> ModelUsage {
+        ModelUsage {
+            input_tokens: self.input_tokens.saturating_sub(base.input_tokens),
+            output_tokens: self.output_tokens.saturating_sub(base.output_tokens),
+            cache_read_tokens: self
+                .cache_read_tokens
+                .saturating_sub(base.cache_read_tokens),
+            cache_create_tokens: self
+                .cache_create_tokens
+                .saturating_sub(base.cache_create_tokens),
+            call_count: self.call_count.saturating_sub(base.call_count),
+        }
+    }
+
+    /// This, moved by `to - from` (none below zero).
+    fn shifted(&self, from: &ModelUsage, to: &ModelUsage) -> ModelUsage {
+        ModelUsage {
+            input_tokens: shift(self.input_tokens, from.input_tokens, to.input_tokens),
+            output_tokens: shift(self.output_tokens, from.output_tokens, to.output_tokens),
+            cache_read_tokens: shift(
+                self.cache_read_tokens,
+                from.cache_read_tokens,
+                to.cache_read_tokens,
+            ),
+            cache_create_tokens: shift(
+                self.cache_create_tokens,
+                from.cache_create_tokens,
+                to.cache_create_tokens,
+            ),
+            call_count: shift(self.call_count, from.call_count, to.call_count),
+        }
+    }
+}
+
+/// `value` moved by `to - from`, none below zero: what a counter becomes when
+/// its row went from `from` to `to` through other Hubs' flushes.
+fn shift(value: u64, from: u64, to: u64) -> u64 {
+    (i128::from(value) + i128::from(to) - i128::from(from)).clamp(0, i128::from(u64::MAX)) as u64
+}
+
+/// The counters of one session that a Postgres flush adds up across every Hub
+/// sharing the database (ctx-multi-tenant-hub t-012). `tokens_saved` isn't
+/// one: it follows from `tokens_sent`.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Counts {
+    tokens_sent: u64,
+    llm_input: u64,
+    llm_output: u64,
+    llm_cache_read: u64,
+    llm_cache_create: u64,
+    llm_calls: u64,
+    extra: BTreeMap<String, u64>,
+    by_model: BTreeMap<String, ModelUsage>,
+}
+
+impl Counts {
+    fn of(stats: &SessionStats) -> Self {
+        Self {
+            tokens_sent: stats.tokens_sent.load(Ordering::Relaxed),
+            llm_input: stats.llm_input_tokens.load(Ordering::Relaxed),
+            llm_output: stats.llm_output_tokens.load(Ordering::Relaxed),
+            llm_cache_read: stats.llm_cache_read_tokens.load(Ordering::Relaxed),
+            llm_cache_create: stats.llm_cache_create_tokens.load(Ordering::Relaxed),
+            llm_calls: stats.llm_call_count.load(Ordering::Relaxed),
+            extra: stats.extra_tokens(),
+            by_model: stats.by_model(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// What this has that `base` doesn't, none below zero.
+    fn since(&self, base: &Counts) -> Counts {
+        let mut extra = BTreeMap::new();
+        for (k, v) in &self.extra {
+            let new = v.saturating_sub(base.extra.get(k).copied().unwrap_or(0));
+            if new > 0 {
+                extra.insert(k.clone(), new);
+            }
+        }
+        let mut by_model = BTreeMap::new();
+        for (m, u) in &self.by_model {
+            let new = u.since(&base.by_model.get(m).cloned().unwrap_or_default());
+            if new != ModelUsage::default() {
+                by_model.insert(m.clone(), new);
+            }
+        }
+        Counts {
+            tokens_sent: self.tokens_sent.saturating_sub(base.tokens_sent),
+            llm_input: self.llm_input.saturating_sub(base.llm_input),
+            llm_output: self.llm_output.saturating_sub(base.llm_output),
+            llm_cache_read: self.llm_cache_read.saturating_sub(base.llm_cache_read),
+            llm_cache_create: self.llm_cache_create.saturating_sub(base.llm_cache_create),
+            llm_calls: self.llm_calls.saturating_sub(base.llm_calls),
+            extra,
+            by_model,
+        }
+    }
+
+    fn plus(&self, other: &Counts) -> Counts {
+        let mut sum = self.clone();
+        sum.tokens_sent += other.tokens_sent;
+        sum.llm_input += other.llm_input;
+        sum.llm_output += other.llm_output;
+        sum.llm_cache_read += other.llm_cache_read;
+        sum.llm_cache_create += other.llm_cache_create;
+        sum.llm_calls += other.llm_calls;
+        for (k, v) in &other.extra {
+            *sum.extra.entry(k.clone()).or_insert(0) += v;
+        }
+        for (m, u) in &other.by_model {
+            sum.by_model.entry(m.clone()).or_default().merge(u);
+        }
+        sum
+    }
 }
 
 impl Default for SessionStats {
@@ -389,6 +517,8 @@ impl SessionStats {
             extra_tokens: RwLock::new(BTreeMap::new()),
             by_model: RwLock::new(BTreeMap::new()),
             recall_log: RwLock::new(std::collections::VecDeque::new()),
+            synced: Mutex::new(None),
+            by_model_replaced: AtomicBool::new(false),
         }
     }
 
@@ -428,6 +558,8 @@ impl SessionStats {
             extra_tokens: RwLock::new(extra_tokens),
             by_model: RwLock::new(by_model),
             recall_log: RwLock::new(std::collections::VecDeque::new()),
+            synced: Mutex::new(None),
+            by_model_replaced: AtomicBool::new(false),
         }
     }
 
@@ -594,6 +726,7 @@ impl SessionStats {
     pub fn set_by_model(&self, map: BTreeMap<String, ModelUsage>) {
         if let Ok(mut w) = self.by_model.write() {
             *w = map;
+            self.by_model_replaced.store(true, Ordering::Relaxed);
         }
     }
 
@@ -605,6 +738,86 @@ impl SessionStats {
     /// Read the last-observed provider, if any.
     pub fn last_provider(&self) -> Option<String> {
         self.last_provider.read().ok().and_then(|g| g.clone())
+    }
+
+    /// Show `model` and `provider` as the latest, where they're known.
+    fn take_last_seen(&self, model: Option<String>, provider: Option<String>) {
+        if let Some(m) = model
+            && let Ok(mut w) = self.last_model.write()
+        {
+            *w = Some(m);
+        }
+        if let Some(p) = provider
+            && let Ok(mut w) = self.last_provider.write()
+        {
+            *w = Some(p);
+        }
+    }
+
+    /// Take in what other Hubs added to this session's row, which went from
+    /// `from` to `to` meanwhile, keeping what was recorded here. Leaves
+    /// `by_model` alone when `with_by_model` is false: this Hub replaced it.
+    fn catch_up(&self, from: &Counts, to: &Counts, with_by_model: bool) {
+        let move_by = |counter: &AtomicU64, from: u64, to: u64| {
+            if from != to {
+                let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                    Some(shift(v, from, to))
+                });
+            }
+        };
+        move_by(&self.tokens_sent, from.tokens_sent, to.tokens_sent);
+        move_by(&self.llm_input_tokens, from.llm_input, to.llm_input);
+        move_by(&self.llm_output_tokens, from.llm_output, to.llm_output);
+        move_by(
+            &self.llm_cache_read_tokens,
+            from.llm_cache_read,
+            to.llm_cache_read,
+        );
+        move_by(
+            &self.llm_cache_create_tokens,
+            from.llm_cache_create,
+            to.llm_cache_create,
+        );
+        move_by(&self.llm_call_count, from.llm_calls, to.llm_calls);
+        let total_sent = self.tokens_sent.load(Ordering::Relaxed);
+        self.tokens_saved
+            .store(savings_estimate_tokens(total_sent), Ordering::Relaxed);
+        if from.extra != to.extra
+            && let Ok(mut w) = self.extra_tokens.write()
+        {
+            let keys: std::collections::BTreeSet<_> =
+                from.extra.keys().chain(to.extra.keys()).cloned().collect();
+            for k in keys {
+                let get = |m: &BTreeMap<String, u64>| m.get(&k).copied().unwrap_or(0);
+                let v = shift(get(&w), get(&from.extra), get(&to.extra));
+                if v > 0 {
+                    w.insert(k, v);
+                } else {
+                    w.remove(&k);
+                }
+            }
+        }
+        if with_by_model
+            && from.by_model != to.by_model
+            && let Ok(mut w) = self.by_model.write()
+        {
+            let models: std::collections::BTreeSet<_> = from
+                .by_model
+                .keys()
+                .chain(to.by_model.keys())
+                .cloned()
+                .collect();
+            for m in models {
+                let get =
+                    |map: &BTreeMap<String, ModelUsage>| map.get(&m).cloned().unwrap_or_default();
+                let v = get(&w).shifted(&get(&from.by_model), &get(&to.by_model));
+                if v != ModelUsage::default() {
+                    w.insert(m, v);
+                } else {
+                    w.remove(&m);
+                }
+            }
+        }
     }
 }
 
@@ -808,6 +1021,9 @@ impl SessionSnapshot {
 /// section is a single `get` + optional `put`.
 pub struct SessionRegistry {
     sessions: Mutex<LruCache<String, Arc<SessionStats>>>,
+    /// Postgres flushes take turns on this. It holds the database's time from
+    /// which the next one reads back rows other Hubs wrote ("": all of them).
+    pg_since: Mutex<String>,
 }
 
 /// Default maximum number of sessions retained in memory before LRU
@@ -844,6 +1060,7 @@ impl SessionRegistry {
         );
         Self {
             sessions: Mutex::new(lru),
+            pg_since: Mutex::new(String::new()),
         }
     }
 
@@ -900,14 +1117,25 @@ impl SessionRegistry {
                 let (pool, tenant, id) =
                     (pg.tenant_pool(), pg.tenant().to_string(), id.to_string());
                 let removed = PostgresStorage::run(async move {
-                    let client = pool.get().await.map_err(|e| e.to_string())?;
-                    client
-                        .execute(
-                            "DELETE FROM ctxone_sessions WHERE tenant_id = $1 AND session_id = $2",
-                            &[&tenant, &id],
-                        )
+                    let mut client = pool.get().await.map_err(|e| e.to_string())?;
+                    // Between flushes, so none writes back what it read before.
+                    let tx = client.transaction().await.map_err(|e| pg_error(&e))?;
+                    tx.batch_execute(PG_SYNC_LOCK_TIMEOUT)
                         .await
-                        .map_err(|e| pg_error(&e))
+                        .map_err(|e| pg_error(&e))?;
+                    tx.execute(
+                        "SELECT pg_advisory_xact_lock($1, hashtext($2))",
+                        &[&STATS_LOCK_CLASS, &tenant],
+                    )
+                    .await
+                    .map_err(|e| pg_error(&e))?;
+                    tx.execute(
+                        "DELETE FROM ctxone_sessions WHERE tenant_id = $1 AND session_id = $2",
+                        &[&tenant, &id],
+                    )
+                    .await
+                    .map_err(|e| pg_error(&e))?;
+                    tx.commit().await.map_err(|e| pg_error(&e))
                 });
                 if let Err(e) = removed {
                     tracing::warn!(error = %e, "session stats: delete from postgres failed");
@@ -1291,21 +1519,26 @@ impl SessionRegistry {
     pub fn load_from_pg(pg: &PgStore) -> Self {
         let registry = Self::new();
         let (pool, tenant) = (pg.tenant_pool(), pg.tenant().to_string());
-        let rows = PostgresStorage::run(async move {
+        let loaded = PostgresStorage::run(async move {
             let client = pool.get().await.map_err(|e| e.to_string())?;
-            client
+            let since: String = client
+                .query_one(PG_SYNC_SINCE, &[])
+                .await
+                .map_err(|e| pg_error(&e))?
+                .get(0);
+            let rows = client
                 .query(
-                    "SELECT session_id, tokens_sent, tokens_saved,
-                            llm_input_tokens, llm_output_tokens, llm_cache_read_tokens,
-                            llm_cache_create_tokens, llm_call_count, last_model, last_provider,
-                            extra_tokens, by_model
-                     FROM ctxone_sessions WHERE tenant_id = $1",
+                    &format!("{PG_SESSION_COLUMNS} WHERE tenant_id = $1"),
                     &[&tenant],
                 )
                 .await
-                .map_err(|e| pg_error(&e))
+                .map_err(|e| pg_error(&e))?;
+            Ok::<_, String>((
+                since,
+                rows.iter().map(Persisted::from_row).collect::<Vec<_>>(),
+            ))
         });
-        let rows = match rows {
+        let (since, rows) = match loaded {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(error = %e, "session stats: postgres load failed; starting empty");
@@ -1315,119 +1548,311 @@ impl SessionRegistry {
         {
             let mut lru = registry.sessions.lock().expect("sessions lock");
             for row in &rows {
-                // Counters are BIGINT; a negative value can't come from us.
-                let n = |i: usize| row.get::<_, i64>(i).max(0) as u64;
-                // The same degrade-to-empty policy as the SQLite load.
-                let extra = row
-                    .get::<_, Option<String>>(10)
-                    .and_then(|s| serde_json::from_str::<BTreeMap<String, u64>>(&s).ok())
-                    .unwrap_or_default();
-                let by_model = row
-                    .get::<_, Option<String>>(11)
-                    .and_then(|s| serde_json::from_str::<BTreeMap<String, ModelUsage>>(&s).ok())
-                    .unwrap_or_default();
-                let stats = Arc::new(SessionStats::with_values(
-                    n(1),
-                    n(2),
-                    n(3),
-                    n(4),
-                    n(5),
-                    n(6),
-                    n(7),
-                    row.get(8),
-                    row.get(9),
-                    extra,
-                    by_model,
-                ));
-                lru.put(row.get::<_, String>(0), stats);
+                lru.put(row.session_id.clone(), Arc::new(row.stats()));
             }
         }
+        *registry.pg_since.lock().expect("stats sync lock") = since;
         tracing::info!(sessions = rows.len(), "session stats loaded from postgres");
         registry
     }
 
-    /// [`flush_to_db`](Self::flush_to_db) for a Postgres hub.
+    /// [`flush_to_db`](Self::flush_to_db) for a Postgres hub, where several
+    /// Hubs can share a tenant's rows (ctx-multi-tenant-hub t-012): a flush
+    /// adds what each session recorded here since this Hub last read or wrote
+    /// its row, instead of writing its totals, so no Hub's counts overwrite
+    /// another's. It then takes in what the others added, to the sessions it
+    /// holds and to sessions they began, so every Hub's statistics catch up
+    /// with the rest at each flush. A session whose row is gone was deleted
+    /// through another Hub, and is dropped here rather than written back.
+    ///
+    /// Flushes of a tenant take turns across Hubs, under
+    /// `pg_advisory_xact_lock(STATS_LOCK_CLASS, hashtext(<tenant>))`, so each
+    /// adds to the totals the one before it left.
     pub fn flush_to_pg(&self, pg: &PgStore) {
-        let snaps = self.snapshot_all();
-        if snaps.is_empty() {
-            return;
-        }
+        // One at a time here, too: two flushes from one Hub would both add
+        // what's new since the same read.
+        let mut since = self.pg_since.lock().expect("stats sync lock");
+        let held: Vec<(String, Arc<SessionStats>)> = {
+            let w = self.sessions.lock().expect("sessions lock");
+            w.iter().map(|(id, s)| (id.clone(), s.clone())).collect()
+        };
+        let pending: Vec<PendingSync> = held.iter().map(|(id, s)| PendingSync::of(id, s)).collect();
+        let ids: Vec<String> = held.iter().map(|(id, _)| id.clone()).collect();
         let (pool, tenant) = (pg.tenant_pool(), pg.tenant().to_string());
-        let flushed = PostgresStorage::run(async move {
-            let client = pool.get().await.map_err(|e| e.to_string())?;
-            let mut written = 0usize;
-            for s in &snaps {
-                // NULL rather than "{}", as in the SQLite table.
-                let extra = (!s.extra_tokens.is_empty())
-                    .then(|| serde_json::to_string(&s.extra_tokens).ok())
-                    .flatten();
-                let by_model = (!s.llm_by_model.is_empty())
-                    .then(|| serde_json::to_string(&s.llm_by_model).ok())
-                    .flatten();
-                let counts = [
-                    s.session_tokens_used,
-                    s.session_tokens_saved,
-                    s.llm_input_tokens,
-                    s.llm_output_tokens,
-                    s.llm_cache_read_tokens,
-                    s.llm_cache_create_tokens,
-                    s.llm_call_count,
-                ]
-                .map(|n| i64::try_from(n).unwrap_or(i64::MAX));
-                let result = client
-                    .execute(
-                        "INSERT INTO ctxone_sessions
-                            (tenant_id, session_id, tokens_sent, tokens_saved,
-                             llm_input_tokens, llm_output_tokens, llm_cache_read_tokens,
-                             llm_cache_create_tokens, llm_call_count, last_model, last_provider,
-                             extra_tokens, by_model, updated_at)
-                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
-                                 to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))
-                         ON CONFLICT (tenant_id, session_id) DO UPDATE SET
-                            tokens_sent             = excluded.tokens_sent,
-                            tokens_saved            = excluded.tokens_saved,
-                            llm_input_tokens        = excluded.llm_input_tokens,
-                            llm_output_tokens       = excluded.llm_output_tokens,
-                            llm_cache_read_tokens   = excluded.llm_cache_read_tokens,
-                            llm_cache_create_tokens = excluded.llm_cache_create_tokens,
-                            llm_call_count          = excluded.llm_call_count,
-                            last_model              = excluded.last_model,
-                            last_provider           = excluded.last_provider,
-                            extra_tokens            = excluded.extra_tokens,
-                            by_model                = excluded.by_model,
-                            updated_at              = excluded.updated_at",
-                        &[
-                            &tenant,
-                            &s.session_id,
-                            &counts[0],
-                            &counts[1],
-                            &counts[2],
-                            &counts[3],
-                            &counts[4],
-                            &counts[5],
-                            &counts[6],
-                            &s.last_model,
-                            &s.last_provider,
-                            &extra,
-                            &by_model,
-                        ],
-                    )
-                    .await;
-                match result {
-                    Ok(_) => written += 1,
-                    Err(e) => tracing::warn!(
-                        session = %s.session_id,
-                        error = %pg_error(&e),
-                        "session stats: postgres upsert failed"
+        let prev = since.clone();
+        let inputs = pending.clone();
+        let synced = PostgresStorage::run(async move {
+            let mut client = pool.get().await.map_err(|e| e.to_string())?;
+            let tx = client.transaction().await.map_err(|e| pg_error(&e))?;
+            // A Hub stuck holding the lock costs this flush, not the next.
+            tx.batch_execute(PG_SYNC_LOCK_TIMEOUT)
+                .await
+                .map_err(|e| pg_error(&e))?;
+            tx.execute(
+                "SELECT pg_advisory_xact_lock($1, hashtext($2))",
+                &[&STATS_LOCK_CLASS, &tenant],
+            )
+            .await
+            .map_err(|e| pg_error(&e))?;
+            let next: String = tx
+                .query_one(PG_SYNC_SINCE, &[])
+                .await
+                .map_err(|e| pg_error(&e))?
+                .get(0);
+            let rows: HashMap<String, Persisted> = tx
+                .query(
+                    &format!(
+                        "{PG_SESSION_COLUMNS}
+                         WHERE tenant_id = $1 AND (session_id = ANY($2) OR updated_at >= $3)"
                     ),
+                    &[&tenant, &ids, &prev],
+                )
+                .await
+                .map_err(|e| pg_error(&e))?
+                .iter()
+                .map(Persisted::from_row)
+                .map(|row| (row.session_id.clone(), row))
+                .collect();
+            let mut written = HashMap::new();
+            for p in &inputs {
+                let Some(new) = p.to_write(rows.get(&p.id).map(|r| &r.counts)) else {
+                    continue;
+                };
+                let n = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
+                // NULL rather than "{}", as in the SQLite table.
+                let json = |empty: bool, value: serde_json::Result<String>| {
+                    (!empty).then(|| value.ok()).flatten()
+                };
+                let extra = json(new.extra.is_empty(), serde_json::to_string(&new.extra));
+                let by_model = json(
+                    new.by_model.is_empty(),
+                    serde_json::to_string(&new.by_model),
+                );
+                tx.execute(
+                    "INSERT INTO ctxone_sessions
+                        (tenant_id, session_id, tokens_sent, tokens_saved,
+                         llm_input_tokens, llm_output_tokens, llm_cache_read_tokens,
+                         llm_cache_create_tokens, llm_call_count, last_model, last_provider,
+                         extra_tokens, by_model, updated_at)
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
+                             to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))
+                     ON CONFLICT (tenant_id, session_id) DO UPDATE SET
+                        tokens_sent             = excluded.tokens_sent,
+                        tokens_saved            = excluded.tokens_saved,
+                        llm_input_tokens        = excluded.llm_input_tokens,
+                        llm_output_tokens       = excluded.llm_output_tokens,
+                        llm_cache_read_tokens   = excluded.llm_cache_read_tokens,
+                        llm_cache_create_tokens = excluded.llm_cache_create_tokens,
+                        llm_call_count          = excluded.llm_call_count,
+                        last_model    = COALESCE(excluded.last_model, ctxone_sessions.last_model),
+                        last_provider = COALESCE(excluded.last_provider, ctxone_sessions.last_provider),
+                        extra_tokens            = excluded.extra_tokens,
+                        by_model                = excluded.by_model,
+                        updated_at              = excluded.updated_at",
+                    &[
+                        &tenant,
+                        &p.id,
+                        &n(new.tokens_sent),
+                        &n(savings_estimate_tokens(new.tokens_sent)),
+                        &n(new.llm_input),
+                        &n(new.llm_output),
+                        &n(new.llm_cache_read),
+                        &n(new.llm_cache_create),
+                        &n(new.llm_calls),
+                        &p.last_model,
+                        &p.last_provider,
+                        &extra,
+                        &by_model,
+                    ],
+                )
+                .await
+                .map_err(|e| format!("session {}: {}", p.id, pg_error(&e)))?;
+                written.insert(p.id.clone(), new);
+            }
+            tx.commit().await.map_err(|e| pg_error(&e))?;
+            Ok::<_, String>((next, rows, written))
+        });
+        let (next, rows, written) = match synced {
+            Ok(synced) => synced,
+            Err(e) => {
+                // Nothing was written: the next flush adds all of it.
+                for p in pending.iter().filter(|p| p.replaced_by_model.is_some()) {
+                    if let Some((_, s)) = held.iter().find(|(id, _)| *id == p.id) {
+                        s.by_model_replaced.store(true, Ordering::Relaxed);
+                    }
+                }
+                tracing::warn!(error = %e, "session stats: postgres flush failed");
+                return;
+            }
+        };
+        *since = next;
+
+        let zero = Counts::default();
+        let mut gone = Vec::new();
+        for (p, (_, stats)) in pending.iter().zip(&held) {
+            let row = rows.get(&p.id);
+            if row.is_none() && p.base.is_some() {
+                gone.push((p.id.clone(), stats.clone()));
+                continue;
+            }
+            if let Some(row) = row {
+                let base = p.base.as_ref().unwrap_or(&zero);
+                stats.catch_up(base, &row.counts, p.replaced_by_model.is_none());
+                // Calls made only elsewhere: their model is the latest.
+                if row.counts.llm_calls > base.llm_calls && p.delta.llm_calls == 0 {
+                    stats.take_last_seen(row.last_model.clone(), row.last_provider.clone());
                 }
             }
-            Ok::<_, String>(written)
-        });
-        match flushed {
-            Ok(written) => tracing::debug!(sessions = written, "session stats flushed to postgres"),
-            Err(e) => tracing::warn!(error = %e, "session stats: postgres flush failed"),
+            if let Some(now) = written.get(&p.id).or(row.map(|r| &r.counts)) {
+                *stats.synced.lock().expect("synced lock") = Some(now.clone());
+            }
         }
+        let mut w = self.sessions.lock().expect("sessions lock");
+        for (id, stats) in gone {
+            if w.peek(&id).is_some_and(|s| Arc::ptr_eq(s, &stats)) {
+                w.pop(&id);
+            }
+        }
+        // Sessions other Hubs began. Never at the cost of one held here.
+        for (id, row) in rows {
+            if w.len() < w.cap().get() && !w.contains(&id) {
+                w.put(id, Arc::new(row.stats()));
+            }
+        }
+        tracing::debug!(
+            sessions = written.len(),
+            "session stats flushed to postgres"
+        );
+    }
+}
+
+/// Flushes of a tenant's statistics take turns across every Hub sharing the
+/// database under `pg_advisory_xact_lock(STATS_LOCK_CLASS, hashtext(<tenant>))`
+/// ("ctss").
+pub const STATS_LOCK_CLASS: i32 = 0x6374_7373;
+
+/// How long a flush, or a session's delete, waits for that lock before giving
+/// up until the next one.
+const PG_SYNC_LOCK_TIMEOUT: &str = "SET LOCAL lock_timeout = '30s'";
+
+/// The database's time, a minute back, from which the next flush reads back
+/// the rows other Hubs wrote. The minute covers a row whose writer took its
+/// time before committing; reading one twice changes nothing.
+const PG_SYNC_SINCE: &str =
+    "SELECT to_char((clock_timestamp() - interval '1 minute') AT TIME ZONE 'UTC',
+                        'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')";
+
+/// The columns [`Persisted::from_row`] reads, in its order.
+const PG_SESSION_COLUMNS: &str = "SELECT session_id, tokens_sent,
+        llm_input_tokens, llm_output_tokens, llm_cache_read_tokens,
+        llm_cache_create_tokens, llm_call_count, last_model, last_provider,
+        extra_tokens, by_model
+    FROM ctxone_sessions";
+
+/// A session's row in `ctxone_sessions`.
+struct Persisted {
+    session_id: String,
+    counts: Counts,
+    last_model: Option<String>,
+    last_provider: Option<String>,
+}
+
+impl Persisted {
+    fn from_row(row: &agentstategraph_storage::tokio_postgres::Row) -> Self {
+        // Counters are BIGINT; a negative value can't come from us.
+        let n = |i: usize| row.get::<_, i64>(i).max(0) as u64;
+        // Unreadable JSON degrades to empty, as in the SQLite load.
+        let json = |i: usize| row.get::<_, Option<String>>(i);
+        Self {
+            session_id: row.get(0),
+            counts: Counts {
+                tokens_sent: n(1),
+                llm_input: n(2),
+                llm_output: n(3),
+                llm_cache_read: n(4),
+                llm_cache_create: n(5),
+                llm_calls: n(6),
+                extra: json(9)
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default(),
+                by_model: json(10)
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default(),
+            },
+            last_model: row.get(7),
+            last_provider: row.get(8),
+        }
+    }
+
+    /// The session as its row has it, known to match the row.
+    fn stats(&self) -> SessionStats {
+        let c = &self.counts;
+        let stats = SessionStats::with_values(
+            c.tokens_sent,
+            0,
+            c.llm_input,
+            c.llm_output,
+            c.llm_cache_read,
+            c.llm_cache_create,
+            c.llm_calls,
+            self.last_model.clone(),
+            self.last_provider.clone(),
+            c.extra.clone(),
+            c.by_model.clone(),
+        );
+        *stats.synced.lock().expect("synced lock") = Some(c.clone());
+        stats
+    }
+}
+
+/// What a Postgres flush has to write for one session.
+#[derive(Clone)]
+struct PendingSync {
+    id: String,
+    /// What its row held when last read or written here; `None`: no row.
+    base: Option<Counts>,
+    /// What it recorded since.
+    delta: Counts,
+    /// Its `by_model`, when that was replaced rather than added to.
+    replaced_by_model: Option<BTreeMap<String, ModelUsage>>,
+    /// Its latest model and provider, when it made calls since.
+    last_model: Option<String>,
+    last_provider: Option<String>,
+}
+
+impl PendingSync {
+    fn of(id: &str, stats: &SessionStats) -> Self {
+        let base = stats.synced.lock().expect("synced lock").clone();
+        let now = Counts::of(stats);
+        let delta = now.since(base.as_ref().unwrap_or(&Counts::default()));
+        let replaced = stats.by_model_replaced.swap(false, Ordering::Relaxed);
+        let called = delta.llm_calls > 0;
+        Self {
+            id: id.to_owned(),
+            base,
+            replaced_by_model: replaced.then_some(now.by_model),
+            last_model: called.then(|| stats.last_model()).flatten(),
+            last_provider: called.then(|| stats.last_provider()).flatten(),
+            delta,
+        }
+    }
+
+    /// The totals to write over `row` (`None`: there's none), or `None` when
+    /// there's nothing to write: nothing new for a row this Hub has written or
+    /// read, or the row was deleted. A session with no row yet gets one even
+    /// with nothing counted, so it's still listed after a restart.
+    fn to_write(&self, row: Option<&Counts>) -> Option<Counts> {
+        if self.delta.is_empty() && self.replaced_by_model.is_none() && self.base.is_some() {
+            return None;
+        }
+        if row.is_none() && self.base.is_some() {
+            return None;
+        }
+        let mut new = row.cloned().unwrap_or_default().plus(&self.delta);
+        if let Some(by_model) = &self.replaced_by_model {
+            new.by_model = by_model.clone();
+        }
+        Some(new)
     }
 }
 
@@ -6362,6 +6787,111 @@ mod tests {
         assert_eq!(snap.llm_output_tokens, 10);
         assert_eq!(snap.llm_cache_read_tokens, 5);
         assert_eq!(snap.llm_call_count, 1);
+    }
+
+    fn usage(input_tokens: u64, call_count: u64) -> ModelUsage {
+        ModelUsage {
+            input_tokens,
+            call_count,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_postgres_flush_writes_what_is_new_on_top_of_the_row() {
+        let s = SessionStats::new();
+        s.record(400, 0);
+        s.record_llm_usage(10, 20, 0, 0, Some("m".into()), None);
+        let p = PendingSync::of("x", &s);
+        assert_eq!(p.last_model.as_deref(), Some("m"));
+        // No row yet: what it has.
+        assert_eq!(p.to_write(None).map(|c| c.tokens_sent), Some(100));
+        // Another Hub's row: on top of it.
+        let row = Counts {
+            tokens_sent: 7,
+            llm_calls: 3,
+            by_model: BTreeMap::from([("m".to_string(), usage(5, 3))]),
+            ..Default::default()
+        };
+        let new = p.to_write(Some(&row)).unwrap();
+        assert_eq!(
+            (new.tokens_sent, new.llm_calls, new.llm_input),
+            (107, 4, 10)
+        );
+        assert_eq!(
+            new.by_model["m"],
+            ModelUsage {
+                output_tokens: 20,
+                ..usage(15, 4)
+            }
+        );
+
+        // Once written, nothing new means nothing to write, and the model
+        // isn't claimed as the latest.
+        *s.synced.lock().unwrap() = Some(Counts::of(&s));
+        let p = PendingSync::of("x", &s);
+        assert!(p.to_write(Some(&row)).is_none());
+        assert_eq!(p.last_model, None);
+        // A row deleted through another Hub isn't written back.
+        s.record(40, 0);
+        assert!(PendingSync::of("x", &s).to_write(None).is_none());
+        // A session with no row gets one, counted or not.
+        let fresh = PendingSync::of("y", &SessionStats::new());
+        assert_eq!(fresh.to_write(None), Some(Counts::default()));
+    }
+
+    #[test]
+    fn a_replaced_per_model_split_is_written_whole() {
+        let s = SessionStats::new();
+        for _ in 0..3 {
+            s.record_llm_usage(100, 0, 0, 0, Some("m".into()), None);
+        }
+        *s.synced.lock().unwrap() = Some(Counts::of(&s));
+        s.set_by_model(BTreeMap::from([("m".to_string(), usage(100, 1))]));
+        let p = PendingSync::of("x", &s);
+        let mut row = Counts::of(&s);
+        row.by_model = BTreeMap::from([("m".to_string(), usage(350, 4))]);
+        let new = p.to_write(Some(&row)).unwrap();
+        assert_eq!(new.by_model["m"], usage(100, 1));
+        // Taken: the next flush adds again.
+        assert!(PendingSync::of("x", &s).replaced_by_model.is_none());
+    }
+
+    #[test]
+    fn catching_up_takes_in_other_hubs_counts_and_keeps_its_own() {
+        let s = SessionStats::new();
+        s.record(40, 0);
+        s.record_extra_tokens(&BTreeMap::from([("reasoning".to_string(), 5)]));
+        let theirs = Counts {
+            tokens_sent: 30,
+            extra: BTreeMap::from([("reasoning".to_string(), 2), ("thoughts".to_string(), 4)]),
+            by_model: BTreeMap::from([("m".to_string(), usage(9, 1))]),
+            ..Default::default()
+        };
+        s.catch_up(&Counts::default(), &theirs, true);
+        assert_eq!(s.tokens_sent.load(Ordering::Relaxed), 40);
+        assert_eq!(
+            s.tokens_saved.load(Ordering::Relaxed),
+            savings_estimate_tokens(40)
+        );
+        assert_eq!(
+            s.extra_tokens(),
+            BTreeMap::from([("reasoning".to_string(), 7), ("thoughts".to_string(), 4)])
+        );
+        assert_eq!(s.by_model()["m"], usage(9, 1));
+        // A row that went down takes this down with it, never below zero.
+        s.catch_up(&theirs, &Counts::default(), true);
+        assert_eq!(s.tokens_sent.load(Ordering::Relaxed), 10);
+        assert_eq!(
+            s.extra_tokens(),
+            BTreeMap::from([("reasoning".to_string(), 5)])
+        );
+        assert!(s.by_model().is_empty());
+        s.catch_up(&theirs, &Counts::default(), true);
+        assert_eq!(s.tokens_sent.load(Ordering::Relaxed), 0);
+        // A split replaced here stays as it is.
+        s.catch_up(&Counts::default(), &theirs, false);
+        assert!(s.by_model().is_empty());
     }
 
     #[test]
