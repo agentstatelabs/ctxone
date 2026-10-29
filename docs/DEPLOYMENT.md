@@ -459,6 +459,53 @@ own. Keep that, plus a couple for `ctxone-hub tenant purge` and whatever else
 uses the database, under the server's `max_connections` (100 by default on
 Postgres; managed plans often allow fewer). Lower the pool for a small plan.
 
+### Row-level security
+
+Every query the hub runs is filtered by its tenant. Row-level security has the
+database check that too: with it on, each table that holds tenants' rows
+(AgentStateGraph's, and the hub's `ctxone_*` tables) shows a statement only its
+own tenant's rows, and refuses to write another tenant's. A query missing its
+filter then sees nothing of anyone else's. It's off until you switch it on,
+once for each database:
+
+```bash
+ctxone-hub db row-security on --database-url "$DATABASE_URL"
+```
+
+It prints `on`. `ctxone-hub db row-security status` prints `on`, `off` or
+`partial` and names any table it's off for, and `off` switches it off. Hubs
+already running needn't restart: every connection a hub uses names its tenant
+already.
+
+- **Connect the hub as a role that row-level security binds:** not a superuser,
+  and without `BYPASSRLS`, either of which skips it without a word. A new role
+  has neither:
+
+  ```sql
+  CREATE ROLE ctxone LOGIN PASSWORD '…';
+  CREATE DATABASE ctxone OWNER ctxone;
+  ```
+
+  At startup a hub on Postgres logs whether row-level security is on, and warns
+  when it's on but the hub's role skips it, when it's on for only some tables,
+  or when a table with a `tenant_id` column has no policy.
+- **Run `ctxone-hub db` as the role that owns the tables,** which is the hub's
+  role if the hub created them. Row-level security is forced, so it binds the
+  owner too. Switching locks each table for a moment, and gives up if a busy one
+  keeps it waiting 10 seconds; run it again.
+- **Back up as a role that skips it.** With it on, `pg_dump` as the tables'
+  owner fails rather than dump only some rows. Dump as a superuser, or as a role
+  made for backups (Postgres 14 or later):
+
+  ```sql
+  CREATE ROLE ctxone_backup LOGIN BYPASSRLS PASSWORD '…';
+  GRANT pg_read_all_data TO ctxone_backup;
+  ```
+
+  Your provider's snapshots aren't affected.
+- **`ctxone-hub tenant purge`** works with it on: it deletes as the tenant it
+  purges.
+
 ### HTTPS in front
 
 The hub listens on `0.0.0.0:<port>` over plain HTTP. Terminate TLS for your
@@ -526,7 +573,9 @@ leaves those views out. A single-tenant hub keeps all of them.
 ### Running it
 
 - **Backups:** a Postgres backup (`pg_dump`, or your provider's snapshots)
-  holds every tenant. There's no export of one tenant yet.
+  holds every tenant. There's no export of one tenant yet. With row-level
+  security on, run `pg_dump` as a role that skips it
+  ([Row-level security](#row-level-security)).
 - **A lost or leaked token:** `ctxone-hub tenant rotate <name>`.
 - **Someone leaves:** `disable` them, and `purge` once their data can go.
 - **Upgrades:** stop the hub, which saves every open tenant's statistics, and

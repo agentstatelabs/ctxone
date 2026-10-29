@@ -43,8 +43,14 @@ the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
 
 - **`--pg-pool-size <N>`** (or `CTXONE_PG_POOL_SIZE`) caps the Postgres connections the Hub holds, 32 by default. A multi-tenant Hub's tenants share them.
 
+- **Row-level security on a Hub's Postgres database,** a backstop behind every query's tenant filter. `ctxone-hub db row-security on|off|status` (`--database-url`, or `DATABASE_URL`) switches it for every table that holds tenants' rows, AgentStateGraph's and the Hub's `ctxone_*` tables, or prints whether it's `on`, `off` or `partial`. It's off until switched on, once per database, and running Hubs needn't restart. With it on, a statement sees and writes only its connection's tenant's rows.
+  - The Hub gives its `ctxone_*` tables AgentStateGraph's tenant policy where it sets them up, so existing tables get it from the first Hub to start (or from `ctxone-hub db`).
+  - Every connection the Hub uses names its tenant: the project registry, session statistics, the lock a tenant opens under, and `ctxone-hub tenant purge`, which deletes as the tenant it purges.
+  - At startup a Hub on Postgres logs whether it's on, and warns when it's on but the Hub's role is a superuser or has `BYPASSRLS` (both skip it), when it's on for only some tables, or when a table with a `tenant_id` column has no policy.
+  - The isolation sweep and the purge test also run with it on, as a role it binds.
+
 ### Changed
-- **AgentStateGraph 1.4.2** (`agentstategraph*` = "1.4.2", from 1.4.0). Its `PostgresStorage::for_tenant` opens another tenant on the same connection pool, which the multi-tenant Hub's per-tenant state builds on. `Cargo.lock` moves only the seven agentstategraph crates.
+- **AgentStateGraph 1.5.0** (`agentstategraph*` = "1.5.0", from 1.4.0). Its `PostgresStorage::for_tenant` (1.4.2) opens another tenant on the same connection pool, which the multi-tenant Hub's per-tenant state builds on. 1.5.0 adds the row-level security policies and `PostgresStorage::tenant_pool`, a pool whose connections name their tenant, which the Hub now uses for its own tables in place of the deprecated `pool()`. Naming the tenant takes one more round trip per checkout. `Cargo.lock` moves only the seven agentstategraph crates.
 - **`GET /api/health` needs no token,** on any Hub, so a load balancer, a Kubernetes probe or the container image's own health check can call it. Its answer is fixed and it opens no tenant. It isn't rate limited either, so probes neither use up a tenant's or an address's budget nor get refused for one. A token sent with it is still checked, so a wrong one is a 401. Before, a multi-tenant Hub refused a health check without a tenant's token, which failed the image's health check, and so did a Hub with `--require-auth-on-loopback`.
 
 ### Fixed
@@ -64,6 +70,8 @@ the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
   - what's off, and backups, upgrades and offboarding.
 
   The flag and environment tables list `--tenants-file`, `--pg-pool-size`, `--database-url` and their variables. The design doc (docs/design/MULTI_TENANT_HUB.md) is marked implemented.
+
+- **docs/DEPLOYMENT.md covers row-level security:** switching it on, a role it binds for the Hub, running `ctxone-hub db` as the tables' owner, and backing up as a role that skips it.
 
 ## [v1.0.15] — 2026-10-21
 

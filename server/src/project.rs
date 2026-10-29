@@ -95,7 +95,7 @@ impl HubStore {
         match self {
             Self::Sqlite(db) => Ok(add_local_path(db, project_id, local_path)?),
             Self::Postgres(pg) => {
-                let (pool, tenant) = (pg.pool(), pg.tenant().to_string());
+                let (pool, tenant) = (pg.tenant_pool(), pg.tenant().to_string());
                 let (project_id, local_path) = (project_id.to_string(), local_path.to_string());
                 PostgresStorage::run(async move {
                     let client = pool
@@ -140,7 +140,7 @@ impl HubStore {
         match self {
             Self::Sqlite(db) => Ok(list_projects(db)?),
             Self::Postgres(pg) => {
-                let (pool, tenant) = (pg.pool(), pg.tenant().to_string());
+                let (pool, tenant) = (pg.tenant_pool(), pg.tenant().to_string());
                 PostgresStorage::run(async move {
                     let client = pool
                         .get()
@@ -193,7 +193,7 @@ impl HubStore {
                 Ok(rows)
             }
             Self::Postgres(pg) => {
-                let (pool, tenant) = (pg.pool(), pg.tenant().to_string());
+                let (pool, tenant) = (pg.tenant_pool(), pg.tenant().to_string());
                 PostgresStorage::run(async move {
                     let client = pool
                         .get()
@@ -222,7 +222,7 @@ fn pg_register_project(
     display_name: Option<&str>,
     local_path: Option<&str>,
 ) -> Result<(), RegistryError> {
-    let (pool, tenant) = (pg.pool(), pg.tenant().to_string());
+    let (pool, tenant) = (pg.tenant_pool(), pg.tenant().to_string());
     let id = id.to_string();
     let remote_url = remote_url.map(str::to_string);
     let namespace_id = namespace_id.to_string();
@@ -260,7 +260,7 @@ fn pg_load_project(
     column: &'static str,
     value: &str,
 ) -> Result<Option<Project>, RegistryError> {
-    let (pool, tenant, value) = (pg.pool(), pg.tenant().to_string(), value.to_string());
+    let (pool, tenant, value) = (pg.tenant_pool(), pg.tenant().to_string(), value.to_string());
     PostgresStorage::run(async move {
         let client = pool
             .get()

@@ -6,6 +6,9 @@
 //! `CTXONE_REQUIRE_POSTGRES` turns the skip into a failure (CI sets both).
 //! Tenant names are random, so a shared database is fine.
 
+#[path = "support/row_security.rs"]
+mod row_security;
+
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -471,6 +474,27 @@ fn count(counts: &[(String, i64)], table: &str) -> i64 {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn purge_deletes_every_row_of_the_tenant_and_nothing_else() {
     let Some(url) = url() else { return };
+    purge_deletes(&url, &url).await;
+}
+
+/// With row-level security on, purge's connection works for the tenant it
+/// deletes: one working for another tenant would delete nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn with_row_security_on_purge_deletes_every_row_of_the_tenant() {
+    let Some(url) = url() else { return };
+    let schema = row_security::Schema::new(&url, "purge").await;
+    let app_url = schema.app_url.clone();
+    tokio::task::spawn_blocking(move || row_security::switch_on(&app_url))
+        .await
+        .unwrap();
+    purge_deletes(&schema.app_url, &schema.admin_url).await;
+    schema.drop().await;
+}
+
+/// A Hub on `url`, and purge, delete a tenant's rows; `count_url` counts them,
+/// as a role that sees every tenant's.
+async fn purge_deletes(url: &str, count_url: &str) {
+    let url = url.to_owned();
     let hub = pg_hub(&url).await;
     let (alice, bob) = (fresh("purged"), fresh("kept"));
     let alice_token = add(&hub.path, &alice);
@@ -482,7 +506,7 @@ async fn purge_deletes_every_row_of_the_tenant_and_nothing_else() {
         .await
         .unwrap();
 
-    let db = db(&url).await;
+    let db = db(count_url).await;
     let tables = tenant_id_tables(&db).await;
     let alice_before = rows(&db, &tables, &alice).await;
     let bob_before = rows(&db, &tables, &bob).await;
@@ -596,7 +620,7 @@ async fn purge_refuses_a_database_with_a_tenant_table_it_does_not_know() {
     let storage = PostgresStorage::connect_tenant_with_pool_size(&url, ROOT_TENANT, 1)
         .await
         .unwrap();
-    let pool = storage.pool();
+    let pool = storage.tenant_pool();
     let tenant = Tenant::new(&alice).unwrap();
     let err = tokio::task::spawn_blocking(move || purge_rows(&pool, &tenant, &known))
         .await

@@ -17,8 +17,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use agentstategraph_storage::PostgresStorage;
-use agentstategraph_storage::oxtel_sql::postgres::Pool;
+use agentstategraph_storage::{PostgresStorage, TenantPool};
 
 use crate::hub_store::pg_error;
 use crate::tenant::{self, DISABLED, Tenant, TokenHash};
@@ -420,13 +419,15 @@ const TENANT_ID_TABLES: &str = "
 /// each table held, for the tables that held any. Holds the tenant's open lock
 /// meanwhile, so no Hub opens it halfway through. Refuses, deleting nothing,
 /// when the database has a `tenant_id` table that isn't in `tables`. A table
-/// in `tables` that the database lacks is skipped.
+/// in `tables` that the database lacks is skipped. `pool` may be any tenant's:
+/// the connection works for `tenant`, so row-level security lets it at
+/// `tenant`'s rows, and only those.
 pub fn purge_rows(
-    pool: &Pool,
+    pool: &TenantPool,
     tenant: &Tenant,
     tables: &[&'static str],
 ) -> Result<Vec<(&'static str, u64)>, String> {
-    let pool = pool.clone();
+    let pool = pool.for_tenant(tenant.as_str());
     let name = tenant.as_str().to_owned();
     let tables = tables.to_vec();
     PostgresStorage::run(async move {
@@ -803,7 +804,7 @@ fn purge(
     disabled_here(&Roster::read(path)?).map_err(|why| format!("{why}. Nothing was deleted"))?;
     let storage = PostgresStorage::connect_tenant_blocking(url, ROOT_TENANT, 1)
         .map_err(|e| format!("connect to the database: {e}"))?;
-    let deleted = purge_rows(&storage.pool(), tenant, TENANT_TABLES)?;
+    let deleted = purge_rows(&storage.tenant_pool(), tenant, TENANT_TABLES)?;
     let removed = Roster::edit(path, |r| Ok(r.remove(tenant)))?;
     let total: u64 = deleted.iter().map(|(_, n)| n).sum();
     let detail = if deleted.is_empty() {
