@@ -298,7 +298,9 @@ itself had to move to the database, or be safe to keep in each process:
   affinity on `Mcp-Session-Id` unnecessary, and covers what affinity couldn't:
   a session its own process let go (rmcp's five-minute idle timeout, a closed
   tenant, a restart). A row unused for 7 days is deleted when the tenant's next
-  session is stored.
+  session is stored. A SQLite hub, one process, keeps the same table in its
+  file without `tenant_id`, so its sessions survive a restart and the idle
+  timeout too.
 - **Session statistics.** A flush wrote each session's totals, so two processes
   overwrote each other's counts. Each `SessionStats` now remembers what its row
   held when this process last read or wrote it, and a flush adds only what's

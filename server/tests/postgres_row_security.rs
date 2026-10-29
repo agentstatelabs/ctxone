@@ -210,9 +210,6 @@ fn seed(store: &HubStore, session: &str) {
     let registry = SessionRegistry::new();
     registry.get_or_create(session).record(100, 10);
     registry.flush(store);
-    let HubStore::Postgres(pg) = store else {
-        unreachable!("a Postgres store")
-    };
     let params = serde_json::from_value(serde_json::json!({
         "protocolVersion": "2025-06-18",
         "capabilities": {},
@@ -221,7 +218,7 @@ fn seed(store: &HubStore, session: &str) {
     .unwrap();
     tokio::runtime::Handle::current()
         .block_on(
-            McpSessionStore::new(pg.clone(), "default", session)
+            McpSessionStore::new(store.clone(), "default", session)
                 .store(&format!("{session}-mcp"), &SessionState::new(params)),
         )
         .unwrap();
