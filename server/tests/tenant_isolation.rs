@@ -19,7 +19,12 @@
 //!
 //! The sweep needs Postgres (`TEST_DATABASE_URL`; `CTXONE_REQUIRE_POSTGRES`
 //! turns the skip into a failure, and CI sets both): a Hub keeping tenants in
-//! memory has no project registry, so it can't make the shared workspace.
+//! memory has no project registry, so it can't make the shared workspace. It
+//! runs twice: as the test's own role, and with row-level security on, as a
+//! role it binds (t-011), so that a query it turns away fails a probe.
+
+#[path = "support/row_security.rs"]
+mod row_security;
 
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
@@ -1675,7 +1680,31 @@ async fn tenants_with_the_same_names_reach_only_their_own_data() {
     let root = PostgresStorage::connect_tenant_with_pool_size(&url, fresh("root").as_str(), 8)
         .await
         .expect("connect");
-    let opener = Arc::new(PostgresTenants::new(root).expect("tenants"));
+    sweep(PostgresTenants::new(root).expect("tenants")).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn with_row_security_on_tenants_with_the_same_names_reach_only_their_own_data() {
+    let Some(url) = url() else { return };
+    let schema = row_security::Schema::new(&url, "iso").await;
+    let root =
+        PostgresStorage::connect_tenant_with_pool_size(&schema.app_url, fresh("root").as_str(), 8)
+            .await
+            .expect("connect");
+    let tenants = PostgresTenants::new(root).expect("tenants");
+    // Switched on while the Hub's pool is open, as on a live database.
+    let url = schema.app_url.clone();
+    tokio::task::spawn_blocking(move || row_security::switch_on(&url))
+        .await
+        .unwrap();
+    sweep(tenants).await;
+    schema.drop().await;
+}
+
+/// Seed two tenants with the same names on `tenants`, then probe every route
+/// and tool as one of them.
+async fn sweep(tenants: PostgresTenants) {
+    let opener = Arc::new(tenants);
     let token = || format!("token-{}", uuid::Uuid::new_v4());
     let marker = |tag: &str| format!("{tag}{}", &uuid::Uuid::new_v4().simple().to_string()[..10]);
     let (mut a, mut b) = (

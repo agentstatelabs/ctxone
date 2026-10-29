@@ -897,7 +897,8 @@ impl SessionRegistry {
                 }
             }
             Some(HubStore::Postgres(pg)) => {
-                let (pool, tenant, id) = (pg.pool(), pg.tenant().to_string(), id.to_string());
+                let (pool, tenant, id) =
+                    (pg.tenant_pool(), pg.tenant().to_string(), id.to_string());
                 let removed = PostgresStorage::run(async move {
                     let client = pool.get().await.map_err(|e| e.to_string())?;
                     client
@@ -1289,7 +1290,7 @@ impl SessionRegistry {
     /// rows of `ctxone_sessions` (created by [`PgStore::new`]).
     pub fn load_from_pg(pg: &PgStore) -> Self {
         let registry = Self::new();
-        let (pool, tenant) = (pg.pool(), pg.tenant().to_string());
+        let (pool, tenant) = (pg.tenant_pool(), pg.tenant().to_string());
         let rows = PostgresStorage::run(async move {
             let client = pool.get().await.map_err(|e| e.to_string())?;
             client
@@ -1351,7 +1352,7 @@ impl SessionRegistry {
         if snaps.is_empty() {
             return;
         }
-        let (pool, tenant) = (pg.pool(), pg.tenant().to_string());
+        let (pool, tenant) = (pg.tenant_pool(), pg.tenant().to_string());
         let flushed = PostgresStorage::run(async move {
             let client = pool.get().await.map_err(|e| e.to_string())?;
             let mut written = 0usize;

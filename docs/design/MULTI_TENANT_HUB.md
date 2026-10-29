@@ -6,8 +6,11 @@ AgentStateGraph's shared pool (t-001), tenant identity (t-002), per-tenant
 state (t-003), background work with the machine-local features off (t-004),
 isolation tests across every route and MCP tool (t-005), tenant administration
 (t-006), Lens (t-007) and the deployment docs (t-008). How to run one:
-[DEPLOYMENT.md](../DEPLOYMENT.md#one-hub-for-many-users). Later work (t-009):
-Postgres row-level security as a backstop, and more than one Hub replica.
+[DEPLOYMENT.md](../DEPLOYMENT.md#one-hub-for-many-users). Postgres row-level
+security, a backstop behind every query's tenant filter, followed (t-009:
+AgentStateGraph's policies in t-010, the Hub's tables and
+`ctxone-hub db row-security` in t-011). Later work: more than one Hub replica
+(t-012).
 **Plan:** CTX plan `ctx-multi-tenant-hub` (tasks listed at the end).
 **Goal:** One `ctxone-hub` process serves many users ("tenants"), each with
 their own memory, plans, sessions and project registry, on one Postgres
@@ -122,9 +125,9 @@ by (tenant, workspace, target).
 `PostgresStorage::for_tenant(&self, tenant)` returns a storage on the same pool
 with another `tenant_id` and its own garbage-collection state. Schema setup runs
 once per process, not per tenant. This is the Postgres part of AgentStateGraph's
-`StoreProvider` (its DESIGN.md, Plan F t-003); Postgres row-level security can
-follow as a backstop. The pool size becomes a Hub setting (`--pg-pool-size`)
-because every tenant now shares it.
+`StoreProvider` (its DESIGN.md, Plan F t-003); Postgres row-level security
+backs it up (AgentStateGraph 1.5.0). The pool size becomes a Hub setting
+(`--pg-pool-size`) because every tenant now shares it.
 
 ### What multi-tenant mode turns off
 
@@ -253,8 +256,13 @@ The main risk is a request reaching another tenant's data. The defences:
    so a route or tool without a probe fails it. Mutations that share storage,
    drop a `tenant_id` filter, share MCP services or share the recall cache are
    each caught.
-3. **Storage.** AgentStateGraph filters every query by `tenant_id` today;
-   Postgres row-level security follows.
+3. **Storage.** AgentStateGraph filters every query by `tenant_id`, as the
+   Hub does for its `ctxone_*` tables. With Postgres row-level security
+   switched on (`ctxone-hub db row-security on`), the database checks it too:
+   each of those tables has a policy comparing a row's `tenant_id` with the
+   connection's tenant, which every connection the Hub uses sets first. The
+   isolation sweep and the purge test run with it on as well, as a role it
+   binds.
 4. **Logs** carry the tenant name and never a token.
 
 What tenants still share holds none of their data:
@@ -310,5 +318,8 @@ CTX plan `ctx-multi-tenant-hub`:
 | t-007 | Lens on a multi-tenant Hub (token entry, bearer calls) | t-003 |
 | t-008 | Docs: DEPLOYMENT section, `--pg-pool-size`, CHANGELOG | t-004, t-006, t-007 |
 | t-009 | Later: Postgres row-level security; more than one replica | t-005 |
+| t-010 | AgentStateGraph: row-level security policies, off until switched on; a tenant-scoped pool; release 1.5.0 | |
+| t-011 | Row-level security on the Hub's tables; `ctxone-hub db row-security` | t-010 |
+| t-012 | More than one Hub replica: MCP session affinity, additive statistics flushes | |
 
-t-001 to t-008 are done.
+t-001 to t-008, t-010 and t-011 are done.

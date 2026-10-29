@@ -8,6 +8,7 @@
 //!                             ctxone-hub --path /data/ctxone.db
 //! Many tenants, one database: ctxone-hub --http --tenants-file <PATH> --database-url <URL>
 //! Their tenants and tokens:   ctxone-hub tenant add|list|rotate|disable|enable|purge
+//! Row-level security:         ctxone-hub db row-security on|off|status
 //!
 //! Default sqlite path is `./target/ctxone.db` — that's the natural
 //! ephemeral zone for cargo workspaces. Production deployments should
@@ -24,7 +25,8 @@
 //! `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
 
 use ctxone_hub::{
-    asd_pool, backup, http, lockfile, memory_tools, migrations, tenant, tenant_admin, tenant_cache,
+    asd_pool, backup, db_admin, http, lockfile, memory_tools, migrations, tenant, tenant_admin,
+    tenant_cache,
 };
 
 use std::sync::Arc;
@@ -99,6 +101,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // nothing.
     if args.get(1).map(String::as_str) == Some("tenant") {
         std::process::exit(tenant_admin::main(&args[2..]));
+    }
+    // `ctxone-hub db ...` switches row-level security on a Hub's database.
+    if args.get(1).map(String::as_str) == Some("db") {
+        std::process::exit(db_admin::main(&args[2..]));
     }
 
     let mut storage_type = "sqlite";
@@ -398,6 +404,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "                        (without --init, missing files exit 66 — guards against typos)"
                 );
                 eprintln!("      --database-url <URL>  Postgres connection URL");
+                eprintln!(
+                    "                        `ctxone-hub db --help` switches row-level security on."
+                );
                 eprintln!(
                     "      --tenant <ID>     The Postgres tenant this hub serves (default: \"default\")"
                 );
@@ -730,6 +739,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::process::exit(1);
                 }
             }
+            db_admin::log_row_security(storage.row_security());
             Arc::new(Repository::new(Box::new(storage)))
         }
         _ => {
@@ -1486,7 +1496,13 @@ fn serve_tenants(run: TenantsRun) -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(warning) = tls.warning() {
                         warn!("{warning}");
                     }
-                    Arc::new(tenant_cache::PostgresTenants::connect(url, run.pg_pool_size).await?)
+                    let tenants =
+                        Arc::new(tenant_cache::PostgresTenants::connect(url, run.pg_pool_size).await?);
+                    let probe = tenants.clone();
+                    db_admin::log_row_security(
+                        tokio::task::spawn_blocking(move || probe.row_security()).await?,
+                    );
+                    tenants
                 }
                 None => {
                     info!(

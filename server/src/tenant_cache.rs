@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 use agentstategraph::Repository;
-use agentstategraph_storage::{MemoryStorage, PostgresStorage};
+use agentstategraph_storage::{MemoryStorage, PostgresStorage, RowSecurity, StorageError};
 use axum::http::{Extensions, StatusCode};
 use tracing::{info, warn};
 
@@ -441,15 +441,19 @@ impl PostgresTenants {
             .map_err(|e| e.to_string())?
     }
 
+    /// Where row-level security stands on the tenants' database, as this
+    /// Hub's role sees it.
+    pub fn row_security(&self) -> Result<RowSecurity, StorageError> {
+        self.root.row_security()
+    }
+
     /// Wait until no other Hub is opening `tenant`, and keep it that way
     /// while the guard lives.
     fn lock(&self, tenant: &Tenant) -> Result<OpenLock, String> {
-        let pool = self.root.pool();
+        let pool = self.root.tenant_pool();
         let name = tenant.as_str().to_owned();
         PostgresStorage::run(async move {
-            let pooled = deadpool_postgres::Pool::get(&pool)
-                .await
-                .map_err(|e| e.to_string())?;
+            let pooled = pool.get().await.map_err(|e| e.to_string())?.into_inner();
             // Taken out of the pool, which frees its place there for the
             // migrations. Dropping the guard closes the connection, and
             // closing it releases the lock however the open ended.

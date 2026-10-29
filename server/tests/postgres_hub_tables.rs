@@ -291,7 +291,7 @@ fn tenants_never_see_each_others_sessions() {
 fn hubs_starting_at_once_all_get_their_tables() {
     let Some(url) = url() else { return };
     let schema = format!("ctx_race_{}", uuid::Uuid::new_v4().simple());
-    let pool = connect(&url, "race-setup").pool();
+    let pool = connect(&url, "race-setup").tenant_pool();
     let in_default = |sql: String| {
         let pool = pool.clone();
         PostgresStorage::run(async move {
