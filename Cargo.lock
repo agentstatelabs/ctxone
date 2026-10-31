@@ -579,7 +579,7 @@ dependencies = [
 
 [[package]]
 name = "ctxone"
-version = "1.0.15"
+version = "1.1.0"
 dependencies = [
  "chrono",
  "clap",
@@ -598,7 +598,7 @@ dependencies = [
 
 [[package]]
 name = "ctxone-hub"
-version = "1.0.15"
+version = "1.1.0"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",

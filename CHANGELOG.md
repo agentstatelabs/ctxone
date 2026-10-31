@@ -2,9 +2,12 @@
 
 All notable changes to CTXone are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
-the project's release tags (`v1.0.x`, incremented by 0.0.1 per release).
+the project's release tags (`vMAJOR.MINOR.PATCH`). Most releases go up by
+0.0.1; v1.1.0, the first with a multi-tenant Hub, went up a minor version.
 
-## [Unreleased]
+## [v1.1.0] — 2026-10-31
+
+One Hub can now serve many users: a tenants file, tenant administration, row-level security, more than one Hub on one Postgres database, and MCP sessions that survive a restart. See docs/DEPLOYMENT.md.
 
 ### Added
 - **Tenant identity for a multi-tenant Hub,** the first part of one Hub serving many tenants (docs/design/MULTI_TENANT_HUB.md).
