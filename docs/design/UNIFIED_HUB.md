@@ -107,7 +107,7 @@ per-request by the `NamespaceId` extractor
      Codex TOML equivalent. Keep the stdio `{"command","args"}` entry available
      via `--transport stdio`.
    - Preserve `--agent-id` as `X-CTXone-Agent` (header or query) so `ctx blame`
-     still attributes commits per tool.
+     still attributes commits per tool. (Done: ctx-hub-sync t-010.)
 5. **Service install** — document (and optionally generate) a launchd plist /
    `brew services` unit that runs `ctxone-hub --http --lens` at login, so the
    daemon is up independent of any agent. See [../DEPLOYMENT.md](../DEPLOYMENT.md).

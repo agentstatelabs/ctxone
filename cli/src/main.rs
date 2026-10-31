@@ -7584,6 +7584,10 @@ fn mcp_server_entry(
                 // "default" row. mcp-remote forwards a literal --header.
                 args.push("--header".to_string());
                 args.push(format!("X-CTXone-Session: {session_id}"));
+                // Attribution (ctx-hub-sync t-010): commits through this
+                // tool carry its id, not the Hub's.
+                args.push("--header".to_string());
+                args.push(format!("X-CTXone-Agent: {agent_id}"));
                 // mcp-remote forwards a literal --header; it does not expand
                 // env vars, so only a literal token works for the bridge.
                 if let Some(tok) = auth_token {
@@ -7600,6 +7604,12 @@ fn mcp_server_entry(
                 headers.insert(
                     "X-CTXone-Session".to_string(),
                     serde_json::Value::String(session_id.to_string()),
+                );
+                // Attribution (ctx-hub-sync t-010): commits through this tool
+                // carry its id (`ctx blame`'s "who"), not the Hub's.
+                headers.insert(
+                    "X-CTXone-Agent".to_string(),
+                    serde_json::Value::String(agent_id.to_string()),
                 );
                 // Prefer a literal header; else reference an env var (clients
                 // that support `${VAR}` expansion in config values resolve it).
@@ -7658,6 +7668,25 @@ fn mcp_http_url(base: &str, namespace: Option<&str>) -> String {
         }
         _ => base.to_string(),
     }
+}
+
+/// The MCP URL for Codex, whose config gives an HTTP server a `url` and no
+/// headers: the session and agent id ride in the query (`?session=`,
+/// `?agent=`), which the Hub reads like `X-CTXone-Session` and
+/// `X-CTXone-Agent` (ctx-hub-sync t-010).
+fn codex_mcp_http_url(
+    base: &str,
+    namespace: Option<&str>,
+    session_id: &str,
+    agent_id: &str,
+) -> String {
+    let url = mcp_http_url(base, namespace);
+    let sep = if url.contains('?') { '&' } else { '?' };
+    format!(
+        "{url}{sep}session={}&agent={}",
+        urlencoding(session_id),
+        urlencoding(agent_id)
+    )
 }
 
 /// Merge a `[mcp_servers.ctxone]` entry into an existing Codex TOML config.
@@ -8077,7 +8106,12 @@ fn init_mcp(
                 // and Streamable HTTP (a `url` key). Pick per --transport.
                 let merged = match transport {
                     McpTransport::Http => {
-                        let url = mcp_http_url(mcp_url, namespace.as_deref());
+                        let url = codex_mcp_http_url(
+                            mcp_url,
+                            namespace.as_deref(),
+                            &session_id,
+                            &agent_id,
+                        );
                         merge_codex_ctxone_toml_http(&existing, &url, auth_token_env)
                     }
                     McpTransport::Stdio => merge_codex_ctxone_toml(
@@ -10249,6 +10283,28 @@ args = ["--path", "/old/db"]
     }
 
     #[test]
+    fn codex_url_carries_session_and_agent_in_the_query() {
+        assert_eq!(
+            codex_mcp_http_url(
+                "http://localhost:3001/mcp",
+                Some("p"),
+                "p:codex:ab12",
+                "codex"
+            ),
+            "http://localhost:3001/mcp?namespace=p&session=p:codex:ab12&agent=codex"
+        );
+        assert_eq!(
+            codex_mcp_http_url(
+                "http://localhost:3001/mcp",
+                None,
+                "proj-codex-ab12",
+                "codex"
+            ),
+            "http://localhost:3001/mcp?session=proj-codex-ab12&agent=codex"
+        );
+    }
+
+    #[test]
     fn codex_http_merge_writes_url_entry() {
         let out = merge_codex_ctxone_toml_http("", "http://localhost:3001/mcp?namespace=p", None)
             .expect("http merge");
@@ -10490,6 +10546,11 @@ args = ["--path", "/old/db"]
             entry["headers"]["X-CTXone-Session"].as_str(),
             Some("sess-test")
         );
+        // Commits through the tool carry its id (ctx-hub-sync t-010).
+        assert_eq!(
+            entry["headers"]["X-CTXone-Agent"].as_str(),
+            Some("claude-code")
+        );
         assert!(
             entry["headers"].get("Authorization").is_none(),
             "no token → no auth header"
@@ -10563,6 +10624,7 @@ args = ["--path", "/old/db"]
         // The session header is always forwarded now (recall/savings attribution).
         assert!(args.contains(&"--header"));
         assert!(args.contains(&"X-CTXone-Session: sess-test"));
+        assert!(args.contains(&"X-CTXone-Agent: claude-desktop"));
         // ...but no Authorization header without a token.
         assert!(
             !args.iter().any(|a| a.starts_with("Authorization:")),

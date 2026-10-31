@@ -173,9 +173,10 @@ namespace, which contradicts
 
 ### Attribution
 
-- Over HTTP MCP, every commit is currently stamped with the daemon-wide agent
-  id. `ctx init` should send `X-CTXone-Agent` per tool, as
-  [UNIFIED_HUB.md](UNIFIED_HUB.md) planned.
+- Over HTTP MCP, commits were stamped with the daemon-wide agent id. `ctx init`
+  now writes `X-CTXone-Agent` per tool (`?agent=` for Codex, whose config has
+  no headers), as [UNIFIED_HUB.md](UNIFIED_HUB.md) planned, and the Hub stamps
+  each MCP session's commits with it (t-010).
 - Commits also carry the device id, via the AgentStateGraph Plan F call context.
 
 ## Tasks

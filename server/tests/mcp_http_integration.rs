@@ -258,3 +258,32 @@ async fn one_plan_name_closed_in_two_workspaces_seals_two_epochs() {
         ]
     );
 }
+
+/// The agent of the newest commit on the root repo's `main`.
+fn last_commit_agent(repo: &Repository) -> String {
+    repo.log("main", 1).expect("log")[0].agent_id.clone()
+}
+
+/// Commits made over MCP carry the agent id the request names, which `ctx
+/// init` writes per tool (ctx-hub-sync t-010), and the Hub's own otherwise.
+#[tokio::test]
+async fn mcp_commits_carry_the_agent_the_request_names() {
+    let (app, repo) = mcp_router_and_repo();
+    let fact = |n: u32| json!({ "fact": format!("Agent attribution fact {n}") });
+
+    let uri = "/mcp?agent=claude-code";
+    let session = mcp_session(&app, uri).await;
+    tool(&app, uri, &session, "remember", fact(1)).await;
+    assert_eq!(last_commit_agent(&repo), "claude-code");
+
+    // Another tool on the same workspace and session gets its own service.
+    let uri = "/mcp?agent=codex";
+    let session = mcp_session(&app, uri).await;
+    tool(&app, uri, &session, "remember", fact(2)).await;
+    assert_eq!(last_commit_agent(&repo), "codex");
+
+    // No agent named: the Hub's --agent-id, as before.
+    let session = mcp_session(&app, "/mcp").await;
+    tool(&app, "/mcp", &session, "remember", fact(3)).await;
+    assert_eq!(last_commit_agent(&repo), "test-agent");
+}

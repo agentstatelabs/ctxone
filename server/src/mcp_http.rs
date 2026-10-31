@@ -52,18 +52,21 @@ use crate::tenant_cache::{Tenancy, TenantState};
 type McpService =
     StreamableHttpService<oxtel_rmcp::Instrumented<CtxOneServer>, LocalSessionManager>;
 
-/// One MCP service per (namespace, session id), built on first use. Keyed by
-/// both because the service captures a namespace-scoped repo AND a specific
-/// session's stats; a stable per-project `X-CTXone-Session` header keeps the
-/// cardinality bounded (one entry per project, not per request). Each tenant
-/// has its own.
+/// One MCP service per (namespace, session id, agent id), built on first use.
+/// Keyed by all three because the service captures a namespace-scoped repo, a
+/// specific session's stats and the agent id its commits carry; the stable
+/// per-project `X-CTXone-Session` and per-tool `X-CTXone-Agent` headers keep
+/// the cardinality bounded (one entry per project and tool, not per request).
+/// Each tenant has its own.
 #[derive(Default)]
 pub(crate) struct McpServices(RwLock<HashMap<String, Arc<McpService>>>);
 
 /// What every tenant's MCP services share.
 struct McpConfig {
-    /// Agent id stamped on commits made through MCP (parity with
-    /// `ctxone-hub --agent-id`). Reported as `X-CTXone-Agent` on the REST side.
+    /// Agent id stamped on commits made through MCP when the request names
+    /// none (parity with `ctxone-hub --agent-id`). A request's
+    /// `X-CTXone-Agent`, which `ctx init` writes per tool, or `?agent=`
+    /// overrides it, as `X-CTXone-Agent` does on the REST side.
     agent_id: String,
     /// Registered ASD code-graph repos with pre-known base URLs.
     asd_repos: Arc<Vec<(String, String)>>,
@@ -107,7 +110,8 @@ impl McpHttpState {
         }
     }
 
-    /// Get (or lazily create) `tenant`'s MCP service for `(ns, session_id)`.
+    /// Get (or lazily create) `tenant`'s MCP service for `(ns, session_id,
+    /// agent)`, where `agent` is the request's own agent id, if it named one.
     /// Double-checked under the write lock so concurrent first-hits don't
     /// build twice.
     async fn service_for(
@@ -115,9 +119,12 @@ impl McpHttpState {
         tenant: &TenantState,
         ns: &str,
         session_id: &str,
+        agent: Option<&str>,
     ) -> Arc<McpService> {
-        // NUL can't appear in a header value, so it's a safe composite delimiter.
-        let key = format!("{ns}\u{0}{session_id}");
+        let agent_id = agent.unwrap_or(&self.config.agent_id);
+        // NUL can't appear in a header value or a decoded `?agent=` (control
+        // characters are refused), so it's a safe composite delimiter.
+        let key = format!("{ns}\u{0}{session_id}\u{0}{agent_id}");
         if let Some(svc) = tenant.mcp.0.read().await.get(&key) {
             return svc.clone();
         }
@@ -125,15 +132,22 @@ impl McpHttpState {
         if let Some(svc) = guard.get(&key) {
             return svc.clone();
         }
-        let svc = Arc::new(self.build_service(tenant, ns, session_id));
+        let svc = Arc::new(self.build_service(tenant, ns, session_id, agent_id));
         guard.insert(key, svc.clone());
         svc
     }
 
     /// Build a fresh `StreamableHttpService` on `tenant`'s data, scoped to `ns`
-    /// and `session_id`. The repo is forked once here; the factory clones the
-    /// `Arc` and the shared session for each new MCP session.
-    fn build_service(&self, tenant: &TenantState, ns: &str, session_id: &str) -> McpService {
+    /// and `session_id`, whose commits carry `agent_id`. The repo is forked
+    /// once here; the factory clones the `Arc` and the shared session for each
+    /// new MCP session.
+    fn build_service(
+        &self,
+        tenant: &TenantState,
+        ns: &str,
+        session_id: &str,
+        agent_id: &str,
+    ) -> McpService {
         // The repo and the name of the workspace it actually serves, which is
         // "default" whenever the fork falls back to the root repo. Tools report
         // that name, and plan closes seal their epochs under it.
@@ -157,7 +171,7 @@ impl McpHttpState {
             _ => (tenant.repo.clone(), Namespace::DEFAULT),
         };
         let served = served.to_string();
-        let agent_id = self.config.agent_id.clone();
+        let agent_id = agent_id.to_string();
         let asd_repos = (*self.config.asd_repos).clone();
         let asd_pool = self.config.asd_pool.clone();
         let machine_local = self.config.machine_local;
@@ -344,7 +358,39 @@ fn resolve_session(req: &Request) -> Result<String, IdentityError> {
     }
 }
 
-/// Minimal percent-decoding for the `?session=` value. Session ids carry `:`
+/// The longest agent id a request may name. `ctx init` writes a tool's slug,
+/// such as `claude-code`; this only bounds what a client can make the Hub keep.
+const MAX_AGENT_ID_LEN: usize = 128;
+
+/// The agent id an MCP request names for its commits: `?agent=` first, then
+/// the `X-CTXone-Agent` header, which `ctx init` writes per tool, so `ctx
+/// blame` and plan assignment show the tool that made each change rather
+/// than the Hub's own `--agent-id`. The query form is for clients that can't
+/// send headers, like `?session=`.
+///
+/// `None` when the request names none, or one that's empty, longer than
+/// [`MAX_AGENT_ID_LEN`] or holds a control character: its commits then carry
+/// the Hub's agent id, as before.
+fn resolve_agent(req: &Request) -> Option<String> {
+    let from_query = req.uri().query().and_then(|q| {
+        q.split('&')
+            .find_map(|pair| pair.strip_prefix("agent=").map(percent_decode))
+    });
+    let from_header = || {
+        req.headers()
+            .get("x-ctxone-agent")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+    };
+    from_query
+        .or_else(from_header)
+        .map(|a| a.trim().to_string())
+        .filter(|a| {
+            !a.is_empty() && a.len() <= MAX_AGENT_ID_LEN && !a.chars().any(char::is_control)
+        })
+}
+
+/// Minimal percent-decoding for the `?session=` and `?agent=` values. Session ids carry `:`
 /// separators, which clients may or may not escape; nothing else needs decoding.
 fn percent_decode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -391,7 +437,10 @@ async fn mcp_handler(State(state): State<McpHttpState>, req: Request) -> Respons
                 return (axum::http::StatusCode::BAD_REQUEST, msg).into_response();
             }
         };
-        let svc = state.service_for(&data, &ns, &session_id).await;
+        let agent = resolve_agent(&req);
+        let svc = state
+            .service_for(&data, &ns, &session_id, agent.as_deref())
+            .await;
         svc.handle(req).await.into_response()
     }
     .instrument(span)
@@ -436,7 +485,9 @@ mod tests {
         assert!(registry.snapshot("proj-sess").is_none());
         // Building the service for this (ns, session) must get_or_create the
         // session in the shared registry.
-        let _svc = state.service_for(&tenant, "default", "proj-sess").await;
+        let _svc = state
+            .service_for(&tenant, "default", "proj-sess", None)
+            .await;
         assert!(
             registry.snapshot("proj-sess").is_some(),
             "MCP service must back its session with the shared, flushed registry"
@@ -475,6 +526,39 @@ mod tests {
             b = b.header(*k, *v);
         }
         b.body(axum::body::Body::empty()).unwrap()
+    }
+
+    #[test]
+    fn resolve_agent_reads_query_then_header() {
+        let header = req(&[("x-ctxone-agent", " claude-code ")], "/mcp");
+        assert_eq!(resolve_agent(&header).as_deref(), Some("claude-code"));
+
+        let both = req(
+            &[("x-ctxone-agent", "cursor")],
+            "/mcp?namespace=p&agent=codex",
+        );
+        assert_eq!(resolve_agent(&both).as_deref(), Some("codex"));
+
+        let encoded = req(&[], "/mcp?agent=claude%20desktop");
+        assert_eq!(resolve_agent(&encoded).as_deref(), Some("claude desktop"));
+
+        assert_eq!(resolve_agent(&req(&[], "/mcp")), None);
+    }
+
+    #[test]
+    fn resolve_agent_ignores_an_unusable_id() {
+        let long = "a".repeat(MAX_AGENT_ID_LEN + 1);
+        for uri in [
+            "/mcp?agent=".to_string(),
+            "/mcp?agent=%20%20".to_string(),
+            "/mcp?agent=bad%0Aid".to_string(),
+            format!("/mcp?agent={long}"),
+        ] {
+            assert_eq!(resolve_agent(&req(&[], &uri)), None, "{uri}");
+        }
+        let at_limit = "a".repeat(MAX_AGENT_ID_LEN);
+        let ok = req(&[], &format!("/mcp?agent={at_limit}"));
+        assert_eq!(resolve_agent(&ok), Some(at_limit));
     }
 
     #[test]
