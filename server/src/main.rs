@@ -793,6 +793,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => None,
     };
 
+    // Project remotes kept as git printed them become canonical, so a repo's
+    // ssh and https remotes are one project (ctx-hub-sync t-001). Safe to run
+    // at every start.
+    if let Some(store) = &hub_store {
+        ctxone_hub::project::log_remote_migration(store.canonicalize_remotes());
+    }
+
     // Run ASG-level schema migrations first — the substrate's
     // /_meta/schema_version must be current before CTXone starts
     // reading or writing plan/task state.

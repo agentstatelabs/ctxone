@@ -770,13 +770,181 @@ pub fn read_git_remote(dir: &Path) -> Option<String> {
     None
 }
 
-/// Strip trailing `.git` suffix and trailing slashes so that
-/// `https://github.com/user/repo.git` and `https://github.com/user/repo`
-/// map to the same canonical form. Public so the HTTP layer normalizes
+/// The form the registry keeps a remote in, and looks one up by: its
+/// [`canonical_remote`], so the ssh and https URLs of one repository are one
+/// project. A remote with no canonical form, such as a local path, keeps its
+/// URL without a trailing `/` or `.git`. Public so the HTTP layer normalizes
 /// user-supplied remote URLs the same way detection normalizes git's.
 pub fn normalize_remote_url(url: &str) -> String {
-    let trimmed = url.trim_end_matches('/');
-    trimmed.strip_suffix(".git").unwrap_or(trimmed).to_string()
+    canonical_remote(url).unwrap_or_else(|| {
+        let trimmed = url.trim_end_matches('/');
+        trimmed.strip_suffix(".git").unwrap_or(trimmed).to_string()
+    })
+}
+
+/// A git remote as `host/path`, lowercased, without its scheme, user,
+/// password, port, trailing `/` or `.git` (ctx-hub-sync t-001). So
+/// `https://github.com/Owner/Repo.git`, `git@github.com:owner/repo` and
+/// `ssh://git@github.com:22/owner/repo` are all `github.com/owner/repo`.
+///
+/// `None` for what isn't a network remote: a local path or a `file://` URL.
+/// Host aliases aren't resolved: an IP address and a DNS name for one server,
+/// or a `Host` alias from `~/.ssh/config`, stay apart.
+///
+/// `ctx` derives a new project's id from the same form (`cli/src/workspace.rs`
+/// keeps a copy of this function; the two must agree).
+pub fn canonical_remote(url: &str) -> Option<String> {
+    let url = url.trim();
+    let (authority, path) = match url.split_once("://") {
+        Some((scheme, _)) if scheme.eq_ignore_ascii_case("file") => return None,
+        Some((_, rest)) => rest.split_once('/')?,
+        None => {
+            // scp-like `[user@]host:path`. A `/` before the `:` makes it a
+            // local path, and a one-letter host a Windows drive.
+            let (authority, path) = url.split_once(':')?;
+            if authority.contains('/') || authority.contains('\\') {
+                return None;
+            }
+            (authority, path)
+        }
+    };
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = match host_port.strip_prefix('[') {
+        // An IPv6 literal, `[::1]:22`.
+        Some(v6) => v6.split_once(']').map_or(v6, |(h, _)| h),
+        None => host_port
+            .rsplit_once(':')
+            .filter(|(_, port)| port.chars().all(|c| c.is_ascii_digit()))
+            .map_or(host_port, |(h, _)| h),
+    };
+    let path = path.trim_matches('/');
+    let path = path
+        .strip_suffix(".git")
+        .unwrap_or(path)
+        .trim_end_matches('/');
+    if host.len() < 2 || path.is_empty() {
+        return None;
+    }
+    Some(format!("{host}/{path}").to_ascii_lowercase())
+}
+
+/// Log what [`HubStore::canonicalize_remotes`] did. Remotes aren't logged:
+/// an https remote can carry a token.
+pub fn log_remote_migration(result: Result<RemoteMigration, RegistryError>) {
+    match result {
+        Ok(m) => {
+            if !m.updated.is_empty() {
+                tracing::info!(
+                    projects = m.updated.len(),
+                    "project remotes rewritten in canonical form"
+                );
+            }
+            for (id, _, holder) in &m.conflicts {
+                tracing::warn!(
+                    project = %id,
+                    holder = %holder,
+                    "a project's remote is the same repository as another project's; \
+                     it keeps its remote, and is found by its path or .ctxproject"
+                );
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "could not rewrite project remotes in canonical form"),
+    }
+}
+
+/// What [`HubStore::canonicalize_remotes`] did.
+#[derive(Debug, Default, PartialEq)]
+pub struct RemoteMigration {
+    /// `(project id, remote it had, remote it has now)`.
+    pub updated: Vec<(String, String, String)>,
+    /// `(project id, remote it keeps, the project holding its canonical form)`:
+    /// two projects whose remotes are one repository. Neither is changed; the
+    /// one listed keeps its remote and is found by its path or `.ctxproject`.
+    pub conflicts: Vec<(String, String, String)>,
+}
+
+impl HubStore {
+    /// Rewrite every project's remote in the form [`normalize_remote_url`]
+    /// gives (ctx-hub-sync t-001). Remotes were kept as git printed them, so
+    /// the ssh and https URLs of one repository didn't match; lookups now
+    /// compare canonical forms, and a project whose remote wasn't rewritten
+    /// would only be found by its path or `.ctxproject`.
+    ///
+    /// Project ids and workspaces don't change. Safe to run again, which the
+    /// Hub does at every start and when it opens a tenant: a remote already
+    /// in canonical form is left alone. When two projects' remotes are one
+    /// repository, the older one gets the canonical form and the other keeps
+    /// its remote, reported in [`RemoteMigration::conflicts`] every run.
+    pub fn canonicalize_remotes(&self) -> Result<RemoteMigration, RegistryError> {
+        let projects = self.list_projects()?;
+        let mut holder: std::collections::HashMap<String, String> = projects
+            .iter()
+            .filter_map(|p| Some((p.remote_url.clone()?, p.id.clone())))
+            .collect();
+        let mut out = RemoteMigration::default();
+        // Oldest first, as `list_projects` orders them.
+        for p in &projects {
+            let Some(stored) = &p.remote_url else {
+                continue;
+            };
+            let canonical = normalize_remote_url(stored);
+            if &canonical == stored {
+                continue;
+            }
+            if let Some(other) = holder.get(&canonical) {
+                out.conflicts
+                    .push((p.id.clone(), stored.clone(), other.clone()));
+                continue;
+            }
+            match self.set_remote_url(&p.id, &canonical) {
+                Ok(()) => {}
+                // Another Hub registered it meanwhile.
+                Err(RegistryError::Duplicate(_)) => {
+                    out.conflicts
+                        .push((p.id.clone(), stored.clone(), String::new()));
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+            holder.remove(stored);
+            holder.insert(canonical.clone(), p.id.clone());
+            out.updated.push((p.id.clone(), stored.clone(), canonical));
+        }
+        Ok(out)
+    }
+
+    /// Set a registered project's remote.
+    fn set_remote_url(&self, project_id: &str, remote_url: &str) -> Result<(), RegistryError> {
+        match self {
+            Self::Sqlite(db) => {
+                let conn = open(db)?;
+                conn.execute(
+                    "UPDATE projects SET remote_url = ?1 WHERE id = ?2",
+                    params![remote_url, project_id],
+                )?;
+                Ok(())
+            }
+            Self::Postgres(pg) => {
+                let (pool, tenant) = (pg.tenant_pool(), pg.tenant().to_string());
+                let (project_id, remote_url) = (project_id.to_string(), remote_url.to_string());
+                PostgresStorage::run(async move {
+                    let client = pool
+                        .get()
+                        .await
+                        .map_err(|e| RegistryError::Other(e.to_string()))?;
+                    client
+                        .execute(
+                            "UPDATE ctxone_projects SET remote_url = $3
+                             WHERE tenant_id = $1 AND id = $2",
+                            &[&tenant, &project_id, &remote_url],
+                        )
+                        .await
+                        .map_err(from_pg)?;
+                    Ok(())
+                })
+            }
+        }
+    }
 }
 
 /// Detect the current git branch name from the working directory.
@@ -1017,18 +1185,135 @@ mod tests {
 
     #[test]
     fn normalize_remote_url_strips_git_suffix() {
+        for url in [
+            "https://github.com/user/repo.git",
+            "https://github.com/user/repo",
+            "https://github.com/user/repo/",
+        ] {
+            assert_eq!(normalize_remote_url(url), "github.com/user/repo", "{url}");
+        }
+        // No canonical form: the URL, trimmed as before.
+        assert_eq!(normalize_remote_url("/srv/git/repo.git/"), "/srv/git/repo");
+    }
+
+    #[test]
+    fn canonical_remote_collapses_ssh_https_and_their_trimmings() {
+        for url in [
+            "https://github.com/Owner/Repo.git",
+            "http://github.com/owner/repo",
+            "https://user:secret@github.com/owner/repo/",
+            "https://github.com:443/owner/repo",
+            "git@github.com:owner/repo.git",
+            "github.com:owner/repo",
+            "ssh://git@github.com/owner/repo.git",
+            "ssh://git@github.com:22/owner/repo",
+            "git+ssh://git@github.com/owner/repo",
+            "git://github.com/owner/repo.git",
+            "  https://github.com/owner/repo.git\n",
+        ] {
+            assert_eq!(
+                canonical_remote(url).as_deref(),
+                Some("github.com/owner/repo"),
+                "{url}"
+            );
+        }
+        // Nested groups keep their whole path.
         assert_eq!(
-            normalize_remote_url("https://github.com/user/repo.git"),
-            "https://github.com/user/repo"
+            canonical_remote("git@gitlab.example.com:group/sub/app.git").as_deref(),
+            Some("gitlab.example.com/group/sub/app")
         );
         assert_eq!(
-            normalize_remote_url("https://github.com/user/repo"),
-            "https://github.com/user/repo"
+            canonical_remote("ssh://git@[2001:db8::1]:2222/g/app").as_deref(),
+            Some("2001:db8::1/g/app")
+        );
+        // Different owners stay different: the point of t-001.
+        assert_ne!(
+            canonical_remote("https://github.com/a/app"),
+            canonical_remote("https://github.com/b/app")
+        );
+    }
+
+    #[test]
+    fn canonical_remote_is_none_for_local_paths() {
+        for url in [
+            "/srv/git/repo.git",
+            "../repo",
+            "file:///srv/git/repo.git",
+            "C:\\repos\\app",
+            "C:/repos/app",
+            "https://github.com",
+            "",
+        ] {
+            assert_eq!(canonical_remote(url), None, "{url}");
+        }
+    }
+
+    #[test]
+    fn canonicalize_remotes_rewrites_once_and_reports_collisions() {
+        let (_dir, db) = tmp_db();
+        let store = HubStore::Sqlite(db.clone());
+        // Oldest first: register in created order (created_at has 1s
+        // resolution, so the order falls back to insertion order... set it).
+        for (id, remote) in [
+            ("app", Some("https://git.example.com/g/app.git")),
+            ("app-ssh", Some("git@git.example.com:g/app.git")),
+            ("web", Some("ssh://git@git.example.com:2222/g/web")),
+            ("done", Some("git.example.com/g/done")),
+            ("local", Some("/srv/git/local.git")),
+            ("none", None),
+        ] {
+            store.register_project(id, remote, id, None, None).unwrap();
+        }
+        let conn = Connection::open(&db).unwrap();
+        for (i, id) in ["app", "app-ssh", "web", "done", "local", "none"]
+            .iter()
+            .enumerate()
+        {
+            conn.execute(
+                "UPDATE projects SET created_at = ?1 WHERE id = ?2",
+                params![format!("2026-01-01T00:00:0{i}Z"), id],
+            )
+            .unwrap();
+        }
+
+        let first = store.canonicalize_remotes().unwrap();
+        let updated: Vec<(&str, &str)> = first
+            .updated
+            .iter()
+            .map(|(id, _, to)| (id.as_str(), to.as_str()))
+            .collect();
+        assert_eq!(
+            updated,
+            [
+                ("app", "git.example.com/g/app"),
+                ("web", "git.example.com/g/web"),
+                ("local", "/srv/git/local"),
+            ]
         );
         assert_eq!(
-            normalize_remote_url("https://github.com/user/repo/"),
-            "https://github.com/user/repo"
+            first.conflicts,
+            [(
+                "app-ssh".to_string(),
+                "git@git.example.com:g/app.git".to_string(),
+                "app".to_string()
+            )]
         );
+
+        // Again: nothing more to rewrite, the same collision reported.
+        let second = store.canonicalize_remotes().unwrap();
+        assert!(second.updated.is_empty(), "{second:?}");
+        assert_eq!(second.conflicts, first.conflicts);
+
+        // Ids and workspaces are untouched; the ssh form finds the project.
+        let found = store
+            .resolve_by_remote_url(&normalize_remote_url("git@git.example.com:g/web.git"))
+            .unwrap()
+            .expect("web by its ssh remote");
+        assert_eq!(
+            (found.id.as_str(), found.namespace_id.as_str()),
+            ("web", "web")
+        );
+        assert_eq!(store.list_projects().unwrap().len(), 6);
     }
 
     #[test]
@@ -1141,6 +1426,8 @@ mod tests {
             Some("/elsewhere/app"),
         )
         .unwrap();
+        // Stored as git printed it, as before t-001; a Hub rewrites it at start.
+        store.canonicalize_remotes().unwrap();
         let cwd = Path::new("/no/such/dir/on/this/machine");
         assert!(!cwd.exists());
 
@@ -1160,7 +1447,7 @@ mod tests {
         };
         match resolve_clues(cwd, Some(&store), &remote) {
             DetectResult::FoundByRemote { remote_url, .. } => {
-                assert_eq!(remote_url, "https://git.example.com/g/app");
+                assert_eq!(remote_url, "git.example.com/g/app");
             }
             other => panic!("expected FoundByRemote, got {other:?}"),
         }

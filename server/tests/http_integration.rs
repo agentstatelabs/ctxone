@@ -1563,11 +1563,8 @@ async fn project_register_creates_namespace_and_round_trips() {
     .await;
     assert_eq!(status, StatusCode::OK, "register failed: {body}");
     assert_eq!(body["namespace"], "exampleproj"); // defaults to id
-    // remote_url is normalized (.git stripped)
-    assert_eq!(
-        body["remote_url"],
-        "https://gitlab.example.com/g/exampleproj"
-    );
+    // remote_url is canonical: host/path, no scheme or .git
+    assert_eq!(body["remote_url"], "gitlab.example.com/g/exampleproj");
 
     // The ASG namespace exists now.
     let namespaces = repo.list_namespaces().expect("list namespaces");
@@ -1773,7 +1770,20 @@ async fn project_detect_resolves_a_clients_clues() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["via"], "remote");
-    assert_eq!(body["remote_url"], "git@git.example.com:g/app");
+    assert_eq!(body["remote_url"], "git.example.com/g/app");
+
+    // The https URL of the same repository finds it too (ctx-hub-sync t-001).
+    let (status, body) = call_json(
+        router.clone(),
+        get(&client_detect_uri(
+            cwd,
+            &[("remote_url", "https://ci-token@git.example.com/G/app.git/")],
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["via"], "remote");
+    assert_eq!(body["namespace"], "remote-proj");
 
     let (status, body) = call_json(router.clone(), get(&client_detect_uri(cwd, &[]))).await;
     assert_eq!(status, StatusCode::OK);

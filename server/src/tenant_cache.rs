@@ -488,9 +488,12 @@ impl TenantOpener for PostgresTenants {
             .map_err(|e| e.to_string())?;
         let repo = Repository::new(Box::new(storage));
         prepare(&repo)?;
+        let store = HubStore::Postgres(self.tables.for_tenant(tenant.as_str()));
+        // Under the open lock, like the migrations (ctx-hub-sync t-001).
+        crate::project::log_remote_migration(store.canonicalize_remotes());
         Ok(OpenedTenant {
             repo: Arc::new(repo),
-            store: Some(HubStore::Postgres(self.tables.for_tenant(tenant.as_str()))),
+            store: Some(store),
         })
     }
 }
