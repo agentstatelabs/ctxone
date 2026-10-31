@@ -2192,3 +2192,130 @@ async fn bulk_turn_write_accepts_multi_megabyte_payload() {
     assert_eq!(status, StatusCode::OK, "large bulk turn write must not 413");
     assert_eq!(v["turns"], 1500);
 }
+
+// -------- Session usage rollup (ctx-hub-sync t-005) --------
+
+fn put_json(uri: &str, body: Value) -> Request<Body> {
+    Request::builder()
+        .uri(uri)
+        .method("PUT")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap()
+}
+
+fn opus_usage(input: u64) -> Value {
+    json!({
+        "by_model": {
+            "claude-opus-4-8": {
+                "input_tokens": input,
+                "output_tokens": 40,
+                "cache_read_tokens": 10,
+                "cache_create_tokens": 5,
+                "call_count": 2
+            }
+        },
+        "last_model": "claude-opus-4-8"
+    })
+}
+
+#[tokio::test]
+async fn session_usage_replaces_the_split_and_lands_in_the_envelope() {
+    let router = test_router();
+    let (status, body) = call_json(
+        router.clone(),
+        put_json("/api/sessions/s1/usage", opus_usage(100)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "ok");
+
+    let (_, stats) = call_json(router.clone(), get("/api/stats/tokens/s1")).await;
+    assert_eq!(stats["llm_input_tokens"], 100);
+    assert_eq!(stats["llm_call_count"], 2);
+    assert_eq!(stats["last_model"], "claude-opus-4-8");
+    assert_eq!(
+        stats["llm_by_model"]["claude-opus-4-8"]["cache_create_tokens"],
+        5
+    );
+
+    let (_, envelope) = call_json(
+        router.clone(),
+        get("/api/state/main?path=/sessions/s1/usage"),
+    )
+    .await;
+    assert_eq!(
+        envelope["by_model"]["claude-opus-4-8"]["input_tokens"], 100,
+        "{envelope}"
+    );
+    assert_eq!(envelope["last_model"], "claude-opus-4-8");
+    assert_eq!(envelope["tokens_sent"], 0);
+
+    // The same rollup again writes nothing.
+    let (status, body) = call_json(
+        router.clone(),
+        put_json("/api/sessions/s1/usage", opus_usage(100)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "unchanged");
+
+    // A grown session replaces the split rather than adding to it.
+    call_json(
+        router.clone(),
+        put_json("/api/sessions/s1/usage", opus_usage(300)),
+    )
+    .await;
+    let (_, stats) = call_json(router.clone(), get("/api/stats/tokens/s1")).await;
+    assert_eq!(stats["llm_input_tokens"], 300);
+    assert_eq!(stats["llm_call_count"], 2);
+}
+
+#[tokio::test]
+async fn session_usage_refuses_an_empty_model_name() {
+    let router = test_router();
+    let body = json!({ "by_model": { "": { "input_tokens": 1 } } });
+    let (status, _) = call_raw(router, put_json("/api/sessions/s1/usage", body)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// A Hub with none of a session's statistics, as after an import, still
+/// lists the session with its usage and costs its plan, from the rollup.
+#[tokio::test]
+async fn plan_cost_and_session_list_read_the_rollup_without_statistics() {
+    let repo = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
+    repo.init().expect("repo init");
+    let ingested = http::router(repo.clone(), Arc::new(SessionRegistry::new()));
+    for (uri, body) in [
+        ("/api/sessions/s9/title", json!("Imported work")),
+        ("/api/sessions/s9/usage", opus_usage(100)),
+    ] {
+        let (status, _) = call_json(ingested.clone(), put_json(uri, body)).await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+    }
+    let (status, _) = call_json(
+        ingested,
+        post_json(
+            "/api/sessions/s9/links",
+            json!({ "plan": "feat-x", "task": "t-001" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let fresh = http::router(repo, Arc::new(SessionRegistry::new()));
+    let (_, cost) = call_json(fresh.clone(), get("/api/stats/plan/feat-x/cost")).await;
+    assert_eq!(cost["session_count"], 1, "{cost}");
+    assert_eq!(cost["totals"]["llm_input_tokens"], 100);
+    assert_eq!(cost["sessions"][0]["last_model"], "claude-opus-4-8");
+
+    let (_, list) = call_json(fresh, get("/api/stats/sessions")).await;
+    let s9 = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["session_id"] == "s9")
+        .unwrap_or_else(|| panic!("s9 missing from {list}"));
+    assert_eq!(s9["llm_input_tokens"], 100);
+    assert_eq!(s9["name"], "Imported work");
+}

@@ -27,8 +27,9 @@ use agentstategraph_core::{IntentCategory, Namespace};
 
 use crate::asd_pool::AsdProcessPool;
 use crate::memory_tools::{
-    DEFAULT_AGENT_ID, DEFAULT_SESSION_ID, SESSION_DISCOVERY_MAX_DEPTH, SESSION_NODE_ROOT,
-    SessionRegistry, SessionSnapshot, SessionStats, ensure_flat_size, run_prime, run_recall,
+    DEFAULT_AGENT_ID, DEFAULT_SESSION_ID, ModelUsage, SESSION_DISCOVERY_MAX_DEPTH,
+    SESSION_NODE_ROOT, SessionRegistry, SessionSnapshot, SessionStats, SessionUsage,
+    ensure_flat_size, run_prime, run_recall,
 };
 use crate::plan_tools;
 use crate::rate_limit;
@@ -1166,6 +1167,10 @@ fn build_router(
             axum::routing::put(put_session_burn),
         )
         .route(
+            "/api/sessions/{sid}/usage",
+            axum::routing::put(put_session_usage),
+        )
+        .route(
             "/api/sessions/{sid}/analysis",
             get(get_session_analysis).put(put_session_analysis),
         )
@@ -1671,10 +1676,11 @@ async fn list_sessions(s: HubState, ns: NamespaceId) -> impl IntoResponse {
     let mut snaps = s.sessions.snapshot_all();
     let is_default_ns = ns.0 == Namespace::DEFAULT;
 
+    // Placed elsewhere = has a node in any named namespace. In `default`,
+    // everything else (default-resident sessions AND registry-only ghosts)
+    // stays.
+    let mut placed = std::collections::HashSet::new();
     if is_default_ns {
-        // Placed elsewhere = has a node in any named namespace. Everything
-        // else (default-resident sessions AND registry-only ghosts) stays.
-        let mut placed = std::collections::HashSet::new();
         if let Ok(names) = s.repo.list_namespaces() {
             for name in names {
                 if name.as_str() == Namespace::DEFAULT {
@@ -1693,10 +1699,12 @@ async fn list_sessions(s: HubState, ns: NamespaceId) -> impl IntoResponse {
     // instead of three reads per session.
     if let Ok(repo) = s.repo_for(&ns) {
         let view = sessions_view(&repo);
+        let mut here = session_ids_in(&view);
         if !is_default_ns {
-            let here = session_ids_in(&view);
             snaps.retain(|snap| here.contains(&snap.session_id));
         }
+        here.retain(|id| !placed.contains(id));
+        add_usage_rollups(&repo, "main", &mut snaps, &here);
         let meta_paths: Vec<String> = snaps
             .iter()
             .map(|snap| session_meta_path(&snap.session_id))
@@ -2094,17 +2102,50 @@ async fn help_manifest() -> Json<serde_json::Value> {
     Json(crate::help::manifest())
 }
 
-/// The plans a session is linked to (from its `/session_links/<sid>` sidecar).
-fn plans_linked_to_session(repo: &Repository, ref_name: &str, sid: &str) -> Vec<String> {
-    repo.get_json(ref_name, &format!("/session_links/{sid}"))
-        .ok()
-        .and_then(|v| v.get("links").and_then(|l| l.as_array()).cloned())
+/// The plans in a session's `/session_links/<sid>` sidecar.
+fn plans_in_links(links: &serde_json::Value) -> Vec<String> {
+    links
+        .get("links")
+        .and_then(|l| l.as_array())
         .map(|arr| {
             arr.iter()
                 .filter_map(|x| x.get("plan").and_then(|p| p.as_str()).map(String::from))
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The sessions linked to plans in this workspace, with the plans each is
+/// linked to, from one read of `/session_links`. Each session's usage comes
+/// from the Hub's statistics, filled in from its usage rollup where they lack
+/// it; a linked session with no statistics here, as in an imported workspace,
+/// takes its rollup alone (ctx-hub-sync t-005).
+fn linked_sessions_with_usage(
+    s: &HubState,
+    repo: &Repository,
+    ref_name: &str,
+) -> (
+    Vec<SessionSnapshot>,
+    std::collections::HashMap<String, Vec<String>>,
+) {
+    let mut plans_of = std::collections::HashMap::new();
+    if let Ok(serde_json::Value::Object(links)) = repo.get_json(ref_name, "/session_links") {
+        for (sid, v) in links {
+            let ps = plans_in_links(&v);
+            if !ps.is_empty() {
+                plans_of.insert(sid, ps);
+            }
+        }
+    }
+    let mut snaps: Vec<SessionSnapshot> = s
+        .sessions
+        .snapshot_all()
+        .into_iter()
+        .filter(|snap| plans_of.contains_key(&snap.session_id))
+        .collect();
+    let linked: std::collections::HashSet<String> = plans_of.keys().cloned().collect();
+    add_usage_rollups(repo, ref_name, &mut snaps, &linked);
+    (snaps, plans_of)
 }
 
 /// Pure rollup: sum LLM usage across the sessions linked to `plan` (t-002,
@@ -2168,14 +2209,7 @@ async fn plan_cost(
     Path(plan): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
-    let snaps = s.sessions.snapshot_all();
-    let mut plans_of = std::collections::HashMap::new();
-    for snap in &snaps {
-        let ps = plans_linked_to_session(&repo, "main", &snap.session_id);
-        if !ps.is_empty() {
-            plans_of.insert(snap.session_id.clone(), ps);
-        }
-    }
+    let (snaps, plans_of) = linked_sessions_with_usage(&s, &repo, "main");
     Ok(Json(plan_cost_rollup(&plan, &snaps, &plans_of)))
 }
 
@@ -4220,12 +4254,13 @@ async fn plan_provenance(
 
     // Sessions linked to the plan + their token usage; and the cost rollup
     // (reuses the t-002 join, keeping pricing read-time in Lens).
-    let snaps = s.sessions.snapshot_all();
-    let mut plans_of = std::collections::HashMap::new();
+    let (snaps, plans_of) = linked_sessions_with_usage(&s, &repo, &q.ref_name);
     let mut sessions = Vec::new();
     for snap in &snaps {
-        let ps = plans_linked_to_session(&repo, &q.ref_name, &snap.session_id);
-        if ps.iter().any(|p| p == &name) {
+        let linked = plans_of
+            .get(&snap.session_id)
+            .is_some_and(|ps| ps.iter().any(|p| p == &name));
+        if linked {
             sessions.push(serde_json::json!({
                 "session_id": snap.session_id,
                 "name": snap.name,
@@ -4234,9 +4269,6 @@ async fn plan_provenance(
                 "last_model": snap.last_model,
                 "cumulative_ratio": snap.cumulative_ratio,
             }));
-        }
-        if !ps.is_empty() {
-            plans_of.insert(snap.session_id.clone(), ps);
         }
     }
     let cost = plan_cost_rollup(&name, &snaps, &plans_of);
@@ -5378,6 +5410,150 @@ async fn put_session_burn(
         "path": path,
         "commit_id": format!("{}", commit_id.short()),
     })))
+}
+
+fn session_usage_path(sid: &str) -> String {
+    format!("/sessions/{}/usage", sid)
+}
+
+/// The most models one usage rollup may name, and the longest model name.
+/// A session uses a handful; these only stop a body growing without bound.
+const SESSION_USAGE_MAX_MODELS: usize = 256;
+const SESSION_USAGE_MAX_MODEL_LEN: usize = 200;
+
+#[derive(Deserialize)]
+struct SessionUsageBody {
+    #[serde(default)]
+    by_model: std::collections::BTreeMap<String, ModelUsage>,
+    #[serde(default)]
+    last_model: Option<String>,
+}
+
+/// `PUT /api/sessions/{sid}/usage` — the session's LLM usage by model
+/// (ctx-hub-sync t-005).
+///
+/// `ctx` works it out from the whole transcript at ingest and sends only the
+/// totals, `{by_model: {<model>: {input_tokens, output_tokens,
+/// cache_read_tokens, cache_create_tokens, call_count}}, last_model}`, so a Hub
+/// that gets no turns (a remote Hub, ctx-hub-sync t-013) still has per-model
+/// usage. Like the backfill from stored turns, it replaces the session's
+/// per-model split, so sending it again changes nothing; an empty split leaves
+/// the session's as it is.
+///
+/// The Hub adds the session's recall counters and keeps the whole at
+/// `/sessions/{sid}/usage` ([`SessionUsage`]), where it travels with the
+/// session: plan cost and the session list read it for a session the Hub has
+/// no statistics for. A rollup that hasn't changed writes no commit.
+async fn put_session_usage(
+    s: HubState,
+    ns: NamespaceId,
+    Path(sid): Path<String>,
+    agent_id: AgentId,
+    Query(q): Query<SessionTurnQuery>,
+    Json(body): Json<SessionUsageBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let names_too_long = body
+        .by_model
+        .keys()
+        .chain(body.last_model.as_ref())
+        .any(|m| m.is_empty() || m.len() > SESSION_USAGE_MAX_MODEL_LEN);
+    if body.by_model.len() > SESSION_USAGE_MAX_MODELS || names_too_long {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "usage names at most {SESSION_USAGE_MAX_MODELS} models, each 1 to \
+                 {SESSION_USAGE_MAX_MODEL_LEN} bytes"
+            ),
+        ));
+    }
+    let repo = s.repo_for(&ns)?;
+    let stats = s.sessions.get_or_create(&sid);
+    if !body.by_model.is_empty() {
+        stats.set_by_model(body.by_model);
+    }
+    stats.take_last_seen(body.last_model, None);
+    if let Some(store) = &s.store {
+        s.sessions.flush(store);
+    }
+
+    let snap = SessionSnapshot::from_session(&sid, &stats);
+    let usage = SessionUsage {
+        by_model: snap.llm_by_model,
+        last_model: snap.last_model,
+        tokens_sent: snap.session_tokens_used,
+        tokens_saved: snap.session_tokens_saved,
+    };
+    let value = serde_json::to_value(&usage)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let path = session_usage_path(&sid);
+    if repo.get_json(&q.ref_name, &path).ok().as_ref() == Some(&value) {
+        return Ok(Json(serde_json::json!({
+            "status": "unchanged",
+            "ref": q.ref_name,
+            "path": path,
+        })));
+    }
+    let opts = CommitOptions::new(
+        &agent_id.0,
+        IntentCategory::Custom("Observe".to_string()),
+        format!("session usage {}", sid),
+    )
+    .with_tags(vec![
+        format!("session:{}", sid),
+        "kind:session-usage".to_string(),
+    ]);
+    let commit_id = repo
+        .set_json(&q.ref_name, &path, &value, opts)
+        .map_err(internal_error)?;
+    s.sessions.mark_all_dirty();
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "ref": q.ref_name,
+        "path": path,
+        "commit_id": format!("{}", commit_id.short()),
+    })))
+}
+
+/// Fill in each listed session's usage from its rollup where the statistics
+/// lack it, and list the sessions in `here` that have a rollup but no
+/// statistics on this Hub, as after an import (ctx-hub-sync t-005). One
+/// batched read covers every session.
+fn add_usage_rollups(
+    repo: &Repository,
+    ref_name: &str,
+    snaps: &mut Vec<SessionSnapshot>,
+    here: &std::collections::HashSet<String>,
+) {
+    let known: std::collections::HashSet<String> =
+        snaps.iter().map(|s| s.session_id.clone()).collect();
+    let mut missing: Vec<&String> = here.iter().filter(|id| !known.contains(*id)).collect();
+    missing.sort();
+    let ids: Vec<&str> = snaps
+        .iter()
+        .map(|s| s.session_id.as_str())
+        .chain(missing.iter().map(|id| id.as_str()))
+        .collect();
+    let paths: Vec<String> = ids.iter().map(|id| session_usage_path(id)).collect();
+    let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
+    let usages = repo
+        .get_json_many(ref_name, &paths)
+        .unwrap_or_else(|_| vec![None; paths.len()]);
+    let usages: Vec<Option<SessionUsage>> = usages
+        .into_iter()
+        .map(|v| v.and_then(|v| serde_json::from_value(v).ok()))
+        .collect();
+    let (listed, extra) = usages.split_at(snaps.len());
+    for (snap, usage) in snaps.iter_mut().zip(listed) {
+        if let Some(u) = usage {
+            snap.fill_from_usage(u);
+        }
+    }
+    let added: Vec<SessionSnapshot> = missing
+        .iter()
+        .zip(extra)
+        .filter_map(|(id, u)| u.as_ref().map(|u| SessionSnapshot::from_usage(id, u)))
+        .collect();
+    snaps.extend(added);
 }
 
 /// Where a deleted session is remembered as deleted.

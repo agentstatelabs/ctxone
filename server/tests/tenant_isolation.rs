@@ -440,6 +440,8 @@ async fn seed(app: &axum::Router, token: &str, m: &str) -> Ids {
     )
     .await;
     ok(app, token, "PUT", "/api/sessions/s1/burn", note.clone()).await;
+    let rollup = json!({ "by_model": { format!("model-{m}"): { "input_tokens": 7 } } });
+    ok(app, token, "PUT", "/api/sessions/s1/usage", rollup).await;
     ok(app, token, "PUT", "/api/sessions/s1/analysis", note).await;
     let link = json!({ "plan": PLAN, "task": "t-001", "note": format!("{m} link") });
     post("/api/sessions/s1/links", link).await;
@@ -1063,6 +1065,12 @@ fn rest_probes(m: &str, own: &Ids, other: &Ids) -> Vec<Probe> {
             "PUT /api/sessions/{sid}/analysis",
             "/api/sessions/s1/analysis",
             json!({ "note": "again" }),
+            Ok
+        ),
+        probe!(
+            "PUT /api/sessions/{sid}/usage",
+            "/api/sessions/s1/usage",
+            json!({ "by_model": { "model-again": { "input_tokens": 1 } } }),
             Ok
         ),
         probe!(

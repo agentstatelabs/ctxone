@@ -5546,6 +5546,23 @@ async fn ingest_one_session(
         .await;
     }
 
+    // Usage rollup (ctx-hub-sync t-005): tokens by model from the FULL turn
+    // list, so a Hub that gets no turns still has per-model usage, and it
+    // travels in the session's envelope. It replaces the Hub's split, so
+    // re-ingesting never inflates it.
+    let usage = crate::ingest::session_usage(&turns);
+    let usage_stored = if dry_run {
+        let _ = writeln!(
+            out.log,
+            "  [dry] usage: /sessions/{}/usage = {}",
+            effective_session.unwrap_or("default"),
+            serde_json::to_string(&usage).unwrap_or_default()
+        );
+        crate::ingest::UsageStored::Failed
+    } else {
+        crate::ingest::store_session_usage(&usage, server, branch, effective_session, client).await
+    };
+
     // Apply --since / --last filters before the per-turn work.
     if !since_ts.is_empty() {
         turns.retain(|t| t.timestamp.as_str() >= since_ts);
@@ -5564,9 +5581,9 @@ async fn ingest_one_session(
     // One bulk write for all full turns. LLM usage is NOT posted via
     // record_llm_usage here: that endpoint fetch_adds, so re-ingesting a session
     // re-added its whole total every time (session 019c005a showed 8× = 6.5B vs
-    // the true 817M). Instead, after the turns are written we ask the hub to
-    // recompute the session's per-model split from those (idempotent) turns —
-    // see the trigger_session_by_model_backfill call below the bulk write.
+    // the true 817M). The usage rollup above replaces the session's per-model
+    // split instead; a Hub that doesn't take it recomputes the split from the
+    // stored turns (the trigger_session_by_model_backfill call below).
     for turn in turns.iter() {
         out.turns += 1;
         out.tokens.add(&turn.tokens);
@@ -5590,11 +5607,14 @@ async fn ingest_one_session(
                 client,
             )
             .await;
-            // Turns are now on the graph — recompute this session's per-model LLM
-            // usage from them (idempotent REPLACE), so re-ingesting never inflates
-            // the counters. This replaces the old additive record_llm_usage post.
-            crate::ingest::trigger_session_by_model_backfill(server, effective_session, client)
-                .await;
+            // Turns are now on the graph. A Hub that didn't take the usage
+            // rollup, such as one that predates it, recomputes this session's
+            // per-model usage from them (idempotent REPLACE), so re-ingesting
+            // never inflates the counters.
+            if usage_stored != crate::ingest::UsageStored::Stored {
+                crate::ingest::trigger_session_by_model_backfill(server, effective_session, client)
+                    .await;
+            }
         }
     }
 
@@ -5737,9 +5757,8 @@ async fn run_ingest_session(
     if full_turn && !turns_allowed(server) {
         eprintln!(
             "Not sending raw turns to {}: that hub isn't on this machine. Session titles, \
-             metadata and extracted memories still go; per-model token usage needs the turns, \
-             so it won't show there. To send turns too, run `ctx config set remote_turns true` \
-             (or set CTX_REMOTE_TURNS=1).",
+             metadata, per-model token usage and extracted memories still go. To send turns \
+             too, run `ctx config set remote_turns true` (or set CTX_REMOTE_TURNS=1).",
             crate::ingest::hub_origin(server)
         );
         full_turn = false;

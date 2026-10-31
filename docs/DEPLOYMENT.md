@@ -231,11 +231,12 @@ How each client gets the token:
 Raw session turns stay on the machine that recorded them. When `ctx`'s hub isn't
 on this machine (anything but `localhost`, a `.localhost` name, 127.x or `::1`),
 `ctx ingest-session` and `ctx session import` send each session's title,
-metadata, provenance and extracted memories, and the Stop-hook
-`ctx capture-turn` sends token counts and extracted memories, but none of them
-sends the turns. An import's per-model token usage is derived from the turns,
-so it doesn't show on that hub. To send turns as well, run
-`ctx config set remote_turns true`, or set `CTX_REMOTE_TURNS=1` for one command.
+metadata, provenance, per-model token usage and extracted memories, and the
+Stop-hook `ctx capture-turn` sends token counts and extracted memories, but none
+of them sends the turns. The per-model usage is worked out from the turns on
+this machine and sent as totals (`PUT /api/sessions/{sid}/usage`). To send turns
+as well, run `ctx config set remote_turns true`, or set `CTX_REMOTE_TURNS=1` for
+one command.
 - **AI tools** — `ctx init --transport http` writes it into each tool's config:
 - **`ctx init --transport http --auth-token <TOK>`** — embeds a literal bearer:
   a `headers` entry for native http (Claude Code/Cursor/VS Code) and a

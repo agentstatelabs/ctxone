@@ -741,7 +741,7 @@ impl SessionStats {
     }
 
     /// Show `model` and `provider` as the latest, where they're known.
-    fn take_last_seen(&self, model: Option<String>, provider: Option<String>) {
+    pub(crate) fn take_last_seen(&self, model: Option<String>, provider: Option<String>) {
         if let Some(m) = model
             && let Ok(mut w) = self.last_model.write()
         {
@@ -948,17 +948,7 @@ impl SessionSnapshot {
                     stats.llm_call_count.load(Ordering::Relaxed),
                 )
             } else {
-                by_model
-                    .values()
-                    .fold((0, 0, 0, 0, 0), |(i, o, cr, cc, n), u| {
-                        (
-                            i + u.input_tokens,
-                            o + u.output_tokens,
-                            cr + u.cache_read_tokens,
-                            cc + u.cache_create_tokens,
-                            n + u.call_count,
-                        )
-                    })
+                llm_totals(&by_model)
             };
         Self {
             session_id: session_id.to_string(),
@@ -989,6 +979,87 @@ impl SessionSnapshot {
             has_turns: false,
         }
     }
+
+    /// A snapshot from a session's usage rollup alone, for a session this Hub
+    /// has no statistics for, as in an imported workspace (ctx-hub-sync t-005).
+    pub fn from_usage(session_id: &str, usage: &SessionUsage) -> Self {
+        let mut snap = Self {
+            session_id: session_id.to_string(),
+            ..Default::default()
+        };
+        snap.fill_from_usage(usage);
+        snap
+    }
+
+    /// Take from `usage` what this snapshot lacks: its LLM usage when it has
+    /// none, its recall counters when they're zero, and its last model. What
+    /// it has wins, since the statistics are live and the rollup is as of the
+    /// session's last ingest.
+    pub fn fill_from_usage(&mut self, usage: &SessionUsage) {
+        let has_llm = !self.llm_by_model.is_empty()
+            || self.llm_call_count > 0
+            || self.llm_input_tokens > 0
+            || self.llm_output_tokens > 0;
+        if !has_llm && !usage.by_model.is_empty() {
+            (
+                self.llm_input_tokens,
+                self.llm_output_tokens,
+                self.llm_cache_read_tokens,
+                self.llm_cache_create_tokens,
+                self.llm_call_count,
+            ) = llm_totals(&usage.by_model);
+            self.llm_by_model = usage.by_model.clone();
+        }
+        if self.session_tokens_used == 0 && usage.tokens_sent > 0 {
+            self.session_tokens_used = usage.tokens_sent;
+            self.session_tokens_saved = usage.tokens_saved;
+            self.cumulative_ratio =
+                (usage.tokens_sent + usage.tokens_saved) as f64 / usage.tokens_sent as f64;
+        }
+        if self.last_model.is_none() {
+            self.last_model = usage.last_model.clone();
+        }
+    }
+}
+
+/// The input, output, cache-read and cache-create tokens and the calls of a
+/// per-model split, summed.
+fn llm_totals(by_model: &BTreeMap<String, ModelUsage>) -> (u64, u64, u64, u64, u64) {
+    by_model
+        .values()
+        .fold((0, 0, 0, 0, 0), |(i, o, cr, cc, n), u| {
+            (
+                i + u.input_tokens,
+                o + u.output_tokens,
+                cr + u.cache_read_tokens,
+                cc + u.cache_create_tokens,
+                n + u.call_count,
+            )
+        })
+}
+
+/// A session's usage rollup, kept in its envelope at `/sessions/{id}/usage`
+/// (ctx-hub-sync t-005).
+///
+/// The session statistics live in the Hub's own table, outside the graph, so
+/// they don't travel with a workspace (export and import, or sync later), and
+/// a Hub that gets no turns can't work out the per-model split from them. The
+/// rollup can: `ctx` sends the split at ingest, and the Hub adds its recall
+/// counters as of then. Dollar costs aren't kept; Lens prices the tokens when
+/// it reads them, as it does the live statistics.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct SessionUsage {
+    #[serde(default)]
+    pub by_model: BTreeMap<String, ModelUsage>,
+    /// The model of the session's last turn with one.
+    #[serde(default)]
+    pub last_model: Option<String>,
+    /// Tokens CTXone injected into the session, which the savings estimate
+    /// follows from.
+    #[serde(default)]
+    pub tokens_sent: u64,
+    #[serde(default)]
+    pub tokens_saved: u64,
 }
 
 /// A process-wide registry of per-session stats.

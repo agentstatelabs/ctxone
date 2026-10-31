@@ -78,7 +78,7 @@ One real store, 2026-10-06, read-only.
 |---|---|---|
 | `/memory/**`: facts, `<context>`, pinned, primed, curated | Yes | Authored and LLM-extracted facts share one path shape; extraction is costly and non-deterministic to redo. Credential-scanned. |
 | `/drafts/<sid>/*` | Yes | Small review queue. |
-| `/sessions/<sid>/{title, meta, provenance, burn, analysis, summary, decisions, details}` | Yes | The session envelope, ~1.7 KB each. Gains a usage rollup (t-005). |
+| `/sessions/<sid>/{title, meta, provenance, burn, usage, analysis, summary, decisions, details}` | Yes | The session envelope, ~1.7 KB each. `usage` is the usage rollup (t-005). |
 | `/sessions/<sid>/turns/**` | **No** (local-only ref) | Re-scrapable only on the originating machine, while its transcript files exist. Opt-in later. |
 | `/session_links/*`, `/session_tombstones/*` | Yes | Tombstones make deletions propagate and stop re-imports. |
 | `/plans/**`, `/plan_links/**` | Yes | Task ids renumbered before push (decision 5). |
@@ -140,10 +140,13 @@ One real store, 2026-10-06, read-only.
 - **Readers:** they already avoid turns. Recall reads `/memory`, discovery is
   depth-limited and `why_did_we` drops `/sessions`, so nothing that syncs
   depends on turns.
-- **Usage:** a per-session usage rollup (tokens by model, cost, the
-  `tokens_sent` estimate) is written into the envelope. Plan cost and savings
-  views then work on any machine without turns or the local `ctxone_sessions`
-  table.
+- **Usage:** a per-session usage rollup (tokens by model, the last model, and
+  the `tokens_sent` estimate) is written into the envelope at
+  `/sessions/<sid>/usage`. `ctx` works out the split from the transcript at
+  ingest, so a Hub that gets no turns has it too. Plan cost and the session
+  list then work on any machine without turns or the local `ctxone_sessions`
+  table. Dollar costs aren't stored: Lens prices tokens when it reads them,
+  and a stored figure would go stale with the price table.
 
 ### Plans and tasks
 
