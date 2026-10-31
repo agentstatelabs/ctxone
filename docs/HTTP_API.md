@@ -23,6 +23,11 @@ that origin is allow-listed (`--allowed-origin` / `CTXONE_ALLOWED_ORIGINS`).
 - **Content type:** requests and responses use `application/json`.
 - **Error responses:** HTTP 4xx for bad input, 5xx for server errors. Body
   is plain text with a human-readable message.
+- **Unchanged writes:** a write that would leave its path holding what it
+  already holds makes no commit: `remember`, `prime`, imports, session
+  turns, titles, meta, provenance, burn and analysis, summaries, plan and
+  session links, and doc registrations. Its `commit_id` is then the ref's
+  head, where the value already is.
 
 ## Namespaces
 

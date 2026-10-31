@@ -26,6 +26,7 @@ use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::{IntentCategory, Namespace};
 
 use crate::asd_pool::AsdProcessPool;
+use crate::graph_write::set_json_if_changed;
 use crate::memory_tools::{
     DEFAULT_AGENT_ID, DEFAULT_SESSION_ID, ModelUsage, SESSION_DISCOVERY_MAX_DEPTH,
     SESSION_NODE_ROOT, SessionRegistry, SessionSnapshot, SessionStats, SessionUsage,
@@ -2461,8 +2462,7 @@ async fn import_graph(
             IntentCategory::Custom("Import".to_string()),
             format!("import {path}"),
         );
-        repo.set_json(&req.ref_name, path, value, opts)
-            .map_err(internal_error)?;
+        set_json_if_changed(&repo, &req.ref_name, path, value, opts).map_err(internal_error)?;
         imported += 1;
     }
     s.sessions.mark_all_dirty();
@@ -2529,7 +2529,7 @@ async fn register_doc(
         IntentCategory::Custom("DocRegistry".to_string()),
         format!("register doc {}", req.path),
     );
-    repo.set_json(&req.ref_name, &format!("/docs/{slug}"), &entry, opts)
+    set_json_if_changed(&repo, &req.ref_name, &format!("/docs/{slug}"), &entry, opts)
         .map_err(internal_error)?;
     Ok(Json(entry))
 }
@@ -3201,9 +3201,8 @@ async fn remember(
     }
 
     let value = serde_json::Value::String(fact);
-    let commit_id = repo
-        .set_json(&req.ref_name, &path, &value, opts)
-        .map_err(internal_error)?;
+    let commit_id =
+        set_json_if_changed(&repo, &req.ref_name, &path, &value, opts).map_err(internal_error)?;
 
     s.sessions.mark_all_dirty();
 
@@ -3376,7 +3375,8 @@ async fn summarize_session(
     .with_confidence(0.9);
 
     let summary_val = serde_json::Value::String(summary);
-    repo.set_json(
+    set_json_if_changed(
+        &repo,
         "main",
         &format!("/sessions/{}/summary", req.session_id),
         &summary_val,
@@ -3393,7 +3393,8 @@ async fn summarize_session(
         )
         .with_confidence(0.95);
 
-        repo.set_json(
+        set_json_if_changed(
+            &repo,
             "main",
             &format!("/sessions/{}/decisions", req.session_id),
             &decisions_val,
@@ -4169,7 +4170,8 @@ async fn link_plan_task(
         IntentCategory::Custom("Link".to_string()),
         format!("{name}/{task_id} satisfies {}", req.target),
     );
-    repo.set_json(
+    set_json_if_changed(
+        &repo,
         &req.ref_name,
         &plan_link_path(&name, &task_id),
         &serde_json::json!({ "satisfies": links }),
@@ -5030,9 +5032,8 @@ async fn put_session_turns_bulk(
         format!("session:{}", sid),
         "kind:full-turn".to_string(),
     ]);
-    let commit_id = repo
-        .set_json(&q.ref_name, &path, &body, opts)
-        .map_err(internal_error)?;
+    let commit_id =
+        set_json_if_changed(&repo, &q.ref_name, &path, &body, opts).map_err(internal_error)?;
     s.sessions.mark_all_dirty();
     Ok(Json(serde_json::json!({
         "status": "ok",
@@ -5074,9 +5075,8 @@ async fn put_session_turn(
         format!("turn:{}", idx),
         "kind:full-turn".to_string(),
     ]);
-    let commit_id = repo
-        .set_json(&q.ref_name, &path, &body, opts)
-        .map_err(internal_error)?;
+    let commit_id =
+        set_json_if_changed(&repo, &q.ref_name, &path, &body, opts).map_err(internal_error)?;
     // Session writes change the graph, so cached flat sizes are stale. The
     // other write paths have always done this; these four did not, which left
     // token-savings figures computed against a tree that no longer existed.
@@ -5262,8 +5262,7 @@ async fn put_session_title(
         format!("session:{}", sid),
         "kind:session-title".to_string(),
     ]);
-    let commit_id = repo
-        .set_json(&q.ref_name, &path, &serde_json::json!(title), opts)
+    let commit_id = set_json_if_changed(&repo, &q.ref_name, &path, &serde_json::json!(title), opts)
         .map_err(internal_error)?;
     // Session writes change the graph, so cached flat sizes are stale. The
     // other write paths have always done this; these four did not, which left
@@ -5358,9 +5357,8 @@ async fn put_session_analysis(
         format!("session:{}", sid),
         "kind:session-analysis".to_string(),
     ]);
-    let commit_id = repo
-        .set_json(&q.ref_name, &path, &body, opts)
-        .map_err(internal_error)?;
+    let commit_id =
+        set_json_if_changed(&repo, &q.ref_name, &path, &body, opts).map_err(internal_error)?;
     s.sessions.mark_all_dirty();
     Ok(Json(serde_json::json!({
         "status": "ok",
@@ -5400,9 +5398,8 @@ async fn put_session_burn(
         format!("session:{}", sid),
         "kind:session-burn".to_string(),
     ]);
-    let commit_id = repo
-        .set_json(&q.ref_name, &path, &body, opts)
-        .map_err(internal_error)?;
+    let commit_id =
+        set_json_if_changed(&repo, &q.ref_name, &path, &body, opts).map_err(internal_error)?;
     s.sessions.mark_all_dirty();
     Ok(Json(serde_json::json!({
         "status": "ok",
@@ -5982,8 +5979,7 @@ async fn add_session_link(
         format!("session:{}", sid),
         "kind:session-links".to_string(),
     ]);
-    repo.set_json(&req.ref_name, &path, &node, opts)
-        .map_err(internal_error)?;
+    set_json_if_changed(&repo, &req.ref_name, &path, &node, opts).map_err(internal_error)?;
 
     Ok(Json(serde_json::json!({
         "status": "ok",
@@ -6101,7 +6097,7 @@ async fn derive_session_links(
         format!("session:{}", sid),
         "kind:session-links".to_string(),
     ]);
-    repo.set_json(&q.ref_name, &session_links_path(&sid), &node, opts)
+    set_json_if_changed(&repo, &q.ref_name, &session_links_path(&sid), &node, opts)
         .map_err(internal_error)?;
 
     Ok(Json(serde_json::json!({
@@ -6628,9 +6624,8 @@ async fn put_session_provenance(
         format!("session:{}", sid),
         "kind:session-provenance".to_string(),
     ]);
-    let commit_id = repo
-        .set_json(&q.ref_name, &path, &body, opts)
-        .map_err(internal_error)?;
+    let commit_id =
+        set_json_if_changed(&repo, &q.ref_name, &path, &body, opts).map_err(internal_error)?;
     // Session writes change the graph, so cached flat sizes are stale. The
     // other write paths have always done this; these four did not, which left
     // token-savings figures computed against a tree that no longer existed.
@@ -6672,9 +6667,8 @@ async fn put_session_meta(
         format!("session:{}", sid),
         "kind:session-meta".to_string(),
     ]);
-    let commit_id = repo
-        .set_json(&q.ref_name, &path, &body, opts)
-        .map_err(internal_error)?;
+    let commit_id =
+        set_json_if_changed(&repo, &q.ref_name, &path, &body, opts).map_err(internal_error)?;
     // Session writes change the graph, so cached flat sizes are stale. The
     // other write paths have always done this; these four did not, which left
     // token-savings figures computed against a tree that no longer existed.

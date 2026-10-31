@@ -11,6 +11,7 @@ use std::sync::{Mutex, RwLock};
 
 use rusqlite::{Connection as SqliteConn, params as sqlite_params};
 
+use crate::graph_write::set_json_if_changed;
 use crate::hub_store::{HubStore, PgStore, pg_error};
 use agentstategraph_storage::PostgresStorage;
 
@@ -2500,8 +2501,7 @@ pub fn run_prime(
             "body": body,
         });
 
-        repo.set_json(ref_name, &path, &value, opts)
-            .map_err(|e| e.to_string())?;
+        set_json_if_changed(&repo, ref_name, &path, &value, opts).map_err(|e| e.to_string())?;
 
         written.push(path);
     }
@@ -3671,7 +3671,7 @@ impl CtxOneServer {
         }
 
         let value = serde_json::Value::String(fact.clone());
-        match self.repo.set_json(&p.ref_name, &path, &value, opts) {
+        match set_json_if_changed(&self.repo, &p.ref_name, &path, &value, opts) {
             Ok(commit_id) => {
                 self.session.mark_dirty();
                 let mut out = serde_json::json!({
@@ -3814,7 +3814,8 @@ impl CtxOneServer {
         .with_confidence(0.9);
 
         let summary_val = serde_json::Value::String(summary);
-        let _ = self.repo.set_json(
+        let _ = set_json_if_changed(
+            &self.repo,
             "main",
             &format!("/sessions/{}/summary", p.session_id),
             &summary_val,
@@ -3831,7 +3832,8 @@ impl CtxOneServer {
             )
             .with_confidence(0.95);
 
-            let _ = self.repo.set_json(
+            let _ = set_json_if_changed(
+                &self.repo,
                 "main",
                 &format!("/sessions/{}/decisions", p.session_id),
                 &decisions_val,
@@ -3846,7 +3848,8 @@ impl CtxOneServer {
             IntentCategory::Custom("Observe".to_string()),
             format!("Session {} details", p.session_id),
         );
-        let _ = self.repo.set_json(
+        let _ = set_json_if_changed(
+            &self.repo,
             "main",
             &format!("/sessions/{}/details", p.session_id),
             &details_val,
@@ -5688,7 +5691,7 @@ impl CtxOneServer {
             format!("session:{}", p.session_id),
             "kind:session-links".to_string(),
         ]);
-        match self.repo.set_json(&p.ref_name, &path, &node, opts) {
+        match set_json_if_changed(&self.repo, &p.ref_name, &path, &node, opts) {
             Ok(_) => serde_json::json!({
                 "status": "ok", "plan": plan, "task": task,
                 "validated": validated, "already_linked": already,

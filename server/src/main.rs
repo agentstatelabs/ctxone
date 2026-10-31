@@ -1258,7 +1258,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             agentstategraph_core::IntentCategory::Custom("Observe".to_string()),
                             format!("branch {} mirrors git branch {}", mirrored, raw_branch),
                         );
-                        let _ = repo.set_json(
+                        let _ = ctxone_hub::graph_write::set_json_if_changed(
+                            &repo,
                             "main",
                             &format!("/ctxone/branches/{}/git_branch", mirrored),
                             &serde_json::json!(raw_branch),

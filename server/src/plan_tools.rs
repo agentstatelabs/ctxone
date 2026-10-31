@@ -689,7 +689,8 @@ pub fn add_satisfies(
         IntentCategory::Custom("Link".to_string()),
         format!("{plan}/{task} satisfies {target}"),
     );
-    repo.set_json(
+    crate::graph_write::set_json_if_changed(
+        &repo,
         ref_name,
         &plan_link_path(plan, task),
         &serde_json::json!({ "satisfies": links }),
