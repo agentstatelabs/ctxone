@@ -147,6 +147,45 @@ List every known session with its current stats.
 Sorted by `session_id`. The `"default"` session is always present even
 on a fresh Hub.
 
+### `PUT /api/sessions/{sid}/usage`
+
+Replace a session's per-model LLM usage, and keep it in the session's
+envelope at `/sessions/{sid}/usage`. `ctx ingest-session` and
+`ctx session import` send it, worked out from the whole transcript, so a Hub
+that gets no turns still has per-model usage. Sending the same usage again
+writes nothing, and a grown session's usage replaces the old rather than adding
+to it.
+
+**Request body:**
+```json
+{
+  "by_model": {
+    "claude-opus-4-8": {
+      "input_tokens": 119,
+      "output_tokens": 29518,
+      "cache_read_tokens": 3342296,
+      "cache_create_tokens": 95623,
+      "call_count": 5
+    }
+  },
+  "last_model": "claude-opus-4-8"
+}
+```
+
+For OpenAI-family models, `input_tokens` leaves out the cached tokens, as
+everywhere else on the Hub. At most 256 models, each name 1 to 200 bytes; an
+empty `by_model` leaves the session's split as it is.
+
+The envelope holds the same split plus the session's `tokens_sent` and
+`tokens_saved` as of the call. It travels with the workspace (export and
+import), so a Hub with no statistics for a session lists it in
+`GET /api/stats/sessions` and costs it in `GET /api/stats/plan/{plan}/cost`
+from the envelope. Dollar costs aren't stored: Lens prices the tokens when it
+reads them.
+
+**Response (200):** `{"status": "ok", "ref", "path", "commit_id"}`, or
+`{"status": "unchanged", "ref", "path"}` when the envelope already held it.
+
 ### `POST /api/stats/llm_usage`
 
 Record one LLM turn's token usage against the caller's session.

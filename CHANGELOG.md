@@ -5,6 +5,14 @@ All notable changes to CTXone are documented here. Format loosely follows
 the project's release tags (`vMAJOR.MINOR.PATCH`). Most releases go up by
 0.0.1; v1.1.0, the first with a multi-tenant Hub, went up a minor version.
 
+## [Unreleased]
+
+### Added
+- **A session's usage travels with the session and reaches a Hub that gets no turns** (ctx-hub-sync t-005). `ctx ingest-session` and `ctx session import` work out each session's LLM usage by model from the whole transcript and send the totals with `PUT /api/sessions/{sid}/usage`. The Hub replaces the session's per-model split with them, so re-ingesting never inflates it, and keeps them, with the session's recall counters, in the session's envelope at `/sessions/{sid}/usage`. A Hub on another machine gets no turns, so until now it had no per-model usage, and its plan cost and model views were empty.
+  - Plan cost (`GET /api/stats/plan/{plan}/cost`, and `GET /api/plans/{name}/provenance`) and the session list read the rollup for a session the Hub has no statistics for, as after an import, and fill in what a session's statistics lack. Plan cost reads every session's plan links at once, where it read them one session at a time.
+  - An unchanged rollup writes no commit. Dollar costs aren't stored; Lens prices the tokens when it reads them, as before.
+  - Against an older Hub, `ctx` has it recompute the split from the stored turns, as before.
+
 ## [v1.1.0] — 2026-10-31
 
 One Hub can now serve many users: a tenants file, tenant administration, row-level security, more than one Hub on one Postgres database, and MCP sessions that survive a restart. See docs/DEPLOYMENT.md.

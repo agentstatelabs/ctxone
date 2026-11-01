@@ -1645,6 +1645,101 @@ pub async fn store_session_burn(
     let _ = req.send().await;
 }
 
+/// Whether a model reports `input_tokens` with the cached tokens inside them,
+/// as OpenAI and Codex models do, where Anthropic reports them apart. Kept in
+/// lockstep with `is_openai_family` in the Hub's `http.rs`, whose backfill from
+/// stored turns this rollup must agree with, and with web/src/lib/pricing.ts.
+fn is_openai_family(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    m.starts_with("gpt-")
+        || m.starts_with("codex")
+        || m.starts_with("o1")
+        || m.starts_with("o3")
+        || m.starts_with("o4")
+}
+
+/// The session's LLM usage by model, from every turn of its transcript
+/// (ctx-hub-sync t-005): `{by_model: {<model>: {input_tokens, output_tokens,
+/// cache_read_tokens, cache_create_tokens, call_count}}, last_model}`.
+///
+/// It follows the Hub's backfill from stored turns exactly, so a Hub that has
+/// the turns and one that has only this agree: turns with no real model
+/// (empty, `unknown`, or a `<synthetic>`-style marker) are skipped, and an
+/// OpenAI-family model's cached tokens come out of its input.
+pub fn session_usage(turns: &[Turn]) -> Value {
+    let mut by_model: BTreeMap<String, Value> = BTreeMap::new();
+    let mut last_model = None;
+    for turn in turns {
+        let model = turn.model.as_str();
+        if model.is_empty() || model == "unknown" || model.starts_with('<') {
+            continue;
+        }
+        let t = &turn.tokens;
+        let input = if is_openai_family(model) {
+            t.input.saturating_sub(t.cache_read)
+        } else {
+            t.input
+        };
+        let entry = by_model.entry(model.to_string()).or_insert_with(|| {
+            serde_json::json!({
+                "input_tokens": 0u64,
+                "output_tokens": 0u64,
+                "cache_read_tokens": 0u64,
+                "cache_create_tokens": 0u64,
+                "call_count": 0u64,
+            })
+        });
+        for (field, n) in [
+            ("input_tokens", input),
+            ("output_tokens", t.output),
+            ("cache_read_tokens", t.cache_read),
+            ("cache_create_tokens", t.cache_creation),
+            ("call_count", 1),
+        ] {
+            let sum = entry[field].as_u64().unwrap_or(0) + n;
+            entry[field] = sum.into();
+        }
+        last_model = Some(model.to_string());
+    }
+    serde_json::json!({ "by_model": by_model, "last_model": last_model })
+}
+
+/// What became of a usage rollup sent to the Hub.
+#[derive(Debug, PartialEq)]
+pub enum UsageStored {
+    Stored,
+    /// The Hub predates `PUT /api/sessions/{sid}/usage`.
+    NotSupported,
+    Failed,
+}
+
+/// Send the session's usage rollup (`session_usage`) to the Hub, which keeps
+/// it in the session's envelope and replaces its per-model split with it.
+pub async fn store_session_usage(
+    usage: &Value,
+    hub: &str,
+    branch: &str,
+    session: Option<&str>,
+    client: &reqwest::Client,
+) -> UsageStored {
+    let sid = session.unwrap_or("default");
+    let url = format!(
+        "{}/api/sessions/{}/usage?ref={}",
+        hub,
+        crate::urlencoding(sid),
+        crate::urlencoding(branch),
+    );
+    let mut req = client.put(url).json(usage);
+    if let Some(s) = session {
+        req = req.header("X-CTXone-Session", s);
+    }
+    match req.send().await {
+        Ok(r) if r.status().is_success() => UsageStored::Stored,
+        Ok(r) if matches!(r.status().as_u16(), 404 | 405) => UsageStored::NotSupported,
+        _ => UsageStored::Failed,
+    }
+}
+
 pub async fn store_memory(
     mem: &ExtractedMemory,
     hub: &str,
@@ -1861,6 +1956,51 @@ mod tests {
             git_branches: branches.iter().map(|s| s.to_string()).collect(),
             git_commit: None,
         }
+    }
+
+    fn turn_using(model: &str, input: u64, output: u64, cache_read: u64) -> Turn {
+        let mut t = turn_on(&["main"], "2026-05-01T00:00:00Z");
+        t.model = model.into();
+        t.tokens = TurnTokens {
+            input,
+            output,
+            cache_read,
+            cache_creation: 2,
+            extra: BTreeMap::new(),
+        };
+        t
+    }
+
+    #[test]
+    fn session_usage_sums_each_model_and_skips_placeholders() {
+        let turns = vec![
+            turn_using("claude-opus-4-8", 100, 10, 50),
+            turn_using("<synthetic>", 999, 999, 999),
+            turn_using("claude-opus-4-8", 200, 20, 60),
+            turn_using("", 999, 999, 999),
+            turn_using("unknown", 999, 999, 999),
+            turn_using("gpt-5.5", 1000, 30, 400),
+        ];
+        let u = session_usage(&turns);
+        let opus = &u["by_model"]["claude-opus-4-8"];
+        assert_eq!(opus["input_tokens"], 300);
+        assert_eq!(opus["output_tokens"], 30);
+        assert_eq!(opus["cache_read_tokens"], 110);
+        assert_eq!(opus["cache_create_tokens"], 4);
+        assert_eq!(opus["call_count"], 2);
+        // OpenAI counts cached tokens inside input; the rollup takes them out,
+        // as the Hub's backfill from stored turns does.
+        assert_eq!(u["by_model"]["gpt-5.5"]["input_tokens"], 600);
+        assert_eq!(u["by_model"]["gpt-5.5"]["cache_read_tokens"], 400);
+        assert_eq!(u["by_model"].as_object().unwrap().len(), 2);
+        assert_eq!(u["last_model"], "gpt-5.5");
+    }
+
+    #[test]
+    fn session_usage_of_no_turns_is_empty() {
+        let u = session_usage(&[]);
+        assert_eq!(u["by_model"], serde_json::json!({}));
+        assert!(u["last_model"].is_null());
     }
 
     #[test]
