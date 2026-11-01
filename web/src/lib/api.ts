@@ -388,6 +388,8 @@ export async function remember(req: RememberRequest): Promise<{ path: string; co
 export interface RecallEntry {
 	path: string;
 	pinned: boolean;
+	/** The namespace it came from: the workspace's own, or `_personal`. */
+	namespace?: string;
 	title?: string;
 	body?: string;
 	value?: string;
@@ -749,6 +751,8 @@ export async function createBranch(
 export interface PinnedItem {
 	path: string;
 	value: unknown;
+	/** The namespace it came from: the workspace's own, or `_personal`. */
+	namespace?: string;
 }
 
 export async function getPinned(): Promise<PinnedItem[]> {

@@ -129,6 +129,18 @@ One real store, 2026-10-06, read-only.
   - the project registry.
 - Recall and `prime` read the personal namespace plus the project namespace.
 - The personal namespace syncs only to the user's own space, never a team's.
+- Done (t-003) except the registry: the namespace is `_personal`, beside
+  every workspace in each store (each tenant's, on a multi-tenant Hub), on
+  `main` only. Names beginning with `_` are reserved, so no project takes it.
+  - `ctx agents install` primes the rules there and removes the workspace's
+    own copy; `ctx agents migrate --apply` removes the copies earlier
+    versions primed into every workspace.
+  - `ctx remember --personal`, and `personal: true` on MCP `remember`,
+    `forget` and `prime`. Over REST it's `?namespace=_personal`.
+  - Recall, the per-task recall gate and `GET /api/memory/pinned` read the
+    workspace and `_personal`; each result says which, and the workspace's
+    copy of a path wins.
+  - Lens lists it as Personal and marks what comes from it.
 
 ### Remotes per namespace
 

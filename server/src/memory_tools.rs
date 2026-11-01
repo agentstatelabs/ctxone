@@ -2086,6 +2086,11 @@ pub fn collect_pinned(repo: &Repository, ref_name: &str) -> Vec<PinnedEntry> {
 
 /// Shared recall implementation: always-include pinned, then topic matches, budget-capped.
 /// Returns a structured JSON value. Both MCP tools and HTTP handlers call this.
+///
+/// It reads the personal namespace's `main` too (ctx-hub-sync t-003), so a
+/// workspace's recall includes the person's rules and preferences. Each
+/// result names the namespace it came from; where both hold the same path,
+/// the workspace's own copy wins.
 pub fn run_recall(
     repo: &Repository,
     session: &SessionStats,
@@ -2179,7 +2184,19 @@ pub fn run_recall_scoped(
     // silently invalidates the entry — a `remember` immediately followed by a
     // `recall` always recomputes. The cheap, per-session tail (token stats +
     // recall log) is replayed on every call, hit or miss, in `assemble_recall`.
-    let cache_key = recall_cache_key(repo, ref_name, topic, budget, &scope_normalized);
+    let personal = crate::personal::beside(repo);
+    let personal_ref = crate::personal::PERSONAL_REF;
+    let project_ns = repo.namespace().as_str().to_string();
+    let personal_ns = crate::personal::PERSONAL_NAMESPACE;
+
+    let cache_key = recall_cache_key(
+        repo,
+        personal.as_ref(),
+        ref_name,
+        topic,
+        budget,
+        &scope_normalized,
+    );
     if let Some(core) = cache_key.as_ref().and_then(|k| cache.get(k)) {
         return assemble_recall(repo, session, topic, ref_name, &scope_normalized, core);
     }
@@ -2188,12 +2205,26 @@ pub fn run_recall_scoped(
     let mut total = 0usize;
     let mut seen_paths = std::collections::HashSet::new();
 
-    // 1. Pinned memories (up to half the budget)
-    let pinned = collect_pinned(repo, ref_name);
+    // 1. Pinned memories (up to half the budget): the workspace's, then the
+    //    personal namespace's that the workspace doesn't also hold.
+    let mut pinned: Vec<(PinnedEntry, &str)> = collect_pinned(repo, ref_name)
+        .into_iter()
+        .map(|p| (p, project_ns.as_str()))
+        .collect();
+    if let Some(personal) = &personal {
+        let held: std::collections::HashSet<String> =
+            pinned.iter().map(|(p, _)| p.path.clone()).collect();
+        pinned.extend(
+            collect_pinned(personal, personal_ref)
+                .into_iter()
+                .filter(|p| !held.contains(&p.path))
+                .map(|p| (p, personal_ns)),
+        );
+    }
     let pinned_count = pinned.len();
     let pinned_budget = budget_chars / 2;
     let mut pinned_total = 0usize;
-    for p in &pinned {
+    for (p, ns) in &pinned {
         if !in_scope(&p.path) {
             continue;
         }
@@ -2206,6 +2237,7 @@ pub fn run_recall_scoped(
             "title": p.title,
             "body": p.body,
             "pinned": true,
+            "namespace": ns,
         }));
         seen_paths.insert(p.path.clone());
         pinned_total += entry_size;
@@ -2216,8 +2248,8 @@ pub fn run_recall_scoped(
     //    and score by how many tokens matched + whether the full phrase hit.
     let tokens = tokenize_query(topic);
 
-    // Map path -> (value, token_hit_count, full_phrase_hit)
-    let mut scored: std::collections::HashMap<String, (String, usize, bool)> =
+    // Map path -> (value, token_hit_count, full_phrase_hit, namespace)
+    let mut scored: std::collections::HashMap<String, (String, usize, bool, &str)> =
         std::collections::HashMap::new();
 
     // `want`: query string -> (acts_as_phrase, token_weight). The full phrase
@@ -2243,7 +2275,22 @@ pub fn run_recall_scoped(
     // the scoped subtree (default `/memory`, ~a couple thousand small nodes) in
     // ONE `get_json` and match in memory. Bounded regardless of term rarity, and
     // it never touches `/sessions`.
-    for (path, value) in memory_scoped_candidates(repo, ref_name, &scope_normalized) {
+    let mut candidates: Vec<(String, String, &str)> =
+        memory_scoped_candidates(repo, ref_name, &scope_normalized)
+            .into_iter()
+            .map(|(path, value)| (path, value, project_ns.as_str()))
+            .collect();
+    if let Some(personal) = &personal {
+        let held: std::collections::HashSet<String> =
+            candidates.iter().map(|(path, _, _)| path.clone()).collect();
+        candidates.extend(
+            memory_scoped_candidates(personal, personal_ref, &scope_normalized)
+                .into_iter()
+                .filter(|(path, _)| !held.contains(path))
+                .map(|(path, value)| (path, value, personal_ns)),
+        );
+    }
+    for (path, value, ns) in candidates {
         let hay = value.to_lowercase();
         let mut count = 0usize;
         let mut full = false;
@@ -2256,16 +2303,16 @@ pub fn run_recall_scoped(
             }
         }
         if full || count > 0 {
-            let entry = scored.entry(path).or_insert((value, 0, false));
+            let entry = scored.entry(path).or_insert((value, 0, false, ns));
             entry.1 += count;
             entry.2 |= full;
         }
     }
 
     // Sort: full-phrase hits first, then by token-hit count desc, then by path
-    let mut ranked: Vec<(String, String, usize, bool)> = scored
+    let mut ranked: Vec<(String, String, usize, bool, &str)> = scored
         .into_iter()
-        .map(|(p, (v, count, full))| (p, v, count, full))
+        .map(|(p, (v, count, full, ns))| (p, v, count, full, ns))
         .collect();
     ranked.sort_by(|a, b| {
         b.3.cmp(&a.3) // full phrase wins
@@ -2274,7 +2321,7 @@ pub fn run_recall_scoped(
     });
 
     let mut topic_matches = 0usize;
-    for (path, value, score, full_match) in &ranked {
+    for (path, value, score, full_match, ns) in &ranked {
         let section_path = path
             .strip_suffix("/title")
             .or_else(|| path.strip_suffix("/body"))
@@ -2297,6 +2344,7 @@ pub fn run_recall_scoped(
             "pinned": false,
             "score": score,
             "full_match": full_match,
+            "namespace": ns,
         }));
         total += entry_size;
         topic_matches += 1;
@@ -2365,18 +2413,25 @@ impl RecallCache {
 
 /// Build the cache key. `None` (skip caching) when the ref can't be resolved to
 /// a head commit — without a head we can't guarantee invalidation on write.
+/// The personal namespace's head is part of it, so a personal write
+/// invalidates too; a personal namespace that doesn't exist yet adds nothing.
 fn recall_cache_key(
     repo: &Repository,
+    personal: Option<&Repository>,
     ref_name: &str,
     topic: &str,
     budget: usize,
     scope: &Option<String>,
 ) -> Option<String> {
     let head = repo.head(ref_name).ok()?;
+    let personal_head = personal
+        .and_then(|p| p.head(crate::personal::PERSONAL_REF).ok())
+        .map(|h| h.to_string())
+        .unwrap_or_default();
     // \u{1} is a control char that can't appear in a namespace/ref/topic/scope,
     // so the concatenation is unambiguous.
     Some(format!(
-        "{}\u{1}{ref_name}\u{1}{head}\u{1}{budget}\u{1}{}\u{1}{topic}",
+        "{}\u{1}{ref_name}\u{1}{head}\u{1}{personal_head}\u{1}{budget}\u{1}{}\u{1}{topic}",
         repo.namespace(),
         scope.as_deref().unwrap_or("")
     ))
@@ -2577,6 +2632,12 @@ pub struct RememberParams {
     /// Branch to write to (default: "main").
     #[serde(default = "default_ref", rename = "ref")]
     pub ref_name: String,
+    /// Write to the personal namespace instead of this workspace: for what
+    /// belongs to the person, such as preferences, rather than to the
+    /// project. Personal memory is on `main` and every workspace's recall
+    /// reads it.
+    #[serde(default)]
+    pub personal: bool,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -2698,6 +2759,11 @@ pub struct PrimeParams {
     /// Branch to write to (default: "main").
     #[serde(default = "default_ref", rename = "ref")]
     pub ref_name: String,
+    /// Prime into the personal namespace instead of this workspace, as
+    /// `ctx agents install` does with the agent rules. Personal memory is on
+    /// `main` and every workspace's recall reads it.
+    #[serde(default)]
+    pub personal: bool,
 }
 
 fn default_importance() -> String {
@@ -2920,6 +2986,10 @@ pub struct ForgetParams {
     /// Branch to write the rollback to (default: "main").
     #[serde(default = "default_ref", rename = "ref")]
     pub ref_name: String,
+    /// Forget from the personal namespace instead of this workspace. A
+    /// recall result's `namespace` says which one holds it.
+    #[serde(default)]
+    pub personal: bool,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -3527,6 +3597,29 @@ impl CtxOneServer {
         }
     }
 
+    /// Where a write with `personal` set lands: the personal namespace on
+    /// `main` (created on its first write) instead of this session's
+    /// workspace and ref. Returns the repository, ref and namespace name.
+    fn write_target(
+        &self,
+        personal: bool,
+        ref_name: &str,
+    ) -> Result<(Arc<Repository>, String, String), String> {
+        if !personal {
+            return Ok((
+                self.repo.clone(),
+                ref_name.to_string(),
+                self.namespace.clone(),
+            ));
+        }
+        let repo = crate::personal::open_for_write(&self.repo).map_err(|e| e.to_string())?;
+        Ok((
+            Arc::new(repo),
+            crate::personal::PERSONAL_REF.to_string(),
+            crate::personal::PERSONAL_NAMESPACE.to_string(),
+        ))
+    }
+
     /// Find which namespace(s) contain a given plan or task id, by scanning
     /// every workspace. Shared by the `namespace_for_plan`/`namespace_for_task`
     /// tools so a stranded agent can resolve the right workspace from an id.
@@ -3634,10 +3727,14 @@ impl CtxOneServer {
         Importance maps to confidence: 'high' (0.95) for explicit decisions and policies, 'medium' (0.7, default) for conventions and preferences, 'low' (0.4) for trivia and speculation. When unsure, save it. `remember` is cheap; forgetting something the user already told you is expensive. To import a whole markdown doc's sections at once, use `prime`, not repeated `remember` calls."
     )]
     async fn remember(&self, params: Parameters<RememberParams>) -> String {
-        if let Some(msg) = self.namespace_write_block() {
+        let p = params.0;
+        // A personal write names where it goes, so the fallback-`default`
+        // guard doesn't apply to it.
+        if !p.personal
+            && let Some(msg) = self.namespace_write_block()
+        {
             return msg;
         }
-        let p = params.0;
         let p = self.apply_default_ref(p);
 
         // Reject overlong / path-smuggling `context` and unbounded
@@ -3670,14 +3767,18 @@ impl CtxOneServer {
             opts = opts.with_tags(tags);
         }
 
+        let (repo, ref_name, namespace) = match self.write_target(p.personal, &p.ref_name) {
+            Ok(target) => target,
+            Err(e) => return format!("Error: {}", e),
+        };
         let value = serde_json::Value::String(fact.clone());
-        match set_json_if_changed(&self.repo, &p.ref_name, &path, &value, opts) {
+        match set_json_if_changed(&repo, &ref_name, &path, &value, opts) {
             Ok(commit_id) => {
                 self.session.mark_dirty();
                 let mut out = serde_json::json!({
                     "status": "ok",
-                    "ref": p.ref_name,
-                    "namespace": self.namespace,
+                    "ref": ref_name,
+                    "namespace": namespace,
                     "fact": fact,
                     "path": path,
                     "commit_id": format!("{}", commit_id.short()),
@@ -3732,15 +3833,19 @@ impl CtxOneServer {
         let p = self.apply_default_ref(p);
         let sections: Vec<(String, String)> =
             p.sections.into_iter().map(|s| (s.title, s.body)).collect();
+        let (repo, ref_name, _) = match self.write_target(p.personal, &p.ref_name) {
+            Ok(target) => target,
+            Err(e) => return format!("Error: {}", e),
+        };
 
         match run_prime(
-            &self.repo,
+            &repo,
             &self.session,
             &self.agent_id,
             &p.source,
             p.pinned,
             &sections,
-            &p.ref_name,
+            &ref_name,
         ) {
             Ok(result) => {
                 serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string())
@@ -4532,18 +4637,25 @@ impl CtxOneServer {
         CALL THIS WHEN the user asks to forget, retract, or revoke a stored memory; or when a stored fact is wrong and you've replaced it with a corrected one. The reason becomes part of the rollback's blame trail."
     )]
     async fn forget(&self, params: Parameters<ForgetParams>) -> String {
-        if let Some(msg) = self.namespace_write_block() {
+        let p = params.0;
+        if !p.personal
+            && let Some(msg) = self.namespace_write_block()
+        {
             return msg;
         }
-        let p = params.0;
         let p = self.apply_default_ref(p);
         let opts = CommitOptions::new(&self.agent_id, IntentCategory::Rollback, &p.reason);
-        match self.repo.delete(&p.ref_name, &p.path, opts) {
+        let (repo, ref_name, namespace) = match self.write_target(p.personal, &p.ref_name) {
+            Ok(target) => target,
+            Err(e) => return serde_json::json!({ "error": e }).to_string(),
+        };
+        match repo.delete(&ref_name, &p.path, opts) {
             Ok(commit_id) => {
                 self.session.mark_dirty();
                 serde_json::json!({
                     "status": "ok",
-                    "ref": p.ref_name,
+                    "ref": ref_name,
+                    "namespace": namespace,
                     "path": p.path,
                     "commit_id": format!("{}", commit_id.short()),
                 })
@@ -5823,6 +5935,48 @@ mod tests {
         // Any non-default namespace → allowed regardless of the flag.
         let named = CtxOneServer::new(fresh_repo()).with_namespace("proj".to_string());
         assert!(named.namespace_write_block().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_personal_write_lands_in_the_personal_namespace_from_any_session() {
+        // A fallback `default` session refuses workspace writes, but a
+        // personal one names where it goes.
+        let repo = fresh_repo();
+        let server = CtxOneServer::new(repo.clone());
+        let remember = |personal: bool| RememberParams {
+            fact: "I prefer tabs".to_string(),
+            importance: "medium".to_string(),
+            context: Some("preferences".to_string()),
+            tags: None,
+            ref_name: "feature-branch".to_string(),
+            personal,
+        };
+        let refused = server.remember(Parameters(remember(false))).await;
+        assert!(refused.contains("Write refused"), "{refused}");
+
+        let out: serde_json::Value =
+            serde_json::from_str(&server.remember(Parameters(remember(true))).await).unwrap();
+        assert_eq!(out["namespace"], "_personal");
+        // Personal memory is on `main`, whatever ref the session uses.
+        assert_eq!(out["ref"], "main");
+        let path = out["path"].as_str().unwrap().to_string();
+        let personal = crate::personal::beside(&repo).unwrap();
+        assert_eq!(
+            personal.get_json("main", &path).unwrap(),
+            serde_json::json!("I prefer tabs")
+        );
+        assert!(repo.get_json("main", &path).is_err());
+
+        let forgot = server
+            .forget(Parameters(ForgetParams {
+                path: path.clone(),
+                reason: "test".to_string(),
+                ref_name: String::new(),
+                personal: true,
+            }))
+            .await;
+        assert!(forgot.contains("\"status\":\"ok\""), "{forgot}");
+        assert!(personal.get_json("main", &path).is_err());
     }
 
     #[test]
@@ -7137,6 +7291,135 @@ mod tests {
         assert_eq!(scoped["scope"].as_str(), Some("/memory/projects/app-a"));
     }
 
+    // -------- the personal namespace (ctx-hub-sync t-003) --------
+
+    /// A store with a project namespace `app`, and its personal namespace.
+    fn project_and_personal() -> (Arc<Repository>, Repository) {
+        let root = Repository::new(Box::new(
+            agentstategraph_storage::SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ));
+        root.init().unwrap();
+        let project = root.fork_namespace(agentstategraph_core::Namespace::new("app").unwrap());
+        project.init().unwrap();
+        let personal = crate::personal::open_for_write(&project).unwrap();
+        (Arc::new(project), personal)
+    }
+
+    fn seed(repo: &Repository, path: &str, value: &str) {
+        let opts = CommitOptions::new("t", IntentCategory::Custom("Observe".to_string()), "seed");
+        repo.set_json("main", path, &serde_json::json!(value), opts)
+            .unwrap();
+    }
+
+    fn seed_pinned(repo: &Repository, slug: &str, title: &str, body: &str) {
+        seed(repo, &format!("/memory/pinned/rules/{slug}/title"), title);
+        seed(repo, &format!("/memory/pinned/rules/{slug}/body"), body);
+    }
+
+    #[test]
+    fn recall_reads_the_personal_namespace_beside_the_workspace() {
+        let (project, personal) = project_and_personal();
+        seed(&project, "/memory/facts/db", "widgets live in postgres");
+        seed(
+            &personal,
+            "/memory/preferences/tabs",
+            "widgets use tabs, not spaces",
+        );
+        seed_pinned(&personal, "be-brief", "Be brief", "Answer in a few lines");
+
+        let out = run_recall(
+            &project,
+            &SessionStats::new(),
+            &RecallCache::default(),
+            "widgets",
+            1500,
+            "main",
+        );
+        let results = out["results"].as_array().unwrap();
+        let find = |path: &str| {
+            results
+                .iter()
+                .find(|r| r["path"] == path)
+                .unwrap_or_else(|| panic!("{path} not recalled: {results:?}"))
+        };
+        assert_eq!(find("/memory/facts/db")["namespace"], "app");
+        assert_eq!(find("/memory/preferences/tabs")["namespace"], "_personal");
+        let rule = find("/memory/pinned/rules/be-brief");
+        assert_eq!(rule["pinned"], true);
+        assert_eq!(rule["namespace"], "_personal");
+        assert_eq!(out["pinned_count"], 1);
+
+        // Recalling the personal namespace itself reads it once.
+        let own = run_recall(
+            &Arc::new(personal),
+            &SessionStats::new(),
+            &RecallCache::default(),
+            "widgets",
+            1500,
+            "main",
+        );
+        let own_results = own["results"].as_array().unwrap();
+        assert!(own_results.iter().all(|r| r["namespace"] == "_personal"));
+        assert!(!own_results.iter().any(|r| r["path"] == "/memory/facts/db"));
+    }
+
+    #[test]
+    fn the_workspace_copy_wins_over_the_personal_one() {
+        let (project, personal) = project_and_personal();
+        seed_pinned(&project, "style", "Style", "the project's style");
+        seed_pinned(&personal, "style", "Style", "my own style");
+        seed(&project, "/memory/facts/x", "widgets: the project's");
+        seed(&personal, "/memory/facts/x", "widgets: mine");
+
+        let out = run_recall(
+            &project,
+            &SessionStats::new(),
+            &RecallCache::default(),
+            "widgets",
+            1500,
+            "main",
+        );
+        let results = out["results"].as_array().unwrap();
+        let pinned: Vec<_> = results
+            .iter()
+            .filter(|r| r["path"] == "/memory/pinned/rules/style")
+            .collect();
+        assert_eq!(pinned.len(), 1);
+        assert_eq!(pinned[0]["body"], "the project's style");
+        assert_eq!(pinned[0]["namespace"], "app");
+        let facts: Vec<_> = results
+            .iter()
+            .filter(|r| r["path"] == "/memory/facts/x")
+            .collect();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0]["value"], "widgets: the project's");
+        assert_eq!(out["pinned_count"], 1);
+    }
+
+    #[test]
+    fn a_personal_write_invalidates_a_cached_recall() {
+        let (project, personal) = project_and_personal();
+        seed(&project, "/memory/facts/a", "widgets one");
+        let cache = RecallCache::default();
+        let recall = || {
+            run_recall(
+                &project,
+                &SessionStats::new(),
+                &cache,
+                "widgets",
+                1500,
+                "main",
+            )["results"]
+                .as_array()
+                .unwrap()
+                .len()
+        };
+        assert_eq!(recall(), 1);
+        assert_eq!(recall(), 1); // served from the cache
+        seed(&personal, "/memory/facts/b", "widgets two");
+        assert_eq!(recall(), 2);
+    }
+
     // -------- remember input validation (H3) --------
 
     fn remember_params(context: Option<String>, tags: Option<Vec<String>>) -> RememberParams {
@@ -7146,6 +7429,7 @@ mod tests {
             context,
             tags,
             ref_name: "main".to_string(),
+            personal: false,
         }
     }
 

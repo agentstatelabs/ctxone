@@ -54,6 +54,25 @@ Rules:
   exist return **404**.
 - Cross-namespace merge is deny-by-default: attempting it returns
   **403** (per AgentStateGraph's isolation rules).
+- Names beginning with `_` are reserved for CTXone; a project can't use
+  one.
+
+### The personal namespace
+
+`_personal` holds what belongs to the person rather than to a project: the
+agent rules `ctx agents install` primes, and preferences remembered with
+`ctx remember --personal`. Any request may name it with
+`?namespace=_personal`, and the first one creates it. It has only `main`.
+
+Recall reads it as well as the request's namespace, and so does
+`GET /api/memory/pinned`. Each result names the namespace it came from in
+`namespace`, and where both hold the same path, the workspace's own copy
+wins. On a multi-tenant Hub, each tenant has its own. It will sync only to
+the user's own space ([HUB_SYNC.md](design/HUB_SYNC.md)).
+
+Over MCP, where the namespace is fixed for the connection, `remember`,
+`forget` and `prime` take `personal: true` instead. A personal write isn't
+refused when a session fell back to `default`, since it names where it goes.
 
 ## Health
 
@@ -513,7 +532,8 @@ operations work immediately).
 
 **Response (200):** the project object (same shape as `GET /api/projects`
 entries). Returns **409** on a duplicate `id` or `remote_url`, **400**
-on an invalid namespace name.
+on an invalid namespace name or an `id` or `namespace` beginning with `_`
+(reserved for CTXone).
 
 ### `GET /api/projects/{id}`
 
@@ -614,6 +634,10 @@ Store a fact.
 - `tags` — queryable tags stored on the commit
 - `ref` — branch to write to (default `main`)
 
+To remember something personal, send it to the personal namespace:
+`POST /api/memory/remember?namespace=_personal` with `ref` `main`
+([The personal namespace](#the-personal-namespace)).
+
 **Response (200):**
 ```json
 {
@@ -660,6 +684,9 @@ Retrieve memories for a topic. Pinned-first, token-scored, budget-capped.
 
 **Response (200):** see the `recall` response schema in
 [CLI_REFERENCE.md](CLI_REFERENCE.md#recall-response).
+
+Recall reads the [personal namespace](#the-personal-namespace)'s `main` as
+well, and each result carries the `namespace` it came from.
 
 Every recall updates the session token counters — each call's `sent`
 contributes to `session_tokens_used` on `GET /api/stats/tokens`.
@@ -727,14 +754,18 @@ List all pinned memories.
 **Response (200):**
 ```json
 [
-  {"path": "/memory/pinned/project/the-insight/title", "value": "The Insight"},
-  {"path": "/memory/pinned/project/the-insight/body", "value": "..."},
+  {"path": "/memory/pinned/project/the-insight/title", "value": "The Insight", "namespace": "myrepo"},
+  {"path": "/memory/pinned/project/the-insight/body", "value": "...", "namespace": "myrepo"},
+  {"path": "/memory/pinned/ctxone-agents/standing-rules/title", "value": "Standing rules", "namespace": "_personal"},
   ...
 ]
 ```
 
 Clients typically group these by `/memory/pinned/<source>/<slug>` and pair
 the `/title` and `/body` children to reconstruct structured sections.
+The workspace's own leaves come first, then the
+[personal namespace](#the-personal-namespace)'s, leaving out any path the
+workspace also holds. `namespace` says which one each came from.
 Returns an empty array (not 404) when no pinned memories exist.
 
 ### `POST /api/memory/summarize_session`

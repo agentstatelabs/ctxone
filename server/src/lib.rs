@@ -19,6 +19,7 @@ pub mod mcp_http;
 pub mod mcp_sessions;
 pub mod memory_tools;
 pub mod migrations;
+pub mod personal;
 pub mod plan_tools;
 pub mod postgres_url;
 pub mod project;

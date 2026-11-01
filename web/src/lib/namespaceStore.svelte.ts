@@ -13,6 +13,9 @@ import { branchStore } from './branchStore.svelte';
 
 const KEY = 'ctxone:namespace';
 export const DEFAULT_NAMESPACE = 'default';
+/** The Hub's personal namespace: your own rules and preferences, which
+ * every workspace's recall reads too. */
+export const PERSONAL_NAMESPACE = '_personal';
 
 function load(): string {
 	if (typeof localStorage === 'undefined') return DEFAULT_NAMESPACE;
@@ -41,7 +44,11 @@ function createNamespaceStore() {
 		/** Reconcile the persisted namespace against the known list —
 		 * if its project was deleted, fall back to default. */
 		hydrate(known: string[]) {
-			if (!known.includes(current) && current !== DEFAULT_NAMESPACE) {
+			if (
+				!known.includes(current) &&
+				current !== DEFAULT_NAMESPACE &&
+				current !== PERSONAL_NAMESPACE
+			) {
 				this.current = DEFAULT_NAMESPACE;
 			}
 		}

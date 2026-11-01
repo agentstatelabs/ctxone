@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { getPinned, primeSections, parseMarkdownSections } from '$lib/api';
 	import type { PinnedItem } from '$lib/api';
-	import { namespaceStore } from '$lib/namespaceStore.svelte';
+	import { namespaceStore, PERSONAL_NAMESPACE } from '$lib/namespaceStore.svelte';
 	import ScopeBadge from '$lib/ScopeBadge.svelte';
 	import EmptyState from '$lib/EmptyState.svelte';
 	import { useAutoRefresh, formatAgo } from '$lib/refreshStore.svelte';
@@ -53,7 +53,9 @@
 
 	const auto = useAutoRefresh(refresh);
 
-	// Group pinned items by source (everything between /memory/pinned/ and the last segment)
+	// Group pinned items by source (everything between /memory/pinned/ and the
+	// last segment), keeping the personal namespace's sources apart from the
+	// workspace's own.
 	let grouped = $derived.by(() => {
 		const bySource = new Map<string, Map<string, { title?: string; body?: string }>>();
 
@@ -62,9 +64,12 @@
 			const m = item.path.match(/^\/memory\/pinned\/([^/]+)\/([^/]+)\/(title|body)$/);
 			if (!m) continue;
 			const [, source, slug, field] = m;
+			const personal =
+				item.namespace === PERSONAL_NAMESPACE && namespaceStore.current !== PERSONAL_NAMESPACE;
+			const key = `${personal ? 'personal' : 'workspace'}\u0000${source}`;
 
-			if (!bySource.has(source)) bySource.set(source, new Map());
-			const sectionMap = bySource.get(source)!;
+			if (!bySource.has(key)) bySource.set(key, new Map());
+			const sectionMap = bySource.get(key)!;
 			if (!sectionMap.has(slug)) sectionMap.set(slug, {});
 			const section = sectionMap.get(slug)!;
 
@@ -72,8 +77,9 @@
 			if (field === 'body' && typeof item.value === 'string') section.body = item.value;
 		}
 
-		return Array.from(bySource.entries()).map(([source, sections]) => ({
-			source,
+		return Array.from(bySource.entries()).map(([key, sections]) => ({
+			source: key.slice(key.indexOf('\u0000') + 1),
+			personal: key.startsWith('personal'),
 			sections: Array.from(sections.values()).filter((s) => s.title && s.body) as Array<{
 				title: string;
 				body: string;
@@ -89,6 +95,7 @@
 		return grouped
 			.map((g) => ({
 				source: g.source,
+				personal: g.personal,
 				sections: g.sections.filter(
 					(s) =>
 						g.source.toLowerCase().includes(q) ||
@@ -104,7 +111,12 @@
 	// through groups.
 	let flatSections = $derived.by(() =>
 		filtered.flatMap((g) =>
-			g.sections.map((s) => ({ source: g.source, title: s.title, body: s.body }))
+			g.sections.map((s) => ({
+				source: g.source,
+				personal: g.personal,
+				title: s.title,
+				body: s.body
+			}))
 		)
 	);
 
@@ -220,7 +232,10 @@
 	{:else if viewMode === 'tree'}
 		{#each filtered as group}
 			<div class="source-group">
-				<h3 class="source-name">{group.source}</h3>
+				<h3 class="source-name">
+					{group.source}
+					{#if group.personal}<span class="personal-chip" title="From your personal namespace">personal</span>{/if}
+				</h3>
 				<div class="sections">
 					{#each group.sections as section}
 						<div class="section">
@@ -237,6 +252,7 @@
 				<div class="section flat-section">
 					<div class="section-title">
 						<span class="source-chip">{s.source}</span>
+						{#if s.personal}<span class="personal-chip" title="From your personal namespace">personal</span>{/if}
 						{s.title}
 					</div>
 					<div class="section-body">{s.body}</div>
@@ -419,6 +435,20 @@
 		font-size: 0.78rem;
 	}
 	/* Flat-mode chip identifying the source for each row. */
+	.personal-chip {
+		display: inline-block;
+		margin-left: 0.4rem;
+		border: 1px solid var(--text-3);
+		color: var(--text-1);
+		font-family: monospace;
+		font-size: 0.65rem;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		padding: 0.05rem 0.4rem;
+		border-radius: 3px;
+		vertical-align: middle;
+	}
+
 	.source-chip {
 		display: inline-block;
 		background: var(--accent-bg);

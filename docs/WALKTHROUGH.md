@@ -101,7 +101,8 @@ Three layers, same shape as its sibling:
    plans, taint, `why_did_we`, etc. as structured tools — the capability
    layer. 68 tools in total.
 2. **Always-on guidance** (`ctx agents install`). Writes `AGENTS.md` and
-   primes it as pinned memory so the agent knows the tools exist and the
+   primes it as pinned memory in your personal namespace, which every
+   workspace's recall reads, so the agent knows the tools exist and the
    house rules for using them.
 3. **Agent Skill** (`ctx skill`). A `SKILL.md` that teaches the agent *when*
    to record a decision, open a plan, or recall context — so memory-keeping

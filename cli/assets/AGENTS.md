@@ -59,8 +59,9 @@ rules that aren't discoverable at runtime.
 
 ## This file is yours
 
-Lives at `~/.config/ctxone/AGENTS.md`, pinned in the graph
-(`ctx ls /memory/pinned/ctxone-agents`), fully editable — `ctx agents install`
+Lives at `~/.config/ctxone/AGENTS.md`, pinned in your personal namespace
+(`ctx ls /memory/pinned/ctxone-agents --namespace _personal`), so every
+workspace's recall includes it. Fully editable — `ctx agents install`
 to re-prime, `ctx agents remove` to drop it. Not hidden, not immutable, not
 automatic beyond the one-time install prompt. If you delete it, you fall back to
 whatever generic memory-tool behavior your MCP client provides.

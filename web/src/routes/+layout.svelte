@@ -13,7 +13,7 @@
 	import type { AsdHealth, AsdRepoInfo } from '$lib/codeTypes';
 	import { selectedRepo } from '$lib/repoStore';
 	import { branchStore } from '$lib/branchStore.svelte';
-	import { namespaceStore, DEFAULT_NAMESPACE } from '$lib/namespaceStore.svelte';
+	import { namespaceStore, DEFAULT_NAMESPACE, PERSONAL_NAMESPACE } from '$lib/namespaceStore.svelte';
 	import { themeStore, THEMES, type ThemeId } from '$lib/themeStore.svelte';
 	import { refreshStore, REFRESH_INTERVAL_MS } from '$lib/refreshStore.svelte';
 	import { authStore } from '$lib/authStore.svelte';
@@ -132,6 +132,7 @@
 	type WorkspaceOption = { namespace: string; label: string };
 	let workspaceOptions = $derived<WorkspaceOption[]>([
 		{ namespace: DEFAULT_NAMESPACE, label: 'default' },
+		{ namespace: PERSONAL_NAMESPACE, label: 'Personal' },
 		...projects.map((p) => ({ namespace: p.namespace, label: p.display_name ?? p.id }))
 	]);
 	let currentWorkspace = $derived(

@@ -95,12 +95,19 @@ OPTIONS:
   -i, --importance <LEVEL>  high | medium | low  [default: medium]
   -c, --context <NAME>      Group under /memory/<context>/
   -t, --tags <TAGS>         Queryable tags
+      --personal            Store it in your personal namespace instead of
+                            this workspace; every workspace's recall reads it
 ```
+
+`--personal` is for what's yours rather than the project's, such as a
+preference. It goes to the personal namespace's `main`
+([HTTP_API.md](HTTP_API.md#the-personal-namespace)).
 
 **Examples:**
 
 ```bash
 ctx remember "We use BSL-1.1" --importance high --context licensing
+ctx remember "I prefer small commits" --context preferences --personal
 echo "fact" | ctx remember -
 ctx remember "deployed" --format id    # prints just the commit id
 ```
@@ -108,7 +115,9 @@ ctx remember "deployed" --format id    # prints just the commit id
 ### `ctx recall <topic>`
 
 Retrieve memories relevant to a topic. Always includes pinned context first,
-then topic-matched facts, respecting a token budget.
+then topic-matched facts, respecting a token budget. It reads your personal
+namespace as well as this workspace, and marks what came from it
+`personal`.
 
 ```
 USAGE: ctx recall <TOPIC> [OPTIONS]
@@ -171,6 +180,8 @@ ARGS:
 
 OPTIONS:
       --reason <TEXT>  Shows up in blame  [default: "forgotten by user"]
+      --personal       Forget it from your personal namespace (recall
+                       marks those results `personal`)
 ```
 
 ### `ctx context <project>`
@@ -642,8 +653,15 @@ fastest path to wiring CTXone into whatever agent you're already in.
 
 Manage the `AGENTS.md` guidance file — a short, pinned document that
 teaches AI tools how to use CTXone. `ctx agents show` prints the full
-text; `ctx agents install` writes it and primes it as pinned memory
-(prompts unless `--yes`). See also [AGENTS.md](AGENTS.md).
+text; `ctx agents install` writes it and primes it as pinned memory in your
+personal namespace, so every workspace's recall includes it. See also
+[AGENTS.md](AGENTS.md).
+
+Earlier versions primed it into each workspace instead. `ctx agents install`
+removes the current workspace's copy, and `ctx agents migrate` lists every
+workspace that still has one; `--apply` primes the personal copy if it's
+missing, then removes them. `ctx agents status` reports both, and
+`ctx agents remove` removes both.
 
 ### `ctx db backup [--suffix <NAME>]`
 
@@ -725,14 +743,16 @@ ctx completion fish > ~/.config/fish/completions/ctx.fish
       "path": "/memory/pinned/vision/the-insight",
       "title": "The Insight",
       "body": "...",
-      "pinned": true
+      "pinned": true,
+      "namespace": "myrepo"
     },
     {
       "path": "/memory/licensing/18a6...",
       "value": "CTXone uses BSL-1.1",
       "pinned": false,
       "score": 2,
-      "full_match": true
+      "full_match": true,
+      "namespace": "_personal"
     }
   ],
   "pinned_count": 5,

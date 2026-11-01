@@ -153,7 +153,7 @@ primes CTXone — and offers to set up **AgentStateDeveloper** (code context) to
 |---|---|
 | `ctx service install` | Run the unified hub (`ctxone-hub --http --lens`) as an always-on login/boot daemon (launchd / systemd / Task Scheduler) — the recommended production path. |
 | `ctx init` | Auto-detect and configure your AI tools (MCP). Defaults to `--transport http` (point tools at the running daemon by URL); target one with `ctx init --tool claude` / `--tool cursor`. |
-| `ctx agents install` | Write the shared `AGENTS.md` and prime it as pinned memory in the Hub. |
+| `ctx agents install` | Write the shared `AGENTS.md` and prime it as pinned memory in your personal namespace, which every workspace's recall reads. |
 | `ctx skill` | Install CTXone's **Agent Skill** (`SKILL.md`) into each host's skills directory — teaches the agent to record decisions, plans, and memory. Version-stamped. When the `asd` CLI is present, it also installs the combined **CTXone + ASD** suite skill. |
 
 ```bash

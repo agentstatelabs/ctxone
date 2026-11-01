@@ -870,9 +870,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // whether the Hub is serving pinned agent guidance. This is the
     // disclosure surface for the `ctx agents install` flow — if the
     // file is primed, it shows up here. If it isn't, the line tells
-    // the operator exactly how to prime it.
-    let agents_paths = repo
-        .list_paths("main", "/memory/pinned/ctxone-agents", Some(50))
+    // the operator exactly how to prime it. `ctx agents install` primes the
+    // personal namespace (ctx-hub-sync t-003).
+    let agents_paths = ctxone_hub::personal::beside(&repo)
+        .and_then(|personal| {
+            personal
+                .list_paths(
+                    ctxone_hub::personal::PERSONAL_REF,
+                    "/memory/pinned/ctxone-agents",
+                    Some(50),
+                )
+                .ok()
+        })
         .unwrap_or_default();
     let agents_sections = agents_paths
         .iter()
@@ -882,6 +891,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!(
             sections = agents_sections,
             path = "/memory/pinned/ctxone-agents",
+            namespace = ctxone_hub::personal::PERSONAL_NAMESPACE,
             "AGENTS.md: primed"
         );
     } else {

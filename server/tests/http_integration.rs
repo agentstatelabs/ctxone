@@ -1984,6 +1984,182 @@ async fn namespaces_isolate_memory_and_branches() {
     );
 }
 
+// -------- The personal namespace (ctx-hub-sync t-003) --------
+
+/// A project namespace on `router`'s Hub.
+async fn register(router: &axum::Router, id: &str) {
+    let (status, body) = call_json(
+        router.clone(),
+        post_json("/api/projects", json!({ "id": id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "register {id} failed: {body}");
+}
+
+#[tokio::test]
+async fn personal_memory_reaches_every_workspaces_recall() {
+    let (_dir, _repo, router) = sqlite_router();
+    register(&router, "repo-a").await;
+    register(&router, "repo-b").await;
+
+    // `ctx remember --personal` names the personal namespace; the first
+    // request creates it.
+    let (status, body) = call_json(
+        router.clone(),
+        post_json(
+            "/api/memory/remember?namespace=_personal",
+            json!({ "fact": "I review diffs before merging", "context": "preferences" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "remember failed: {body}");
+    let path = body["path"].as_str().unwrap().to_string();
+
+    for ns in ["repo-a", "repo-b", "default"] {
+        let (status, body) = call_json(
+            router.clone(),
+            get_ns("/api/memory/recall?topic=review%20diffs", ns),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let hit = body["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["path"] == path.as_str())
+            .unwrap_or_else(|| panic!("{ns} didn't recall it: {body}"))
+            .clone();
+        assert_eq!(hit["namespace"], "_personal");
+    }
+
+    // A workspace's own memory stays its own.
+    let (status, _) = call_json(
+        router.clone(),
+        post_json_ns(
+            "/api/memory/remember",
+            "repo-a",
+            json!({ "fact": "repo-a reviews in pairs" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, body) = call_json(
+        router.clone(),
+        get_ns("/api/memory/recall?topic=reviews%20in%20pairs", "repo-b"),
+    )
+    .await;
+    assert!(
+        !body["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["value"] == "repo-a reviews in pairs"),
+        "repo-b recalled repo-a's memory: {body}"
+    );
+}
+
+#[tokio::test]
+async fn personal_pinned_rules_show_beside_a_workspaces_own() {
+    let (_dir, _repo, router) = sqlite_router();
+    register(&router, "repo-a").await;
+
+    // `ctx agents install` primes the personal namespace.
+    let (status, _) = call_json(
+        router.clone(),
+        post_json(
+            "/api/memory/prime?namespace=_personal",
+            json!({
+                "source": "ctxone-agents",
+                "pinned": true,
+                "sections": [
+                    {"title": "Use recall", "body": "Recall before substantial work"},
+                    {"title": "House style", "body": "my own style"},
+                ],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // The workspace pins its own house style at the same path.
+    let (status, _) = call_json(
+        router.clone(),
+        post_json_ns(
+            "/api/memory/prime",
+            "repo-a",
+            json!({
+                "source": "ctxone-agents",
+                "pinned": true,
+                "sections": [{"title": "House style", "body": "the project's style"}],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = call_json(
+        router.clone(),
+        get_ns("/api/memory/recall?topic=unrelated-xyz", "repo-a"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let pinned: Vec<&Value> = body["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["pinned"] == true)
+        .collect();
+    assert_eq!(pinned.len(), 2, "{body}");
+    let style = pinned
+        .iter()
+        .find(|r| r["path"] == "/memory/pinned/ctxone-agents/house-style")
+        .unwrap();
+    assert_eq!(style["body"], "the project's style");
+    assert_eq!(style["namespace"], "repo-a");
+    let rule = pinned
+        .iter()
+        .find(|r| r["path"] == "/memory/pinned/ctxone-agents/use-recall")
+        .unwrap();
+    assert_eq!(rule["namespace"], "_personal");
+
+    // Lens's pinned list says where each leaf came from, and drops the
+    // personal copy the workspace overrides.
+    let (status, body) = call_json(router.clone(), get_ns("/api/memory/pinned", "repo-a")).await;
+    assert_eq!(status, StatusCode::OK);
+    let leaves = body.as_array().unwrap();
+    let ns_of = |path: &str| -> Vec<String> {
+        leaves
+            .iter()
+            .filter(|l| l["path"] == path)
+            .map(|l| l["namespace"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(
+        ns_of("/memory/pinned/ctxone-agents/house-style/body"),
+        ["repo-a"]
+    );
+    assert_eq!(
+        ns_of("/memory/pinned/ctxone-agents/use-recall/body"),
+        ["_personal"]
+    );
+}
+
+#[tokio::test]
+async fn names_beginning_with_an_underscore_are_reserved() {
+    let (_dir, _repo, router) = sqlite_router();
+    for body in [
+        json!({ "id": "_personal" }),
+        json!({ "id": "_mine" }),
+        json!({ "id": "app", "namespace": "_personal" }),
+    ] {
+        let (status, text) = call_raw(router.clone(), post_json("/api/projects", body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+        assert!(text.contains("reserved"), "{text}");
+    }
+    let (status, body) = call_json(router, get("/api/projects")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.as_array().unwrap().is_empty(), "{body}");
+}
+
 #[tokio::test]
 async fn session_listing_is_scoped_to_its_workspace() {
     let (_dir, _repo, router) = sqlite_router();
