@@ -126,6 +126,38 @@ async fn each_tenant_reaches_only_its_own_memory() {
 }
 
 #[tokio::test]
+async fn each_tenant_has_its_own_personal_namespace() {
+    // `_personal` is opened from the tenant's own store, so one tenant's
+    // preferences never reach another's recall (ctx-hub-sync t-003).
+    let hub = memory_hub();
+    for (token, fact) in [
+        (ALICE, "Alice prefers squash merges on Fridays"),
+        (BOB, "Bob prefers rebase merges on Fridays"),
+    ] {
+        let body = json!({ "fact": fact, "context": "preferences" });
+        let (status, text) = call(
+            &hub.app,
+            request(
+                "POST",
+                "/api/memory/remember?namespace=_personal",
+                token,
+                Some(body),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+    }
+
+    let alice = recall(&hub.app, ALICE, "merges").await;
+    assert!(alice.contains("Alice prefers"), "{alice}");
+    assert!(alice.contains("_personal"), "{alice}");
+    assert!(!alice.contains("Bob prefers"), "{alice}");
+    let bob = recall(&hub.app, BOB, "merges").await;
+    assert!(bob.contains("Bob prefers"), "{bob}");
+    assert!(!bob.contains("Alice prefers"), "{bob}");
+}
+
+#[tokio::test]
 async fn session_statistics_are_per_tenant() {
     let hub = memory_hub();
     let mut req = request("GET", "/api/memory/recall?topic=x", ALICE, None);

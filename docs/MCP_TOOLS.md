@@ -117,9 +117,15 @@ Store a fact, preference, or decision.
 | `context` | string | no | — | Category (becomes `/memory/<context>/<id>`) |
 | `tags` | string[] | no | — | Queryable tags |
 | `ref` | string | no | `main` | Branch to write to |
+| `personal` | bool | no | false | Write to the personal namespace's `main` instead of this workspace |
 
 **Response:** JSON object with `status`, `path`, `commit_id`, `ref`,
-`namespace` (which project namespace the write landed in), `fact`.
+`namespace` (which namespace the write landed in), `fact`.
+
+`personal: true` is for what belongs to the person rather than the
+project, such as a preference. Every workspace's recall reads the personal
+namespace, and a personal write isn't refused when the session fell back to
+`default` ([HTTP_API.md](HTTP_API.md#the-personal-namespace)).
 
 **When to call:** any time the agent learns a fact about the user's project
 that should persist to the next session. Agents are encouraged to call this
@@ -147,9 +153,11 @@ Retrieve memories for a topic.
 **Response:** JSON with `results`, `pinned_count`, `topic_matches`,
 `ctx_tokens_sent`, `ctx_tokens_estimated_flat`, `ctx_savings_ratio`.
 
-Results are structured: each item has `path` and `pinned: bool`. Pinned
-items also have `title` and `body`; topic matches have `value`, `score`,
-and `full_match`.
+Results are structured: each item has `path`, `pinned: bool` and
+`namespace`. Pinned items also have `title` and `body`; topic matches have
+`value`, `score`, and `full_match`. Recall reads the personal namespace's
+`main` as well as this workspace, so `namespace` is either the workspace or
+`_personal`; where both hold the same path, the workspace's copy wins.
 
 **When to call:** at the start of every agent session, and whenever the
 agent needs project-specific context mid-session. Think of it as "search
@@ -175,6 +183,7 @@ Load structured sections as pinned or primed memory.
 | `pinned` | bool | no | false | If true, always include in recall |
 | `sections` | array | yes | — | Array of `{title, body}` objects |
 | `ref` | string | no | `main` | Branch to write to |
+| `personal` | bool | no | false | Prime into the personal namespace's `main`, as `ctx agents install` does |
 
 **Response:** JSON with `sections_written` count and `paths` array.
 
@@ -822,7 +831,8 @@ Forget a path by writing a rollback commit. The data isn't physically
 removed — its history is preserved in blame — but `get` and
 `recall` will no longer surface it.
 
-**Parameters:** `path`, `reason?`, `ref?`.
+**Parameters:** `path`, `reason?`, `ref?`, `personal?` (forget from the
+personal namespace; a recall result's `namespace` says which holds it).
 
 **When to call:** when a fact is wrong, expired, or the user
 explicitly asks to forget it. Prefer `forget` over editing a fact in

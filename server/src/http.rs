@@ -297,6 +297,13 @@ impl HubState {
         if ns.0 == Namespace::DEFAULT {
             return Ok(self.repo.clone());
         }
+        // The personal namespace sits beside every workspace, so any request
+        // may name it, and the first one creates it (ctx-hub-sync t-003).
+        if ns.0 == crate::personal::PERSONAL_NAMESPACE {
+            return crate::personal::open_for_write(&self.repo)
+                .map(Arc::new)
+                .map_err(internal_error);
+        }
         let namespace =
             Namespace::new(ns.0.as_str()).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
         Ok(Arc::new(self.repo.fork_namespace(namespace)))
@@ -3572,7 +3579,32 @@ async fn list_pinned(
     if let Ok(pinned) = repo.get_json("main", "/memory/pinned") {
         pinned_leaves(&pinned, "/memory/pinned", 0, &mut out);
     }
+    tag_namespace(&mut out, repo.namespace().as_str());
+    // The personal namespace's pinned memory too, as recall sees it: what
+    // the workspace doesn't hold itself (ctx-hub-sync t-003).
+    if let Some(personal) = crate::personal::beside(&repo)
+        && let Ok(pinned) = personal.get_json(crate::personal::PERSONAL_REF, "/memory/pinned")
+    {
+        let held: std::collections::HashSet<String> = out
+            .iter()
+            .filter_map(|leaf| leaf["path"].as_str().map(String::from))
+            .collect();
+        let mut theirs = Vec::new();
+        pinned_leaves(&pinned, "/memory/pinned", 0, &mut theirs);
+        theirs.retain(|leaf| leaf["path"].as_str().is_some_and(|p| !held.contains(p)));
+        tag_namespace(&mut theirs, crate::personal::PERSONAL_NAMESPACE);
+        out.extend(theirs);
+    }
     Ok(Json(out))
+}
+
+/// Mark each `{path, value}` leaf with the namespace it came from.
+fn tag_namespace(leaves: &mut [serde_json::Value], namespace: &str) {
+    for leaf in leaves {
+        if let Some(obj) = leaf.as_object_mut() {
+            obj.insert("namespace".into(), namespace.into());
+        }
+    }
 }
 
 /// How deep [`list_pinned`] looks below `/memory/pinned`.
@@ -7463,6 +7495,12 @@ async fn register_project_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let db = registry(&s)?;
     let namespace = req.namespace.clone().unwrap_or_else(|| req.id.clone());
+    if crate::personal::is_reserved(&req.id) || crate::personal::is_reserved(&namespace) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "project ids and namespaces beginning with `_` are reserved for CTXone".to_string(),
+        ));
+    }
 
     // Create the ASG namespace first — Namespace::new validates the name
     // (ASCII alnum/-/_, 1..=64 bytes), and init() creates the namespace row

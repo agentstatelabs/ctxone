@@ -2,7 +2,7 @@
 	import { untrack } from 'svelte';
 	import { recall, type RecallResponse } from '$lib/api';
 	import { branchStore } from '$lib/branchStore.svelte';
-	import { namespaceStore } from '$lib/namespaceStore.svelte';
+	import { namespaceStore, PERSONAL_NAMESPACE } from '$lib/namespaceStore.svelte';
 	import ScopeBadge from '$lib/ScopeBadge.svelte';
 	import BrowsePane from '$lib/BrowsePane.svelte';
 
@@ -107,6 +107,9 @@
 						>
 							<div class="result-head">
 								<span class="result-path">{r.path}</span>
+								{#if r.namespace === PERSONAL_NAMESPACE && namespaceStore.current !== PERSONAL_NAMESPACE}
+									<span class="tag personal" title="From your personal namespace">personal</span>
+								{/if}
 								{#if r.pinned}
 									<span class="tag pinned">pinned</span>
 								{:else}
@@ -292,6 +295,10 @@
 	}
 	.tag.full {
 		color: var(--accent);
+	}
+	.tag.personal {
+		color: var(--text-1);
+		border-color: var(--text-3);
 	}
 
 	.result-title {

@@ -95,7 +95,7 @@ pub const REGISTRY: &[HelpDoc] = &[
         feature: "remember",
         group: "memory",
         synopsis: "Store a durable fact, decision, or preference that survives sessions and tool switches.",
-        syntax: "ctx remember <fact> [--importance low|medium|high] [--context <ns>] [--tags a,b]",
+        syntax: "ctx remember <fact> [--importance low|medium|high] [--context <ns>] [--tags a,b] [--personal]",
         params: &[
             p!("fact", true, "The fact/decision text to store."),
             p!(
@@ -108,10 +108,19 @@ pub const REGISTRY: &[HelpDoc] = &[
                 false,
                 "Namespace/project to file the memory under."
             ),
+            p!(
+                "--personal",
+                false,
+                "Store it in your personal namespace (MCP: personal=true); every workspace's recall reads it."
+            ),
         ],
-        examples: &["ctx remember \"BSL-1.1 for new repos\" --importance high --context licensing"],
+        examples: &[
+            "ctx remember \"BSL-1.1 for new repos\" --importance high --context licensing",
+            "ctx remember \"I prefer small commits\" --context preferences --personal",
+        ],
         gotchas: &[
             "To import a whole markdown doc's sections at once use `prime`, not repeated remember calls.",
+            "A preference of the person's, not the project's, belongs in the personal namespace (--personal).",
             "Don't ask permission — if the user said it, it's worth remembering.",
         ],
         related: &["recall", "prime", "forget"],
