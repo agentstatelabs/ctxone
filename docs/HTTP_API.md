@@ -530,6 +530,13 @@ operations work immediately).
 - `display_name` — human-readable name
 - `local_path` — checkout path to bind
 
+The Hub also keeps the project's namespace, remote and display name in the
+[personal namespace](#the-personal-namespace) at `/ctxone/projects/<id>`, so
+the registry can follow the person to other machines. Local paths stay on
+this machine. At every start (and tenant open) the Hub writes any record
+that's missing or differs, and registers a project for a record it has no
+row for, without local paths.
+
 **Response (200):** the project object (same shape as `GET /api/projects`
 entries). Returns **409** on a duplicate `id` or `remote_url`, **400**
 on an invalid namespace name or an `id` or `namespace` beginning with `_`

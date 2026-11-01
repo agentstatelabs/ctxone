@@ -7529,6 +7529,12 @@ async fn register_project_handler(
         StatusCode::INTERNAL_SERVER_ERROR,
         "project vanished after insert".to_string(),
     ))?;
+    // The registry follows the person in their personal namespace
+    // (ctx-hub-sync t-003). The row is in already; a record that can't be
+    // written now is written when the Hub next starts.
+    if let Err(e) = crate::project::record_in_personal(&s.repo, &p) {
+        warn!(project = %p.id, error = %e, "couldn't record the project in the personal namespace");
+    }
     Ok(Json(project_to_json(&s, p).await))
 }
 

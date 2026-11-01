@@ -489,8 +489,10 @@ impl TenantOpener for PostgresTenants {
         let repo = Repository::new(Box::new(storage));
         prepare(&repo)?;
         let store = HubStore::Postgres(self.tables.for_tenant(tenant.as_str()));
-        // Under the open lock, like the migrations (ctx-hub-sync t-001).
+        // Under the open lock, like the migrations (ctx-hub-sync t-001), and
+        // then the registry's copy in the personal namespace (t-003).
         crate::project::log_remote_migration(store.canonicalize_remotes());
+        crate::project::log_registry_sync(crate::project::sync_personal_registry(&store, &repo));
         Ok(OpenedTenant {
             repo: Arc::new(repo),
             store: Some(store),
