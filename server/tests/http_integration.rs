@@ -2144,6 +2144,40 @@ async fn personal_pinned_rules_show_beside_a_workspaces_own() {
 }
 
 #[tokio::test]
+async fn a_registered_project_is_recorded_in_the_personal_namespace() {
+    let (_dir, _repo, router) = sqlite_router();
+    let (status, body) = call_json(
+        router.clone(),
+        post_json(
+            "/api/projects",
+            json!({
+                "id": "github-com-a-app",
+                "remote_url": "git@github.com:a/app.git",
+                "display_name": "App",
+                "local_path": "/home/me/app",
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, record) = call_json(
+        router,
+        get("/api/state/main?path=/ctxone/projects/github-com-a-app&namespace=_personal"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{record}");
+    assert_eq!(
+        record,
+        json!({
+            "namespace": "github-com-a-app",
+            "remote_url": "github.com/a/app",
+            "display_name": "App",
+        })
+    );
+}
+
+#[tokio::test]
 async fn names_beginning_with_an_underscore_are_reserved() {
     let (_dir, _repo, router) = sqlite_router();
     for body in [

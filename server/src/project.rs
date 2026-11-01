@@ -16,8 +16,15 @@
 //! functions taking a path remain for SQLite-only callers.
 //!
 //! Schema is created on first use (idempotent `CREATE TABLE IF NOT EXISTS`).
+//!
+//! The personal namespace keeps a copy of each project's namespace, remote and
+//! display name at `/ctxone/projects/<id>`, so the registry can follow the
+//! person to other machines (ctx-hub-sync t-003). The tables stay the index
+//! detection reads; [`sync_personal_registry`] brings the two together.
 
 use crate::hub_store::{HubStore, PgStore, pg_error};
+use agentstategraph::{CommitOptions, RepoError, Repository};
+use agentstategraph_core::{IntentCategory, Namespace};
 use agentstategraph_storage::PostgresStorage;
 use agentstategraph_storage::tokio_postgres::error::SqlState;
 use rusqlite::{Connection, Result as SqlResult, params};
@@ -1042,6 +1049,164 @@ pub fn find_git_root(start: &Path) -> Option<PathBuf> {
     None
 }
 
+// ── The registry's copy in the personal namespace (ctx-hub-sync t-003) ───────
+
+/// Where the personal namespace keeps the registry: `<this>/<project id>`.
+pub const PERSONAL_REGISTRY: &str = "/ctxone/projects";
+
+/// The record the personal namespace keeps for `p`: its namespace, remote and
+/// display name. Not its local paths, which belong to this machine and stay in
+/// SQL, nor when this Hub registered it, which differs from machine to machine
+/// and would have each one rewrite the others' records.
+fn personal_record(p: &Project) -> serde_json::Value {
+    let mut record = serde_json::json!({ "namespace": p.namespace_id });
+    if let Some(remote) = &p.remote_url {
+        record["remote_url"] = remote.clone().into();
+    }
+    if let Some(name) = &p.display_name {
+        record["display_name"] = name.clone().into();
+    }
+    record
+}
+
+/// Keep `p`'s record in the personal namespace beside `repo`, so the
+/// registry follows the person once the namespace syncs. Writes nothing when
+/// the record is already there as it is.
+pub fn record_in_personal(repo: &Repository, p: &Project) -> Result<(), RepoError> {
+    let personal = crate::personal::open_for_write(repo)?;
+    let opts = CommitOptions::new(
+        "ctxone-hub",
+        IntentCategory::Custom("Registry".to_string()),
+        format!("project registry: {}", p.id),
+    );
+    crate::graph_write::set_json_if_changed(
+        &personal,
+        crate::personal::PERSONAL_REF,
+        &format!("{PERSONAL_REGISTRY}/{}", p.id),
+        &personal_record(p),
+        opts,
+    )?;
+    Ok(())
+}
+
+/// What [`sync_personal_registry`] did.
+#[derive(Debug, Default, PartialEq)]
+pub struct RegistrySync {
+    /// Projects whose record was written to the personal namespace.
+    pub recorded: Vec<String>,
+    /// Projects registered here from a record this Hub had no row for.
+    pub registered: Vec<String>,
+    /// `(project id, why)`: records that couldn't be registered.
+    pub skipped: Vec<(String, String)>,
+}
+
+/// Bring the registry and its copy in the personal namespace together.
+///
+/// Every project here gets its record, written only where it differs, and
+/// this Hub's row wins over a record for the same id. A record with no row
+/// here, such as one a sync brought from another machine, is registered
+/// without local paths, so the project is found by its id or remote. Safe to
+/// run at every start.
+pub fn sync_personal_registry(
+    store: &HubStore,
+    repo: &Repository,
+) -> Result<RegistrySync, RegistryError> {
+    let other = |e: RepoError| RegistryError::Other(e.to_string());
+    let projects = store.list_projects()?;
+    let personal = crate::personal::open_for_write(repo).map_err(other)?;
+    let records = personal
+        .get_json(crate::personal::PERSONAL_REF, PERSONAL_REGISTRY)
+        .ok();
+    let mut out = RegistrySync::default();
+    for p in &projects {
+        let held = records.as_ref().and_then(|r| r.get(&p.id));
+        if held == Some(&personal_record(p)) {
+            continue;
+        }
+        record_in_personal(repo, p).map_err(other)?;
+        out.recorded.push(p.id.clone());
+    }
+    let here: std::collections::HashSet<&str> = projects.iter().map(|p| p.id.as_str()).collect();
+    if let Some(serde_json::Value::Object(records)) = &records {
+        for (id, record) in records {
+            if here.contains(id.as_str()) {
+                continue;
+            }
+            match register_from_record(store, repo, id, record) {
+                Ok(()) => out.registered.push(id.clone()),
+                Err(why) => {
+                    out.skipped.push((id.clone(), why));
+                    continue;
+                }
+            }
+            // The row as registered, its remote canonical, becomes the record.
+            if let Some(p) = store.resolve_by_id(id)? {
+                record_in_personal(repo, &p).map_err(other)?;
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Register project `id` from its personal-namespace `record`, creating its
+/// namespace as `POST /api/projects` does.
+fn register_from_record(
+    store: &HubStore,
+    repo: &Repository,
+    id: &str,
+    record: &serde_json::Value,
+) -> Result<(), String> {
+    let namespace = record
+        .get("namespace")
+        .and_then(|v| v.as_str())
+        .ok_or("the record names no namespace")?;
+    if crate::personal::is_reserved(id) || crate::personal::is_reserved(namespace) {
+        return Err("names beginning with `_` are reserved".to_string());
+    }
+    let ns = Namespace::new(namespace).map_err(|e| e.to_string())?;
+    let remote = record
+        .get("remote_url")
+        .and_then(|v| v.as_str())
+        .map(normalize_remote_url);
+    let display_name = record.get("display_name").and_then(|v| v.as_str());
+    repo.fork_namespace(ns).init().map_err(|e| e.to_string())?;
+    store
+        .register_project(id, remote.as_deref(), namespace, display_name, None)
+        .map_err(|e| e.to_string())
+}
+
+/// Log what [`sync_personal_registry`] did. Ids only: a remote can carry a
+/// token.
+pub fn log_registry_sync(result: Result<RegistrySync, RegistryError>) {
+    match result {
+        Ok(sync) => {
+            if !sync.recorded.is_empty() {
+                tracing::info!(
+                    projects = sync.recorded.len(),
+                    "project registry recorded in the personal namespace"
+                );
+            }
+            if !sync.registered.is_empty() {
+                tracing::info!(
+                    projects = sync.registered.len(),
+                    "projects registered from the personal namespace's registry"
+                );
+            }
+            for (id, why) in &sync.skipped {
+                tracing::warn!(
+                    project = %id,
+                    reason = %why,
+                    "couldn't register a project from the personal namespace's registry"
+                );
+            }
+        }
+        Err(e) => tracing::warn!(
+            error = %e,
+            "could not bring the project registry and the personal namespace together"
+        ),
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1497,5 +1662,141 @@ mod tests {
             resolve_clues(Path::new("/srv/p/sub"), Some(&store), &unreadable),
             DetectResult::FoundByPath { .. }
         ));
+    }
+
+    // ── the registry's copy in the personal namespace ──
+
+    fn graph() -> Repository {
+        let repo = Repository::new(Box::new(
+            agentstategraph_storage::SqliteStorage::in_memory().expect("in-memory sqlite"),
+        ));
+        repo.init().unwrap();
+        repo
+    }
+
+    fn personal_registry(repo: &Repository) -> serde_json::Value {
+        crate::personal::beside(repo)
+            .unwrap()
+            .get_json(crate::personal::PERSONAL_REF, PERSONAL_REGISTRY)
+            .unwrap_or(serde_json::Value::Null)
+    }
+
+    #[test]
+    fn every_project_gets_a_record_once_without_its_paths() {
+        let (_dir, db) = tmp_db();
+        let store = HubStore::Sqlite(db);
+        let repo = graph();
+        store
+            .register_project(
+                "github-com-a-app",
+                Some("github.com/a/app"),
+                "github-com-a-app",
+                Some("App"),
+                Some("/home/me/app"),
+            )
+            .unwrap();
+        store
+            .register_project("notes", None, "notes", None, None)
+            .unwrap();
+
+        let first = sync_personal_registry(&store, &repo).unwrap();
+        assert_eq!(first.recorded, ["github-com-a-app", "notes"]);
+        assert!(first.registered.is_empty() && first.skipped.is_empty());
+        let records = personal_registry(&repo);
+        let app = &records["github-com-a-app"];
+        assert_eq!(app["remote_url"], "github.com/a/app");
+        assert_eq!(app["display_name"], "App");
+        assert_eq!(app["namespace"], "github-com-a-app");
+        assert!(app.get("local_paths").is_none(), "{app}");
+        assert!(!app.to_string().contains("/home/me/app"), "{app}");
+        assert_eq!(records["notes"]["namespace"], "notes");
+        assert!(records["notes"].get("remote_url").is_none());
+
+        // Running it again writes nothing: no record, and no commit.
+        let personal = crate::personal::beside(&repo).unwrap();
+        let head = personal.head(crate::personal::PERSONAL_REF).unwrap();
+        assert_eq!(
+            sync_personal_registry(&store, &repo).unwrap(),
+            RegistrySync::default()
+        );
+        assert_eq!(personal.head(crate::personal::PERSONAL_REF).unwrap(), head);
+    }
+
+    #[test]
+    fn a_record_this_hub_lacks_is_registered_and_this_hubs_row_wins() {
+        let (_dir, db) = tmp_db();
+        let store = HubStore::Sqlite(db);
+        let repo = graph();
+        store
+            .register_project(
+                "mine",
+                Some("github.com/a/mine"),
+                "mine",
+                Some("Here"),
+                None,
+            )
+            .unwrap();
+        // Records another machine wrote, as a sync would bring them.
+        let personal = crate::personal::open_for_write(&repo).unwrap();
+        let opts = || CommitOptions::new("t", IntentCategory::Checkpoint, "seed");
+        let seed = |id: &str, record: serde_json::Value| {
+            personal
+                .set_json(
+                    crate::personal::PERSONAL_REF,
+                    &format!("{PERSONAL_REGISTRY}/{id}"),
+                    &record,
+                    opts(),
+                )
+                .unwrap();
+        };
+        seed(
+            "mine",
+            serde_json::json!({"namespace": "mine", "display_name": "There"}),
+        );
+        seed(
+            "elsewhere",
+            serde_json::json!({
+                "namespace": "elsewhere",
+                "remote_url": "git@github.com:A/Elsewhere.git",
+                "display_name": "From another machine",
+            }),
+        );
+        seed(
+            "clash",
+            serde_json::json!({"namespace": "clash", "remote_url": "github.com/a/mine"}),
+        );
+        seed("_hidden", serde_json::json!({"namespace": "_hidden"}));
+
+        let sync = sync_personal_registry(&store, &repo).unwrap();
+        assert_eq!(sync.recorded, ["mine"]);
+        assert_eq!(sync.registered, ["elsewhere"]);
+        let skipped: Vec<&str> = sync.skipped.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(skipped, ["_hidden", "clash"]);
+
+        // This Hub's row won, and the registered project's record now has
+        // its remote in canonical form.
+        let records = personal_registry(&repo);
+        assert_eq!(records["mine"]["display_name"], "Here");
+        assert_eq!(records["elsewhere"]["remote_url"], "github.com/a/elsewhere");
+        // The other machine's project is found by its id and its remote,
+        // with its namespace ready, and no local paths.
+        let found = store.resolve_by_id("elsewhere").unwrap().unwrap();
+        assert_eq!(found.remote_url.as_deref(), Some("github.com/a/elsewhere"));
+        assert_eq!(found.display_name.as_deref(), Some("From another machine"));
+        assert!(found.local_paths.is_empty());
+        assert!(
+            store
+                .resolve_by_remote_url(&normalize_remote_url("https://github.com/A/elsewhere"))
+                .unwrap()
+                .is_some()
+        );
+        let ns = repo.fork_namespace(Namespace::new("elsewhere").unwrap());
+        assert!(ns.head("main").is_ok());
+        assert!(store.resolve_by_id("_hidden").unwrap().is_none());
+
+        // A second run has nothing to do but skip the same two records.
+        let again = sync_personal_registry(&store, &repo).unwrap();
+        assert!(again.recorded.is_empty() && again.registered.is_empty());
+        assert_eq!(again.skipped.len(), 2);
     }
 }

@@ -111,7 +111,15 @@ One real store, 2026-10-06, read-only.
     resolved.
 - **Project registry:** the id → remote and display-name mapping moves into the
   personal namespace (`/ctxone/projects/<id>`), so it follows the user. Local
-  paths stay in the SQL table. This waits for the personal namespace (t-003).
+  paths stay in the SQL table.
+  - Done (t-003): each project's record holds its namespace, remote and
+    display name, not its paths or when this Hub registered it (that differs
+    per machine). `POST /api/projects` writes it, and every start and tenant
+    open brings the two together: a project here gets its record, this Hub's
+    row winning, and a record with no row here (one a sync brought) is
+    registered without paths. Unchanged records write nothing.
+  - The SQL table stays the index detection reads, since it must be readable
+    before any namespace is opened.
 - **Device:** each install gets a device id, used to attribute commits and pushes.
   Done for the id itself (t-001): `~/.ctxone/device_id`, minted by `ctx init`
   or first use, and carried in each session's provenance. Commits get it when
@@ -129,7 +137,7 @@ One real store, 2026-10-06, read-only.
   - the project registry.
 - Recall and `prime` read the personal namespace plus the project namespace.
 - The personal namespace syncs only to the user's own space, never a team's.
-- Done (t-003) except the registry: the namespace is `_personal`, beside
+- Done (t-003): the namespace is `_personal`, beside
   every workspace in each store (each tenant's, on a multi-tenant Hub), on
   `main` only. Names beginning with `_` are reserved, so no project takes it.
   - `ctx agents install` primes the rules there and removes the workspace's
@@ -141,6 +149,8 @@ One real store, 2026-10-06, read-only.
     workspace and `_personal`; each result says which, and the workspace's
     copy of a path wins.
   - Lens lists it as Personal and marks what comes from it.
+  - The project registry's records are at `/ctxone/projects/<id>` (see
+    Identity).
 
 ### Remotes per namespace
 

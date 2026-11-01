@@ -828,6 +828,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
+    // The project registry's copy in the personal namespace (ctx-hub-sync
+    // t-003), after the remotes above are canonical. Writes only what
+    // differs, so it's safe at every start.
+    if let Some(store) = &hub_store {
+        ctxone_hub::project::log_registry_sync(ctxone_hub::project::sync_personal_registry(
+            store, &repo,
+        ));
+    }
+
     // Acquire <db>.lock so a second hub against the same path refuses
     // to start. Must happen before backups so two racing hubs don't
     // both snapshot the same db at the same moment. Skip for memory/
