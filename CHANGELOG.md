@@ -3,9 +3,12 @@
 All notable changes to CTXone are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 the project's release tags (`vMAJOR.MINOR.PATCH`). Most releases go up by
-0.0.1; v1.1.0, the first with a multi-tenant Hub, went up a minor version.
+0.0.1; v1.1.0 (a multi-tenant Hub) and v1.2.0 (the personal namespace) went
+up a minor version.
 
-## [Unreleased]
+## [v1.2.0] — 2026-10-31
+
+A Hub on another machine, which gets no raw turns, now has each session's usage by model. Commits say which tool made them, a write that changes nothing makes no commit, and new project ids come from the whole remote. Your agent rules and preferences live in a personal namespace that every workspace's recall reads. After upgrading, run `ctx init` again so each tool sends its agent id, then `ctx agents migrate --apply` to remove the copies of `AGENTS.md` earlier versions primed into each workspace.
 
 ### Added
 - **A personal namespace for what's yours rather than a project's** (ctx-hub-sync t-003). Each store has one, `_personal`, beside its workspaces (each tenant has its own on a multi-tenant Hub), on `main` only. Recall reads it as well as the workspace, and so do the per-task recall gate and `GET /api/memory/pinned`, so every workspace gets your rules and preferences without its own copy, and teammates sharing a workspace no longer overwrite each other's. Each result says which namespace it came from, and where both hold the same path, the workspace's copy wins.
