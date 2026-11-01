@@ -534,10 +534,13 @@ Open WebUI's.
 
 Highest priority wins:
 
-1. **HTTP request**: `X-CTXone-Agent: <name>` header on the request
+1. **HTTP request**: `X-CTXone-Agent: <name>` header on the request. MCP
+   over HTTP also takes `?agent=<name>` in the URL, ahead of the header.
+   `ctx init` writes one or the other into each tool's entry.
 2. **MCP stdio**: `--agent-id <name>` flag passed when spawning
    `ctxone-hub` as a subprocess (or `CTX_AGENT_ID` env var)
-3. **Fallback**: `"ctxone"`
+3. **Fallback**: `"ctxone"`, or for MCP over HTTP the Hub's own
+   `--agent-id`
 
 ### Setting the agent ID from clients
 

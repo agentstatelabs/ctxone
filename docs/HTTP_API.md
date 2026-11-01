@@ -840,8 +840,15 @@ wrote each fact.
 Absent the header, commits are attributed to `"ctxone"`. The Python
 client accepts an `agent_id` constructor arg or reads `CTX_AGENT_ID`
 from the environment; the Hub binary accepts `--agent-id <name>`
-for MCP stdio mode (which is what `ctx init` wires into the
-generated `.mcp.json` / `.cursor/mcp.json` etc).
+for MCP stdio mode.
+
+MCP over HTTP (`/mcp`) reads the agent ID the same way, from
+`X-CTXone-Agent` or, for clients that can't send headers, `?agent=<name>`
+(which wins). `ctx init` writes the tool's ID into each entry it generates
+(`.mcp.json`, `.cursor/mcp.json` and so on: a header, an `mcp-remote`
+`--header`, or Codex's query string). An MCP request that names none, or
+one longer than 128 bytes or with a control character, is attributed to
+the Hub's `--agent-id`.
 
 See [docs/TROUBLESHOOTING.md#per-tool-agent-ids](TROUBLESHOOTING.md#per-tool-agent-ids)
 for the full resolution order and examples.
