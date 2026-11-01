@@ -9,6 +9,7 @@ pub mod asd_registry;
 pub mod backup;
 pub mod code_tools;
 pub mod db_admin;
+pub mod graph_write;
 pub mod help;
 pub mod http;
 pub mod hub_store;

@@ -15,6 +15,9 @@ the project's release tags (`vMAJOR.MINOR.PATCH`). Most releases go up by
   - An unchanged rollup writes no commit. Dollar costs aren't stored; Lens prices the tokens when it reads them, as before.
   - Against an older Hub, `ctx` has it recompute the split from the stored turns, as before.
 
+### Changed
+- **A write that changes nothing makes no commit** (ctx-hub-sync t-004). AgentStateGraph commits every write, and a third of the commits in a measured store (21,014 of 64,756) left the graph as it was. Most were imports (11,370), plus a grown session's turns, title, provenance and burn written again as they were, and sections primed again unchanged. They grew history, and once workspaces sync they'd be synced too. The Hub now compares the content address of what's at the path with the one the value would get, and skips the commit when they match. That covers `remember` (REST and MCP), `prime`, `POST /api/import`, session turns (bulk and one at a time), session title, meta, provenance, burn and analysis, session summaries, plan and session links, doc registration, and the stdio Hub's git-branch mirror. The answer's `commit_id` is then the ref's head. Replaying 18 sessions' envelopes and turns plus one workspace's export as an import, all unchanged, on a copy of that store made 764 commits before and none now.
+
 ## [v1.1.0] — 2026-10-31
 
 One Hub can now serve many users: a tenants file, tenant administration, row-level security, more than one Hub on one Postgres database, and MCP sessions that survive a restart. See docs/DEPLOYMENT.md.

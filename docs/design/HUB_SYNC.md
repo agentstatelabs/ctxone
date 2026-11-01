@@ -186,7 +186,7 @@ namespace, which contradicts
 | t-001 | **Identity.** New auto-derived project ids use the full normalized remote. Add a device id at install. Move the project registry's id, remote and display name into the personal namespace; local paths stay in SQL. | 1 |
 | t-002 | **Turns on their own local-only ref.** Redirect every turn writer. The envelope stays on `main`. Migration: the synced refs start from a fresh commit, and existing turn history stays local. | 1 |
 | t-003 | **Personal namespace.** Reserve it. Prime `AGENTS.md` rules into it. Add a personal scope to `remember`. Recall and `prime` read personal plus project. | 1 |
-| t-004 | **Stop no-op writes.** Skip commits that leave the tree unchanged (re-imports, identical full-turn rewrites, unchanged title/provenance/burn). | 1 |
+| t-004 | **Stop no-op writes.** Skip commits that leave the tree unchanged (re-imports, identical full-turn rewrites, unchanged title/provenance/burn). Done: `server/src/graph_write.rs`. | 1 |
 | t-005 | **Usage rollup in the session envelope,** so plan cost and savings views work from synced data. | 1 |
 | t-006 | **`ctx remote add / set`, `ctx push / pull`, `ctx sync status`,** plus daemon background sync and Lens status, on AgentStateGraph Plan G. Hub login via device code; token in the OS keychain. | 2 |
 | t-007 | **Credential scan before push.** Use AgentStateGraph's push filter with CTXone's patterns: block high-confidence matches, with a per-finding override. Add `ctx secrets scan` to find and clean matches in a store before its first push. | 2 |
