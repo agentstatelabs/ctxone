@@ -2,6 +2,7 @@ mod burn;
 mod codex;
 mod cursor;
 mod detect;
+mod device;
 mod gemini;
 mod ingest;
 mod metrics;
@@ -3559,6 +3560,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let server = cli.server.clone();
             let branch = cli.branch.clone();
             let format = cli.format;
+            // This install's device id, minted here if it has none yet
+            // (ctx-hub-sync t-001).
+            if !dry_run && crate::device::device_id().is_none() {
+                eprintln!(
+                    "  \u{26A0} couldn't keep a device id in {}",
+                    crate::device::path()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "~/.ctxone/device_id".to_string())
+                );
+            }
             if no_mcp {
                 println!("MCP config step skipped (--no-mcp).");
             } else {

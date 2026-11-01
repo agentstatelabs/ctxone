@@ -92,7 +92,7 @@ pub struct Router {
     /// to the fallback/`default`. Opt-in (`ctx ingest-session --dir-workspaces`)
     /// because bare directory names are less canonical than git-remote identity:
     /// they can collide (`/a/app` and `/b/app`) and proliferate. Git repos still
-    /// prefer their remote's `owner/repo` identity.
+    /// prefer their remote's `host/owner/repo` identity.
     dir_workspaces: bool,
     /// cwd → routing outcome. Includes negative results so a directory that
     /// cannot be resolved is not re-probed once per transcript.
@@ -327,12 +327,21 @@ pub async fn fetch_tombstones(
         .unwrap_or_default()
 }
 
-/// Derive a stable, kebab-case project id for a repo.
+/// Derive a stable, kebab-case id for a new project.
 ///
-/// Prefers the remote's `owner/repo` tail so the same repo cloned to two paths
-/// (or checked out as a worktree) resolves to one workspace; falls back to the
-/// directory name for repos with no remote.
+/// Prefers the remote's whole canonical form, `host/owner/repo` (ctx-hub-sync
+/// t-001), so the same repo cloned to two paths, checked out as a worktree, or
+/// cloned over ssh and over https resolves to one workspace, and
+/// `github.com/a/app` and `github.com/b/app` don't share one. A remote with no
+/// canonical form, such as a local path, gives its last path segment, and a
+/// repo with no remote its directory name.
+///
+/// Only new projects get these ids: a registered project keeps its id, and the
+/// Hub finds it by its remote first.
 pub fn project_id_for(root: &std::path::Path, remote: Option<&str>) -> Option<String> {
+    if let Some(canonical) = remote.and_then(canonical_remote) {
+        return Some(id_from_canonical(&canonical));
+    }
     let from_remote = remote.and_then(|r| {
         let trimmed = r.trim_end_matches('/').trim_end_matches(".git");
         trimmed
@@ -343,6 +352,71 @@ pub fn project_id_for(root: &std::path::Path, remote: Option<&str>) -> Option<St
     let raw = from_remote.or_else(|| root.file_name().map(|n| n.to_string_lossy().to_string()))?;
     let id = kebab(&raw);
     (!id.is_empty()).then_some(id)
+}
+
+/// The longest id a namespace may have.
+const MAX_ID_LEN: usize = 64;
+
+/// A canonical remote as a project id: `github.com/owner/repo` is
+/// `github-com-owner-repo`. One longer than a namespace may be loses its host
+/// and ends in eight hex digits of a hash of the whole remote, so it stays
+/// distinct and the same on every machine.
+fn id_from_canonical(canonical: &str) -> String {
+    let id = kebab(canonical);
+    if id.len() <= MAX_ID_LEN {
+        return id;
+    }
+    let path = canonical.split_once('/').map_or(canonical, |(_, p)| p);
+    let mut base = kebab(path);
+    base.truncate(MAX_ID_LEN - 9);
+    let base = base.trim_end_matches('-');
+    format!("{base}-{:08x}", fnv1a(canonical) >> 32)
+}
+
+/// 64-bit FNV-1a: small, and the same in every build, unlike std's hasher.
+fn fnv1a(s: &str) -> u64 {
+    s.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// A git remote as `host/path`, lowercased, without its scheme, user,
+/// password, port, trailing `/` or `.git`; `None` for a local path or a
+/// `file://` URL. A copy of `canonical_remote` in the Hub's `project.rs`, which
+/// keeps and looks up remotes in this form; the two must agree.
+pub fn canonical_remote(url: &str) -> Option<String> {
+    let url = url.trim();
+    let (authority, path) = match url.split_once("://") {
+        Some((scheme, _)) if scheme.eq_ignore_ascii_case("file") => return None,
+        Some((_, rest)) => rest.split_once('/')?,
+        None => {
+            // scp-like `[user@]host:path`. A `/` before the `:` makes it a
+            // local path, and a one-letter host a Windows drive.
+            let (authority, path) = url.split_once(':')?;
+            if authority.contains('/') || authority.contains('\\') {
+                return None;
+            }
+            (authority, path)
+        }
+    };
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = match host_port.strip_prefix('[') {
+        // An IPv6 literal, `[::1]:22`.
+        Some(v6) => v6.split_once(']').map_or(v6, |(h, _)| h),
+        None => host_port
+            .rsplit_once(':')
+            .filter(|(_, port)| port.chars().all(|c| c.is_ascii_digit()))
+            .map_or(host_port, |(h, _)| h),
+    };
+    let path = path.trim_matches('/');
+    let path = path
+        .strip_suffix(".git")
+        .unwrap_or(path)
+        .trim_end_matches('/');
+    if host.len() < 2 || path.is_empty() {
+        return None;
+    }
+    Some(format!("{host}/{path}").to_ascii_lowercase())
 }
 
 /// Lowercase ASCII alnum + dash, collapsed — matching what `Namespace::new`
@@ -380,18 +454,78 @@ mod tests {
     }
 
     #[test]
-    fn project_id_prefers_the_remote_tail() {
+    fn project_id_is_the_whole_remote() {
         let root = PathBuf::from("/Users/user/checkouts/some-checkout-dir");
-        // Two different paths for the same repo must agree, which is what
-        // makes worktrees land in their parent's workspace.
-        assert_eq!(
-            project_id_for(&root, Some("git@github.com:agentstatelabs/CTXone.git")).unwrap(),
-            "ctxone"
+        // Two different paths, and ssh and https, for the same repo must agree,
+        // which is what makes worktrees land in their parent's workspace.
+        for remote in [
+            "git@github.com:agentstatelabs/CTXone.git",
+            "https://github.com/agentstatelabs/ctxone",
+            "ssh://git@github.com:22/agentstatelabs/ctxone.git",
+        ] {
+            assert_eq!(
+                project_id_for(&root, Some(remote)).unwrap(),
+                "github-com-agentstatelabs-ctxone",
+                "{remote}"
+            );
+        }
+        // Repos of one name under two owners no longer share a workspace.
+        assert_ne!(
+            project_id_for(&root, Some("https://github.com/a/app")),
+            project_id_for(&root, Some("https://github.com/b/app"))
         );
+        // A remote that's a local path keeps the old rule: its last segment.
         assert_eq!(
-            project_id_for(&root, Some("https://github.com/agentstatelabs/ctxone")).unwrap(),
-            "ctxone"
+            project_id_for(&root, Some("/srv/git/Shared-Repo.git")).unwrap(),
+            "shared-repo"
         );
+    }
+
+    #[test]
+    fn a_long_remote_id_fits_a_namespace_and_stays_distinct() {
+        let root = PathBuf::from("/x");
+        let long = |repo: &str| {
+            format!(
+                "https://gitlab.example.com/a-very-long-group-name/another-long-subgroup/{repo}"
+            )
+        };
+        let a = project_id_for(&root, Some(&long("the-application"))).unwrap();
+        let b = project_id_for(&root, Some(&long("the-application-two"))).unwrap();
+        for id in [&a, &b] {
+            assert!(id.len() <= 64, "{id} is {} bytes", id.len());
+            assert!(id.starts_with("a-very-long-group-name-"), "{id}");
+        }
+        assert_ne!(a, b);
+        // The same on every run and machine.
+        assert_eq!(
+            a,
+            project_id_for(&root, Some(&long("the-application"))).unwrap()
+        );
+    }
+
+    #[test]
+    fn canonical_remote_agrees_with_the_hubs() {
+        // The Hub's project.rs tests the same cases on its copy.
+        for (url, want) in [
+            (
+                "https://user:secret@github.com:443/Owner/Repo.git/",
+                Some("github.com/owner/repo"),
+            ),
+            (
+                "git@gitlab.example.com:group/sub/app.git",
+                Some("gitlab.example.com/group/sub/app"),
+            ),
+            (
+                "ssh://git@[2001:db8::1]:2222/g/app",
+                Some("2001:db8::1/g/app"),
+            ),
+            ("/srv/git/repo.git", None),
+            ("file:///srv/git/repo.git", None),
+            ("C:/repos/app", None),
+            ("https://github.com", None),
+        ] {
+            assert_eq!(canonical_remote(url).as_deref(), want, "{url}");
+        }
     }
 
     #[test]

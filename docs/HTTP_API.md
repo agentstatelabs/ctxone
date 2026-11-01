@@ -495,8 +495,18 @@ operations work immediately).
 
 - `id` (required) — project id (kebab-case). Doubles as the namespace
   name unless `namespace` is given.
-- `remote_url` — git remote for detection. Normalized on write:
-  trailing `.git` and `/` are stripped.
+- `remote_url` — git remote for detection. Kept in canonical form,
+  `host/path` lowercased, without scheme, user, password, port, trailing
+  `/` or `.git`, so `git@github.com:alice/myrepo.git` and
+  `https://github.com/alice/myrepo` are both `github.com/alice/myrepo`. A
+  remote with no such form (a local path) only loses a trailing `.git` and
+  `/`. Host aliases aren't resolved: an IP address and a DNS name for one
+  server, or an `~/.ssh/config` alias, are different remotes. The Hub
+  rewrites remotes registered before this in canonical form when it starts
+  and when it opens a tenant; ids and workspaces don't change. When two
+  projects' remotes turn out to be one repository, the older one gets the
+  canonical form, and the other keeps its remote and is found by its path
+  or `.ctxproject` (the Hub logs it).
 - `namespace` — explicit namespace name (default: the id)
 - `display_name` — human-readable name
 - `local_path` — checkout path to bind
@@ -525,8 +535,9 @@ session started there would land in:
 
 1. `.ctxproject` file (first non-empty line = project id) in `cwd` or
    any parent
-2. `git remote get-url origin` looked up in the registry (URLs
-   normalized the same way as on write)
+2. `git remote get-url origin` looked up in the registry (in the same
+   canonical form as on write, so an ssh clone finds a project registered
+   from https)
 3. the longest registered `local_path` containing `cwd`
 
 Steps 1 and 2 read the directory, which only works on the machine it is

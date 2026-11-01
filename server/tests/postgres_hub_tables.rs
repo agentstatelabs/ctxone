@@ -55,6 +55,54 @@ fn sessions(registry: &SessionRegistry) -> Vec<String> {
     ids
 }
 
+/// Remotes stored as git printed them become canonical once, and only for
+/// this tenant (ctx-hub-sync t-001).
+#[test]
+fn project_remotes_become_canonical_once_per_tenant() {
+    let Some(url) = url() else { return };
+    let (a, b) = (store(&url, "remotes-a"), store(&url, "remotes-b"));
+    for store in [&a, &b] {
+        store
+            .register_project(
+                "app",
+                Some("https://git.example.com/g/app.git"),
+                "app",
+                None,
+                None,
+            )
+            .unwrap();
+    }
+    a.register_project(
+        "app-ssh",
+        Some("git@git.example.com:g/app"),
+        "app-ssh",
+        None,
+        None,
+    )
+    .unwrap();
+
+    let first = a.canonicalize_remotes().unwrap();
+    assert_eq!(first.updated.len(), 1, "{first:?}");
+    assert_eq!(first.updated[0].2, "git.example.com/g/app");
+    assert_eq!(first.conflicts.len(), 1, "{first:?}");
+    assert_eq!(first.conflicts[0].0, "app-ssh");
+    let second = a.canonicalize_remotes().unwrap();
+    assert!(second.updated.is_empty(), "{second:?}");
+
+    let found = a
+        .resolve_by_remote_url("git.example.com/g/app")
+        .unwrap()
+        .expect("canonical remote");
+    assert_eq!(found.id, "app");
+    // The other tenant's row is its own, and untouched.
+    assert!(
+        b.resolve_by_remote_url("git.example.com/g/app")
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(b.canonicalize_remotes().unwrap().updated.len(), 1);
+}
+
 #[test]
 fn projects_round_trip() {
     let Some(url) = url() else { return };
@@ -378,7 +426,7 @@ fn the_project_api_works_on_a_postgres_hub() {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "register: {body}");
-        assert_eq!(body["remote_url"], "https://git.example.com/g/pgproj");
+        assert_eq!(body["remote_url"], "git.example.com/g/pgproj");
         let namespaces = repo.list_namespaces().unwrap();
         assert!(
             namespaces.iter().any(|n| n.as_str() == "pgproj"),

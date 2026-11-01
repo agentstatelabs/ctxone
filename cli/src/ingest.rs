@@ -1611,6 +1611,10 @@ pub async fn store_session_provenance(
         // history and still ingests.
         body.insert("archived".into(), serde_json::json!(true));
     }
+    // Which machine the session ran on (ctx-hub-sync t-001).
+    if let Some(device) = crate::device::device_id() {
+        body.insert("device".into(), serde_json::json!(device));
+    }
     let mut req = client.put(url).json(&serde_json::Value::Object(body));
     if let Some(s) = session {
         req = req.header("X-CTXone-Session", s);

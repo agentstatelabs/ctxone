@@ -102,10 +102,21 @@ One real store, 2026-10-06, read-only.
     (`cli/src/workspace.rs`, whose doc comment wrongly says owner/repo).
   - Existing ids are kept. The fix applies to new auto-derived ids, and the
     personal registry records the remote, so ids stay mappable.
+  - Done (t-001): new ids are the kebab-case canonical remote
+    (`github-com-owner-repo`; one over 64 bytes drops its host and ends in
+    a hash). The registry keeps remotes in that canonical form, so an ssh
+    clone finds a project registered from https; the Hub rewrites older
+    remotes when it starts or opens a tenant, safe to run again. Host
+    aliases (an IP and a DNS name, `~/.ssh/config` aliases) aren't
+    resolved.
 - **Project registry:** the id → remote and display-name mapping moves into the
   personal namespace (`/ctxone/projects/<id>`), so it follows the user. Local
-  paths stay in the SQL table.
+  paths stay in the SQL table. This waits for the personal namespace (t-003).
 - **Device:** each install gets a device id, used to attribute commits and pushes.
+  Done for the id itself (t-001): `~/.ctxone/device_id`, minted by `ctx init`
+  or first use, and carried in each session's provenance. Commits get it when
+  AgentStateGraph can take it per call: plan commits are made inside
+  AgentStateGraph with only an agent id.
 - **Account:** comes from hub login (device-code flow); the token is kept in the
   OS keychain.
 
