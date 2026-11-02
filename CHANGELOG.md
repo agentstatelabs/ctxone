@@ -6,6 +6,15 @@ the project's release tags (`vMAJOR.MINOR.PATCH`). Most releases go up by
 0.0.1; v1.1.0 (a multi-tenant Hub) and v1.2.0 (the personal namespace) went
 up a minor version.
 
+## [Unreleased]
+
+### Added
+- **`ctx secrets scan` finds credential-shaped strings before they sync** (ctx-hub-sync t-017). It scans every branch of the current workspace and of the personal namespace (`--all` for every workspace, `--branch` for one branch). Raw session turns stay on this machine, so they're skipped unless you pass `--turns`.
+  - High confidence: private keys, and AWS, GitHub, GitLab, Anthropic, OpenAI, Slack, Stripe live, Google, Hugging Face, npm, PyPI and CTXone Hub tokens. Medium: JSON web tokens, a password in a URL, and secret-named values (`api_key = …`). Documentation stand-ins such as `AKIA…EXAMPLE`, `${TOKEN}` and `changeme` aren't findings.
+  - Each finding shows a masked match (`ghp_…(40 chars)`), never the value, and the `ctx forget` command that removes it. It exits 1 when anything is found.
+  - Over REST it's `GET /api/secrets/scan`. Content shared by several branches is read once, so scanning every branch costs little more than scanning one.
+  - Forgetting removes a value from the branch as it is now; earlier commits keep it. Sync's first push is shallow, so those don't go with it. The push-time guard (t-007) waits on AgentStateGraph's push filter and will reuse these rules.
+
 ## [v1.2.0] — 2026-11-02
 
 A Hub on another machine, which gets no raw turns, now has each session's usage by model. Commits say which tool made them, a write that changes nothing makes no commit, and new project ids come from the whole remote. Your agent rules and preferences live in a personal namespace that every workspace's recall reads. After upgrading, run `ctx init` again so each tool sends its agent id, then `ctx agents migrate --apply` to remove the copies of `AGENTS.md` earlier versions primed into each workspace.

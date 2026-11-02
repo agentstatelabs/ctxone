@@ -25,6 +25,7 @@ pub mod postgres_url;
 pub mod project;
 pub mod rate_limit;
 pub mod reminder_tools;
+pub mod secrets;
 pub mod segments;
 pub mod session_links;
 pub mod starter;

@@ -58,6 +58,7 @@ CTXone has four surfaces:
 | `ctx prime <file>` (alias `ctx import-doc`) | Load a markdown file as primed memory; `--pin` makes it always-included. |
 | `ctx pinned` | List pinned (always-included) memories. |
 | `ctx forget <path>` | Delete a memory at a path; `--reason` shows up in blame. |
+| `ctx secrets scan` | Find credential-shaped strings (API keys, tokens, private keys) in what this workspace and your personal namespace would sync, with a masked match and the `ctx forget` that removes each. `--all` scans every workspace, `--turns` raw turns too. |
 | `ctx search <query>` | Literal substring search over the graph — full matching paths and values, no budget (unlike recall). |
 | `ctx ls [prefix]` / `ctx get <path>` | List paths under a prefix / read the value at a path. |
 | `ctx tokens [text]` | Count exact tokens (tiktoken cl100k_base); reads stdin if no argument. |

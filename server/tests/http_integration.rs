@@ -2539,3 +2539,133 @@ async fn plan_cost_and_session_list_read_the_rollup_without_statistics() {
     assert_eq!(s9["llm_input_tokens"], 100);
     assert_eq!(s9["name"], "Imported work");
 }
+
+// ── ctx secrets scan (ctx-hub-sync t-017) ──────────────────────────────
+
+/// A GitHub-token-shaped string, built at run time so this file holds none.
+fn fake_github_token() -> String {
+    let body: String = "a1B2c3D4e5F6g7H8i9J0".chars().cycle().take(36).collect();
+    format!("ghp_{body}")
+}
+
+#[tokio::test]
+async fn a_secrets_scan_finds_keys_in_the_workspace_and_personal_and_masks_them() {
+    let (_dir, _repo, router) = sqlite_router();
+    register(&router, "repo-a").await;
+    let token = fake_github_token();
+    let aws = format!("AKIA{}", "Q7ZR4M2KXW9PLT3B");
+
+    let (status, body) = call_json(
+        router.clone(),
+        post_json_ns(
+            "/api/memory/remember",
+            "repo-a",
+            json!({ "fact": format!("CI pushes with {token}"), "context": "ci" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "remember failed: {body}");
+    let (status, body) = call_json(
+        router.clone(),
+        post_json(
+            "/api/memory/remember?namespace=_personal",
+            json!({ "fact": format!("my AWS key is {aws}") }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "remember failed: {body}");
+
+    let (status, body) = call_json(router.clone(), get_ns("/api/secrets/scan", "repo-a")).await;
+    assert_eq!(status, StatusCode::OK, "scan failed: {body}");
+    let text = body.to_string();
+    assert!(
+        !text.contains(&token[4..]) && !text.contains(&aws[4..]),
+        "a secret came back: {body}"
+    );
+
+    let findings = body["findings"].as_array().unwrap();
+    let by_rule = |rule: &str| {
+        findings
+            .iter()
+            .find(|f| f["rule"] == rule)
+            .unwrap_or_else(|| panic!("no {rule} finding: {body}"))
+    };
+    let gh = by_rule("github-token");
+    assert_eq!(gh["namespace"], "repo-a");
+    assert_eq!(gh["ref"], "main");
+    assert_eq!(gh["confidence"], "high");
+    assert_eq!(gh["masked"], "ghp_…(40 chars)");
+    let forget = gh["forget"].as_str().unwrap();
+    assert!(gh["path"].as_str().unwrap().starts_with(forget), "{gh}");
+    assert_eq!(by_rule("aws-access-key")["namespace"], "_personal");
+    assert_eq!(findings.len(), 2, "{body}");
+    assert_eq!(body["turns"], false);
+    assert_eq!(body["truncated"], false);
+
+    // The finding's forget path removes it.
+    let (status, _) = call_json(
+        router.clone(),
+        post_json_ns("/api/memory/forget", "repo-a", json!({ "path": forget })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, body) = call_json(router.clone(), get_ns("/api/secrets/scan", "repo-a")).await;
+    assert!(
+        !body["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["rule"] == "github-token"),
+        "still found after forget: {body}"
+    );
+}
+
+#[tokio::test]
+async fn a_secrets_scan_covers_every_workspace_with_all_and_creates_no_namespace() {
+    let (_dir, _repo, router) = sqlite_router();
+    // A scan reads the personal namespace beside, and doesn't create it.
+    // (Registering a project would: it records the project there.)
+    let (status, body) = call_json(router.clone(), get("/api/secrets/scan")).await;
+    assert_eq!(status, StatusCode::OK, "scan failed: {body}");
+    let (_, namespaces) = call_json(router.clone(), get("/api/namespaces")).await;
+    assert!(
+        !namespaces.to_string().contains("_personal"),
+        "{namespaces}"
+    );
+
+    register(&router, "repo-a").await;
+    register(&router, "repo-b").await;
+    let token = fake_github_token();
+    let (status, _) = call_json(
+        router.clone(),
+        post_json_ns(
+            "/api/memory/remember",
+            "repo-b",
+            json!({ "fact": format!("deploys use {token}") }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // repo-a's own scan doesn't see repo-b.
+    let (status, body) = call_json(router.clone(), get_ns("/api/secrets/scan", "repo-a")).await;
+    assert_eq!(status, StatusCode::OK, "scan failed: {body}");
+    assert!(body["findings"].as_array().unwrap().is_empty(), "{body}");
+
+    let (status, body) = call_json(router.clone(), get("/api/secrets/scan?all=true")).await;
+    assert_eq!(status, StatusCode::OK, "scan failed: {body}");
+    let findings = body["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 1, "{body}");
+    assert_eq!(findings[0]["namespace"], "repo-b");
+    let scanned = body["scanned"].as_array().unwrap();
+    for ns in ["default", "repo-a", "repo-b"] {
+        assert!(
+            scanned.iter().any(|s| s["namespace"] == ns),
+            "{ns} not scanned: {body}"
+        );
+    }
+
+    // One branch only.
+    let (_, body) = call_json(router.clone(), get("/api/secrets/scan?all=true&ref=nope")).await;
+    assert!(body["scanned"].as_array().unwrap().is_empty(), "{body}");
+}
