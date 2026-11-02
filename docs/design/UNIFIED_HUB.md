@@ -9,7 +9,8 @@ owner of the db.
 (Streamable HTTP), scoped per request by `?namespace=` (see the spike note
 below). `ctx init --transport http [--mcp-url …]` writes a
 `{"type":"http","url":…}` client entry with the detected namespace baked in.
-stdio remains the default and a fully-supported fallback. See
+`http` is now `ctx init`'s default transport; stdio remains a fully supported
+fallback (`ctx init --transport stdio`). See
 [../DEPLOYMENT.md](../DEPLOYMENT.md) for operator setup.
 
 **Spike finding (informs the design):** rmcp 1.7's `StreamableHttpService` takes a

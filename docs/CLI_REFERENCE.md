@@ -69,6 +69,7 @@ Follows `sysexits.h` conventions.
 | Code | Name | Meaning |
 |------|------|---------|
 | 0 | OK | Success |
+| 1 | — | `ctx secrets scan` found something; `ctx db fsck` found damage |
 | 64 | USAGE | Clap handled an argument error |
 | 65 | DATAERR | Bad input data (empty fact, malformed file, no sections) |
 | 66 | NOINPUT | Input file doesn't exist or can't be read |
@@ -183,6 +184,49 @@ OPTIONS:
       --personal       Forget it from your personal namespace (recall
                        marks those results `personal`)
 ```
+
+### `ctx secrets scan`
+
+Find credential-shaped strings in what this workspace would sync, so you can
+forget them first. Run it before connecting a remote Hub, and again before a
+first sync.
+
+```
+USAGE: ctx secrets scan [OPTIONS]
+
+OPTIONS:
+      --turns          Also scan raw session turns
+      --all            Scan every workspace in the store, not just this one
+      --branch <NAME>  Scan one branch (the global option); every branch
+                       otherwise
+```
+
+It scans every branch of the current workspace and of your personal
+namespace. Raw session turns stay on this machine, so they're skipped unless
+you pass `--turns`.
+
+- **High confidence:** private keys, and AWS, GitHub, GitLab, Anthropic,
+  OpenAI, Slack, Stripe live, Google, Hugging Face, npm, PyPI and CTXone Hub
+  tokens.
+- **Medium:** JSON web tokens, a password in a URL, and secret-named values
+  such as `api_key = …`.
+
+Each finding shows a masked match, never the value, and the command that
+forgets the record holding it:
+
+```
+high    GitHub token  ghp_…(40 chars)
+        /memory/ci/18e45270505dc388  (default: main)
+        ctx forget /memory/ci/18e45270505dc388
+```
+
+A finding outside memory and session envelopes, such as a plan task's title,
+has no forget command: edit the value instead. Forgetting removes a value
+from the branch as it is now; earlier commits keep it. Sync's first push is
+shallow, so those commits don't go with it.
+
+Exits 1 when anything is found. `--format json` prints the Hub's response
+(see `GET /api/secrets/scan` in [HTTP_API.md](HTTP_API.md)).
 
 ### `ctx context <project>`
 

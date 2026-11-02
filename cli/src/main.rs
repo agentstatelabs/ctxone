@@ -1022,6 +1022,12 @@ enum Commands {
         #[command(subcommand)]
         action: AgentsAction,
     },
+    /// Find credential-shaped strings (API keys, tokens, private keys) in
+    /// what this workspace would sync, so you can forget them first.
+    Secrets {
+        #[command(subcommand)]
+        action: SecretsAction,
+    },
     /// Manage plans — a container of tasks that survives across sessions.
     /// Plans are the CTXone cure for "plan rot": unstructured markdown
     /// todos that drift from reality the moment work starts.
@@ -1826,6 +1832,23 @@ enum PlanAction {
 }
 
 /// Subcommands under `ctx agents`. Everything here operates on the
+#[derive(Subcommand)]
+enum SecretsAction {
+    /// Scan every branch of this workspace and of your personal namespace.
+    /// Raw session turns stay on this machine, so they're skipped unless you
+    /// pass --turns. Each finding shows a masked match, never the value, and
+    /// the `ctx forget` command that removes it. `--branch` scans one branch.
+    /// Exits 1 when anything is found.
+    Scan {
+        /// Also scan raw session turns.
+        #[arg(long)]
+        turns: bool,
+        /// Scan every workspace in the store, not just this one.
+        #[arg(long)]
+        all: bool,
+    },
+}
+
 /// user-editable `~/.config/ctxone/AGENTS.md` file and the pinned
 /// memory path `/memory/pinned/ctxone-agents/*`.
 #[derive(Subcommand)]
@@ -3698,6 +3721,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let format = cli.format;
             handle_agents(action, &server, &branch, format, client.clone()).await?;
         }
+        Commands::Secrets { action } => match action {
+            SecretsAction::Scan { turns, all } => {
+                let only = cli.branch_explicit.then(|| cli.branch.clone());
+                let scan = SecretsScan {
+                    workspace: namespace.as_deref().unwrap_or("default"),
+                    branch: &cli.branch,
+                    only: only.as_deref(),
+                    turns,
+                    all,
+                };
+                secrets_scan(&cli.server, &client, cli.format, &scan).await?;
+            }
+        },
         Commands::Worktree { action } => {
             worktree::run(action)?;
         }
@@ -4382,6 +4418,159 @@ async fn handle_project(
 /// Dispatch for `ctx agents <subcommand>`. Takes server/branch/format
 /// directly (not &Cli) so callers can grab these fields before the
 /// outer match consumes `cli.command`.
+/// What `ctx secrets scan` scans, and where its forget commands point.
+struct SecretsScan<'a> {
+    /// This invocation's workspace.
+    workspace: &'a str,
+    /// The branch a plain `ctx forget` would write to.
+    branch: &'a str,
+    /// The one branch to scan (an explicit --branch), or every branch.
+    only: Option<&'a str>,
+    turns: bool,
+    all: bool,
+}
+
+/// `ctx secrets scan` (ctx-hub-sync t-017): `GET /api/secrets/scan`, then the
+/// findings grouped by path, each with the command that forgets it.
+async fn secrets_scan(
+    server: &str,
+    client: &reqwest::Client,
+    format: OutputFormat,
+    scan: &SecretsScan<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut url = format!(
+        "{server}/api/secrets/scan?turns={}&all={}",
+        scan.turns, scan.all
+    );
+    if let Some(branch) = scan.only {
+        url.push_str(&format!("&ref={}", urlencoding(branch)));
+    }
+    let resp = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(e) => unreachable_exit(server, e),
+    };
+    if !resp.status().is_success() {
+        http_error_exit(resp, "secrets scan failed").await;
+    }
+    let parsed: Value = resp.json().await?;
+    let found = parsed["findings"].as_array().is_some_and(|f| !f.is_empty());
+    emit(format, &parsed, |v| print_secrets_report(v, scan));
+    if found {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn print_secrets_report(v: &Value, scan: &SecretsScan<'_>) {
+    let empty = Vec::new();
+    let scanned = v["scanned"].as_array().unwrap_or(&empty);
+    let findings = v["findings"].as_array().unwrap_or(&empty);
+    let namespaces: std::collections::BTreeSet<&str> = scanned
+        .iter()
+        .filter_map(|s| s["namespace"].as_str())
+        .collect();
+    let mut summary = format!(
+        "Scanned {} in {} ({} strings).",
+        plural(scanned.len(), "branch", "branches"),
+        plural(namespaces.len(), "namespace", "namespaces"),
+        v["strings"].as_u64().unwrap_or(0),
+    );
+    if !scan.turns {
+        summary.push_str(" Raw session turns were skipped; --turns scans them too.");
+    }
+    println!("{summary}");
+    if findings.is_empty() {
+        println!("No credential-shaped strings found.");
+        return;
+    }
+
+    // One entry per string, listing every branch it's on.
+    let mut groups: Vec<(&Value, Vec<&Value>)> = Vec::new();
+    for f in findings {
+        let same = |g: &&mut (&Value, Vec<&Value>)| {
+            ["namespace", "path", "rule", "masked"]
+                .iter()
+                .all(|k| g.0[*k] == f[*k])
+        };
+        match groups.iter_mut().find(same) {
+            Some(g) => g.1.push(f),
+            None => groups.push((f, vec![f])),
+        }
+    }
+    let high = groups
+        .iter()
+        .filter(|g| g.0["confidence"] == "high")
+        .count();
+    println!(
+        "Found {} ({high} high confidence, {} medium).",
+        plural(
+            groups.len(),
+            "credential-shaped string",
+            "credential-shaped strings"
+        ),
+        groups.len() - high,
+    );
+    for (f, on) in &groups {
+        let ns = f["namespace"].as_str().unwrap_or("?");
+        let path = f["path"].as_str().unwrap_or("?");
+        let refs: Vec<&str> = on.iter().filter_map(|g| g["ref"].as_str()).collect();
+        println!();
+        println!(
+            "{:<7} {}  {}",
+            f["confidence"].as_str().unwrap_or("?"),
+            f["name"].as_str().unwrap_or("?"),
+            f["masked"].as_str().unwrap_or("?"),
+        );
+        println!("        {path}  ({ns}: {})", refs.join(", "));
+        match f["forget"].as_str() {
+            Some(target) => {
+                for r in &refs {
+                    println!("        {}", forget_command(ns, r, target, scan));
+                }
+            }
+            None => println!("        not a memory entry or session part: edit it to remove it"),
+        }
+    }
+    println!();
+    println!(
+        "Forgetting removes a value from the branch as it is now; earlier commits keep it. \
+         Sync's first push is shallow, so those commits don't go with it."
+    );
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// The `ctx forget` that removes `path` from `ref_name` in `ns`, run from
+/// where the scan was.
+fn forget_command(ns: &str, ref_name: &str, path: &str, scan: &SecretsScan<'_>) -> String {
+    let path = shell_quote(path);
+    if ns == PERSONAL_NAMESPACE {
+        // Personal memory lives on its one branch.
+        return format!("ctx forget --personal {path}");
+    }
+    let mut cmd = String::from("ctx");
+    if ns != scan.workspace {
+        cmd.push_str(&format!(" --namespace {}", shell_quote(ns)));
+    }
+    if ref_name != scan.branch {
+        cmd.push_str(&format!(" --branch {}", shell_quote(ref_name)));
+    }
+    format!("{cmd} forget {path}")
+}
+
+/// `s` as one shell word.
+fn shell_quote(s: &str) -> String {
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || "/._-:@%+=,".contains(c))
+    {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
+}
+
 async fn handle_agents(
     action: AgentsAction,
     server: &str,
@@ -10160,6 +10349,37 @@ mod tests {
     }
 
     // -------- urlencoding --------
+
+    #[test]
+    fn a_secret_findings_forget_command_names_only_what_differs() {
+        let scan = SecretsScan {
+            workspace: "repo-a",
+            branch: "main",
+            only: None,
+            turns: false,
+            all: false,
+        };
+        assert_eq!(
+            forget_command("repo-a", "main", "/memory/ci/f1", &scan),
+            "ctx forget /memory/ci/f1"
+        );
+        assert_eq!(
+            forget_command("repo-a", "feat-x", "/memory/ci/f1", &scan),
+            "ctx --branch feat-x forget /memory/ci/f1"
+        );
+        assert_eq!(
+            forget_command("repo-b", "main", "/sessions/s1/summary", &scan),
+            "ctx --namespace repo-b forget /sessions/s1/summary"
+        );
+        assert_eq!(
+            forget_command(PERSONAL_NAMESPACE, "main", "/memory/me/f2", &scan),
+            "ctx forget --personal /memory/me/f2"
+        );
+        assert_eq!(
+            forget_command("repo-a", "main", "/memory/odd topic/it's", &scan),
+            r"ctx forget '/memory/odd topic/it'\''s'"
+        );
+    }
 
     #[test]
     fn urlencoding_escapes_spaces() {

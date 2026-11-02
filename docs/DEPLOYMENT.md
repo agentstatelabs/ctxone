@@ -135,7 +135,8 @@ Use this when:
 - You're experimenting and don't want to touch your main graph.
 
 > Isolated dbs do **not** sync. A fact remembered in `claude.db` is invisible to
-> the hub serving `memory.db`. To browse an isolated db in Lens, run a hub on it
+> the hub serving `memory.db`. No two hubs sync yet: to share memory between
+> machines, connect them to one hub ([CONNECT_A_HUB.md](CONNECT_A_HUB.md)). To browse an isolated db in Lens, run a hub on it
 > at a **different port** while the agent is stopped, or on a copy:
 > `ctxone-hub --http --lens --path /Users/user/.ctxone/claude.db --port 3002`.
 
@@ -227,16 +228,6 @@ Behaviour:
 
 How each client gets the token:
 - **`ctx` CLI** — pass `--token <TOK>` or set `CTX_TOKEN` (only for a remote hub).
-
-Raw session turns stay on the machine that recorded them. When `ctx`'s hub isn't
-on this machine (anything but `localhost`, a `.localhost` name, 127.x or `::1`),
-`ctx ingest-session` and `ctx session import` send each session's title,
-metadata, provenance, per-model token usage and extracted memories, and the
-Stop-hook `ctx capture-turn` sends token counts and extracted memories, but none
-of them sends the turns. The per-model usage is worked out from the turns on
-this machine and sent as totals (`PUT /api/sessions/{sid}/usage`). To send turns
-as well, run `ctx config set remote_turns true`, or set `CTX_REMOTE_TURNS=1` for
-one command.
 - **AI tools** — `ctx init --transport http` writes it into each tool's config:
 - **`ctx init --transport http --auth-token <TOK>`** — embeds a literal bearer:
   a `headers` entry for native http (Claude Code/Cursor/VS Code) and a
@@ -247,6 +238,16 @@ one command.
   entries reference `Bearer ${VAR}` (for clients that expand env vars). The
   mcp-remote bridge can't expand env vars, so Claude Desktop needs the literal
   `--auth-token` form.
+
+Raw session turns stay on the machine that recorded them. When `ctx`'s hub isn't
+on this machine (anything but `localhost`, a `.localhost` name, 127.x or `::1`),
+`ctx ingest-session` and `ctx session import` send each session's title,
+metadata, provenance, per-model token usage and extracted memories, and the
+Stop-hook `ctx capture-turn` sends token counts and extracted memories, but none
+of them sends the turns. The per-model usage is worked out from the turns on
+this machine and sent as totals (`PUT /api/sessions/{sid}/usage`). To send turns
+as well, run `ctx config set remote_turns true`, or set `CTX_REMOTE_TURNS=1` for
+one command.
 
 ### Rotating tokens
 
@@ -578,7 +579,9 @@ internet. Then:
 
 ### Connect clients
 
-Each person uses their own token, against the one hostname:
+[CONNECT_A_HUB.md](CONNECT_A_HUB.md) walks through it, with what each machine
+sends and what it keeps. Each person uses their own token, against the one
+hostname:
 
 ```bash
 export CTX_SERVER=https://hub.example.com
