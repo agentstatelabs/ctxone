@@ -1,6 +1,10 @@
 # Design: Hub Sync — your memory on every machine, shared with your team
 
-**Status:** proposed (2026-10-06) · **Plan:** `ctx-hub-sync`
+**Status:** in progress (updated 2026-11-02). What needs no AgentStateGraph
+change is done: identity, the personal namespace, no-op writes, the usage
+rollup, attribution by tool, `ctx secrets scan`, and a Hub reached from other
+machines (t-011, t-013, t-014). Sync itself waits on AgentStateGraph Plan G.
+See [Tasks](#tasks). · **Plan:** `ctx-hub-sync`
 **Builds on:**
 - AgentStateGraph Plan G: git-style push/pull, a control ref for taints, reminders and epochs, and push guards.
 - AgentStateGraph Plan F: the embedding API (per-call context, many stores per process).
@@ -15,7 +19,8 @@ Two outcomes:
 Both use AgentStateGraph's git-style push and pull against a hub. Local-first
 stays the default: a hub is something you connect, never something CTXone needs.
 Today [DEPLOYMENT.md](../DEPLOYMENT.md) says it plainly: "Isolated dbs do not
-sync." This design changes that.
+sync." This design changes that. Until it's built, machines share memory by
+connecting to one Hub ([CONNECT_A_HUB.md](../CONNECT_A_HUB.md)).
 
 ## Decisions
 
@@ -47,6 +52,22 @@ sync." This design changes that.
    alone isn't enough.
 7. **The first push sends current state only** (a shallow boundary). Existing
    history, including turn history, never leaves the machine.
+
+Decided 2026-10-29, after the multi-tenant Hub shipped:
+
+8. **A multi-tenant Hub is the sync remote.** This design first assumed a hub
+   per user. One multi-tenant `ctxone-hub` now serves many users from one
+   store, so it serves AgentStateGraph's sync for each tenant, behind that
+   tenant's token (t-015), and `ctx remote` points at it.
+9. **AgentStateGraph ships the sync server as an embeddable service** with an
+   auth hook, which `ctxone-hub` mounts. Its single-account `--hub` binary is
+   built on the same service.
+10. **The control ref is `_control`.** Its merge rules: a resolved taint stays
+    resolved; reminder status changes are ordered, and otherwise the newest
+    edit wins; a sealed epoch never changes.
+11. **ASD judgment syncs to the same Hub,** per tenant, beside the tenant's
+    CTXone memory. ASD's code index stays on each machine
+    (AgentStateDeveloper Plan W).
 
 ## What we measured
 
@@ -97,9 +118,8 @@ One real store, 2026-10-06, read-only.
 
 - **Project id:** taken from `.ctxproject`. Failing that, from the **full**
   normalized git remote (`host/owner/repo`, with ssh and https collapsed).
-  - Today auto-derivation uses only the last path segment, so
-    `github.com/a/app` and `github.com/b/app` both become `app`
-    (`cli/src/workspace.rs`, whose doc comment wrongly says owner/repo).
+  - Auto-derivation used only the last path segment, so
+    `github.com/a/app` and `github.com/b/app` both became `app`.
   - Existing ids are kept. The fix applies to new auto-derived ids, and the
     personal registry records the remote, so ids stay mappable.
   - Done (t-001): new ids are the kebab-case canonical remote
@@ -124,7 +144,7 @@ One real store, 2026-10-06, read-only.
   Done for the id itself (t-001): `~/.ctxone/device_id`, minted by `ctx init`
   or first use, and carried in each session's provenance. Commits get it when
   AgentStateGraph can take it per call: plan commits are made inside
-  AgentStateGraph with only an agent id.
+  AgentStateGraph with only an agent id (t-016).
 - **Account:** comes from hub login (device-code flow); the token is kept in the
   OS keychain.
 
@@ -159,7 +179,8 @@ One real store, 2026-10-06, read-only.
   - `ctx remote set <namespace> <remote>` maps a namespace to it;
   - `ctx push` / `ctx pull` / `ctx sync status`.
 - **Where namespaces go:** the personal namespace goes to the user's own space;
-  a project namespace goes to the user's own space or to a team's.
+  a project namespace goes to the user's own space or to a team's. On a
+  multi-tenant Hub, a space is a tenant (decision 8).
 - **Background sync:** the hub daemon is the only writer to the db, so it pushes
   and pulls in the background on an interval and after writes. Lens shows
   ahead/behind status per namespace.
@@ -191,10 +212,11 @@ One real store, 2026-10-06, read-only.
 
 ### Side tables
 
-Taints, reminders and epochs ride AgentStateGraph's control ref (Plan G t-001),
-with namespace scoping (Plan F t-005). Today they're global SQL tables with no
-namespace, which contradicts
-[MEMORY_BRANCH_SCOPING.md](../MEMORY_BRANCH_SCOPING.md).
+Taints, reminders and epochs ride AgentStateGraph's control ref, `_control`
+(Plan G t-001), with namespace scoping (Plan F t-005) and the merge rules in
+decision 10. Today taints and reminders are SQL tables with no namespace,
+shared by every workspace in a store, as
+[MEMORY_BRANCH_SCOPING.md](../MEMORY_BRANCH_SCOPING.md) says.
 
 - **Reminders:** a synced reminder never runs a command on a machine unless it
   was created there or approved there. `reminder-tick.allow` stays local.
@@ -210,26 +232,31 @@ namespace, which contradicts
   now writes `X-CTXone-Agent` per tool (`?agent=` for Codex, whose config has
   no headers), as [UNIFIED_HUB.md](UNIFIED_HUB.md) planned, and the Hub stamps
   each MCP session's commits with it (t-010).
-- Commits also carry the device id, via the AgentStateGraph Plan F call context.
+- Commits will also carry the device id, via the AgentStateGraph Plan F call
+  context (t-016).
 
 ## Tasks
 
-| Task | Description | Wave |
-|------|-------------|------|
-| t-001 | **Identity.** New auto-derived project ids use the full normalized remote. Add a device id at install. Move the project registry's id, remote and display name into the personal namespace; local paths stay in SQL. | 1 |
-| t-002 | **Turns on their own local-only ref.** Redirect every turn writer. The envelope stays on `main`. Migration: the synced refs start from a fresh commit, and existing turn history stays local. | 1 |
-| t-003 | **Personal namespace.** Reserve it. Prime `AGENTS.md` rules into it. Add a personal scope to `remember`. Recall and `prime` read personal plus project. | 1 |
-| t-004 | **Stop no-op writes.** Skip commits that leave the tree unchanged (re-imports, identical full-turn rewrites, unchanged title/provenance/burn). Done: `server/src/graph_write.rs`. | 1 |
-| t-005 | **Usage rollup in the session envelope,** so plan cost and savings views work from synced data. | 1 |
-| t-006 | **`ctx remote add / set`, `ctx push / pull`, `ctx sync status`,** plus daemon background sync and Lens status, on AgentStateGraph Plan G. Hub login via device code; token in the OS keychain. | 2 |
-| t-007 | **Credential scan before push.** Use AgentStateGraph's push filter with CTXone's patterns: block high-confidence matches, with a per-finding override. Add `ctx secrets scan` to find and clean matches in a store before its first push. | 2 |
-| t-008 | **Reminder safety.** Synced reminders never auto-run commands unless created or approved on this device. | 2 |
-| t-009 | **Epochs.** Legacy seals stay local; new plan epochs ride the control ref and seal only synced refs. | 2 |
-| t-010 | **Attribution.** `ctx init` writes `X-CTXone-Agent`; the device id goes on commits. | 2 |
-| t-011 | **Hub-mode gaps on Postgres.** Today the project registry returns 400 and session stats aren't persisted on Postgres. A hub needs both, plus read-only access to synced ASD stores (AgentStateDeveloper Plan W t-008). | 3 |
-| t-012 | **Docs.** Add a "connect a hub" guide. Correct MEMORY_BRANCH_SCOPING (reminders and taints aren't namespace-isolated until the control ref lands), COST_SAVINGS ("every machine resolves to the same graph" holds only with one shared hub), DEPLOYMENT, UNIFIED_HUB's default transport, and the `workspace.rs` doc comment. | 3 |
-| t-013 | **A remote hub never receives raw turns unless the user opts in.** When the configured hub isn't loopback, `ctx ingest-session`, the Stop-hook `capture-turn` path and imports send the session envelope and extracted memories, not `turns`. This applies to hosted hubs as well as sync, so decision 2 holds when a client talks to a hub directly. | 1 |
-| t-014 | **Hosted-mode hardening.** Add an option to turn off the loopback exemption: today loopback peers skip the bearer token, so a proxy or sidecar on 127.0.0.1 would bypass auth. Add token rotation without a restart, and an explicit origin allow-list for a hosted Lens. | 1 |
+| Task | Description | Wave | Status |
+|------|-------------|------|--------|
+| t-001 | **Identity.** New auto-derived project ids use the full normalized remote. Add a device id at install. Move the project registry's id, remote and display name into the personal namespace; local paths stay in SQL. | 1 | Done |
+| t-002 | **Turns on their own local-only ref.** Redirect every turn writer. The envelope stays on `main`. Migration: the synced refs start from a fresh commit, and existing turn history stays local. | 1 | Waits on AgentStateGraph |
+| t-003 | **Personal namespace.** Reserve it. Prime `AGENTS.md` rules into it. Add a personal scope to `remember`. Recall and `prime` read personal plus project. | 1 | Done |
+| t-004 | **Stop no-op writes.** Skip commits that leave the tree unchanged (re-imports, identical full-turn rewrites, unchanged title/provenance/burn). | 1 | Done |
+| t-005 | **Usage rollup in the session envelope,** so plan cost and savings views work from synced data. | 1 | Done |
+| t-006 | **`ctx remote add / set`, `ctx push / pull`, `ctx sync status`,** plus daemon background sync and Lens status, on AgentStateGraph Plan G. Hub login via device code; token in the OS keychain. | 2 | Waits on AgentStateGraph |
+| t-007 | **Credential scan before push.** Use AgentStateGraph's push filter with CTXone's patterns: block high-confidence matches, with a per-finding override. Add `ctx secrets scan` to find and clean matches in a store before its first push. | 2 | Waits on AgentStateGraph; the scan came first as t-017 |
+| t-008 | **Reminder safety.** Synced reminders never auto-run commands unless created or approved on this device. | 2 | Waits on AgentStateGraph |
+| t-009 | **Epochs.** Legacy seals stay local; new plan epochs ride the control ref and seal only synced refs. | 2 | Waits on t-002 and AgentStateGraph |
+| t-010 | **Attribution.** `ctx init` writes `X-CTXone-Agent`; the device id goes on commits. | 2 | Done; the device id on commits is t-016 |
+| t-011 | **Hub-mode gaps on Postgres.** Today the project registry returns 400 and session stats aren't persisted on Postgres. A hub needs both, plus read-only access to synced ASD stores (AgentStateDeveloper Plan W t-008). | 3 | Done |
+| t-012 | **Docs.** Add a "connect a hub" guide. Correct MEMORY_BRANCH_SCOPING (reminders and taints aren't namespace-isolated until the control ref lands), COST_SAVINGS ("every machine resolves to the same graph" holds only with one shared hub), DEPLOYMENT, UNIFIED_HUB's default transport, and the `workspace.rs` doc comment. | 3 | The half that holds before sync is t-018; the rest waits on t-006 |
+| t-013 | **A remote hub never receives raw turns unless the user opts in.** When the configured hub isn't loopback, `ctx ingest-session`, the Stop-hook `capture-turn` path and imports send the session envelope and extracted memories, not `turns`. This applies to hosted hubs as well as sync, so decision 2 holds when a client talks to a hub directly. | 1 | Done |
+| t-014 | **Hosted-mode hardening.** Add an option to turn off the loopback exemption: today loopback peers skip the bearer token, so a proxy or sidecar on 127.0.0.1 would bypass auth. Add token rotation without a restart, and an explicit origin allow-list for a hosted Lens. | 1 | Done |
+| t-015 | **`ctxone-hub` serves sync for each tenant,** mounting AgentStateGraph's sync service behind the tenant's token (decisions 8 and 9). | 2 | Waits on AgentStateGraph |
+| t-016 | **Commits carry the device id.** `ctx` sends it, and the Hub sets it on every commit through AgentStateGraph's per-call context. | 2 | Waits on AgentStateGraph |
+| t-017 | **`ctx secrets scan`** finds credential-shaped strings in what would sync, with a masked match and the `ctx forget` for each. Split from t-007. | 1 | Done |
+| t-018 | **Docs before sync:** [CONNECT_A_HUB.md](../CONNECT_A_HUB.md), and the corrections t-012 listed that hold today. | 1 | Done |
 
 ### Depends on AgentStateGraph
 
@@ -240,7 +267,9 @@ namespace, which contradicts
 | t-007 | Plan G t-011 (pluggable push filter) |
 | Decision 5 | Plan G t-010 (merge-safe task ids) |
 | t-008, t-009 | Plan G t-001 (control ref) and Plan F t-005 (namespace scoping) |
-| All of the above | An AgentStateGraph release containing them (CTXone pins v1.2.7) |
+| t-015 | Plan G t-004 and t-006, with the sync server as an embeddable service |
+| t-016 | Plan F's per-call context (or a task-store hook) carrying a device id |
+| All of the above | An AgentStateGraph release containing them. CTXone is on AgentStateGraph 1.5.0, which has none of them yet. |
 
 ## Not in this design
 
