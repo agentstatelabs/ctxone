@@ -6,7 +6,7 @@ the project's release tags (`vMAJOR.MINOR.PATCH`). Most releases go up by
 0.0.1; v1.1.0 (a multi-tenant Hub) and v1.2.0 (the personal namespace) went
 up a minor version.
 
-## [v1.2.0] — 2026-10-31
+## [v1.2.0] — 2026-11-02
 
 A Hub on another machine, which gets no raw turns, now has each session's usage by model. Commits say which tool made them, a write that changes nothing makes no commit, and new project ids come from the whole remote. Your agent rules and preferences live in a personal namespace that every workspace's recall reads. After upgrading, run `ctx init` again so each tool sends its agent id, then `ctx agents migrate --apply` to remove the copies of `AGENTS.md` earlier versions primed into each workspace.
 
