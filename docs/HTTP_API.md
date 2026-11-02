@@ -827,6 +827,50 @@ Search for a decision and return its blame chain.
 }
 ```
 
+### `GET /api/secrets/scan`
+
+Credential-shaped strings in what would sync: every branch of the request's
+namespace and of the personal namespace. Raw session turns are skipped
+unless asked for. This is what `ctx secrets scan` calls. A scan reads the
+personal namespace but doesn't create it.
+
+**Query params:**
+- `ref` — scan one branch; every branch when absent
+- `turns` — `true` to scan raw session turns too (default `false`)
+- `all` — `true` to scan every namespace in the store instead
+- `limit` — stop after this many findings (default 1000, at most 10000)
+
+**Response (200):**
+```json
+{
+  "scanned": [{ "namespace": "repo-a", "ref": "main" },
+              { "namespace": "_personal", "ref": "main" }],
+  "turns": false,
+  "strings": 4182,
+  "findings": [
+    {
+      "namespace": "repo-a",
+      "ref": "main",
+      "path": "/memory/ci/18e45270505dc388",
+      "rule": "github-token",
+      "name": "GitHub token",
+      "confidence": "high",
+      "masked": "ghp_…(40 chars)",
+      "forget": "/memory/ci/18e45270505dc388"
+    }
+  ],
+  "truncated": false
+}
+```
+
+`masked` never holds the secret. `forget` is the record to pass to
+`POST /api/memory/forget` (a memory entry, or one part of a session's
+envelope), or `null` where there's none, such as a plan task. `strings`
+counts each string read once; content shared by several branches is read
+once for all of them. `confidence` is `high` for a provider's own token
+format or a private key, and `medium` for shapes ordinary text sometimes
+takes.
+
 ---
 
 ## Error responses

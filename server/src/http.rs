@@ -1082,6 +1082,7 @@ fn build_router(
         .route("/api/export", get(export_graph))
         .route("/api/import", post(import_graph))
         .route("/api/fsck", post(fsck))
+        .route("/api/secrets/scan", get(scan_secrets))
         .route("/api/db/upgrade", post(db_upgrade))
         .route("/api/docs", get(list_docs).post(register_doc))
         .route("/api/plans", get(list_plans).post(create_plan))
@@ -2300,6 +2301,105 @@ async fn export_graph(
         "namespace": ns.0,
         "count": map.len(),
         "paths": serde_json::Value::Object(map),
+    })))
+}
+
+#[derive(Deserialize)]
+struct SecretsScanQuery {
+    /// One branch; every branch when absent.
+    #[serde(rename = "ref")]
+    ref_name: Option<String>,
+    /// Also scan raw session turns, which sync keeps local.
+    #[serde(default)]
+    turns: bool,
+    /// Every namespace in the store, instead of the request's and personal.
+    #[serde(default)]
+    all: bool,
+    /// Stop after this many findings (default 1000, at most 10000).
+    limit: Option<usize>,
+}
+
+/// `GET /api/secrets/scan` — credential-shaped strings in what would sync
+/// (ctx-hub-sync t-017): every branch of the request's namespace and of the
+/// personal namespace, or of every namespace with `all`. Raw turns are
+/// skipped unless `turns` is set. Findings show a masked match, never the
+/// value; see [`crate::secrets`].
+async fn scan_secrets(
+    s: HubState,
+    ns: NamespaceId,
+    Query(q): Query<SecretsScanQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let mut repos = Vec::new();
+    if q.all {
+        let mut names: Vec<String> = s
+            .repo
+            .list_namespaces()
+            .map_err(internal_error)?
+            .iter()
+            .map(|n| n.as_str().to_string())
+            .collect();
+        if !names.iter().any(|n| n == Namespace::DEFAULT) {
+            names.insert(0, Namespace::DEFAULT.to_string());
+        }
+        for name in names {
+            repos.push(s.repo_for(&NamespaceId(name))?);
+        }
+    } else {
+        let repo = s.repo_for(&ns)?;
+        // Read beside, not opened for writing: a scan doesn't create it, and
+        // skips it until something has.
+        let personal_exists = s
+            .repo
+            .list_namespaces()
+            .map_err(internal_error)?
+            .iter()
+            .any(|n| n.as_str() == crate::personal::PERSONAL_NAMESPACE);
+        let personal = crate::personal::beside(&repo)
+            .filter(|_| personal_exists)
+            .map(Arc::new);
+        repos.push(repo);
+        repos.extend(personal);
+    }
+    let opts = crate::secrets::ScanOptions {
+        turns: q.turns,
+        max_findings: q.limit.unwrap_or(1000).clamp(1, 10_000),
+    };
+    let only = q.ref_name.clone();
+    let span = tracing::Span::current();
+    // A scan reads every branch, so it runs on the blocking pool.
+    let (scanned, report) = tokio::task::spawn_blocking(move || {
+        let _span = span.entered();
+        let mut scanner = crate::secrets::Scanner::new(opts);
+        let mut scanned = Vec::new();
+        for repo in &repos {
+            for (branch, _) in repo.list_branches(None)? {
+                if only.as_ref().is_some_and(|r| *r != branch) || scanner.truncated() {
+                    continue;
+                }
+                scanner.scan_ref(repo, &branch)?;
+                scanned.push(serde_json::json!({
+                    "namespace": repo.namespace().as_str(),
+                    "ref": branch,
+                }));
+            }
+        }
+        Ok::<_, agentstategraph::RepoError>((scanned, scanner.finish()))
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("secrets scan failed: {e}"),
+        )
+    })?
+    .map_err(internal_error)?;
+
+    Ok(Json(serde_json::json!({
+        "scanned": scanned,
+        "turns": q.turns,
+        "strings": report.strings,
+        "findings": report.findings,
+        "truncated": report.truncated,
     })))
 }
 

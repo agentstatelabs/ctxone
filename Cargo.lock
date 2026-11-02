@@ -619,6 +619,7 @@ dependencies = [
  "oxtel",
  "oxtel-rmcp",
  "oxtel-tower",
+ "regex",
  "reqwest",
  "rmcp",
  "rusqlite",
