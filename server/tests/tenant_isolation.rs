@@ -647,7 +647,11 @@ fn rest_probes(m: &str, own: &Ids, other: &Ids) -> Vec<Probe> {
         probe!("GET /api/export", "/api/export", Mine),
         probe!("GET /api/export", "/api/export?namespace=default", Mine),
         probe!("GET /api/secrets/scan", "/api/secrets/scan", Ok),
-        probe!("GET /api/secrets/scan", "/api/secrets/scan?all=true&turns=true", Ok),
+        probe!(
+            "GET /api/secrets/scan",
+            "/api/secrets/scan?all=true&turns=true",
+            Ok
+        ),
         // Memory.
         probe!(
             "GET /api/memory/recall",
