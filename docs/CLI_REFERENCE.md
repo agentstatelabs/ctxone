@@ -986,7 +986,9 @@ To import a doc's *content* into recall instead, use `ctx import-doc <file>`
 Portable JSON snapshots (vs the binary `db backup`). `ctx db export [--out FILE]`
 dumps the current branch's graph; `ctx db import FILE` merges it back (upsert).
 Prune the JSON between the two to seed a fresh db with only what you want.
-Branch/namespace scoped via the usual flags.
+`--branch` picks the branch and `--namespace` the workspace. `ctx db` doesn't
+detect the workspace from the current directory, so without `--namespace` it's
+`default`.
 
 ---
 
