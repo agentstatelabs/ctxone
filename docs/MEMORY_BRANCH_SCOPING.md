@@ -20,14 +20,19 @@ namespace (= one code repo, via a registered project)
 ```
 
 A **namespace** isolates everything ref-scoped: branches, plans,
-memory (facts / pinned / primed / sessions), taints, reminders, and
-history. One namespace maps to one code repo through the project
+memory (facts / pinned / primed / sessions), and history. One namespace maps to one code repo through the project
 registry (`ctx project add <id>`, `POST /api/projects`). Every
 surface — HTTP (`?namespace=` / `X-CTXone-Namespace`), CLI
 (`--namespace` / `CTX_NAMESPACE` / auto-detection from the cwd), MCP
 (resolved at server startup) — picks the namespace first; the branch
 model described in the rest of this doc then operates unchanged
 *inside* that namespace. Cross-namespace merge is deny-by-default.
+
+**Not isolated yet: taints and reminders.** AgentStateGraph keeps them
+per store (per tenant on a multi-tenant Hub), not per namespace. Every
+workspace in a store lists the same ones, and a taint on a path gates
+that path in every workspace. They move to a control ref per namespace
+with sync ([design/HUB_SYNC.md](design/HUB_SYNC.md#side-tables)).
 
 **Migration stance:** pre-namespace data remains in the reserved
 `default` namespace; nothing migrates. Adopt namespaces by running

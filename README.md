@@ -255,6 +255,7 @@ ctxone/
 - [Token Savings](docs/TOKEN_SAVINGS.md) — how the ratio is computed, how to read it, how to maximize it
 - [Cookbook](docs/COOKBOOK.md) — git hooks, cron jobs, shell prompts, team setups
 - [Data Safety](docs/DATA_SAFETY.md) — snapshots, lockfile, watchdog, and `ctx db backup`/`restore`
+- [Connect a Hub](docs/CONNECT_A_HUB.md) — several machines on one Hub: setup, and what each machine sends or keeps
 
 **Reference:**
 - [Features & Command Reference](docs/FEATURES.md) — what CTXone does, grouped by capability
