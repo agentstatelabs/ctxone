@@ -6,7 +6,7 @@ the project's release tags (`vMAJOR.MINOR.PATCH`). Most releases go up by
 0.0.1; v1.1.0 (a multi-tenant Hub) and v1.2.0 (the personal namespace) went
 up a minor version.
 
-## [Unreleased]
+## [v1.2.1] — 2026-11-02
 
 ### Added
 - **`ctx secrets scan` finds credential-shaped strings before they sync** (ctx-hub-sync t-017). It scans every branch of the current workspace and of the personal namespace (`--all` for every workspace, `--branch` for one branch). Raw session turns stay on this machine, so they're skipped unless you pass `--turns`.
