@@ -54,11 +54,33 @@ impl Schema {
             .await
             .expect("create the role and schema");
         Self {
-            app_url: role_url(admin_url, &name),
+            app_url: role_url(admin_url, &name, ROLE, PASSWORD),
             admin_url: in_schema(admin_url, &name),
             name,
             admin,
         }
+    }
+
+    /// A serving role with only schema USAGE and table DML, no ownership,
+    /// owner membership, schema CREATE or row-security bypass.
+    pub async fn non_owner_url(&self) -> String {
+        const RUNTIME: &str = "ctxone_non_owner_test";
+        const RUNTIME_PASSWORD: &str = "ctxone-non-owner-test";
+        self.admin
+            .batch_execute(&format!(
+                "DO $$ BEGIN
+                     CREATE ROLE {RUNTIME} LOGIN NOSUPERUSER NOBYPASSRLS
+                         NOCREATEDB NOCREATEROLE PASSWORD '{RUNTIME_PASSWORD}';
+                 EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL;
+                 END $$;
+                 GRANT USAGE ON SCHEMA {schema} TO {RUNTIME};
+                 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES
+                     IN SCHEMA {schema} TO {RUNTIME};",
+                schema = self.name,
+            ))
+            .await
+            .expect("grant non-owner serving access");
+        role_url(&self.admin_url, &self.name, RUNTIME, RUNTIME_PASSWORD)
     }
 
     /// Drop the schema and everything in it.
@@ -123,17 +145,17 @@ fn in_schema(url: &str, schema: &str) -> String {
 
 /// `admin_url`, logging in as [`ROLE`] instead, with `schema` alone on its
 /// search path.
-fn role_url(admin_url: &str, schema: &str) -> String {
+fn role_url(admin_url: &str, schema: &str, role: &str, password: &str) -> String {
     let url = if let Some((scheme, rest)) = admin_url.split_once("://") {
         let (authority, path) = match rest.find('/') {
             Some(slash) => rest.split_at(slash),
             None => (rest, ""),
         };
         let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-        format!("{scheme}://{ROLE}:{PASSWORD}@{host}{path}")
+        format!("{scheme}://{role}:{password}@{host}{path}")
     } else {
         // Later keys win in the key/value form.
-        format!("{admin_url} user={ROLE} password={PASSWORD}")
+        format!("{admin_url} user={role} password={password}")
     };
     in_schema(&url, schema)
 }

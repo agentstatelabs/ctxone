@@ -109,7 +109,24 @@ impl PgStore {
             tx.execute("SELECT pg_advisory_xact_lock($1)", &[&SCHEMA_LOCK_KEY])
                 .await
                 .map_err(|e| pg_error(&e))?;
-            tx.batch_execute(SCHEMA).await.map_err(|e| pg_error(&e))?;
+            // Even CREATE TABLE IF NOT EXISTS requires CREATE on the schema.
+            // A serving role may only use tables initialized by their owner.
+            // SCHEMA is create-only: skip it when all Hub tables already exist.
+            // Keep policy checks below so incomplete setups are never accepted.
+            let initialized: bool = tx
+                .query_one(
+                    "SELECT count(*) = cardinality($1::text[])::bigint
+                     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                     WHERE n.nspname = current_schema() AND c.relkind = 'r'
+                       AND c.relname::text = ANY($1::text[])",
+                    &[&TABLES],
+                )
+                .await
+                .map_err(|e| pg_error(&e))?
+                .get(0);
+            if !initialized {
+                tx.batch_execute(SCHEMA).await.map_err(|e| pg_error(&e))?;
+            }
             for table in TABLES {
                 add_tenant_policy(&tx, table)
                     .await
@@ -117,7 +134,12 @@ impl PgStore {
             }
             tx.commit().await.map_err(|e| pg_error(&e))
         })
-        .map_err(|e| format!("set up the hub's Postgres tables: {e}"))?;
+        .map_err(|e| {
+            format!(
+                "set up the hub's Postgres tables: {e}; initialize missing tables and \
+                 tenant policies as their owner before starting a restricted serving role"
+            )
+        })?;
         Ok(store)
     }
 

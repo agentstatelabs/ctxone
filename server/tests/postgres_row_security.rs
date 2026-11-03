@@ -329,6 +329,8 @@ async fn startup_log(args: &[&str]) -> String {
             .args(["--http", "--port", &port.to_string(), "--pg-pool-size", "2"])
             .args(args)
             .current_dir(dir.path())
+            .env("RUST_LOG", "info")
+            .env("OXTEL_LOG_FORMAT", "text")
             .env("HOME", dir.path())
             .env_remove("DATABASE_URL")
             .env_remove("CTXONE_TENANTS_FILE")
@@ -389,5 +391,75 @@ async fn a_hub_says_at_startup_whether_row_security_binds_it() {
         "{log}"
     );
     assert!(!log.contains("BYPASSRLS"), "{log}");
+    schema.drop().await;
+}
+
+/// Production-style split: an owner prepares the schema, then a serving role
+/// without schema CREATE or ownership opens it and remains bound by RLS.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_non_owner_hub_opens_an_initialized_schema_without_create() {
+    let Some(url) = url() else { return };
+    let schema = Schema::new(&url, "non_owner").await;
+    let r = row_security("on", &schema.app_url).await;
+    assert_eq!((r.code, r.out.as_str()), (0, "on\n"), "{r:?}");
+    let runtime_url = schema.non_owner_url().await;
+    let runtime = connect(&runtime_url).await;
+    let row = runtime
+        .query_one(
+            "SELECT has_schema_privilege(current_schema(), 'CREATE'),
+                    pg_has_role(current_user, $1, 'MEMBER'),
+                    (SELECT rolsuper OR rolbypassrls FROM pg_roles
+                     WHERE rolname = current_user)",
+            &[&row_security::ROLE],
+        )
+        .await
+        .unwrap();
+    assert!(!row.get::<_, bool>(0));
+    assert!(!row.get::<_, bool>(1));
+    assert!(!row.get::<_, bool>(2));
+
+    let r = row_security("status", &runtime_url).await;
+    assert_eq!((r.code, r.out.as_str()), (0, "on\n"), "{r:?}");
+    let dir = tempfile::tempdir().unwrap();
+    let tenants = dir.path().join("tenants");
+    std::fs::write(&tenants, format!("alpha {}\n", TokenHash::of("t").to_hex())).unwrap();
+    let log = startup_log(&[
+        "--tenants-file",
+        tenants.to_str().unwrap(),
+        "--storage",
+        "postgres",
+        "--database-url",
+        &runtime_url,
+    ])
+    .await;
+    assert!(log.contains("row-level security is on for all"), "{log}");
+    assert!(!log.contains("BYPASSRLS"), "{log}");
+
+    // A missing policy must not be silently treated as an initialized schema.
+    let admin = connect(&schema.admin_url).await;
+    admin
+        .batch_execute("DROP POLICY asg_tenant ON ctxone_sessions")
+        .await
+        .unwrap();
+    let r = row_security("status", &runtime_url).await;
+    assert_ne!(r.code, 0, "{r:?}");
+    assert!(r.err.contains("as their owner"), "{r:?}");
+    let r = row_security("on", &schema.app_url).await;
+    assert_eq!(r.code, 0, "{r:?}");
+
+    // An incomplete schema still needs owner setup rather than extra privilege.
+    admin
+        .batch_execute("DROP TABLE ctxone_mcp_sessions")
+        .await
+        .unwrap();
+    let r = row_security("status", &runtime_url).await;
+    assert_ne!(r.code, 0, "{r:?}");
+    assert!(r.err.contains("as their owner"), "{r:?}");
+    let r = row_security("on", &schema.app_url).await;
+    assert_eq!(r.code, 0, "{r:?}");
+    let runtime_url = schema.non_owner_url().await;
+    let r = row_security("status", &runtime_url).await;
+    assert_eq!((r.code, r.out.as_str()), (0, "on\n"), "{r:?}");
     schema.drop().await;
 }
