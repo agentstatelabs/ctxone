@@ -15,6 +15,9 @@ up a minor version.
   - Over REST it's `GET /api/secrets/scan`. Content shared by several branches is read once, so scanning every branch costs little more than scanning one.
   - Forgetting removes a value from the branch as it is now; earlier commits keep it. Sync's first push is shallow, so those don't go with it. The push-time guard (t-007) waits on AgentStateGraph's push filter and will reuse these rules.
 
+### Fixed
+- **`ctx db export` and `ctx db import` use the workspace `--namespace` names.** They dropped it and exported from, or imported into, `default` whatever was passed. `ctx db` still doesn't detect the workspace from the current directory, so without `--namespace` it's `default`.
+
 ## [v1.2.0] — 2026-11-02
 
 A Hub on another machine, which gets no raw turns, now has each session's usage by model. Commits say which tool made them, a write that changes nothing makes no commit, and new project ids come from the whole remote. Your agent rules and preferences live in a personal namespace that every workspace's recall reads. After upgrading, run `ctx init` again so each tool sends its agent id, then `ctx agents migrate --apply` to remove the copies of `AGENTS.md` earlier versions primed into each workspace.

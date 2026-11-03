@@ -2202,6 +2202,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // `ingest-session --all` routes every transcript by its own recorded
         // cwd (see `workspace::Router`); the invoking directory plays no part.
         Commands::IngestSession { all: true, .. } => None,
+        // `db` doesn't detect a workspace from the cwd, but `export` and
+        // `import` act on one, so an explicit --namespace picks it. It used to
+        // be dropped, and they read and wrote `default` whatever was passed.
+        Commands::Db { .. } => cli.namespace.clone(),
         Commands::Skill { .. }
         | Commands::Bootstrap
         | Commands::Completion { .. }
@@ -2209,7 +2213,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         | Commands::Serve { .. }
         | Commands::Session { .. }
         | Commands::Service { .. }
-        | Commands::Db { .. }
         // Local-only: never touch the hub, so a detection failure is not theirs
         // to report.
         | Commands::Tokens { .. }
