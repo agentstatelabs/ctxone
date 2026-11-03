@@ -16,6 +16,7 @@ up a minor version.
   - Forgetting removes a value from the branch as it is now; earlier commits keep it. Sync's first push is shallow, so those don't go with it. The push-time guard (t-007) waits on AgentStateGraph's push filter and will reuse these rules.
 
 ### Fixed
+- **A Postgres Hub can start with a non-owner serving role.** Once the table owner has initialized the Hub schema, startup skips redundant table creation while still checking tenant policies. Missing tables or policies still require owner setup; the serving role needs no schema `CREATE`, table ownership, superuser, or `BYPASSRLS` privilege.
 - **`ctx db export` and `ctx db import` use the workspace `--namespace` names.** They dropped it and exported from, or imported into, `default` whatever was passed. `ctx db` still doesn't detect the workspace from the current directory, so without `--namespace` it's `default`.
 
 ## [v1.2.0] — 2026-11-02
