@@ -3,13 +3,18 @@
 # frontend must be built BEFORE cargo. Vite 8 / Svelte 5 need Node >= 20.19.
 # Only run pipelines that matter, and never the same SHA twice:
 #  * a merge request gets a detached pipeline, so its branch is checked
-#    (frontend, fmt, clippy, build, test) before it merges. The publish jobs
+#    (frontend, fmt, clippy, test) before it merges. The publish jobs
 #    run only on main or a tag, so none of them runs in it;
 #  * a plain push of any other branch (claude/*, worktree-agent-*, …) gets no
 #    pipeline: its merge request's pipeline covers it;
 #  * a `release: vX` commit on main is validated by its tag pipeline (release.sh
 #    pushes main + tag together — same SHA, plus publish), so its branch
-#    pipeline is skipped to avoid a duplicate frontend+compile.
+#    pipeline is skipped to avoid a duplicate frontend+compile;
+#  * a merge to main whose tree is identical to the merged MR's head was
+#    already tested by that MR's pipeline, so frontend, clippy and test skip
+#    their work (.ci/already-tested.sh) and the pipeline only mirrors to
+#    GitHub. A merge that combined other changes, a direct push and "Run
+#    pipeline" all run in full.
 workflow:
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_TITLE =~ /^release: v/'
@@ -37,6 +42,7 @@ frontend:
     paths:
       - web/node_modules/
   script:
+    - if sh .ci/already-tested.sh; then exit 0; fi
     - cd web
     - npm ci
     # Before the build, so a failing test stops the pipeline instead of
@@ -81,21 +87,23 @@ fmt:
   script:
     - cargo fmt --all -- --check
 
+# The builder has two job slots, so a pipeline runs two heavy Rust jobs,
+# clippy and test, and both start as soon as the frontend is built. There is
+# no separate build job: test compiles everything it did.
 clippy:
   stage: check
   script:
+    - if sh .ci/already-tested.sh; then exit 0; fi
     - cargo clippy --workspace --all-targets -- -D clippy::correctness
-
-build:
-  cache:
-    <<: *rust_dependency_cache
-    policy: pull-push
-  stage: check
-  script:
-    - cargo build --workspace --locked
 
 test:
   stage: test
+  needs:
+    - job: frontend
+      artifacts: true
+  cache:
+    <<: *rust_dependency_cache
+    policy: pull-push
   # Postgres for the hub's Postgres tables (server/tests/postgres_hub_tables.rs).
   # Without TEST_DATABASE_URL those tests skip. The alias resolves on both the
   # docker and kubernetes executors.
@@ -110,6 +118,7 @@ test:
     # Fail rather than skip if the database is ever missing.
     CTXONE_REQUIRE_POSTGRES: "1"
   script:
+    - if sh .ci/already-tested.sh; then exit 0; fi
     - cargo test --workspace --locked
 
 # version-guard: on a release tag, prove every component version agrees with the
