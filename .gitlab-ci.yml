@@ -57,7 +57,11 @@ frontend:
 
 # --- Rust jobs (web/build/ artifact flows down from the frontend stage) -------
 default:
-  image: "$CI_REGISTRY_IMAGE/rust-ci@sha256:33b2bd3b2dfd98934c47d972a8f109918c98bcb43da82d339cb75e0a1057c19e"
+  # This project's build of the shared rust-ci image (infra/gitops
+  # bootstrap/rust-ci), with RUST_CI_EXTRA_TOOLCHAINS=1.96.0: the toolchain
+  # rust-toolchain.toml pins is installed, so jobs don't download it at start.
+  # Rebuild with the same setting when that pin changes.
+  image: "$CI_REGISTRY_IMAGE/rust-ci@sha256:e258c9d9dda0716587fde2e5891953dbacac96fc0710771cfa256c4a82cc64bd"
   # One writer archives downloads; compiler objects go directly to scoped S3.
   cache: &rust_dependency_cache
     key:
