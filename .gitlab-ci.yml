@@ -20,7 +20,10 @@ workflow:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_TITLE =~ /^release: v/'
       when: never
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    # A tag pipeline publishes; a newer pipeline never cancels it.
     - if: $CI_COMMIT_TAG
+      auto_cancel:
+        on_new_commit: none
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
     - when: never
 
@@ -77,6 +80,11 @@ default:
     - rustc --version && cargo --version && python3 --version && sccache --version
   after_script:
     - if command -v sccache >/dev/null 2>&1; then sccache --show-stats || true; fi
+  # A newer pipeline on the same merge request or branch cancels this one
+  # (auto-cancel redundant pipelines), so a re-push doesn't build twice.
+  # Publish and release jobs set interruptible: false, and tag pipelines
+  # never auto-cancel.
+  interruptible: true
 
 variables:
   # CI-only: developer/release profiles remain unchanged.
@@ -162,6 +170,7 @@ version-guard:
 # GITHUB_TOKEN (repo scope, masked + protected). Gated on GITHUB_REPO so it
 # no-ops until configured.
 publish-github:
+  interruptible: false
   stage: publish
   image: debian:bookworm-slim
   variables:
@@ -190,6 +199,7 @@ publish-github:
 # crates.io token scoped to publish-update and ctxone*. Gated on it so the job
 # no-ops until configured.
 publish-crates:
+  interruptible: false
   stage: publish
   needs:
     - job: frontend
@@ -224,6 +234,7 @@ publish-crates:
 # tag leaves the tap on the newer release, and re-running the current tag
 # pushes nothing unless a sha256 needs repairing.
 homebrew:
+  interruptible: false
   stage: .post
   image: rust:1-bookworm
   before_script: []   # no cargo needed; the default before_script is rust setup
@@ -252,6 +263,7 @@ homebrew:
 # after homebrew so the site never advertises a release users cannot install
 # yet. Gated on SITE_RELEASES_TOKEN so it no-ops until that is configured.
 site-version:
+  interruptible: false
   stage: .post
   image: debian:bookworm-slim
   before_script: []
