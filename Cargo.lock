@@ -10,9 +10,9 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agentstategraph"
-version = "1.5.0"
+version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3362e8b09b2f12443c53ae6d2ac6e255440eebc50572ec03ce03d9182796e5fa"
+checksum = "e7b9217636839fda0da3f1775f1ce2052ccd20f0ca78bc0a40e64c2c29e8628b"
 dependencies = [
  "agentstategraph-core",
  "agentstategraph-reminders",
@@ -20,18 +20,20 @@ dependencies = [
  "agentstategraph-taint",
  "chrono",
  "metrics",
+ "regex",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tracing",
  "uuid",
+ "zstd",
 ]
 
 [[package]]
 name = "agentstategraph-core"
-version = "1.5.0"
+version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1aef7bfc3f8b74f499e79cd386b3749d24908aa3cca2022bcce4eb6dc8b537d9"
+checksum = "b54b89fb04aad75a57df3268259ae671399d417a821697c6eb5736e7490d0863"
 dependencies = [
  "blake3",
  "chrono",
@@ -43,9 +45,9 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-migrate"
-version = "1.5.0"
+version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5857f1f7e1c818109ee33043e35933674144ec9dce904de92137ec7851a79b54"
+checksum = "270b943125376f67cbead489fff04e8885ad180b156652b0c3945e2b1fcdc863"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -57,9 +59,9 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-reminders"
-version = "1.5.0"
+version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "800088a32dab25f93ad20a8d19c908187da19c807987a065279f294edd8f4d56"
+checksum = "e4093e292784a769edc561fd57b0b198f0aeb902c1f9d3b0f2e82403cc6d14fe"
 dependencies = [
  "agentstategraph-core",
  "chrono",
@@ -71,9 +73,9 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-storage"
-version = "1.5.0"
+version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dac38d9143a5e87e2192509122adb5066d09a8842ecad2f781946a70b563e0fc"
+checksum = "32b2a75173cd1885f925428f21a063efeeeb51ed4ccbba396ed49efc7edac0a2"
 dependencies = [
  "agentstategraph-core",
  "agentstategraph-reminders",
@@ -95,9 +97,9 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-taint"
-version = "1.5.0"
+version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72a8380fe070081e01bde025cf1daed67d90cba2062251cab653d6a17c01118a"
+checksum = "9731dd2a6b851a977fe7a6fb9fcde220100613860386a335c7ea64169408b564"
 dependencies = [
  "agentstategraph-core",
  "chrono",
@@ -109,9 +111,9 @@ dependencies = [
 
 [[package]]
 name = "agentstategraph-tasks"
-version = "1.5.0"
+version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c61222dc86ddd3053bd717dad2f3534d0e25a658a19f9bbf4f4cd2943ae2dc25"
+checksum = "5fd690712b0977ebf29e78293082d9d9510c9b64b2106cd0a126e181e5226da9"
 dependencies = [
  "agentstategraph",
  "agentstategraph-core",
@@ -397,6 +399,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1dce859f0832a7d088c4f1119888ab94ef4b5d6795d1ce05afb7fe159d79f98"
 dependencies = [
  "find-msvc-tools",
+ "jobserver",
+ "libc",
  "shlex",
 ]
 
@@ -1464,6 +1468,16 @@ name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+
+[[package]]
+name = "jobserver"
+version = "0.1.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c00acbd29eabad4a2392fa0e921c874934dbbf4194312ad20f04a0ed67a3cb3"
+dependencies = [
+ "getrandom 0.4.2",
+ "libc",
+]
 
 [[package]]
 name = "js-sys"
@@ -4009,3 +4023,31 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
+
+[[package]]
+name = "zstd"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cdb02c3132d251ab1606e9fc913a7da6c6ed08cc263df15edf082e1dc497d157"
+dependencies = [
+ "zstd-safe",
+]
+
+[[package]]
+name = "zstd-safe"
+version = "7.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c8ea04668f5de8d8d51051714ba560c9536519cadcdb8829bba4fe2ad159b03"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-sys"
+version = "2.1.2+zstd.1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "481ada9c543b2323cbb7bbdbb5249177fbf0188ed959ed2c15e4b22421c84ed3"
+dependencies = [
+ "cc",
+ "pkg-config",
+]

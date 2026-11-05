@@ -842,6 +842,11 @@ fn rest_probes(m: &str, own: &Ids, other: &Ids) -> Vec<Probe> {
             Mine
         ),
         probe!(
+            "POST /api/plans/{name}/unpack",
+            "/api/plans/release/unpack?dry_run=true",
+            Ok
+        ),
+        probe!(
             "POST /api/plans/{name}/tasks/{task_id}/start",
             "/api/plans/release/tasks/t-002/start",
             json!({}),

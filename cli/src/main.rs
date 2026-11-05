@@ -1638,9 +1638,11 @@ enum PlanAction {
         plan_id: String,
         /// Task title (imperative sentence)
         title: String,
-        /// Longer-form description (appended to title)
-        #[arg(long, short)]
-        description: Option<String>,
+        /// The task's notes: its brief. May span lines; at most 16 KiB.
+        /// `plan show` marks a task with notes; `plan tasks --task <id>`
+        /// prints them.
+        #[arg(long, short = 'd', visible_alias = "description")]
+        notes: Option<String>,
         /// Priority: low|medium|high|critical
         #[arg(long, default_value = "medium")]
         priority: String,
@@ -1698,19 +1700,19 @@ enum PlanAction {
         #[arg(long, short)]
         reason: String,
     },
-    /// Change a task's title, description, priority or blockers.
+    /// Change a task's title, notes, priority or blockers.
     ///
     /// Only the options given change. Status, proof and timestamps never
     /// do. Done and abandoned tasks need --force.
     Edit {
         plan_id: String,
         task_id: String,
-        /// New title. The task's description is kept.
+        /// New title. The task's notes are kept.
         #[arg(long)]
         title: Option<String>,
-        /// New description ("" removes it). The title is kept.
-        #[arg(long, short)]
-        description: Option<String>,
+        /// New notes, which may span lines ("" clears them). The title is kept.
+        #[arg(long, short = 'd', visible_alias = "description")]
+        notes: Option<String>,
         /// New priority: low|medium|high|critical
         #[arg(long)]
         priority: Option<String>,
@@ -1778,7 +1780,29 @@ enum PlanAction {
     Show { plan_id: String },
     /// List the tasks of a plan (flat — no plan envelope). Use `show`
     /// when you also want plan metadata.
-    Tasks { plan_id: String },
+    Tasks {
+        plan_id: String,
+        /// Read just this task, and print its notes.
+        #[arg(long = "task")]
+        task_id: Option<String>,
+    },
+    /// Move the descriptions that tasks added before notes existed packed
+    /// into their titles (after " — ") into their notes.
+    ///
+    /// Titles keep only their own part, so `plan show` gets smaller. Safe to
+    /// run again, or after a run cut short; a task whose notes already hold
+    /// something else is reported as kept and left alone.
+    Unpack {
+        /// Plan to unpack.
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        plan_id: Option<String>,
+        /// Every plan on the branch.
+        #[arg(long)]
+        all: bool,
+        /// List what would move, without writing anything.
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+    },
     /// Archive a plan: a soft, reversible transition valid for any
     /// status (active, completed, or empty). All tasks, proofs, and
     /// abandonment reasons are preserved; the plan simply leaves the
@@ -8856,7 +8880,7 @@ async fn handle_plan(
         PlanAction::Add {
             plan_id,
             title,
-            description,
+            notes,
             priority,
             parent,
             assigned_to,
@@ -8871,8 +8895,8 @@ async fn handle_plan(
             if force {
                 body["force"] = serde_json::json!(true);
             }
-            if let Some(d) = description {
-                body["description"] = serde_json::json!(d);
+            if let Some(n) = notes {
+                body["notes"] = serde_json::json!(n);
             }
             if let Some(p) = parent {
                 body["parent_id"] = serde_json::json!(p);
@@ -9063,7 +9087,7 @@ async fn handle_plan(
             plan_id,
             task_id,
             title,
-            description,
+            notes,
             priority,
             blocks,
             clear_blockers,
@@ -9073,8 +9097,8 @@ async fn handle_plan(
             if let Some(t) = title {
                 body["title"] = serde_json::json!(t);
             }
-            if let Some(d) = description {
-                body["description"] = serde_json::json!(d);
+            if let Some(n) = notes {
+                body["notes"] = serde_json::json!(n);
             }
             if let Some(p) = priority {
                 body["priority"] = serde_json::json!(p);
@@ -9381,6 +9405,9 @@ async fn handle_plan(
                     if let Some(a) = assigned {
                         line.push_str(&format!(" @{}", a));
                     }
+                    if task["has_notes"].as_bool().unwrap_or(false) {
+                        line.push_str(" [notes]");
+                    }
                     println!("{}", line);
                     if let Some(proof) = task.get("proof")
                         && !proof.is_null()
@@ -9404,16 +9431,26 @@ async fn handle_plan(
                 }
             });
         }
-        PlanAction::Tasks { plan_id } => {
+        PlanAction::Tasks { plan_id, task_id } => {
             // Mirrors the `plan_tasks` MCP tool: returns just the flat
-            // task array, no plan envelope. Useful in scripts that don't
-            // care about plan metadata.
-            let url = format!(
-                "{}/api/plans/{}/tasks?ref={}",
-                server,
-                urlencoding(&plan_id),
-                encode_ref(branch)
-            );
+            // task array, no plan envelope, notes included. Useful in
+            // scripts that don't care about plan metadata. `--task` reads
+            // one task (still as an array of one) and prints its notes.
+            let url = match &task_id {
+                Some(id) => format!(
+                    "{}/api/plans/{}/tasks/{}?ref={}",
+                    server,
+                    urlencoding(&plan_id),
+                    urlencoding(id),
+                    encode_ref(branch)
+                ),
+                None => format!(
+                    "{}/api/plans/{}/tasks?ref={}",
+                    server,
+                    urlencoding(&plan_id),
+                    encode_ref(branch)
+                ),
+            };
             let resp = match client
                 .get(&url)
                 .header("X-CTXone-Agent", &agent_id)
@@ -9427,6 +9464,12 @@ async fn handle_plan(
                 http_error_exit(resp, "plan tasks failed").await;
             }
             let parsed: Value = resp.json().await?;
+            let parsed = if task_id.is_some() {
+                Value::Array(vec![parsed])
+            } else {
+                parsed
+            };
+            let show_notes = task_id.is_some();
             emit(format, &parsed, |v| {
                 let empty = vec![];
                 let tasks = v.as_array().unwrap_or(&empty);
@@ -9440,6 +9483,7 @@ async fn handle_plan(
                     let status = task["status"].as_str().unwrap_or("");
                     let pri = task["priority"].as_str().unwrap_or("");
                     let assigned = task["assigned_to"].as_str();
+                    let notes = task["notes"].as_str();
                     let mut line = format!(
                         "{} {} {} {}",
                         status_glyph(status),
@@ -9450,8 +9494,112 @@ async fn handle_plan(
                     if let Some(a) = assigned {
                         line.push_str(&format!(" @{}", a));
                     }
+                    if notes.is_some() && !show_notes {
+                        line.push_str(" [notes]");
+                    }
                     println!("{}", line);
+                    if let Some(n) = notes.filter(|_| show_notes) {
+                        println!();
+                        for l in n.lines() {
+                            println!("    {l}");
+                        }
+                    }
                 }
+            });
+        }
+        PlanAction::Unpack {
+            plan_id,
+            all: _,
+            dry_run,
+        } => {
+            let names: Vec<String> = match plan_id {
+                Some(p) => vec![p],
+                None => {
+                    let url = format!("{}/api/plans?ref={}", server, encode_ref(branch));
+                    let resp = match client
+                        .get(&url)
+                        .header("X-CTXone-Agent", &agent_id)
+                        .send()
+                        .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => unreachable_exit(server, e),
+                    };
+                    if !resp.status().is_success() {
+                        http_error_exit(resp, "plan unpack failed").await;
+                    }
+                    let plans: Value = resp.json().await?;
+                    plans
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|p| p["name"].as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                }
+            };
+            let mut reports = Vec::new();
+            for name in &names {
+                let url = format!(
+                    "{}/api/plans/{}/unpack?ref={}&dry_run={}",
+                    server,
+                    urlencoding(name),
+                    encode_ref(branch),
+                    dry_run
+                );
+                let resp = match client
+                    .post(&url)
+                    .header("X-CTXone-Agent", &agent_id)
+                    .send()
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => unreachable_exit(server, e),
+                };
+                if !resp.status().is_success() {
+                    http_error_exit(resp, &format!("plan unpack {name} failed")).await;
+                }
+                reports.push(resp.json::<Value>().await?);
+            }
+            let out = Value::Array(reports);
+            emit(format, &out, |v| {
+                let empty = vec![];
+                let (mut moved, mut kept) = (0, 0);
+                for r in v.as_array().unwrap_or(&empty) {
+                    let unpacked = r["unpacked"].as_array().map_or(0, Vec::len);
+                    let held = r["kept"].as_array().map_or(0, Vec::len);
+                    moved += unpacked;
+                    kept += held;
+                    if unpacked + held > 0 {
+                        println!(
+                            "  {}: {} {}{}",
+                            r["plan"].as_str().unwrap_or("?"),
+                            unpacked,
+                            if dry_run { "to unpack" } else { "unpacked" },
+                            if held > 0 {
+                                format!(", {held} kept (notes already set)")
+                            } else {
+                                String::new()
+                            }
+                        );
+                    }
+                }
+                println!(
+                    "{} {} task(s){}{}",
+                    if dry_run { "Would unpack" } else { "Unpacked" },
+                    moved,
+                    if kept > 0 {
+                        format!("; kept {kept}")
+                    } else {
+                        String::new()
+                    },
+                    if dry_run {
+                        " (dry run: nothing written)"
+                    } else {
+                        ""
+                    }
+                );
             });
         }
         PlanAction::Archive { plan_id } => {
