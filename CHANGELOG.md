@@ -6,7 +6,9 @@ the project's release tags (`vMAJOR.MINOR.PATCH`). Most releases go up by
 0.0.1; v1.1.0 (a multi-tenant Hub) and v1.2.0 (the personal namespace) went
 up a minor version.
 
-## [Unreleased]
+## [v1.2.2] — 2026-11-05
+
+Tasks have notes, in the tools, the CLI, REST and Lens, so a task's brief no longer rides in its title. The first time it opens a store, the upgraded Hub moves that store's taints, reminders and epochs onto a control ref (AgentStateGraph 1.5.1), which takes a moment on a large store. Then run `ctx plan unpack --all --dry-run` to see which packed briefs would move into notes, and the same without `--dry-run` to move them.
 
 ### Added
 - **Tasks have notes.** A task's brief (why it matters, what to check, what counts as proof, links) goes in its `notes`, which may span lines and hold up to 16 KiB. Before, `plan_add` packed a description into the title after an em dash, so a description had to be one line, and every `plan_show` carried every description in full. Notes are stored on the task itself, using AgentStateGraph's `Task::notes`.
