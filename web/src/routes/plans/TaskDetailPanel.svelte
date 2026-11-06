@@ -1,14 +1,20 @@
 <script lang="ts">
-	import type { Proof, ProofKind, Task } from '$lib/plansApi';
+	import { tick, untrack } from 'svelte';
+	import { editTask, getTask, type Proof, type ProofKind, type Task } from '$lib/plansApi';
 	import type { TaskGraph } from './model';
 	import {
+		MAX_NOTES_BYTES,
 		PROOF_GLYPH,
 		STATUS_META,
 		canAbandon,
 		canComplete,
 		canStart,
+		formatBytes,
 		formatTs,
-		isOpen
+		hasNotes,
+		isOpen,
+		notesBytes,
+		packedTitle
 	} from './model';
 	import PriorityChip from './PriorityChip.svelte';
 	import AssigneeChip from './AssigneeChip.svelte';
@@ -24,7 +30,8 @@
 		onNavigate,
 		onStart,
 		onComplete,
-		onAbandon
+		onAbandon,
+		onNotesSaved
 	}: {
 		task: Task;
 		graph: TaskGraph;
@@ -37,6 +44,8 @@
 		onStart: (t: Task) => void;
 		onComplete: (t: Task, proof: Proof) => Promise<boolean>;
 		onAbandon: (t: Task, reason: string) => Promise<boolean>;
+		/** After notes were saved or cleared, so the page can reload the plan. */
+		onNotesSaved?: (taskId: string, cleared: boolean) => void | Promise<void>;
 	} = $props();
 
 	type Mode = 'view' | 'complete' | 'abandon';
@@ -50,16 +59,127 @@
 	let reason = $state('');
 	let submitting = $state(false);
 
-	// Re-sync when the panel is retargeted (new task or an explicit
-	// intent from a board drag / quick action).
+	// Notes. The plan listing marks a task `has_notes` and leaves the notes
+	// out, so the panel reads the task on its own for them.
+	let full = $state<Task | null>(null);
+	let notesLoadError = $state<string | null>(null);
+	let editingNotes = $state(false);
+	let draft = $state('');
+	let draftBase = $state('');
+	let savingNotes = $state(false);
+	let notesError = $state<string | null>(null);
+	let notesEl: HTMLTextAreaElement | undefined = $state();
+
+	// Re-sync when the panel is retargeted: a new task, or an explicit
+	// intent from a board drag / quick action. A plan refresh hands the
+	// panel a fresh copy of the same task every tick, so this compares ids
+	// rather than running on every copy, which would close an open form.
+	let shownId: string | null = null;
+	let shownIntent: typeof intent = null;
 	$effect(() => {
-		void task.id;
-		mode = intent ?? 'view';
+		const id = task.id;
+		const want = intent;
+		if (id === shownId && want === shownIntent) return;
+		const retargeted = id !== shownId;
+		shownId = id;
+		shownIntent = want;
+		mode = want ?? 'view';
 		proofKind = 'commit';
 		proofValue = '';
 		proofNote = '';
 		reason = '';
+		if (retargeted) {
+			editingNotes = false;
+			draft = '';
+			draftBase = '';
+			notesError = null;
+			notesLoadError = null;
+		}
 	});
+
+	let loadSeq = 0;
+	async function loadNotes(id: string) {
+		const seq = ++loadSeq;
+		try {
+			const t = await getTask(planName, id, branch);
+			if (seq !== loadSeq) return;
+			full = t;
+			notesLoadError = null;
+		} catch (e) {
+			if (seq !== loadSeq) return;
+			notesLoadError = e instanceof Error ? e.message : String(e);
+		}
+	}
+
+	// Read the task again on every fresh copy, not just on a retarget: an
+	// agent may have changed the notes since the last plan refresh.
+	$effect(() => {
+		const id = task.id;
+		void task;
+		void planName;
+		void branch;
+		untrack(() => void loadNotes(id));
+	});
+
+	/** The task as read on its own, once it matches the one shown. */
+	let fullHere = $derived(full && full.id === task.id ? full : null);
+	let notes = $derived(fullHere?.notes || null);
+	/** A task from before notes existed, its brief still in its title. */
+	let packed = $derived(hasNotes(fullHere ?? task) ? null : packedTitle(task.title));
+	/** The Hub refuses notes edits on a finished task unless forced. */
+	let notesEditable = $derived(isOpen(task.status));
+	let notesPending = $derived(!fullHere && !notesLoadError && hasNotes(task));
+	let draftBytes = $derived(notesBytes(draft.trim()));
+	let draftDirty = $derived(draft.trim() !== draftBase.trim());
+
+	async function startEditNotes() {
+		const base = notes ?? packed?.brief ?? '';
+		draftBase = base;
+		draft = base;
+		notesError = null;
+		editingNotes = true;
+		await tick();
+		notesEl?.focus();
+	}
+
+	function cancelEditNotes() {
+		editingNotes = false;
+		notesError = null;
+	}
+
+	/** PATCH the notes (`""` clears them), keeping the editor open on error. */
+	async function saveNotes(value: string) {
+		if (savingNotes) return;
+		const id = task.id;
+		savingNotes = true;
+		notesError = null;
+		try {
+			await editTask(planName, id, { notes: value }, branch);
+		} catch (e) {
+			if (task.id === id) notesError = e instanceof Error ? e.message : String(e);
+			return;
+		} finally {
+			savingNotes = false;
+		}
+		if (task.id === id) {
+			// Show what was saved now; the re-read confirms it. The reply
+			// carries `has_notes`, not the notes.
+			if (full?.id === id) full = { ...full, notes: value || null };
+			editingNotes = false;
+			void loadNotes(id);
+		}
+		await onNotesSaved?.(id, value === '');
+	}
+
+	function submitNotes(e: Event) {
+		e.preventDefault();
+		if (!draftDirty) return;
+		void saveNotes(draft.trim());
+	}
+
+	function notesKeydown(e: KeyboardEvent) {
+		if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) submitNotes(e);
+	}
 
 	let meta = $derived(STATUS_META[task.status]);
 	let parent = $derived(task.parent_id ? (graph.byId.get(task.parent_id) ?? null) : null);
@@ -69,16 +189,24 @@
 		task.blocked_by.map((id) => ({ id, task: graph.byId.get(id) ?? null }))
 	);
 
+	// Focus the panel when it opens or is retargeted, but not on a plan
+	// refresh: that would pull focus out of a field being typed in.
 	let panelEl: HTMLElement | undefined = $state();
+	let focusedId: string | null = null;
 	$effect(() => {
-		void task.id;
-		panelEl?.focus();
+		const id = task.id;
+		if (!panelEl || id === focusedId) return;
+		focusedId = id;
+		panelEl.focus();
 	});
 
 	function onKeydown(e: KeyboardEvent) {
 		if (e.key === 'Escape') {
 			e.preventDefault();
-			if (mode !== 'view') mode = 'view';
+			// Esc never throws away an edited draft: Cancel does that.
+			if (editingNotes) {
+				if (!draftDirty) cancelEditNotes();
+			} else if (mode !== 'view') mode = 'view';
 			else onClose();
 		}
 	}
@@ -156,9 +284,6 @@
 
 	<div class="panel-body">
 		<h3 class="title" class:struck={task.status === 'abandoned'}>{task.title}</h3>
-		{#if task.description}
-			<p class="description">{task.description}</p>
-		{/if}
 
 		<!-- Legal transition actions -->
 		{#if isOpen(task.status)}
@@ -236,6 +361,85 @@
 					<button type="button" class="act" onclick={() => (mode = 'view')}>Cancel</button>
 				</div>
 			</div>
+		{/if}
+
+		{#if notesEditable || hasNotes(fullHere ?? task)}
+			<section class="notes" aria-label="Notes">
+				<div class="notes-head">
+					<span class="micro-label">Notes</span>
+					{#if notesEditable && !editingNotes}
+						<button
+							type="button"
+							class="notes-edit"
+							disabled={!fullHere}
+							onclick={startEditNotes}
+						>{notes || packed ? 'Edit' : 'Add'}</button>
+					{/if}
+				</div>
+				{#if editingNotes}
+					<form class="subform" onsubmit={submitNotes}>
+						{#if packed}
+							<p class="hint">
+								This brief is still part of the task's title, from before tasks had
+								notes. Saving takes it out of the title: what you save here becomes
+								the notes.
+							</p>
+						{/if}
+						<textarea
+							bind:this={notesEl}
+							bind:value={draft}
+							onkeydown={notesKeydown}
+							rows="10"
+							aria-label="Task notes"
+							aria-describedby="notes-bytes"
+							placeholder="why it matters, what to check, what counts as proof, links…"
+							readonly={savingNotes}
+						></textarea>
+						<span
+							id="notes-bytes"
+							class="notes-bytes"
+							class:over={draftBytes > MAX_NOTES_BYTES}
+						>{formatBytes(draftBytes)} of {formatBytes(MAX_NOTES_BYTES)}</span>
+						{#if notesError}
+							<p class="notes-error" role="alert">{notesError}</p>
+						{/if}
+						<div class="subform-actions">
+							<button type="submit" class="act primary" disabled={!draftDirty || savingNotes}>
+								{savingNotes ? 'Saving…' : 'Save notes'}
+							</button>
+							<button type="button" class="act" disabled={savingNotes} onclick={cancelEditNotes}>
+								Cancel
+							</button>
+							{#if notes}
+								<span class="spacer"></span>
+								<ConfirmButton
+									label="Clear notes"
+									confirmLabel="Confirm clear"
+									danger
+									disabled={savingNotes}
+									onconfirm={() => void saveNotes('')}
+								/>
+							{/if}
+						</div>
+					</form>
+				{:else if notes}
+					<!-- Plain text: interpolation escapes it, and pre-wrap keeps its line breaks. -->
+					<div class="notes-text" data-testid="task-notes">{notes}</div>
+				{:else if notesLoadError && !fullHere}
+					<p class="notes-error" role="alert">
+						Couldn't load the notes: {notesLoadError}
+						<button type="button" class="notes-edit" onclick={() => void loadNotes(task.id)}>
+							Retry
+						</button>
+					</p>
+				{:else if notesPending}
+					<p class="notes-empty">Loading notes…</p>
+				{:else}
+					<p class="notes-empty">
+						{packed ? "No notes yet: this task's brief is still in its title." : 'No notes.'}
+					</p>
+				{/if}
+			</section>
 		{/if}
 
 		{#if task.proof}
@@ -342,7 +546,7 @@
 
 		<details class="raw-json">
 			<summary>Raw JSON</summary>
-			<pre>{rawJson(task)}</pre>
+			<pre>{rawJson(fullHere ?? task)}</pre>
 		</details>
 	</div>
 </div>
@@ -451,12 +655,75 @@
 		text-decoration: line-through;
 		color: var(--lens-text-secondary);
 	}
-	.description {
-		margin: 0;
-		color: var(--lens-text-secondary);
+	.notes {
+		display: flex;
+		flex-direction: column;
+		gap: var(--lens-space-2);
+	}
+	.notes-head {
+		display: flex;
+		align-items: center;
+		gap: var(--lens-space-2);
+	}
+	.notes-edit {
+		background: transparent;
+		border: none;
+		padding: 0;
+		color: var(--lens-accent);
+		font-size: var(--lens-font-size-2xs);
+		cursor: pointer;
+	}
+	.notes-edit:hover:not(:disabled) {
+		color: var(--lens-accent-hover);
+		text-decoration: underline;
+	}
+	.notes-edit:disabled {
+		color: var(--lens-text-faint);
+		cursor: default;
+	}
+	.notes-text {
+		color: var(--lens-text);
 		font-size: var(--lens-font-size-sm);
 		line-height: var(--lens-leading);
 		white-space: pre-wrap;
+		overflow-wrap: anywhere;
+	}
+	.notes-empty {
+		margin: 0;
+		color: var(--lens-text-faint);
+		font-size: var(--lens-font-size-xs);
+		font-style: italic;
+	}
+	.notes-error {
+		margin: 0;
+		color: var(--lens-danger);
+		font-size: var(--lens-font-size-xs);
+		line-height: var(--lens-leading);
+		overflow-wrap: anywhere;
+	}
+	.notes-bytes {
+		align-self: flex-end;
+		font-family: var(--lens-font-mono);
+		font-size: var(--lens-font-size-2xs);
+		color: var(--lens-muted);
+	}
+	.notes-bytes.over {
+		color: var(--lens-danger);
+	}
+	.subform textarea {
+		background: var(--lens-bg);
+		border: 1px solid var(--lens-border);
+		border-radius: var(--lens-radius-sm);
+		color: var(--lens-text);
+		padding: 0.4rem 0.55rem;
+		font-family: var(--lens-font-sans);
+		font-size: var(--lens-font-size-sm);
+		line-height: var(--lens-leading);
+		resize: vertical;
+		min-height: 8rem;
+	}
+	.spacer {
+		flex: 1;
 	}
 	.actions {
 		display: flex;

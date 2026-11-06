@@ -13,12 +13,16 @@ up a minor version.
   - `plan_add` and `plan_edit` take `notes`, where `""` clears them; so do `POST /api/plans/{name}/tasks` and `PATCH …/tasks/{id}`, and `ctx plan add` and `ctx plan edit` (`--notes`, `-d`). `description` is now the old name for `notes`: it writes notes rather than the title, and passing both is refused.
   - Notes are validated like a title, except that they may span lines: no bidi overrides, zero-width or tag characters, and no controls other than newline and tab.
   - **Listings stay cheap.** `plan_show`, `plan_next`, and the echo of `plan_add`, `plan_edit`, `plan_done` and `plan_abandon` mark a task with notes `has_notes: true`, and leave the key out on a task without. The notes come in full from `plan_start` (where work begins), from `plan_tasks`, which takes a new `task_id` to read one task, and from the `GET …/tasks` routes. `ctx plan show` marks such a task `[notes]`, and `ctx plan tasks --task <id>` prints them.
+- **Lens shows and edits task notes.** Board cards and list rows mark a task that has notes with `¶`. The task panel reads the task on its own for its notes and shows them as plain text, line breaks kept. On an open task they can be added, edited and cleared there; when the Hub refuses them (over 16 KiB, or a character notes may not hold), its message shows beside the editor, which keeps the draft. A task whose brief is still packed into its title shows the title as stored; editing its notes starts from that brief, and saving takes it out of the title. Adding a task sends `notes`.
 - **`ctx plan unpack <plan>` (or `--all`, with `--dry-run`) moves packed descriptions into notes,** and leaves each title with only its own part. Over REST it's `POST /api/plans/{name}/unpack`. It covers every status, takes two commits per task (notes, then title), and is safe to run again or after a run cut short. A task whose notes already hold something else is reported as kept and left alone. On one store, packed descriptions were 409 of 454 tasks and 27% of every `plan_show` character, and 36% of the largest plan's 43,000.
 
 ### Changed
 - **A task added before notes existed keeps its packed title until it's edited or unpacked.** Such a title reads exactly as it was stored. The first `plan_edit` that changes its title or notes moves the description into the notes (or replaces it with the new notes), writing the notes before the title, so an edit cut short leaves the description in both places, never in neither. Edits to only its priority or blockers leave the title as it is.
 - The description cap of 8 KiB is replaced by the notes cap of 16 KiB (`MAX_NOTES_LEN`, AgentStateGraph's `MAX_NOTES_BYTES`).
 - **Built on AgentStateGraph 1.5.1** (was 1.5.0), which adds task notes and sync. On the first open of a store, it moves the store's taints, reminders and epochs onto a control ref, once, in one commit; on a large store this takes a moment. Branch names beginning with `_control` or `remotes/` are now reserved and refused.
+
+### Fixed
+- **Lens's task panel keeps an open form through a plan refresh.** Every refresh (each 30 seconds, with auto-refresh on) handed the panel a fresh copy of its task, which closed an open complete or abandon form and took the focus back. It now resets only when it moves to another task.
 
 ## [v1.2.1] — 2026-11-02
 

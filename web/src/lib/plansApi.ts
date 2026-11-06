@@ -28,9 +28,19 @@ export interface TaskCounts {
 
 export interface Task {
 	id: string;
+	/**
+	 * As stored. A task added before notes existed may still carry its
+	 * brief here, after " — ", until it is edited or unpacked.
+	 */
 	title: string;
-	/** Optional long-form body — present when the task was created with one. */
-	description?: string | null;
+	/**
+	 * The task's brief: plain text, may span lines, at most 16 KiB. Only
+	 * the single-task and task-list routes (and start) send it, `null`
+	 * when the task has none; listings send `has_notes` instead.
+	 */
+	notes?: string | null;
+	/** Listings: `true` when the task has notes; the key is absent otherwise. */
+	has_notes?: boolean;
 	status: TaskStatus;
 	priority: Priority;
 	parent_id: string | null;
@@ -108,9 +118,49 @@ export async function listPlanTasks(
 	);
 }
 
+/** `GET /api/plans/{plan}/tasks/{taskId}`: one task, notes in full. */
+export async function getTask(plan: string, taskId: string, branch = 'main'): Promise<Task> {
+	return fetchJson(
+		`/api/plans/${encodeURIComponent(plan)}/tasks/${encodeURIComponent(taskId)}?ref=${ref(branch)}`
+	);
+}
+
+/** The fields `editTask` can change; send only those to change. */
+export interface EditTaskRequest {
+	title?: string;
+	/** New notes, or `""` to clear them. */
+	notes?: string;
+	priority?: Priority;
+	/** Replaces the whole list; `[]` clears it. */
+	blocked_by?: string[];
+}
+
+/**
+ * `PATCH /api/plans/{plan}/tasks/{taskId}`. The reply carries `has_notes`
+ * rather than the notes, plus `changed`: the fields that changed (empty
+ * when the edit asked for what the task already had). A task whose brief
+ * is still packed into its title gets that title shortened too.
+ */
+export async function editTask(
+	plan: string,
+	taskId: string,
+	edit: EditTaskRequest,
+	branch = 'main'
+): Promise<Task & { changed: string[] }> {
+	return fetchJson(
+		`/api/plans/${encodeURIComponent(plan)}/tasks/${encodeURIComponent(taskId)}`,
+		{
+			method: 'PATCH',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ ...edit, ref: branch })
+		}
+	);
+}
+
 export interface AddTaskRequest {
 	title: string;
-	description?: string;
+	/** The task's brief; may span lines, at most 16 KiB. */
+	notes?: string;
 	priority?: Priority;
 	parent_id?: string;
 	assigned_to?: string;

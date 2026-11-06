@@ -358,6 +358,14 @@
 		}
 	}
 
+	// The panel saves notes itself (its errors stay beside the editor);
+	// the plan is reloaded for `has_notes`, and for the title an edit may
+	// have shortened (a brief packed into it moves into the notes).
+	async function handleNotesSaved(taskId: string, cleared: boolean) {
+		await refreshSelected();
+		toast(cleared ? `Notes cleared on ${taskId}` : `Notes saved on ${taskId}`);
+	}
+
 	/* ---------------------------------------------------------------- *
 	 *  Add task / create plan                                          *
 	 * ---------------------------------------------------------------- */
@@ -710,6 +718,7 @@
 		onStart={doStart}
 		onComplete={doComplete}
 		onAbandon={doAbandon}
+		onNotesSaved={handleNotesSaved}
 	/>
 {/if}
 

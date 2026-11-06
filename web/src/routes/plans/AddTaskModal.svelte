@@ -1,6 +1,6 @@
 <script lang="ts">
 	import type { AddTaskRequest, Priority, Task } from '$lib/plansApi';
-	import { STATUS_META, isOpen } from './model';
+	import { MAX_NOTES_BYTES, STATUS_META, formatBytes, isOpen, notesBytes } from './model';
 
 	let {
 		tasks,
@@ -16,12 +16,14 @@
 	} = $props();
 
 	let title = $state('');
-	let description = $state('');
+	let notes = $state('');
 	let priority: Priority = $state('medium');
 	let assignedTo = $state('');
 	let parentId = $state('');
 	let blockedBy: Set<string> = $state(new Set());
 	let submitting = $state(false);
+
+	let notesSize = $derived(notesBytes(notes.trim()));
 
 	/** Only open tasks make sense as blockers of a brand-new task. */
 	let blockerOptions = $derived(tasks.filter((t) => isOpen(t.status)));
@@ -39,7 +41,7 @@
 		submitting = true;
 		try {
 			const req: AddTaskRequest = { title: title.trim(), priority };
-			if (description.trim()) req.description = description.trim();
+			if (notes.trim()) req.notes = notes.trim();
 			if (assignedTo.trim()) req.assigned_to = assignedTo.trim();
 			if (parentId) req.parent_id = parentId;
 			if (blockedBy.size > 0) req.blocked_by = [...blockedBy];
@@ -76,8 +78,19 @@
 				<input type="text" bind:value={title} placeholder="task title (imperative)" required />
 			</label>
 			<label>
-				Description (optional)
-				<textarea bind:value={description} rows="2" placeholder="details, acceptance criteria…"></textarea>
+				Notes (optional)
+				<!-- aria-label: the byte count below is in the label too. -->
+				<textarea
+					bind:value={notes}
+					aria-label="Notes"
+					rows="4"
+					placeholder="why it matters, what to check, what counts as proof, links…"
+				></textarea>
+				{#if notesSize > 0}
+					<span class="bytes" class:over={notesSize > MAX_NOTES_BYTES}>
+						{formatBytes(notesSize)} of {formatBytes(MAX_NOTES_BYTES)}
+					</span>
+				{/if}
 			</label>
 			<div class="row">
 				<label>
@@ -213,6 +226,15 @@
 	textarea {
 		resize: vertical;
 		font-family: var(--lens-font-sans);
+	}
+	.bytes {
+		align-self: flex-end;
+		font-family: var(--lens-font-mono);
+		text-transform: none;
+		letter-spacing: normal;
+	}
+	.bytes.over {
+		color: var(--lens-danger);
 	}
 	.row {
 		display: flex;
