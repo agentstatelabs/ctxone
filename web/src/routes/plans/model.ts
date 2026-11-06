@@ -299,16 +299,62 @@ export function hashString(s: string): number {
 }
 
 /* ------------------------------------------------------------------ *
+ *  Notes                                                             *
+ * ------------------------------------------------------------------ */
+
+/** The Hub's cap on a task's notes, in UTF-8 bytes (16 KiB). */
+export const MAX_NOTES_BYTES = 16 * 1024;
+
+/**
+ * Whether the task has notes: listings say so with `has_notes`; a task
+ * read on its own carries the notes themselves.
+ */
+export function hasNotes(t: Task): boolean {
+	return t.has_notes === true || (typeof t.notes === 'string' && t.notes.length > 0);
+}
+
+/** How many bytes the Hub counts in `s` against [`MAX_NOTES_BYTES`]. */
+export function notesBytes(s: string): number {
+	return new TextEncoder().encode(s).length;
+}
+
+/** "2.3 KiB", "512 B": a compact size for the notes counter. */
+export function formatBytes(n: number): string {
+	return n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KiB`;
+}
+
+const DESCRIPTION_SEPARATOR = ' — ';
+
+/**
+ * A title stored before tasks had notes, split back into its title and its
+ * brief: the brief is everything after the first " — ", and both sides
+ * must hold something. `null` for a title that isn't packed.
+ *
+ * Mirrors the Hub's `packed_title`. Only a task without notes counts as
+ * packed, and the first edit of its notes takes the brief out of its title.
+ */
+export function packedTitle(title: string): { title: string; brief: string } | null {
+	const at = title.indexOf(DESCRIPTION_SEPARATOR);
+	if (at < 0) return null;
+	const head = title.slice(0, at);
+	const brief = title.slice(at + DESCRIPTION_SEPARATOR.length);
+	if (!head.trim() || !brief.trim()) return null;
+	return { title: head, brief };
+}
+
+/* ------------------------------------------------------------------ *
  *  Search                                                            *
  * ------------------------------------------------------------------ */
 
-/** Case-insensitive match over title, id, assignee and description. */
+/**
+ * Case-insensitive match over title, id, assignee and notes. Listings
+ * carry no notes, so on a plan's board this matches the title (a packed
+ * brief included), id and assignee.
+ */
 export function taskMatches(t: Task, q: string): boolean {
 	if (!q) return true;
 	const m = makeMatcher(q);
-	return (
-		m(t.title) || m(t.id) || m(t.assigned_to ?? '') || m(t.description ?? '')
-	);
+	return m(t.title) || m(t.id) || m(t.assigned_to ?? '') || m(t.notes ?? '');
 }
 
 /* ------------------------------------------------------------------ *

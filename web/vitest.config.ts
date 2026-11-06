@@ -1,5 +1,6 @@
 import { defineConfig } from 'vitest/config';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
+import { fileURLToPath } from 'node:url';
 
 /*
 	`svelte()`, NOT `sveltekit()`. The kit plugin expects a dev/build server it
@@ -12,11 +13,18 @@ import { svelte } from '@sveltejs/vite-plugin-svelte';
 	`lifecycle_function_unavailable` as soon as a test calls `mount()`. The
 	browser condition plus the jsdom environment gets component tests the
 	client build and a DOM to mount into.
+
+	Without the kit plugin nothing defines `$lib`, so it's aliased here, the
+	same as SvelteKit does, for the route modules and components that import
+	from it.
 */
 export default defineConfig({
 	plugins: [svelte()],
 	resolve: {
-		conditions: ['browser']
+		conditions: ['browser'],
+		alias: {
+			$lib: fileURLToPath(new URL('./src/lib', import.meta.url))
+		}
 	},
 	test: {
 		environment: 'jsdom',

@@ -11,6 +11,7 @@
 		canAbandon,
 		canComplete,
 		canStart,
+		hasNotes,
 		openBlockers,
 		subtaskProgress,
 		taskActivityTs
@@ -254,6 +255,9 @@
 							{#if row.depth > 0}<span class="tree-tick">└</span>{/if}
 							<span class="tid">{t.id}</span>
 							<span class="ttl" class:struck={t.status === 'abandoned'}>{t.title}</span>
+							{#if hasNotes(t)}
+								<span class="notes-mark" role="img" aria-label="Has notes" title="Has notes">¶</span>
+							{/if}
 							{#if blockers.length > 0}
 								<span
 									class="blocked"
@@ -454,6 +458,12 @@
 	.ttl.struck {
 		text-decoration: line-through;
 		color: var(--lens-text-secondary);
+	}
+	.notes-mark {
+		color: var(--lens-text-secondary);
+		font-family: var(--lens-font-mono);
+		font-size: var(--lens-font-size-2xs);
+		flex: none;
 	}
 	.blocked {
 		color: var(--lens-warn);

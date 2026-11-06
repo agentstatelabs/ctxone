@@ -7,6 +7,7 @@
 		canAbandon,
 		canComplete,
 		canStart,
+		hasNotes,
 		openBlockers,
 		subtaskProgress
 	} from './model';
@@ -74,6 +75,9 @@
 >
 	<div class="card-top">
 		<span class="task-id">{task.id}</span>
+		{#if hasNotes(task)}
+			<span class="notes-mark" role="img" aria-label="Has notes" title="Has notes">¶</span>
+		{/if}
 		{#if blockers.length > 0}
 			<span class="blocked" title={blockersTooltip()}>⛓ {blockers.length}</span>
 		{/if}
@@ -159,6 +163,9 @@
 	}
 	.task-id {
 		color: var(--lens-muted);
+	}
+	.notes-mark {
+		color: var(--lens-text-secondary);
 	}
 	.blocked {
 		color: var(--lens-warn);
