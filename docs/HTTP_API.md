@@ -1001,27 +1001,34 @@ Add a task. Body fields:
 | Field | Type | Required |
 |-------|------|----------|
 | `title` | string | yes |
-| `description` | string | no |
+| `notes` | string | no — the task's brief; may span lines, at most 16 KiB |
+| `description` | string | no — the old name for `notes`; send one or the other |
 | `priority` | `low`/`medium`/`high`/`critical` | no |
 | `parent_id` | string | no (subtask support) |
 | `assigned_to` | string | no — agent id |
 | `blocked_by` | string[] | no |
 | `ref` | string | no |
 
-Returns the created task on `201`.
+Returns the created task on `201`, with `has_notes: true` in place of
+its notes.
+
+Notes come back in full from the two `GET …/tasks` routes and from
+`…/start`. Every other plan route, including `GET /api/plans/{name}`,
+marks a task that has notes with `has_notes: true` and leaves the key
+out otherwise.
 
 ### `GET /api/plans/{name}/tasks?ref=main`
 
-List tasks in a plan, flat.
+List tasks in a plan, flat, notes included.
 
 ### `GET /api/plans/{name}/tasks/{task_id}?ref=main`
 
-Fetch a single task.
+Fetch a single task, notes included.
 
 ### `POST /api/plans/{name}/tasks/{task_id}/start`
 
-Transition `pending → in_progress`. Returns the updated task. Returns
-`409 Conflict` if blockers aren't done.
+Transition `pending → in_progress`. Returns the updated task, notes
+included. Returns `409 Conflict` if blockers aren't done.
 
 ### `POST /api/plans/{name}/tasks/{task_id}/complete`
 
@@ -1042,26 +1049,46 @@ reasons return `400`).
 
 ### `PATCH /api/plans/{name}/tasks/{task_id}`
 
-Change a task's title, description, priority or blockers. Send only the
+Change a task's title, notes, priority or blockers. Send only the
 fields to change:
 
 ```json
 { "title": "Rewrite the hero", "blocked_by": ["t-009"], "ref": "main" }
 ```
 
-- `title` keeps the task's description, and `description` keeps its title
-  (`""` removes the description).
+- `title` keeps the task's notes, and `notes` keeps its title (`""`
+  clears the notes). `description` is the old name for `notes`; sending
+  both is a `400`.
+- A task added before notes existed keeps its description in its title,
+  after ` — `. The first edit that changes its title or notes moves that
+  description into the notes (or replaces it), and the title keeps only
+  its own part.
 - `blocked_by` replaces the whole list (`[]` clears it).
 - `force: true` allows editing a done or abandoned task.
 
 Status, proof, assignment and timestamps never change. Returns the task
-with `changed`, the fields that changed (empty when nothing did).
+with `changed`, the fields that changed (empty when nothing did), and
+`has_notes` in place of the notes.
 
 Errors:
-- `400`: an empty edit, a blank title, or an unknown priority.
+- `400`: an empty edit, a blank title, an unknown priority, notes over
+  16 KiB or with unsafe characters, or both `notes` and `description`.
 - `404`: an unknown task, or a blocker that isn't in the plan.
 - `409`: blockers that would form a cycle, or a finished task without
   `force`.
+
+### `POST /api/plans/{name}/unpack?ref=main&dry_run=false`
+
+Move every description the plan's tasks packed into their titles (after
+` — `), from before tasks had notes, into their notes, and leave each
+title with only its own part. Covers every status and takes two commits
+per task (notes, then title), made as the `X-CTXone-Agent`. With
+`dry_run=true`, nothing is written.
+
+Returns `{ "plan", "dry_run", "unpacked": [ids], "kept": [ids] }`. A task
+in `kept` has a separator in its title but notes that hold something
+else, and is left alone. Safe to call again, or after a run cut short.
+Behind `ctx plan unpack`.
 
 ### `POST /api/plans/{name}/archive`
 

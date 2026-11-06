@@ -287,3 +287,99 @@ async fn mcp_commits_carry_the_agent_the_request_names() {
     tool(&app, "/mcp", &session, "remember", fact(3)).await;
     assert_eq!(last_commit_agent(&repo), "test-agent");
 }
+
+#[tokio::test]
+async fn mcp_plan_tools_carry_notes_only_where_a_task_is_read() {
+    let app = mcp_router();
+    let uri = "/mcp";
+    let session = mcp_session(&app, uri).await;
+    let brief = "Why: it matters.\n\n1. Check it.\n2. Prove it.";
+
+    tool(&app, uri, &session, "plan_new", json!({ "name": "p" })).await;
+    let added = tool(
+        &app,
+        uri,
+        &session,
+        "plan_add",
+        json!({ "plan_id": "p", "title": "do it", "notes": brief }),
+    )
+    .await;
+    assert_eq!(added["title"], "do it", "{added}");
+    assert_eq!(added["has_notes"], true);
+    assert!(added.get("notes").is_none(), "{added}");
+
+    // `description` is the old name: it writes notes, not the title.
+    let old_name = tool(
+        &app,
+        uri,
+        &session,
+        "plan_add",
+        json!({ "plan_id": "p", "title": "and this", "description": "the why" }),
+    )
+    .await;
+    assert_eq!(old_name["title"], "and this", "{old_name}");
+
+    let shown = tool(&app, uri, &session, "plan_show", json!({ "plan_id": "p" })).await;
+    let tasks = shown["tasks"].as_array().expect("tasks");
+    assert!(tasks.iter().all(|t| t.get("notes").is_none()), "{shown}");
+    assert!(tasks.iter().all(|t| t["has_notes"] == true), "{shown}");
+
+    let next = tool(&app, uri, &session, "plan_next", json!({ "plan_id": "p" })).await;
+    assert!(next.get("notes").is_none(), "{next}");
+
+    let one = tool(
+        &app,
+        uri,
+        &session,
+        "plan_tasks",
+        json!({ "plan_id": "p", "task_id": "t-002" }),
+    )
+    .await;
+    assert_eq!(one.as_array().map(Vec::len), Some(1), "{one}");
+    assert_eq!(one[0]["notes"], "the why");
+    let all = tool(&app, uri, &session, "plan_tasks", json!({ "plan_id": "p" })).await;
+    assert_eq!(all[0]["notes"], brief);
+
+    let started = tool(
+        &app,
+        uri,
+        &session,
+        "plan_start",
+        json!({ "plan_id": "p", "task_id": "t-001" }),
+    )
+    .await;
+    assert_eq!(started["notes"], brief, "{started}");
+
+    let both = tool(
+        &app,
+        uri,
+        &session,
+        "plan_edit",
+        json!({ "plan_id": "p", "task_id": "t-001", "notes": "a", "description": "b" }),
+    )
+    .await;
+    assert!(
+        both["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("not both")),
+        "{both}"
+    );
+    let edited = tool(
+        &app,
+        uri,
+        &session,
+        "plan_edit",
+        json!({ "plan_id": "p", "task_id": "t-001", "notes": "line one\nline two" }),
+    )
+    .await;
+    assert_eq!(edited["changed"], json!(["notes"]), "{edited}");
+    let one = tool(
+        &app,
+        uri,
+        &session,
+        "plan_tasks",
+        json!({ "plan_id": "p", "task_id": "t-001" }),
+    )
+    .await;
+    assert_eq!(one[0]["notes"], "line one\nline two");
+}

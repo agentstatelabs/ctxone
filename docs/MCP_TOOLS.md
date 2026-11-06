@@ -513,7 +513,8 @@ every step as a task before you start executing.
 |-------|------|----------|-------------|
 | `plan_id` | string | yes | Plan name |
 | `title` | string | yes | Imperative sentence |
-| `description` | string | no | Longer-form (appended to title) |
+| `notes` | string | no | The task's brief: why, what to check, what counts as proof. May span lines; at most 16 KiB |
+| `description` | string | no | The old name for `notes`; pass one or the other |
 | `priority` | enum | no | `low` / `medium` / `high` / `critical` |
 | `parent_id` | string | no | Parent task id for a subtask |
 | `assigned_to` | string | no | Agent id (e.g. `claude-code`, `codex`) |
@@ -523,6 +524,9 @@ every step as a task before you start executing.
 Passing `assigned_to` enables the state-driven orchestration pattern —
 see `plan_next` below.
 
+The result echoes the task with `has_notes: true` in place of the notes.
+See [Task notes](#task-notes) for where notes are returned.
+
 ---
 
 ### `plan_start`
@@ -531,6 +535,7 @@ Transition `pending → in_progress`.
 
 **When to call:** you begin working on a task. Refuses with an error
 listing the blockers if any entry in `blocked_by` is not yet `done`.
+The result carries the task's `notes` in full.
 
 **Parameters:** `plan_id`, `task_id`, `reason?`, `ref?`.
 
@@ -569,12 +574,12 @@ no longer wanted. Legal from both `pending` and `in_progress`.
 
 ### `plan_edit`
 
-Change a task's title, description, priority or blockers after it was
-added. Status, proof, assignment and timestamps never change.
+Change a task's title, notes, priority or blockers after it was added.
+Status, proof, assignment and timestamps never change.
 
-**When to call:** a task's scope or wording changed, or its blockers need
-fixing. An abandoned blocker never counts as done, so after abandoning a
-task, edit its dependents' blockers.
+**When to call:** a task's scope or wording changed, its brief needs
+updating, or its blockers need fixing. An abandoned blocker never counts
+as done, so after abandoning a task, edit its dependents' blockers.
 
 **Parameters:**
 
@@ -582,14 +587,23 @@ task, edit its dependents' blockers.
 |-------|------|----------|-------------|
 | `plan_id` | string | yes | Plan name |
 | `task_id` | string | yes | Task to edit |
-| `title` | string | no | New title; the description is kept |
-| `description` | string | no | New description, or `""` to remove it; the title is kept |
+| `title` | string | no | New title; the notes are kept |
+| `notes` | string | no | New notes (may span lines, at most 16 KiB), or `""` to clear them; the title is kept |
+| `description` | string | no | The old name for `notes`; pass one or the other |
 | `priority` | string | no | `low`, `medium`, `high` or `critical` |
 | `blocked_by` | string[] | no | The whole new blocker list (`[]` clears it). Each must be a task in this plan, and the list can't form a cycle |
 | `force` | bool | no | Edit a done or abandoned task (default false) |
 | `ref` | string | no | Branch (default `main`) |
 
-Returns the task with `changed`, the fields that changed.
+Returns the task with `changed`, the fields that changed, and
+`has_notes` in place of the notes.
+
+A task added before notes existed keeps its description in its title,
+after ` — `. The first edit that changes its title or notes moves that
+description into the notes (or replaces it with the new notes), and the
+title keeps only its own part. Other edits leave such a title as it is.
+To do a whole plan at once, run `ctx plan unpack` (see
+[Task notes](#task-notes)).
 
 ---
 
@@ -615,7 +629,8 @@ agent ids each call `plan_next(assigned_to="me")` and pick up their
 own work without stepping on each other. Without `assigned_to`, any
 agent sees any pickable task.
 
-Returns the task object or `null`.
+Returns the task object, with `has_notes` in place of the notes, or
+`null`. `plan_start` returns the notes.
 
 ---
 
@@ -633,7 +648,9 @@ resuming prior work.
 
 ### `plan_show`
 
-Fetch a plan with its full task list.
+Fetch a plan with its full task list. Notes are left out to keep it
+small: a task with notes has `has_notes: true`, and a task without notes
+has no `has_notes` key.
 
 **Parameters:** `plan_id`, `ref?`.
 
@@ -641,9 +658,39 @@ Fetch a plan with its full task list.
 
 ### `plan_tasks`
 
-List the tasks of a plan, flat.
+List the tasks of a plan, flat, notes included. Pass `task_id` to read
+just one task.
 
-**Parameters:** `plan_id`, `ref?`.
+**Parameters:** `plan_id`, `task_id?`, `ref?`. With `task_id`, the result
+is still an array, of one task.
+
+---
+
+### Task notes
+
+A task's `notes` hold its brief: why it matters, what to check, what
+counts as proof, links. They may span lines and hold at most 16 KiB of
+UTF-8, and they're validated like a title (no bidi overrides, zero-width
+or tag characters, and no controls other than newline and tab). A task
+added before notes existed has its description packed into its title
+after ` — `, and that title still reads as it was stored.
+
+Notes are returned in full only where a task is read to be worked on,
+so a listing costs no more than it did before:
+
+| Returns `notes` in full | Returns `has_notes: true` instead |
+|---|---|
+| `plan_start`, `plan_tasks` (all tasks, or one with `task_id`) | `plan_show`, `plan_next`, and the echo of `plan_add`, `plan_edit`, `plan_done` and `plan_abandon` |
+
+Over HTTP, `GET /api/plans/{name}/tasks`, `GET /api/plans/{name}/tasks/{id}`
+and `POST …/start` return the notes; the other plan routes return
+`has_notes`.
+
+`ctx plan unpack <plan>` (or `--all`, with `--dry-run` to preview) moves
+every packed description in a plan into its task's notes. It covers every
+status, takes two commits per task (notes, then title), and is safe to
+run again or after a run cut short. A task whose notes already hold
+something else is reported as kept and left alone.
 
 ---
 

@@ -1099,7 +1099,8 @@ async fn call_text(router: axum::Router, req: Request<Body>) -> (StatusCode, Str
     (status, String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// Plan `p1` with t-001 and t-002, where t-002 ("two — why") waits on t-001.
+/// Plan `p1` with t-001 and t-002, where t-002 ("two", notes "why", sent
+/// as `description`, the old name) waits on t-001.
 async fn plan_with_two_tasks(router: &axum::Router) {
     let _ = call_json(
         router.clone(),
@@ -1138,7 +1139,8 @@ async fn patch_task_changes_only_the_fields_given() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["title"], "two, retitled — why");
+    assert_eq!(body["title"], "two, retitled");
+    assert_eq!(body["has_notes"], true);
     assert_eq!(body["priority"], "critical");
     assert_eq!(body["blocked_by"], json!([]));
     assert_eq!(body["status"], "pending");
@@ -1147,7 +1149,8 @@ async fn patch_task_changes_only_the_fields_given() {
 
     // The edit is stored, and the task is no longer blocked.
     let (_, fetched) = call_json(router.clone(), get("/api/plans/p1/tasks/t-002")).await;
-    assert_eq!(fetched["title"], "two, retitled — why");
+    assert_eq!(fetched["title"], "two, retitled");
+    assert_eq!(fetched["notes"], "why");
     let (status, _) = call_json(
         router,
         post_json_with_agent("/api/plans/p1/tasks/t-002/start", "test", json!({})),
@@ -1221,4 +1224,118 @@ async fn patch_task_refusals() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["status"], "abandoned");
     assert_eq!(body["title"], "one (gone)");
+}
+
+#[tokio::test]
+async fn notes_are_read_in_full_and_listed_as_a_flag() {
+    let router = test_router();
+    plan_with_two_tasks(&router).await;
+    let brief = "Why: it matters.\n\n1. Check it.\n2. Prove it.";
+    let (status, added) = call_json(
+        router.clone(),
+        post_json_with_agent(
+            "/api/plans/p1/tasks",
+            "test",
+            json!({"title": "three", "notes": brief}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{added}");
+    // The echo marks the notes; it doesn't repeat them.
+    assert_eq!(added["has_notes"], true);
+    assert!(added.get("notes").is_none(), "{added}");
+
+    // One task, and the flat list: notes in full.
+    let (_, one) = call_json(router.clone(), get("/api/plans/p1/tasks/t-003")).await;
+    assert_eq!(one["notes"], brief);
+    let (_, all) = call_json(router.clone(), get("/api/plans/p1/tasks")).await;
+    assert_eq!(all[2]["notes"], brief);
+    assert!(all[0]["notes"].is_null());
+
+    // The plan: a flag, not the notes.
+    let (_, plan) = call_json(router.clone(), get("/api/plans/p1")).await;
+    let tasks = plan["tasks"].as_array().unwrap();
+    assert!(tasks.iter().all(|t| t.get("notes").is_none()), "{plan}");
+    assert!(tasks[0].get("has_notes").is_none());
+    assert_eq!(tasks[1]["has_notes"], true);
+    assert_eq!(tasks[2]["has_notes"], true);
+
+    // Starting the task hands over its notes.
+    let (status, started) = call_json(
+        router.clone(),
+        post_json_with_agent("/api/plans/p1/tasks/t-003/start", "test", json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{started}");
+    assert_eq!(started["notes"], brief);
+
+    // Both names at once is refused; "" clears.
+    let (status, text) = call_text(
+        router.clone(),
+        patch_json_with_agent(
+            "/api/plans/p1/tasks/t-003",
+            "test",
+            json!({"notes": "a", "description": "b"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+    let (status, cleared) = call_json(
+        router.clone(),
+        patch_json_with_agent("/api/plans/p1/tasks/t-003", "test", json!({"notes": ""})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cleared}");
+    assert_eq!(cleared["changed"], json!(["notes"]));
+    assert!(cleared.get("has_notes").is_none());
+}
+
+#[tokio::test]
+async fn unpack_moves_packed_titles_into_notes() {
+    use agentstategraph_tasks::{Priority, TaskStore};
+
+    let repo = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
+    repo.init().unwrap();
+    // Tasks as a CTXone before notes stored them: the description packed
+    // into the title.
+    let store = TaskStore::new(repo.clone(), "/plans", "old-ctx");
+    store.create_plan("main", "old", None).unwrap();
+    for title in ["one — the first brief", "two"] {
+        store
+            .add_task("main", "old", title, Priority::Medium, None, vec![], None)
+            .unwrap();
+    }
+    let router = http::router(repo, Arc::new(SessionRegistry::new()));
+
+    let (status, dry) = call_json(
+        router.clone(),
+        post_json_with_agent("/api/plans/old/unpack?dry_run=true", "migrator", json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{dry}");
+    assert_eq!(dry["unpacked"], json!(["t-001"]));
+    assert_eq!(dry["dry_run"], true);
+    let (_, one) = call_json(router.clone(), get("/api/plans/old/tasks/t-001")).await;
+    assert_eq!(
+        one["title"], "one — the first brief",
+        "a dry run writes nothing"
+    );
+
+    let (status, done) = call_json(
+        router.clone(),
+        post_json_with_agent("/api/plans/old/unpack", "migrator", json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{done}");
+    assert_eq!(done["unpacked"], json!(["t-001"]));
+    let (_, one) = call_json(router.clone(), get("/api/plans/old/tasks/t-001")).await;
+    assert_eq!(one["title"], "one");
+    assert_eq!(one["notes"], "the first brief");
+
+    let (_, again) = call_json(
+        router,
+        post_json_with_agent("/api/plans/old/unpack", "migrator", json!({})),
+    )
+    .await;
+    assert_eq!(again["unpacked"], json!([]));
 }

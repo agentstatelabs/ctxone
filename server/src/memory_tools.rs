@@ -4093,7 +4093,7 @@ impl CtxOneServer {
 
     #[tool(description = "Add a task to a plan. \
         \
-        CALL THIS WHEN enumerating the steps of a multi-step task — add every step as a task before you start executing. Pass `assigned_to` to address the work to a specific agent (e.g. 'claude-code', 'codex', a user email) — other agents sharing the plan can then fetch it via `plan_next(assigned_to='me')`. Omit `assigned_to` for tasks any agent can pick up. Blockers must already exist in the plan when passed. Subtasks via `parent_id` are limited to one level of nesting. \
+        CALL THIS WHEN enumerating the steps of a multi-step task — add every step as a task before you start executing. Put the brief (why, what to check, what counts as proof) in `notes`: they may span lines, stay out of `plan_show`, and come back from `plan_start` and `plan_tasks`. Pass `assigned_to` to address the work to a specific agent (e.g. 'claude-code', 'codex', a user email) — other agents sharing the plan can then fetch it via `plan_next(assigned_to='me')`. Omit `assigned_to` for tasks any agent can pick up. Blockers must already exist in the plan when passed. Subtasks via `parent_id` are limited to one level of nesting. \
         \
         If the Hub has `CTXONE_PLAN_LOCK_RATIO` set and the plan's (done+abandoned)/total ratio meets the threshold, this tool refuses with a `plan locked` error — pass `force=true` to override or start a new plan instead.")]
     async fn plan_add(&self, params: Parameters<crate::plan_tools::PlanAddParams>) -> String {
@@ -4106,12 +4106,16 @@ impl CtxOneServer {
         if let Err(e) = pt::check_plan_lock(&store, &p.ref_name, &p.plan_id, p.force) {
             return pt::err_json(e);
         }
+        let notes = match pt::notes_param(p.notes.as_deref(), p.description.as_deref()) {
+            Ok(n) => n,
+            Err(e) => return pt::err_json(e),
+        };
         match pt::add_task(
             &store,
             &p.ref_name,
             &p.plan_id,
             &p.title,
-            p.description.as_deref(),
+            notes,
             p.priority.as_deref(),
             p.parent_id.as_deref(),
             p.assigned_to.as_deref(),
@@ -4119,7 +4123,8 @@ impl CtxOneServer {
         ) {
             Ok(task) => {
                 self.session.mark_dirty();
-                serde_json::to_string(&pt::task_to_json(&task)).unwrap_or_else(|_| "{}".into())
+                serde_json::to_string(&pt::task_to_listing_json(&task))
+                    .unwrap_or_else(|_| "{}".into())
             }
             Err(e) => pt::err_json(e),
         }
@@ -4127,7 +4132,7 @@ impl CtxOneServer {
 
     #[tool(description = "Transition a task from `pending` to `in_progress`. \
         \
-        CALL THIS WHEN you begin working on a task. Refuses with an error listing the blockers if any entry in `blocked_by` is not yet `done`. The task's `started_at` and `started_by` are stamped automatically from the session's agent id. Non-blocking: if OTHER tasks in the plan are already `in_progress`, the result includes a `warning` field naming them — parallel work is allowed, but finish or abandon stale tasks so plan state doesn't drift.")]
+        CALL THIS WHEN you begin working on a task. Refuses with an error listing the blockers if any entry in `blocked_by` is not yet `done`. The task's `started_at` and `started_by` are stamped automatically from the session's agent id. The result carries the task's `notes` in full. Non-blocking: if OTHER tasks in the plan are already `in_progress`, the result includes a `warning` field naming them — parallel work is allowed, but finish or abandon stale tasks so plan state doesn't drift.")]
     async fn plan_start(&self, params: Parameters<crate::plan_tools::PlanStartParams>) -> String {
         if let Some(msg) = self.namespace_write_block() {
             return msg;
@@ -4173,7 +4178,8 @@ impl CtxOneServer {
                 // Completing the last task auto-promotes the plan; seal a
                 // checkpoint if that just happened (no-op otherwise).
                 self.spawn_epoch_seal_if_completed(&p.ref_name, &p.plan_id);
-                serde_json::to_string(&pt::task_to_json(&task)).unwrap_or_else(|_| "{}".into())
+                serde_json::to_string(&pt::task_to_listing_json(&task))
+                    .unwrap_or_else(|_| "{}".into())
             }
             Err(e) => pt::err_json(e),
         }
@@ -4196,16 +4202,17 @@ impl CtxOneServer {
         match store.abandon_task(&p.ref_name, &p.plan_id, &id, &p.reason) {
             Ok(task) => {
                 self.session.mark_dirty();
-                serde_json::to_string(&pt::task_to_json(&task)).unwrap_or_else(|_| "{}".into())
+                serde_json::to_string(&pt::task_to_listing_json(&task))
+                    .unwrap_or_else(|_| "{}".into())
             }
             Err(e) => pt::err_json(e),
         }
     }
 
     #[tool(
-        description = "Change a task after it was added: its title, description, priority or blockers. Pass only the fields to change; status, proof, assignment and timestamps never change. \
+        description = "Change a task after it was added: its title, notes, priority or blockers. Pass only the fields to change; status, proof, assignment and timestamps never change. \
         \
-        CALL THIS WHEN a task's scope or wording changed, or its blockers need fixing — for example when a blocker was abandoned, which never counts as done, so its dependents stay blocked until their blockers are edited. `blocked_by` replaces the whole list (`[]` clears it); each id must be a task in this plan, and the list must not form a cycle. `title` keeps the task's description, and `description` keeps its title (`\"\"` removes it). Done and abandoned tasks are refused unless `force=true`. The result's `changed` lists what changed."
+        CALL THIS WHEN a task's scope or wording changed, its brief needs updating, or its blockers need fixing — for example when a blocker was abandoned, which never counts as done, so its dependents stay blocked until their blockers are edited. `blocked_by` replaces the whole list (`[]` clears it); each id must be a task in this plan, and the list must not form a cycle. `title` keeps the task's notes, and `notes` (may span lines; `\"\"` clears; `description` is its old name) keeps its title. A description an older task packed into its title after ` — ` moves into notes on the first title or notes edit. Done and abandoned tasks are refused unless `force=true`. The result's `changed` lists what changed."
     )]
     async fn plan_edit(&self, params: Parameters<crate::plan_tools::PlanEditParams>) -> String {
         if let Some(msg) = self.namespace_write_block() {
@@ -4214,9 +4221,13 @@ impl CtxOneServer {
         use crate::plan_tools as pt;
         let p = params.0;
         let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        let notes = match pt::notes_param(p.notes.as_deref(), p.description.as_deref()) {
+            Ok(n) => n,
+            Err(e) => return pt::err_json(e),
+        };
         let edit = pt::TaskEdit {
             title: p.title.as_deref(),
-            description: p.description.as_deref(),
+            notes,
             priority: p.priority.as_deref(),
             blocked_by: p.blocked_by,
             force: p.force,
@@ -4236,7 +4247,7 @@ impl CtxOneServer {
     #[tool(
         description = "Return the highest-priority `pending` task whose blockers are all `done`. \
         \
-        CALL THIS WHEN you need to know what to work on next. Pass `assigned_to='me'` (or your agent id) to filter to tasks addressed to you — this is the state-driven orchestration primitive. Without that, any agent sees any pickable task. `include_unassigned` (default true) lets assigned agents also pick up unowned work; set `assigned_only=true` to restrict strictly. Returns `null` if nothing is pickable."
+        CALL THIS WHEN you need to know what to work on next. Pass `assigned_to='me'` (or your agent id) to filter to tasks addressed to you — this is the state-driven orchestration primitive. Without that, any agent sees any pickable task. `include_unassigned` (default true) lets assigned agents also pick up unowned work; set `assigned_only=true` to restrict strictly. Returns `null` if nothing is pickable. Notes are marked `has_notes`; `plan_start` returns them."
     )]
     async fn plan_next(&self, params: Parameters<crate::plan_tools::PlanNextParams>) -> String {
         use crate::plan_tools as pt;
@@ -4261,8 +4272,9 @@ impl CtxOneServer {
             Ok(None) => "null".to_string(),
             Ok(Some(task)) => {
                 // Auto-recall gate: surface memory for the task the agent is
-                // about to pick up, inline with the task itself.
-                let base = pt::task_to_json(&task);
+                // about to pick up, inline with the task itself. The notes
+                // come with `plan_start`, so they aren't read twice.
+                let base = pt::task_to_listing_json(&task);
                 self.with_recall_gate(base, &p.ref_name, &task.title)
             }
             Err(e) => pt::err_json(e),
@@ -4299,7 +4311,7 @@ impl CtxOneServer {
     #[tool(
         description = "Fetch a single plan with full task list and per-task assignment data. \
         \
-        CALL THIS when you need the complete picture of a plan — its tasks, their statuses, their proofs, who's assigned to what. Cheaper than `plan_list` + N `plan_tasks` calls."
+        CALL THIS when you need the complete picture of a plan — its tasks, their statuses, their proofs, who's assigned to what. Cheaper than `plan_list` + N `plan_tasks` calls. Notes are left out to keep it small: a task with notes has `has_notes: true`, and `plan_tasks` with its `task_id` reads them."
     )]
     async fn plan_show(&self, params: Parameters<crate::plan_tools::PlanGetParams>) -> String {
         use crate::plan_tools as pt;
@@ -4551,15 +4563,25 @@ impl CtxOneServer {
     }
 
     #[tool(
-        description = "List every task in a plan, including `assigned_to` per task. \
+        description = "List every task in a plan, including `assigned_to` and `notes` per task. \
         \
-        CALL THIS when you want the flat task list without plan metadata. `plan_show` returns the same tasks plus the plan envelope if you need that too."
+        CALL THIS when you want the flat task list without plan metadata, or a task's notes: pass `task_id` to read just that task. `plan_show` returns the same tasks plus the plan envelope, without the notes."
     )]
     async fn plan_tasks(&self, params: Parameters<crate::plan_tools::PlanTasksParams>) -> String {
         use crate::plan_tools as pt;
         let p = params.0;
         let store = pt::make_store(self.repo.clone(), &self.agent_id);
-        let tasks = match store.list_tasks(&p.ref_name, &p.plan_id) {
+        let tasks = match &p.task_id {
+            Some(id) => store
+                .get_task(
+                    &p.ref_name,
+                    &p.plan_id,
+                    &agentstategraph_tasks::TaskId(id.clone()),
+                )
+                .map(|t| vec![t]),
+            None => store.list_tasks(&p.ref_name, &p.plan_id),
+        };
+        let tasks = match tasks {
             Ok(v) => v,
             Err(e) => return pt::err_json(e),
         };

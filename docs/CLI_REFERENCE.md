@@ -894,7 +894,9 @@ $ ctx plan add website-v2 "Rewrite hero" \
 
 Options:
 
-- `--description <text>` — longer-form, appended to title.
+- `-d, --notes <text>` — the task's brief: why, what to check, what
+  counts as proof. May span lines (`--notes "$(cat brief.md)"`); at most
+  16 KiB. `--description` is its old name.
 - `--priority low|medium|high|critical` (default `medium`)
 - `--parent <task-id>` — nest as subtask (one level only)
 - `--assigned-to <agent>` — address the task to a specific agent
@@ -932,9 +934,9 @@ proof and timestamps never do.
 
 Options:
 
-- `--title <text>` — new title; the task's description is kept
-- `-d, --description <text>` — new description (`""` removes it); the
-  title is kept
+- `--title <text>` — new title; the task's notes are kept
+- `-d, --notes <text>` — new notes, which may span lines (`""` clears
+  them); the title is kept. `--description` is its old name
 - `--priority <p>` — `low`, `medium`, `high` or `critical`
 - `-b, --blocks <task-id>` — the task's new blockers, replacing the old
   list; repeat for several. Each must be a task in the same plan, and the
@@ -969,11 +971,30 @@ With `--me`, two agents sharing one plan each pick up their own tasks
 without stepping on each other. This is **state-driven orchestration**
 — the plan IS the orchestration layer. No framework, no DAG runtime.
 
-### `ctx plan tasks <plan>`
+### `ctx plan tasks <plan> [--task <id>]`
 
-Print the flat task list for a plan — task ids, statuses, titles. Useful
-in scripts or to drive a `plan done` loop. Mirrors the `plan_tasks` MCP
-tool.
+Print the flat task list for a plan — task ids, statuses, titles, and
+`[notes]` on a task that has notes. Useful in scripts or to drive a
+`plan done` loop. Mirrors the `plan_tasks` MCP tool. `--task <id>` reads
+one task and prints its notes. JSON output (`--format json`) carries the
+notes either way.
+
+### `ctx plan unpack <plan> | --all [--dry-run]`
+
+Move the descriptions that tasks added before notes existed packed into
+their titles (after ` — `) into their notes, so each title keeps only its
+own part and `plan show` gets smaller. `--all` does every plan on the
+branch; `--dry-run` lists what would move and writes nothing. Every status
+counts, finished tasks included, and each task moved takes two commits
+(notes, then title).
+
+Safe to run again, or after a run cut short. A task whose notes already
+hold something else is reported as kept and left alone.
+
+```bash
+ctx plan unpack --all --dry-run
+ctx plan unpack --all
+```
 
 ### `ctx plan list`
 

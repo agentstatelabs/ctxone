@@ -1128,6 +1128,7 @@ fn build_router(
         .route("/api/plans/{name}/close", post(close_plan_handler))
         .route("/api/plans/{name}/move", post(move_plan_handler))
         .route("/api/plans/{name}/relocate", post(relocate_plan))
+        .route("/api/plans/{name}/unpack", post(unpack_plan_descriptions))
         .route("/api/move", post(move_subtree))
         // Reminder endpoints
         .route(
@@ -3794,6 +3795,10 @@ struct CreatePlanRequest {
 #[derive(Deserialize)]
 struct CreateTaskRequest {
     title: String,
+    /// The task's notes; may span lines, at most 16 KiB.
+    #[serde(default)]
+    notes: Option<String>,
+    /// The old name for `notes`; pass one or the other.
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
@@ -3842,6 +3847,9 @@ struct AbandonTaskRequest {
 #[derive(Deserialize)]
 struct EditTaskRequest {
     title: Option<String>,
+    /// New notes, or "" to clear them.
+    notes: Option<String>,
+    /// The old name for `notes`; pass one or the other.
     description: Option<String>,
     priority: Option<String>,
     blocked_by: Option<Vec<String>>,
@@ -4476,12 +4484,14 @@ async fn add_plan_task(
     // No-op unless `CTXONE_PLAN_LOCK_RATIO` is set; `force=true` bypasses.
     plan_tools::check_plan_lock(&store, &req.ref_name, &name, req.force)
         .map_err(plan_error_to_response)?;
+    let notes = plan_tools::notes_param(req.notes.as_deref(), req.description.as_deref())
+        .map_err(plan_error_to_response)?;
     let task = plan_tools::add_task(
         &store,
         &req.ref_name,
         &name,
         &req.title,
-        req.description.as_deref(),
+        notes,
         req.priority.as_deref(),
         req.parent_id.as_deref(),
         req.assigned_to.as_deref(),
@@ -4489,7 +4499,10 @@ async fn add_plan_task(
     )
     .map_err(plan_error_to_response)?;
     s.sessions.mark_all_dirty();
-    Ok((StatusCode::CREATED, Json(plan_tools::task_to_json(&task))))
+    Ok((
+        StatusCode::CREATED,
+        Json(plan_tools::task_to_listing_json(&task)),
+    ))
 }
 
 #[instrument(skip_all, fields(name = %name, task_id = %task_id, ref_name = %q.ref_name))]
@@ -4547,7 +4560,7 @@ async fn complete_plan_task(
         .complete_task(&req.ref_name, &name, &TaskId(task_id.clone()), proof)
         .map_err(substrate_error_to_response)?;
     s.sessions.mark_all_dirty();
-    let mut out = plan_tools::task_to_json(&task);
+    let mut out = plan_tools::task_to_listing_json(&task);
     // Remind the caller if finishing this task satisfies a task elsewhere.
     let links = read_satisfies(&repo, &req.ref_name, &name, &task_id);
     if !links.is_empty()
@@ -4573,7 +4586,7 @@ async fn abandon_plan_task(
         .abandon_task(&req.ref_name, &name, &TaskId(task_id), &req.reason)
         .map_err(substrate_error_to_response)?;
     s.sessions.mark_all_dirty();
-    Ok(Json(plan_tools::task_to_json(&task)))
+    Ok(Json(plan_tools::task_to_listing_json(&task)))
 }
 
 #[instrument(skip_all, fields(name = %name, task_id = %task_id, agent = %agent_id.0))]
@@ -4586,9 +4599,11 @@ async fn edit_plan_task(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
     let store = plan_tools::make_store(repo.clone(), &agent_id.0);
+    let notes = plan_tools::notes_param(req.notes.as_deref(), req.description.as_deref())
+        .map_err(plan_error_to_response)?;
     let edit = plan_tools::TaskEdit {
         title: req.title.as_deref(),
-        description: req.description.as_deref(),
+        notes,
         priority: req.priority.as_deref(),
         blocked_by: req.blocked_by,
         force: req.force,
@@ -4599,6 +4614,37 @@ async fn edit_plan_task(
         s.sessions.mark_all_dirty();
     }
     Ok(Json(plan_tools::edited_task_to_json(&edited)))
+}
+
+#[derive(Deserialize)]
+struct UnpackQuery {
+    #[serde(default = "default_ref", rename = "ref")]
+    ref_name: String,
+    /// Report what would move without writing anything.
+    #[serde(default)]
+    dry_run: bool,
+}
+
+/// `POST /api/plans/{name}/unpack[?dry_run=true]` — move the descriptions
+/// that tasks added before notes existed packed into their titles (after
+/// ` — `) into their notes. Safe to run again; see
+/// `plan_tools::unpack_descriptions`. Behind `ctx plan unpack`.
+#[instrument(skip_all, fields(name = %name, ref_name = %q.ref_name, agent = %agent_id.0))]
+async fn unpack_plan_descriptions(
+    s: HubState,
+    ns: NamespaceId,
+    agent_id: AgentId,
+    Path(name): Path<String>,
+    Query(q): Query<UnpackQuery>,
+) -> Result<Json<plan_tools::UnpackReport>, (StatusCode, String)> {
+    let repo = s.repo_for(&ns)?;
+    let store = plan_tools::make_store(repo.clone(), &agent_id.0);
+    let report = plan_tools::unpack_descriptions(&store, &q.ref_name, &name, q.dry_run)
+        .map_err(plan_error_to_response)?;
+    if !report.dry_run && !report.unpacked.is_empty() {
+        s.sessions.mark_all_dirty();
+    }
+    Ok(Json(report))
 }
 
 #[instrument(skip_all, fields(name = %name, ref_name = %q.ref_name, assigned_to = q.assigned_to.as_deref().unwrap_or("")))]
@@ -4641,7 +4687,7 @@ async fn next_plan_task(
     let body = match task {
         None => serde_json::json!({ "task": null, "in_progress": in_progress }),
         Some(t) => {
-            serde_json::json!({ "task": plan_tools::task_to_json(&t), "in_progress": in_progress })
+            serde_json::json!({ "task": plan_tools::task_to_listing_json(&t), "in_progress": in_progress })
         }
     };
     Ok(Json(body))

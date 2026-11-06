@@ -239,16 +239,25 @@ pub const REGISTRY: &[HelpDoc] = &[
     HelpDoc {
         feature: "plan_add",
         group: "plans",
-        synopsis: "Add a task to a plan; optionally assign it to a specific agent.",
-        syntax: "ctx plan add <plan> <title> [--priority ...] [--assigned-to <agent>] [--blocked-by <ids>]",
+        synopsis: "Add a task to a plan, with notes for its brief; optionally assign it to a specific agent.",
+        syntax: "ctx plan add <plan> <title> [--notes <text>] [--priority ...] [--assigned-to <agent>] [--blocked-by <ids>]",
         params: &[
             p!("plan_id", true, "Plan to add the task to."),
             p!("title", true, "Imperative one-line task title."),
+            p!(
+                "--notes",
+                false,
+                "The task's brief: why, what to check, what counts as proof. May span lines; at most 16 KiB. --description is its old name."
+            ),
             p!("--priority", false, "critical|high|medium|low."),
         ],
-        examples: &["ctx plan add website-v2 \"Wire the nav\" --priority high"],
+        examples: &[
+            "ctx plan add website-v2 \"Wire the nav\" --priority high",
+            "ctx plan add website-v2 \"Rewrite the hero\" --notes \"$(cat hero-brief.md)\"",
+        ],
         gotchas: &[
             "Blockers must already exist in the plan; a plan may auto-lock past a done ratio (use --force).",
+            "Notes stay out of plan_show (it marks the task has_notes); plan_start and plan_tasks return them.",
         ],
         related: &["plan_new", "plan_start", "plan_complete"],
     },
@@ -264,6 +273,7 @@ pub const REGISTRY: &[HelpDoc] = &[
         examples: &["ctx plan start ctx-context-paradigm t-005"],
         gotchas: &[
             "Warns (doesn't block) if other tasks are already in_progress — finish or abandon stale ones.",
+            "Returns the task's notes in full: the brief to work from.",
         ],
         related: &["plan_add", "plan_complete", "plan_next"],
     },
@@ -452,16 +462,16 @@ pub const REGISTRY: &[HelpDoc] = &[
     HelpDoc {
         feature: "plan_edit",
         group: "plans",
-        synopsis: "Change a task's title, description, priority or blockers after it was added; status, proof and timestamps never change.",
-        syntax: "ctx plan edit <plan> <task_id> [--title <t>] [-d <desc>] [--priority <p>] [-b <id>]... [--clear-blockers] [--force]",
+        synopsis: "Change a task's title, notes, priority or blockers after it was added; status, proof and timestamps never change.",
+        syntax: "ctx plan edit <plan> <task_id> [--title <t>] [--notes <text>] [--priority <p>] [-b <id>]... [--clear-blockers] [--force]",
         params: &[
             p!("plan_id", true, "Plan holding the task."),
             p!("task_id", true, "Task to edit."),
-            p!("--title", false, "New title; the description is kept."),
+            p!("--title", false, "New title; the notes are kept."),
             p!(
-                "--description",
+                "--notes",
                 false,
-                "New description; \"\" removes it, and the title is kept."
+                "New notes, which may span lines; \"\" clears them, and the title is kept. --description is its old name."
             ),
             p!("--priority", false, "low|medium|high|critical."),
             p!(
@@ -479,8 +489,9 @@ pub const REGISTRY: &[HelpDoc] = &[
         gotchas: &[
             "An abandoned blocker never counts as done: edit the dependents' blockers instead of leaving them blocked.",
             "Blockers must be tasks in the same plan and can't form a cycle; use plan_link across plans.",
+            "A task added before notes existed keeps its description in its title, after ` — `; the first title or notes edit moves it into notes (`ctx plan unpack` does a whole plan).",
         ],
-        related: &["plan_add", "plan_abandon", "plan_link"],
+        related: &["plan_add", "plan_abandon", "plan_link", "plan_unpack"],
     },
     HelpDoc {
         feature: "plan_show",
@@ -491,19 +502,28 @@ pub const REGISTRY: &[HelpDoc] = &[
         examples: &["ctx plan show ctx-context-paradigm"],
         gotchas: &[
             "Cheaper than `plan_list` + N `plan_tasks` calls; use `plan_tasks` for the flat list only.",
+            "Notes are left out to keep it small: a task with notes has `has_notes: true`; read them with `plan_tasks` and its `task_id`.",
         ],
         related: &["plan_tasks", "plan_list", "plan_next"],
     },
     HelpDoc {
         feature: "plan_tasks",
         group: "plans",
-        synopsis: "List every task in a plan (flat, with assigned_to) — no plan-envelope metadata.",
-        syntax: "ctx plan tasks <plan>",
-        params: &[p!("plan_id", true, "Plan whose tasks to list.")],
-        examples: &["ctx plan tasks website-v2"],
-        gotchas: &[
-            "`plan_show` returns the same tasks plus the plan envelope if you also need that.",
+        synopsis: "List every task in a plan (flat, with assigned_to and notes) — no plan-envelope metadata; or read one task.",
+        syntax: "ctx plan tasks <plan> [--task <id>]",
+        params: &[
+            p!("plan_id", true, "Plan whose tasks to list."),
+            p!(
+                "task_id",
+                false,
+                "Read just this task, notes in full (`--task` on the CLI)."
+            ),
         ],
+        examples: &[
+            "ctx plan tasks website-v2",
+            "ctx plan tasks website-v2 --task t-004",
+        ],
+        gotchas: &["`plan_show` returns the same tasks plus the plan envelope, without the notes."],
         related: &["plan_show", "plan_list"],
     },
     HelpDoc {
@@ -608,6 +628,27 @@ pub const REGISTRY: &[HelpDoc] = &[
             "Fixes plans that landed in `default` before per-workspace routing; reads from the current namespace.",
         ],
         related: &["plan_show", "plan_list", "project_status"],
+    },
+    HelpDoc {
+        feature: "plan_unpack",
+        group: "plans",
+        synopsis: "Move the descriptions that older tasks packed into their titles (after ` — `) into their notes, for one plan or all of them.",
+        syntax: "ctx plan unpack <plan> | --all  [--dry-run] [--branch <b>]",
+        params: &[
+            p!("plan_id", false, "Plan to unpack; or pass --all."),
+            p!("--all", false, "Every plan on the branch."),
+            p!("--dry-run", false, "List what would move without writing."),
+        ],
+        examples: &[
+            "ctx plan unpack --all --dry-run",
+            "ctx plan unpack website-v2",
+        ],
+        gotchas: &[
+            "Safe to run again, or after a run cut short. A task whose notes already hold something else is reported as kept and left alone.",
+            "Every status counts, finished tasks included; each task moved is two commits (notes, then title).",
+            "Smaller plan_show output is the point: titles keep only their own part, and the descriptions stay out of listings.",
+        ],
+        related: &["plan_edit", "plan_show", "plan_tasks"],
     },
     // ===== branches =====
     HelpDoc {

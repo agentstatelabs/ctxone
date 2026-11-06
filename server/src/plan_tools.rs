@@ -26,8 +26,8 @@ use std::sync::Arc;
 use agentstategraph::{CommitOptions, Repository};
 use agentstategraph_core::IntentCategory;
 use agentstategraph_tasks::{
-    Plan, PlanStatus, Priority, Proof, ProofKind, Task, TaskId, TaskStatus, TaskStore,
-    TaskStoreError, paths,
+    AddTaskOptions, Plan, PlanStatus, Priority, Proof, ProofKind, Task, TaskId, TaskStatus,
+    TaskStore, TaskStoreError, paths,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -60,23 +60,25 @@ pub const PLAN_LOCK_RATIO_ENV: &str = "CTXONE_PLAN_LOCK_RATIO";
 /// `spec/SECURITY-THREAT-MODEL.md §4`.
 pub const MAX_TITLE_LEN: usize = 256;
 
-/// Maximum length (bytes) of a task description.
+/// Maximum length (bytes) of a task's notes: the substrate's own cap,
+/// `agentstategraph_tasks::MAX_NOTES_BYTES` (16 KiB).
 ///
-/// Unlike a title, a description is a *brief*: it carries why the task
-/// matters, what to exercise, what is most likely to be wrong, and what
-/// counts as proof. 2048 was too tight for that in practice — real briefs
-/// (a Windows installer verification listing four cases and three likely
-/// failure modes) came in at 2100-2500 bytes and had to be truncated,
-/// which loses exactly the detail that makes a task actionable months
-/// later.
+/// Unlike a title, notes are a *brief*: why the task matters, what to
+/// exercise, what is most likely to be wrong, and what counts as proof.
+/// 2048 was too tight for that in practice — real briefs (a Windows
+/// installer verification listing four cases and three likely failure
+/// modes) came in at 2100-2500 bytes and had to be truncated, which loses
+/// exactly the detail that makes a task actionable months later. Packed
+/// into the title, a description was capped at 8 KiB because every listing
+/// carried it; notes stay out of listings (`plan_show` marks them with
+/// `has_notes`), so they take the substrate's cap.
 ///
-/// Still bounded, and by design: this is a prompt-injection channel like
-/// any other plan-tool text field, and the character-level filter in
-/// `is_unsafe_text` (which rejects newlines, bidi overrides and
-/// invisibles) is the primary control here — the byte cap only stops
-/// someone pasting a document. 8 KiB leaves room for a thorough brief
-/// while staying orders of magnitude below that.
-pub const MAX_DESCRIPTION_LEN: usize = 8192;
+/// Still bounded, and by design: notes are a prompt-injection channel like
+/// any other plan-tool text field. `validate_notes` rejects the same bidi
+/// overrides, invisibles, tag characters and controls as a title, except
+/// that notes may span lines; the byte cap only stops someone pasting a
+/// document.
+pub const MAX_NOTES_LEN: usize = agentstategraph_tasks::MAX_NOTES_BYTES;
 
 /// Maximum length (bytes) of an `assigned_to` string. Assignee values
 /// are short labels (agent IDs, emails). A cap much larger than any
@@ -101,9 +103,16 @@ pub const MAX_ASSIGNED_TO_LEN: usize = 128;
 /// adversarial or LLM-mangled input; fail hard rather than silently
 /// strip so the anomaly surfaces.
 fn is_unsafe_text(s: &str) -> bool {
-    s.chars().any(|c| {
+    s.chars().any(|c| is_unsafe_char(c, false))
+}
+
+/// One character of [`is_unsafe_text`]. With `multiline`, `\n` and `\r` are
+/// allowed too, for notes; every other rule still applies.
+fn is_unsafe_char(c: char, multiline: bool) -> bool {
+    {
         // (1) Controls and line/paragraph separators.
-        if (c.is_control() && c != '\t') || c == '\u{2028}' || c == '\u{2029}' {
+        let newline = multiline && (c == '\n' || c == '\r');
+        if (c.is_control() && c != '\t' && !newline) || c == '\u{2028}' || c == '\u{2029}' {
             return true;
         }
         // (2) Bidi formatting controls.
@@ -128,7 +137,7 @@ fn is_unsafe_text(s: &str) -> bool {
             return true;
         }
         false
-    })
+    }
 }
 
 fn validate_plan_text(field: &str, value: &str, max_len: usize) -> Result<(), PlanToolError> {
@@ -147,6 +156,38 @@ fn validate_plan_text(field: &str, value: &str, max_len: usize) -> Result<(), Pl
         )));
     }
     Ok(())
+}
+
+/// Validate a task's notes: at most [`MAX_NOTES_LEN`] bytes, and none of the
+/// characters a title refuses, except that notes may span lines.
+fn validate_notes(value: &str) -> Result<(), PlanToolError> {
+    if value.len() > MAX_NOTES_LEN {
+        return Err(PlanToolError::InvalidInput(format!(
+            "notes exceed maximum length ({} bytes; max {MAX_NOTES_LEN})",
+            value.len()
+        )));
+    }
+    if value.chars().any(|c| is_unsafe_char(c, true)) {
+        return Err(PlanToolError::InvalidInput(
+            "notes contain control or unsafe formatting characters (controls other than newline and tab, bidi overrides, zero-width, BOM, tag chars); strip them before submitting".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// The notes a request carries: `notes`, or `description`, its old name.
+/// Passing both is refused rather than guessing which one was meant.
+pub fn notes_param<'a>(
+    notes: Option<&'a str>,
+    description: Option<&'a str>,
+) -> Result<Option<&'a str>, PlanToolError> {
+    match (notes, description) {
+        (Some(_), Some(_)) => Err(PlanToolError::InvalidInput(
+            "pass notes or description, not both: description is the old name for notes"
+                .to_string(),
+        )),
+        (notes, description) => Ok(notes.or(description)),
+    }
 }
 
 /// A plan or task id is one segment of a state path (`/plans/<plan>/<task>`,
@@ -526,13 +567,15 @@ pub fn make_store(repo: Arc<Repository>, agent_id: &str) -> TaskStore {
 
 // -- Response shape helpers -----------------------------------------
 
-/// Render a task as the JSON shape CTXone exposes on the wire.
-/// `assigned_to` is now carried natively on `Task`, so this is a
-/// straight rename of fields — no sidecar lookup.
+/// Render a task as the JSON shape CTXone exposes on the wire, notes in
+/// full. `assigned_to` is now carried natively on `Task`, so this is a
+/// straight rename of fields — no sidecar lookup. Listings and write echoes
+/// use [`task_to_listing_json`] instead.
 pub fn task_to_json(task: &Task) -> serde_json::Value {
     let mut out = serde_json::json!({
         "id": task.id.as_str(),
         "title": task.title,
+        "notes": task.notes,
         "status": task_status_label(task.status),
         "priority": priority_label(task.priority),
         "parent_id": task.parent_id.as_ref().map(|t| t.as_str()),
@@ -559,6 +602,25 @@ pub fn task_to_json(task: &Task) -> serde_json::Value {
         });
     } else {
         out["proof"] = serde_json::Value::Null;
+    }
+    out
+}
+
+/// [`task_to_json`] without the notes: `has_notes: true` stands in for them
+/// when the task has any, and the key is left out when it has none.
+///
+/// Notes run to 16 KiB each, so a listing that carried them would cost the
+/// sum of every task's brief on every read (`plan_show` reads every task).
+/// Listings, `plan_next` and the echo of a write use this shape; the notes
+/// come from `plan_tasks` (one task with `task_id`), `plan_start`, or
+/// `GET /api/plans/{name}/tasks[/{id}]`.
+pub fn task_to_listing_json(task: &Task) -> serde_json::Value {
+    let mut out = task_to_json(task);
+    if let Some(obj) = out.as_object_mut() {
+        obj.remove("notes");
+        if task.notes.is_some() {
+            obj.insert("has_notes".to_string(), serde_json::Value::Bool(true));
+        }
     }
     out
 }
@@ -781,7 +843,8 @@ pub fn task_to_json_with_warning(task: &Task, warning: Option<String>) -> serde_
 /// Render a plan as a JSON object, including task counts keyed by
 /// status. The `tasks` field is included only when `with_tasks` is
 /// true — the list endpoint keeps responses short, the detail endpoint
-/// opts in.
+/// opts in. Its tasks are in [`task_to_listing_json`]'s shape: `has_notes`,
+/// not the notes.
 pub fn plan_to_json(plan: &Plan, tasks: &[Task], with_tasks: bool) -> serde_json::Value {
     let mut pending = 0u32;
     let mut in_progress = 0u32;
@@ -817,7 +880,7 @@ pub fn plan_to_json(plan: &Plan, tasks: &[Task], with_tasks: bool) -> serde_json
     });
 
     if with_tasks {
-        let tasks_json: Vec<serde_json::Value> = tasks.iter().map(task_to_json).collect();
+        let tasks_json: Vec<serde_json::Value> = tasks.iter().map(task_to_listing_json).collect();
         out["tasks"] = serde_json::Value::Array(tasks_json);
     }
 
@@ -878,9 +941,10 @@ pub struct PlanAddParams {
     pub plan_id: String,
     /// Task title (imperative sentence, one line).
     pub title: String,
-    /// Optional longer-form task description. Stored in the title for now —
-    /// the substrate's Task shape does not carry a description field, so
-    /// if present the description is appended after an em dash.
+    /// The task's notes: a brief, decisions, links. May span lines; at most
+    /// 16 KiB. Kept out of `plan_show`, which marks the task `has_notes`.
+    pub notes: Option<String>,
+    /// The old name for `notes`; pass one or the other.
     pub description: Option<String>,
     /// Priority: low | medium | high | critical. Default: medium.
     pub priority: Option<String>,
@@ -965,9 +1029,11 @@ pub struct PlanAbandonParams {
 pub struct PlanEditParams {
     pub plan_id: String,
     pub task_id: String,
-    /// New title (imperative sentence, one line). The task's description is kept.
+    /// New title (imperative sentence, one line). The task's notes are kept.
     pub title: Option<String>,
-    /// New description, or "" to remove it. The title is kept.
+    /// New notes (may span lines, at most 16 KiB), or "" to clear them.
+    pub notes: Option<String>,
+    /// The old name for `notes`; pass one or the other.
     pub description: Option<String>,
     /// New priority: low | medium | high | critical.
     pub priority: Option<String>,
@@ -1025,6 +1091,8 @@ pub struct PlanArchiveParams {
 #[derive(Deserialize, JsonSchema)]
 pub struct PlanTasksParams {
     pub plan_id: String,
+    /// Read just this task (e.g. "t-003"), notes in full.
+    pub task_id: Option<String>,
     #[serde(default = "default_ref", rename = "ref")]
     pub ref_name: String,
 }
@@ -1110,15 +1178,15 @@ pub fn create_plan(
     Ok(p)
 }
 
-/// Add a task. Assignment is now carried natively on `Task` — the
-/// substrate writes it in the same commit as the task body.
+/// Add a task. Assignment and notes are carried natively on `Task` — the
+/// substrate writes them in the same commit as the task body.
 #[allow(clippy::too_many_arguments)]
 pub fn add_task(
     store: &TaskStore,
     ref_name: &str,
     plan: &str,
     title: &str,
-    description: Option<&str>,
+    notes: Option<&str>,
     priority: Option<&str>,
     parent_id: Option<&str>,
     assigned_to: Option<&str>,
@@ -1126,12 +1194,11 @@ pub fn add_task(
 ) -> Result<Task, PlanToolError> {
     // Input validation — reject payloads that don't fit the UI-rendered
     // task shape. See `spec/SECURITY-THREAT-MODEL.md §4` for the
-    // rationale: uncapped titles / descriptions / assignee strings are
-    // a prompt-injection channel because they show up in every plan
-    // listing an agent reads.
+    // rationale: uncapped titles / notes / assignee strings are a
+    // prompt-injection channel because they show up in what an agent reads.
     validate_plan_text("title", title, MAX_TITLE_LEN)?;
-    if let Some(d) = description {
-        validate_plan_text("description", d, MAX_DESCRIPTION_LEN)?;
+    if let Some(n) = notes {
+        validate_notes(n)?;
     }
     if let Some(a) = assigned_to {
         validate_assigned_to(a)?;
@@ -1147,24 +1214,22 @@ pub fn add_task(
     let parent = parent_id.map(|s| TaskId(s.to_string()));
     let blockers: Vec<TaskId> = blocked_by.into_iter().map(TaskId).collect();
 
-    let full_title = join_title(title, description);
-
     let assigned = assigned_to.filter(|s| !s.is_empty()).map(|s| s.to_string());
-    Ok(store.add_task(ref_name, plan, &full_title, pri, parent, blockers, assigned)?)
+    let options = AddTaskOptions {
+        notes: notes.map(str::to_string),
+        ..Default::default()
+    };
+    Ok(store.add_task_with_extensions(
+        ref_name, plan, title, pri, parent, blockers, assigned, options,
+    )?)
 }
 
-/// Where a task's description starts in its stored title. The substrate's
-/// Task shape has no description field, so `add_task` appends the
-/// description to the title after this separator.
+/// Where a task's description starts in a title stored before tasks had
+/// notes: `add_task` appended the description to the title after this
+/// separator. Such a title still reads as it was stored. A task with no
+/// notes whose title has the separator is "packed": `edit_task` and
+/// `unpack_descriptions` move the part after it into notes.
 const DESCRIPTION_SEPARATOR: &str = " — ";
-
-/// A stored title from a title and an optional description.
-fn join_title(title: &str, description: Option<&str>) -> String {
-    match description {
-        Some(d) if !d.is_empty() => format!("{title}{DESCRIPTION_SEPARATOR}{d}"),
-        _ => title.to_string(),
-    }
-}
 
 /// A stored title split back into its title and description: the
 /// description is everything after the first separator.
@@ -1175,13 +1240,38 @@ fn split_title(full: &str) -> (&str, Option<&str>) {
     }
 }
 
+/// A packed title's title and description, or `None` when the title isn't
+/// packed: no separator, or nothing on one side of it.
+fn packed_title(full: &str) -> Option<(&str, &str)> {
+    match split_title(full) {
+        (title, Some(description))
+            if !title.trim().is_empty() && !description.trim().is_empty() =>
+        {
+            Some((title, description))
+        }
+        _ => None,
+    }
+}
+
+/// A task's title and notes as an edit sees them. A task with notes has a
+/// plain title; one without may carry its description packed in the title.
+fn title_and_notes(task: &Task) -> (&str, Option<&str>) {
+    if task.notes.is_some() {
+        return (&task.title, task.notes.as_deref());
+    }
+    match packed_title(&task.title) {
+        Some((title, description)) => (title, Some(description)),
+        None => (&task.title, None),
+    }
+}
+
 /// What `edit_task` changes. `None` leaves a field as it is.
 #[derive(Debug, Default)]
 pub struct TaskEdit<'a> {
-    /// A new title; the description is kept.
+    /// A new title; the notes are kept.
     pub title: Option<&'a str>,
-    /// A new description, or `""` to remove it; the title is kept.
-    pub description: Option<&'a str>,
+    /// New notes, or `""` to clear them; the title is kept.
+    pub notes: Option<&'a str>,
     /// A new priority: low | medium | high | critical.
     pub priority: Option<&'a str>,
     /// The whole new blocker list, replacing the old one.
@@ -1191,21 +1281,28 @@ pub struct TaskEdit<'a> {
 }
 
 /// A task after `edit_task`, with the fields that changed (`title`,
-/// `description`, `priority`, `blocked_by`); empty when the edit asked for
-/// what the task already had.
+/// `notes`, `priority`, `blocked_by`); empty when the edit asked for what
+/// the task already had.
 #[derive(Debug)]
 pub struct EditedTask {
     pub task: Task,
     pub changed: Vec<&'static str>,
 }
 
-/// Change a task's title, description, priority or blockers after it was
-/// added. Status, proof, assignment and timestamps never change.
+/// Change a task's title, notes, priority or blockers after it was added.
+/// Status, proof, assignment and timestamps never change.
 ///
 /// Everything is validated before anything is written, and blockers are
 /// applied first because the substrate can still refuse them (a cycle, or a
 /// blocker that was just removed): a refused edit changes nothing. Each
 /// changed field is its own commit, made as the calling agent.
+///
+/// A task whose description is still packed into its title is unpacked by
+/// the first edit that changes its title or notes: the title keeps only its
+/// own part, and the description moves into the notes (or is replaced by
+/// the new notes). The notes are written before the title, so an edit cut
+/// short between the two leaves the description in both places, never in
+/// neither.
 pub fn edit_task(
     store: &TaskStore,
     ref_name: &str,
@@ -1214,12 +1311,12 @@ pub fn edit_task(
     edit: TaskEdit<'_>,
 ) -> Result<EditedTask, PlanToolError> {
     if edit.title.is_none()
-        && edit.description.is_none()
+        && edit.notes.is_none()
         && edit.priority.is_none()
         && edit.blocked_by.is_none()
     {
         return Err(PlanToolError::InvalidInput(
-            "nothing to edit: pass title, description, priority or blocked_by".to_string(),
+            "nothing to edit: pass title, notes, priority or blocked_by".to_string(),
         ));
     }
     if let Some(t) = edit.title {
@@ -1230,8 +1327,8 @@ pub fn edit_task(
             ));
         }
     }
-    if let Some(d) = edit.description {
-        validate_plan_text("description", d, MAX_DESCRIPTION_LEN)?;
+    if let Some(n) = edit.notes {
+        validate_notes(n)?;
     }
     let priority = edit
         .priority
@@ -1247,20 +1344,22 @@ pub fn edit_task(
         });
     }
 
-    let (old_title, old_description) = split_title(&task.title);
-    let new_title = edit.title.unwrap_or(old_title);
-    let new_description = match edit.description {
-        Some(d) => Some(d).filter(|d| !d.is_empty()),
-        None => old_description,
+    let (old_title, old_notes) = title_and_notes(&task);
+    let (old_title, old_notes) = (old_title.to_string(), old_notes.map(str::to_string));
+    let new_title = edit.title.map_or_else(|| old_title.clone(), str::to_string);
+    let new_notes = match edit.notes {
+        Some(n) if n.trim().is_empty() => None,
+        Some(n) => Some(n.to_string()),
+        None => old_notes.clone(),
     };
     let mut changed = Vec::new();
     if new_title != old_title {
         changed.push("title");
     }
-    if new_description != old_description {
-        changed.push("description");
+    if new_notes != old_notes {
+        changed.push("notes");
     }
-    let full_title = join_title(new_title, new_description);
+    let text_changed = !changed.is_empty();
 
     if let Some(blockers) = edit.blocked_by {
         let blockers: Vec<TaskId> = blockers.into_iter().map(TaskId).collect();
@@ -1269,8 +1368,13 @@ pub fn edit_task(
             changed.push("blocked_by");
         }
     }
-    if full_title != task.title {
-        task = store.set_title(ref_name, plan, &id, &full_title)?;
+    if text_changed {
+        if new_notes != task.notes {
+            task = store.set_notes(ref_name, plan, &id, new_notes.as_deref())?;
+        }
+        if new_title != task.title {
+            task = store.set_title(ref_name, plan, &id, &new_title)?;
+        }
     }
     if let Some(p) = priority
         && p != task.priority
@@ -1281,11 +1385,73 @@ pub fn edit_task(
     Ok(EditedTask { task, changed })
 }
 
-/// The wire shape of an edited task: the task, plus `changed`.
+/// The wire shape of an edited task: the task without its notes (as
+/// [`task_to_listing_json`]), plus `changed`.
 pub fn edited_task_to_json(edited: &EditedTask) -> serde_json::Value {
-    let mut out = task_to_json(&edited.task);
+    let mut out = task_to_listing_json(&edited.task);
     out["changed"] = serde_json::json!(edited.changed);
     out
+}
+
+/// What [`unpack_descriptions`] did to a plan, or would do with `dry_run`.
+#[derive(Debug, Default, Serialize)]
+pub struct UnpackReport {
+    pub plan: String,
+    pub dry_run: bool,
+    /// Tasks whose packed description moved into their notes.
+    pub unpacked: Vec<String>,
+    /// Tasks whose title has the separator but whose notes already hold
+    /// something else, left as they are.
+    pub kept: Vec<String>,
+}
+
+/// Move every packed description in a plan into its task's notes, leaving
+/// each title with only its own part. Every status counts, finished tasks
+/// included, and each task takes two commits (notes, then title) made as
+/// the store's agent.
+///
+/// Safe to run twice, and to run again after a run cut short: an unpacked
+/// title has no separator, and a task whose notes already equal its packed
+/// description (a run stopped between the two writes) only has its title
+/// finished. A task whose notes hold anything else is reported in `kept`
+/// and not touched.
+pub fn unpack_descriptions(
+    store: &TaskStore,
+    ref_name: &str,
+    plan: &str,
+    dry_run: bool,
+) -> Result<UnpackReport, PlanToolError> {
+    let mut report = UnpackReport {
+        plan: plan.to_string(),
+        dry_run,
+        ..Default::default()
+    };
+    for task in store.list_tasks(ref_name, plan)? {
+        let Some((title, description)) = packed_title(&task.title) else {
+            continue;
+        };
+        let finishing = match task.notes.as_deref() {
+            None => false,
+            Some(notes) if notes == description => true,
+            Some(_) => {
+                report.kept.push(task.id.0.clone());
+                continue;
+            }
+        };
+        if description.len() > MAX_NOTES_LEN {
+            report.kept.push(task.id.0.clone());
+            continue;
+        }
+        report.unpacked.push(task.id.0.clone());
+        if dry_run {
+            continue;
+        }
+        if !finishing {
+            store.set_notes(ref_name, plan, &task.id, Some(description))?;
+        }
+        store.set_title(ref_name, plan, &task.id, title)?;
+    }
+    Ok(report)
 }
 
 /// Force-complete a plan: abandon every still-open task with a fixed
@@ -2346,7 +2512,7 @@ mod tests {
     }
 
     #[test]
-    fn description_cap_leaves_room_for_a_real_brief() {
+    fn notes_cap_leaves_room_for_a_real_brief() {
         // The two boundary tests below track the constant, so they pass at
         // ANY value — they prove validation is wired, not that the cap is
         // usable. This one pins the thing that actually matters.
@@ -2356,17 +2522,17 @@ mod tests {
         // came to ~2500 bytes and had to be cut down, losing the detail that
         // makes a task actionable months later. Keep headroom.
         assert!(
-            MAX_DESCRIPTION_LEN >= 4096,
-            "description cap {MAX_DESCRIPTION_LEN} is too tight for a task brief; \
+            MAX_NOTES_LEN >= 4096,
+            "notes cap {MAX_NOTES_LEN} is too tight for a task brief; \
              see the constant's doc comment before lowering it"
         );
     }
 
     #[test]
-    fn add_task_accepts_max_length_description() {
+    fn add_task_accepts_max_length_notes() {
         let (_repo, store) = fresh_store();
         create_plan(&store, "main", "p", None).unwrap();
-        let at_limit = "d".repeat(MAX_DESCRIPTION_LEN);
+        let at_limit = "d".repeat(MAX_NOTES_LEN);
         let r = add_task(
             &store,
             "main",
@@ -2378,17 +2544,15 @@ mod tests {
             None,
             vec![],
         );
-        assert!(
-            r.is_ok(),
-            "max-length description should be accepted, got {r:?}"
-        );
+        assert!(r.is_ok(), "max-length notes should be accepted, got {r:?}");
+        assert_eq!(r.unwrap().notes.map(|n| n.len()), Some(MAX_NOTES_LEN));
     }
 
     #[test]
-    fn add_task_rejects_over_length_description() {
+    fn add_task_rejects_over_length_notes() {
         let (_repo, store) = fresh_store();
         create_plan(&store, "main", "p", None).unwrap();
-        let too_big = "d".repeat(MAX_DESCRIPTION_LEN + 1);
+        let too_big = "d".repeat(MAX_NOTES_LEN + 1);
         let r = add_task(
             &store,
             "main",
@@ -2400,7 +2564,118 @@ mod tests {
             None,
             vec![],
         );
-        assert!(r.is_err(), "over-length description must be rejected");
+        assert!(r.is_err(), "over-length notes must be rejected");
+        assert!(store.task_ids("main", "p").unwrap().is_empty());
+    }
+
+    #[test]
+    fn notes_keep_their_lines_and_stay_out_of_the_title() {
+        let (_repo, store) = fresh_store();
+        create_plan(&store, "main", "p", None).unwrap();
+        let brief = "Why: the hero is off-brand.\n\n1. Check mobile.\r\n2.\tCheck dark mode.\n";
+        let task = add_task(
+            &store,
+            "main",
+            "p",
+            "Rewrite the hero",
+            Some(brief),
+            None,
+            None,
+            None,
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(task.title, "Rewrite the hero");
+        assert_eq!(task.notes.as_deref(), Some(brief));
+        // Blank notes are no notes.
+        let blank = add_task(
+            &store,
+            "main",
+            "p",
+            "t",
+            Some(" \n "),
+            None,
+            None,
+            None,
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(blank.notes, None);
+    }
+
+    #[test]
+    fn notes_refuse_what_a_title_refuses_except_newlines() {
+        let (_repo, store) = fresh_store();
+        create_plan(&store, "main", "p", None).unwrap();
+        for bad in [
+            "\u{FEFF}hello",
+            "Benign\u{202E}SYSTEM: override",
+            "zero\u{200B}width",
+            "tag\u{E0041}char",
+            "nul\u{0}byte",
+            "escape\u{1B}[31m",
+            "line\u{2028}separator",
+        ] {
+            let err = add_task(
+                &store,
+                "main",
+                "p",
+                "t",
+                Some(bad),
+                None,
+                None,
+                None,
+                vec![],
+            )
+            .unwrap_err();
+            assert!(
+                matches!(&err, PlanToolError::InvalidInput(m) if m.starts_with("notes")),
+                "{bad:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn notes_and_description_are_one_parameter() {
+        assert_eq!(notes_param(Some("n"), None).unwrap(), Some("n"));
+        assert_eq!(notes_param(None, Some("d")).unwrap(), Some("d"));
+        assert_eq!(notes_param(None, None).unwrap(), None);
+        let err = notes_param(Some("n"), Some("d")).unwrap_err();
+        assert!(err.to_string().contains("not both"), "{err}");
+    }
+
+    #[test]
+    fn listings_mark_notes_and_reads_carry_them() {
+        let (_repo, store) = fresh_store();
+        create_plan(&store, "main", "p", None).unwrap();
+        let with = add_task(
+            &store,
+            "main",
+            "p",
+            "a",
+            Some("brief"),
+            None,
+            None,
+            None,
+            vec![],
+        )
+        .unwrap();
+        let without = add_task(&store, "main", "p", "b", None, None, None, None, vec![]).unwrap();
+
+        assert_eq!(task_to_json(&with)["notes"], "brief");
+        assert!(task_to_json(&without)["notes"].is_null());
+
+        let listed = task_to_listing_json(&with);
+        assert!(listed.get("notes").is_none(), "{listed}");
+        assert_eq!(listed["has_notes"], true);
+        let listed = task_to_listing_json(&without);
+        assert!(listed.get("notes").is_none() && listed.get("has_notes").is_none());
+
+        let plan = store.get_plan("main", "p").unwrap();
+        let shown = plan_to_json(&plan, &[with, without], true);
+        assert_eq!(shown["tasks"][0]["has_notes"], true);
+        assert!(shown["tasks"][0].get("notes").is_none());
+        assert!(shown["tasks"][1].get("has_notes").is_none());
     }
 
     // -------- unicode bidi / invisible rejection (H4) --------
@@ -2444,7 +2719,7 @@ mod tests {
     }
 
     #[test]
-    fn add_task_rejects_bom_in_description() {
+    fn add_task_rejects_bom_in_notes() {
         let (_repo, store) = fresh_store();
         create_plan(&store, "main", "p", None).unwrap();
         let err = add_task(
@@ -2683,7 +2958,9 @@ mod tests {
 
     // -- edit_task ---------------------------------------------------
 
-    /// A plan whose t-002 ("two — the second step") waits on t-001.
+    /// A plan whose t-002 ("two", notes "the second step") waits on t-001,
+    /// and whose t-003 was added before notes existed: its description is
+    /// packed into its title, "three — the old brief".
     fn plan_for_editing() -> (Arc<Repository>, TaskStore) {
         let (repo, store) = fresh_store();
         create_plan(&store, "main", "p", None).unwrap();
@@ -2700,7 +2977,22 @@ mod tests {
             vec!["t-001".into()],
         )
         .unwrap();
+        store
+            .add_task(
+                "main",
+                "p",
+                "three — the old brief",
+                Priority::Low,
+                None,
+                vec![],
+                None,
+            )
+            .unwrap();
         (repo, store)
+    }
+
+    fn task(store: &TaskStore, id: &str) -> Task {
+        store.get_task("main", "p", &TaskId(id.into())).unwrap()
     }
 
     fn edit(store: &TaskStore, id: &str, e: TaskEdit<'_>) -> Result<EditedTask, PlanToolError> {
@@ -2712,17 +3004,20 @@ mod tests {
         assert_eq!(split_title("one"), ("one", None));
         assert_eq!(split_title("one — why"), ("one", Some("why")));
         assert_eq!(split_title("one — why — more"), ("one", Some("why — more")));
-        assert_eq!(join_title("one", Some("why")), "one — why");
-        assert_eq!(join_title("one", Some("")), "one");
-        assert_eq!(join_title("one", None), "one");
+        assert_eq!(
+            packed_title("one — why — more"),
+            Some(("one", "why — more"))
+        );
+        assert_eq!(packed_title("one"), None);
+        // Nothing on one side: not packed.
+        assert_eq!(packed_title(" — why"), None);
+        assert_eq!(packed_title("one —  "), None);
     }
 
     #[test]
-    fn a_new_title_keeps_the_description() {
+    fn a_new_title_keeps_the_notes() {
         let (_repo, store) = plan_for_editing();
-        let before = store
-            .get_task("main", "p", &TaskId("t-002".into()))
-            .unwrap();
+        let before = task(&store, "t-002");
         let edited = edit(
             &store,
             "t-002",
@@ -2733,7 +3028,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(edited.changed, ["title"]);
-        assert_eq!(edited.task.title, "two, retitled — the second step");
+        assert_eq!(edited.task.title, "two, retitled");
+        assert_eq!(edited.task.notes.as_deref(), Some("the second step"));
         // Nothing else moved.
         assert_eq!(
             edited.task,
@@ -2745,43 +3041,263 @@ mod tests {
     }
 
     #[test]
-    fn a_new_description_keeps_the_title_and_empty_removes_it() {
+    fn new_notes_keep_the_title_and_empty_clears_them() {
         let (_repo, store) = plan_for_editing();
         let edited = edit(
             &store,
             "t-002",
             TaskEdit {
-                description: Some("a better brief"),
+                notes: Some("a better brief\nwith a second line"),
                 ..Default::default()
             },
         )
         .unwrap();
-        assert_eq!(edited.changed, ["description"]);
-        assert_eq!(edited.task.title, "two — a better brief");
+        assert_eq!(edited.changed, ["notes"]);
+        assert_eq!(edited.task.title, "two");
+        assert_eq!(
+            edited.task.notes.as_deref(),
+            Some("a better brief\nwith a second line")
+        );
 
         let edited = edit(
             &store,
             "t-002",
             TaskEdit {
-                description: Some(""),
+                notes: Some(""),
                 ..Default::default()
             },
         )
         .unwrap();
-        assert_eq!(edited.changed, ["description"]);
-        assert_eq!(edited.task.title, "two");
+        assert_eq!(edited.changed, ["notes"]);
+        assert_eq!(
+            (edited.task.title.as_str(), edited.task.notes),
+            ("two", None)
+        );
 
-        // A description on a task that had none.
+        // Notes on a task that had none.
         let edited = edit(
             &store,
             "t-001",
             TaskEdit {
-                description: Some("first"),
+                notes: Some("first"),
                 ..Default::default()
             },
         )
         .unwrap();
-        assert_eq!(edited.task.title, "one — first");
+        assert_eq!(edited.task.title, "one");
+        assert_eq!(edited.task.notes.as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn retitling_a_packed_task_moves_its_description_into_notes() {
+        let (_repo, store) = plan_for_editing();
+        let edited = edit(
+            &store,
+            "t-003",
+            TaskEdit {
+                title: Some("three, retitled"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // The description didn't change; it only moved.
+        assert_eq!(edited.changed, ["title"]);
+        assert_eq!(edited.task.title, "three, retitled");
+        assert_eq!(edited.task.notes.as_deref(), Some("the old brief"));
+        assert_eq!(task(&store, "t-003"), edited.task);
+    }
+
+    #[test]
+    fn new_notes_on_a_packed_task_replace_its_description() {
+        let (_repo, store) = plan_for_editing();
+        let edited = edit(
+            &store,
+            "t-003",
+            TaskEdit {
+                notes: Some("the new brief"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(edited.changed, ["notes"]);
+        assert_eq!(edited.task.title, "three");
+        assert_eq!(edited.task.notes.as_deref(), Some("the new brief"));
+
+        // Clearing a packed description leaves the title's own part.
+        let (_repo, store) = plan_for_editing();
+        let edited = edit(
+            &store,
+            "t-003",
+            TaskEdit {
+                notes: Some(""),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(edited.changed, ["notes"]);
+        assert_eq!(
+            (edited.task.title.as_str(), edited.task.notes),
+            ("three", None)
+        );
+    }
+
+    #[test]
+    fn a_packed_title_is_left_alone_by_other_edits() {
+        let (repo, store) = plan_for_editing();
+        let edited = edit(
+            &store,
+            "t-003",
+            TaskEdit {
+                priority: Some("critical"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(edited.changed, ["priority"]);
+        assert_eq!(edited.task.title, "three — the old brief");
+        assert_eq!(edited.task.notes, None);
+
+        // Asking for the title and notes a packed task already has is a
+        // no-op too: nothing is written.
+        let head = repo.log("main", 1).unwrap()[0].id;
+        let edited = edit(
+            &store,
+            "t-003",
+            TaskEdit {
+                title: Some("three"),
+                notes: Some("the old brief"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(edited.changed.is_empty(), "{:?}", edited.changed);
+        assert_eq!(repo.log("main", 1).unwrap()[0].id, head, "no commit");
+    }
+
+    #[test]
+    fn a_task_with_notes_has_a_plain_title() {
+        // Notes written, title not yet: what an unpack cut short between its
+        // two writes leaves. The title is read whole, so nothing is lost.
+        let (_repo, store) = plan_for_editing();
+        store
+            .set_notes("main", "p", &TaskId("t-003".into()), Some("the old brief"))
+            .unwrap();
+        let edited = edit(
+            &store,
+            "t-003",
+            TaskEdit {
+                title: Some("three, retitled"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(edited.task.title, "three, retitled");
+        assert_eq!(edited.task.notes.as_deref(), Some("the old brief"));
+    }
+
+    // -- unpack_descriptions ------------------------------------------
+
+    #[test]
+    fn unpack_moves_packed_descriptions_and_runs_twice_safely() {
+        let (repo, store) = plan_for_editing();
+        // A finished packed task counts too.
+        let four = store
+            .add_task(
+                "main",
+                "p",
+                "four — done already",
+                Priority::Low,
+                None,
+                vec![],
+                None,
+            )
+            .unwrap();
+        store.start_task("main", "p", &four.id).unwrap();
+        store
+            .complete_task("main", "p", &four.id, Proof::commit("abc"))
+            .unwrap();
+        // A packed title whose task already has other notes is kept.
+        store
+            .add_task(
+                "main",
+                "p",
+                "five — packed",
+                Priority::Low,
+                None,
+                vec![],
+                None,
+            )
+            .unwrap();
+        store
+            .set_notes("main", "p", &TaskId("t-005".into()), Some("other notes"))
+            .unwrap();
+        let before: Vec<Task> = store.list_tasks("main", "p").unwrap();
+
+        let head = repo.log("main", 1).unwrap()[0].id;
+        let dry = unpack_descriptions(&store, "main", "p", true).unwrap();
+        assert_eq!(
+            (dry.unpacked.as_slice(), dry.kept.as_slice()),
+            (
+                &["t-003".to_string(), "t-004".to_string()][..],
+                &["t-005".to_string()][..]
+            )
+        );
+        assert_eq!(
+            repo.log("main", 1).unwrap()[0].id,
+            head,
+            "a dry run writes nothing"
+        );
+        assert_eq!(store.list_tasks("main", "p").unwrap(), before);
+
+        let done = unpack_descriptions(&store, "main", "p", false).unwrap();
+        assert_eq!(done.unpacked, dry.unpacked);
+        assert_eq!(done.kept, dry.kept);
+        let three = task(&store, "t-003");
+        assert_eq!(
+            (three.title.as_str(), three.notes.as_deref()),
+            ("three", Some("the old brief"))
+        );
+        let four = task(&store, "t-004");
+        assert_eq!(
+            (four.title.as_str(), four.notes.as_deref()),
+            ("four", Some("done already"))
+        );
+        assert_eq!(four.status, TaskStatus::Done);
+        let five = task(&store, "t-005");
+        assert_eq!(
+            (five.title.as_str(), five.notes.as_deref()),
+            ("five — packed", Some("other notes"))
+        );
+        // Tasks without a packed title are untouched.
+        assert_eq!(task(&store, "t-001"), before[0]);
+        assert_eq!(task(&store, "t-002"), before[1]);
+
+        let head = repo.log("main", 1).unwrap()[0].id;
+        let again = unpack_descriptions(&store, "main", "p", false).unwrap();
+        assert!(again.unpacked.is_empty(), "{:?}", again.unpacked);
+        assert_eq!(again.kept, ["t-005"]);
+        assert_eq!(
+            repo.log("main", 1).unwrap()[0].id,
+            head,
+            "a second run writes nothing"
+        );
+    }
+
+    #[test]
+    fn unpack_finishes_a_run_cut_short() {
+        let (_repo, store) = plan_for_editing();
+        // The notes were written, the title wasn't.
+        store
+            .set_notes("main", "p", &TaskId("t-003".into()), Some("the old brief"))
+            .unwrap();
+        let report = unpack_descriptions(&store, "main", "p", false).unwrap();
+        assert_eq!(report.unpacked, ["t-003"]);
+        assert!(report.kept.is_empty());
+        let three = task(&store, "t-003");
+        assert_eq!(
+            (three.title.as_str(), three.notes.as_deref()),
+            ("three", Some("the old brief"))
+        );
     }
 
     #[test]
@@ -2853,17 +3369,23 @@ mod tests {
                 "{title:?}: {err}"
             );
         }
-        let huge = "x".repeat(MAX_DESCRIPTION_LEN + 1);
-        let err = edit(
-            &store,
-            "t-002",
-            TaskEdit {
-                description: Some(&huge),
-                ..Default::default()
-            },
-        )
-        .unwrap_err();
-        assert!(matches!(err, PlanToolError::InvalidInput(_)), "{err}");
+        let huge = "x".repeat(MAX_NOTES_LEN + 1);
+        for notes in [huge.as_str(), "hidden\u{202E}text"] {
+            let err = edit(
+                &store,
+                "t-002",
+                TaskEdit {
+                    notes: Some(notes),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+            assert!(matches!(err, PlanToolError::InvalidInput(_)), "{err}");
+        }
+        assert_eq!(
+            task(&store, "t-002").notes.as_deref(),
+            Some("the second step")
+        );
         let err = edit(
             &store,
             "t-002",
@@ -2991,6 +3513,9 @@ mod tests {
         assert_eq!(json["changed"], serde_json::json!(["priority"]));
         assert_eq!(json["priority"], "critical");
         assert_eq!(json["id"], "t-002");
+        // The echo marks the notes rather than repeating them.
+        assert_eq!(json["has_notes"], true);
+        assert!(json.get("notes").is_none());
     }
 
     #[test]
@@ -3000,7 +3525,8 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(p.blocked_by, Some(vec![]));
-        assert!(p.title.is_none() && p.description.is_none() && p.priority.is_none());
+        assert!(p.title.is_none() && p.notes.is_none() && p.description.is_none());
+        assert!(p.priority.is_none());
         assert!(!p.force);
         assert_eq!(p.ref_name, "main");
     }
