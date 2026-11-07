@@ -24,6 +24,7 @@ pub mod personal;
 pub mod plan_tools;
 pub mod postgres_url;
 pub mod project;
+pub mod push_filter;
 pub mod rate_limit;
 pub mod reminder_tools;
 pub mod reminder_trust;

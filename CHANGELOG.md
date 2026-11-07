@@ -13,6 +13,7 @@ up a minor version.
   - A multi-tenant Hub's tokens each reach their own tenant's store, and no other. `<store>` is `me`, or the tenant's name (`default` on a single-tenant Hub).
   - AgentStateGraph does the receiving side's checks: a push only moves a ref forward, and `/_meta/_secret` and local-only refs (raw turns) are refused.
   - `--sync-max-push-mb` (default 256) bounds one push. The push log records each push under its tenant, plus the device a client names in `X-CTXone-Device`.
+- **Every push is scanned for credentials** (ctx-hub-sync t-007). CTXone's rules, the ones `ctx secrets scan` uses, run as an AgentStateGraph push filter beside its own. A high-confidence hit (a provider's token format, or a private key) blocks the push, and each finding names its path and the record to forget, never the value. A finding someone has checked can be let through with a reason, which the remote's push log keeps; anything under `/_meta/_secret` never can. Medium-confidence shapes don't block: `ctx secrets scan` reports them.
 
 ### Changed
 - **Raw session turns live on a local-only ref of their own** (ctx-hub-sync t-002). A session's envelope (title, meta, provenance, burn, usage, analysis, summary, decisions) stays at `/sessions/<sid>` on its branch. Its turns are at `/turns/<sid>/t<NNNN>` on `_local/turns`, one per workspace whatever branch the session ran on. That ref is marked local-only, so AgentStateGraph never pushes it and a Hub never offers it: once sync arrives, turns stay on the machine that captured them.

@@ -549,7 +549,7 @@ fn walk(value: &serde_json::Value, path: &str, f: &mut impl FnMut(&str, &str)) {
 /// The record that holds `path`, to forget as a whole: a memory entry
 /// (`/memory/<topic>/<id>`, or `/memory/{pinned,primed}/<source>/<section>`)
 /// or one part of a session's envelope (`/sessions/<id>/<part>`).
-fn forget_target(path: &str) -> Option<String> {
+pub(crate) fn forget_target(path: &str) -> Option<String> {
     let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     match parts.as_slice() {
         ["memory", kind @ ("pinned" | "primed"), source, section, ..] => {
