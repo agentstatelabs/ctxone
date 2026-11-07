@@ -19,14 +19,14 @@ exclude = [".asd/", ".asd-*"]
 
 [workspace.dependencies]
 # ASG engine crates, from crates.io. Bump deliberately; the version must already be published.
-agentstategraph = "1.5.3"
-agentstategraph-core = "1.5.3"
-agentstategraph-storage = { version = "1.5.3", features = ["postgres", "postgres-tls", "memory"] }
-agentstategraph-tasks = "1.5.3"
-agentstategraph-migrate = "1.5.3"
-agentstategraph-taint = "1.5.3"
-agentstategraph-reminders = "1.5.3"
-agentstategraph-sync-http = { version = "1.5.3", default-features = false }
+agentstategraph = "1.5.4"
+agentstategraph-core = "1.5.4"
+agentstategraph-storage = { version = "1.5.4", features = ["postgres", "postgres-tls", "memory"] }
+agentstategraph-tasks = "1.5.4"
+agentstategraph-migrate = "1.5.4"
+agentstategraph-taint = "1.5.4"
+agentstategraph-reminders = "1.5.4"
+agentstategraph-sync-http = { version = "1.5.4", default-features = false }
 
 # Engine's workspace deps (required because engine crates inherit from workspace)
 blake3 = "1"

@@ -1,7 +1,7 @@
 # Design: Hub Sync — your memory on every machine, shared with your team
 
 **Status:** built for your own account (updated 2026-11-07), on
-AgentStateGraph 1.5.3. Each machine's Hub pushes to and pulls from a Hub that
+AgentStateGraph 1.5.4. Each machine's Hub pushes to and pulls from a Hub that
 serves sync ([CONNECT_A_HUB.md](../CONNECT_A_HUB.md#sync-your-own-hub-with-a-remote-one)).
 Still to come: commits carrying the device id (t-016), sharing a workspace with
 a team (waits on AgentStateGraph Plan F t-005), device-code login, and opt-in
@@ -216,7 +216,11 @@ One real store, 2026-10-06, read-only.
     whatever branch the session ran on. Every reader, a session's delete and
     move, and the secrets scan's `--turns` use it.
   - Schema 3 moves existing turns off every branch, relinked rather than
-    copied: a 900 MB store with 300 MB of turns took 8 seconds.
+    copied: a 900 MB store with 300 MB of turns took 8 seconds. Its cost
+    follows the number of branches more than the store's size. A 2.5 GB store
+    with 220 branches took 299 s on AgentStateGraph 1.5.3, whose epoch-seal
+    check cost every write up to 1.6 s, and 48.5 s on 1.5.4. Most of what's
+    left is the branches' search indexes dropping the turn text.
 - **What stays on `main`:** the session envelope.
 - **Readers:** they already avoid turns. Recall reads `/memory`, discovery is
   depth-limited and `why_did_we` drops `/sessions`, so nothing that syncs
@@ -303,7 +307,7 @@ shared by every workspace in a store, as
 | t-008, t-009 | Plan G t-001 (control ref) and Plan F t-005 (namespace scoping) |
 | t-015 | Plan G t-004 and t-006, with the sync server as an embeddable service |
 | t-016 | Plan F's per-call context (or a task-store hook) carrying a device id |
-| All of the above | An AgentStateGraph release containing them: 1.5.1 brought Plan G, and 1.5.3 joining unrelated histories, seals over history a store never received, and local epochs. CTXone is on 1.5.3. |
+| All of the above | An AgentStateGraph release containing them: 1.5.1 brought Plan G, and 1.5.3 joining unrelated histories, seals over history a store never received, and local epochs. CTXone is on 1.5.4. |
 
 ## Not in this design
 
