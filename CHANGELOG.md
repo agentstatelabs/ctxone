@@ -9,7 +9,7 @@ up a minor version.
 ## [Unreleased]
 
 ### Added
-- **`ctxone-hub --serve-sync` serves sync** (ctx-hub-sync t-015). It mounts AgentStateGraph's sync service (`agentstategraph-sync-http` 1.5.1) at `/sync/v1/<store>/{refs,fetch,push}`, behind the Hub's own auth, so other stores push to a store here and pull from it. It's off by default.
+- **`ctxone-hub --serve-sync` serves sync** (ctx-hub-sync t-015). It mounts AgentStateGraph's sync service (`agentstategraph-sync-http`) at `/sync/v1/<store>/{refs,fetch,push}`, behind the Hub's own auth, so other stores push to a store here and pull from it. It's off by default.
   - A multi-tenant Hub's tokens each reach their own tenant's store, and no other. `<store>` is `me`, or the tenant's name (`default` on a single-tenant Hub).
   - AgentStateGraph does the receiving side's checks: a push only moves a ref forward, and `/_meta/_secret` and local-only refs (raw turns) are refused.
   - `--sync-max-push-mb` (default 256) bounds one push. The push log records each push under its tenant, plus the device a client names in `X-CTXone-Device`.
@@ -24,6 +24,7 @@ up a minor version.
   - A reminder pulled from another machine waits until it's approved here: with `ctx reminder approve <id>` (new), the `reminder_approve` tool, or `POST /api/reminders/{id}/approve`. Approving now also takes a reminder that isn't due yet, which stays pending and runs here when it's due.
   - The first start (CTXone schema 4) trusts every reminder the store already holds, so nothing that ran before stops.
   - A `ctx` talking to an older Hub, which doesn't say, runs nothing.
+- **Built on AgentStateGraph 1.5.3** (was 1.5.1). It joins stores whose histories are unrelated, lets a store write after taking a seal over history it never received, and keeps chosen epochs off the control ref.
 
 ## [v1.2.2] — 2026-11-05
 
