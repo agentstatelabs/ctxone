@@ -134,9 +134,10 @@ Use this when:
 - Two agents on one machine should **not** see each other's memory.
 - You're experimenting and don't want to touch your main graph.
 
-> Isolated dbs do **not** sync. A fact remembered in `claude.db` is invisible to
-> the hub serving `memory.db`. No two hubs sync yet: to share memory between
-> machines, connect them to one hub ([CONNECT_A_HUB.md](CONNECT_A_HUB.md)). To browse an isolated db in Lens, run a hub on it
+> Isolated dbs do **not** sync with each other. A fact remembered in
+> `claude.db` is invisible to the hub serving `memory.db`. To share memory
+> between machines, connect them to one hub, or sync each machine's hub with
+> one that serves sync ([CONNECT_A_HUB.md](CONNECT_A_HUB.md)). To browse an isolated db in Lens, run a hub on it
 > at a **different port** while the agent is stopped, or on a copy:
 > `ctxone-hub --http --lens --path /Users/user/.ctxone/claude.db --port 3002`.
 
@@ -183,6 +184,8 @@ Override per agent with `--path` (topology C). A bare `ctxone-hub` with no
 | `--storage postgres --database-url <URL>` | Postgres instead of SQLite (or set `DATABASE_URL`) |
 | `--pg-pool-size <N>` | Most Postgres connections the hub holds (default 32); a multi-tenant hub's tenants share them |
 | `--tenants-file <PATH>` | One hub for many users: each request's token picks its tenant ([below](#one-hub-for-many-users)) |
+| `--serve-sync` | Serve sync at `/sync/v1/<store>` behind the same auth, so other hubs push here and pull from here; `<store>` is `me` or the tenant's name ([CONNECT_A_HUB.md](CONNECT_A_HUB.md#sync-your-own-hub-with-a-remote-one)) |
+| `--sync-max-push-mb <N>` | The most one push may send (default 256) |
 | `--asd-path name=PATH` | Register an ASD code-graph repo for the process pool |
 
 ### Environment
@@ -202,6 +205,9 @@ Override per agent with `--path` (topology C). A bare `ctxone-hub` with no
 | `DATABASE_URL` | Postgres connection URL; setting it selects Postgres storage, unless `--storage memory` |
 | `CTXONE_PG_POOL_SIZE` | Same as `--pg-pool-size` |
 | `CTXONE_TENANTS_FILE` | Same as `--tenants-file`, for the hub and for `ctxone-hub tenant` |
+| `CTXONE_SERVE_SYNC` | `1` = same as `--serve-sync` |
+| `CTXONE_SYNC_MAX_PUSH_MB` | Same as `--sync-max-push-mb` |
+| `CTXONE_SYNC_EVERY` | How often a hub that syncs with a remote pulls and pushes, in seconds (default 300; `0` turns the background sync off) |
 | `CTXONE_BACKUP_KEEP` | Startup snapshots to retain (default 5) |
 | `CTXONE_BACKUP_INTERVAL_SECS` | Background VACUUM-INTO snapshot interval (default 1800; 0 disables) |
 | `RUST_LOG` | Log level (`info` default) |
