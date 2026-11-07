@@ -1565,12 +1565,14 @@ enum ReminderAction {
     /// Run due, approved reminders whose commands are all allowlisted, then
     /// record the outcome. Meant to run on a timer (see `ctx service`).
     ///
-    /// A reminder runs only if BOTH gates pass: (1) it is explicitly
+    /// A reminder runs only if all three gates pass: (1) it is explicitly
     /// `autonomous: true` (anything else — including `awaiting_permission` —
-    /// needs a human); and (2) every one of its `commands` is on the allowlist
-    /// (one exact command per line, '#' comments). Otherwise nothing from it
-    /// runs and it is recorded `deferred` and snoozed. Missing allowlist =
-    /// nothing runs.
+    /// needs a human); (2) it was made or approved through this Hub, so one
+    /// that arrived by sync from another machine waits for `ctx reminder
+    /// approve <id>` here; and (3) every one of its `commands` is on the
+    /// allowlist (one exact command per line, '#' comments). A reminder that
+    /// fails the allowlist is recorded `deferred` and snoozed. Missing
+    /// allowlist = nothing runs.
     Tick {
         /// Allowlist file of approved commands (exact match, one per line).
         #[arg(long, default_value = "~/.ctxone/reminder-tick.allow")]
@@ -1584,6 +1586,13 @@ enum ReminderAction {
         /// Show what would run/defer without executing or recording.
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Approve a reminder on this machine: an `awaiting_permission` one
+    /// becomes due, and any one, including a reminder made on another
+    /// machine and pulled here, may then run its commands here.
+    Approve {
+        /// The reminder's id.
+        id: String,
     },
 }
 
@@ -3888,6 +3897,36 @@ async fn handle_reminder(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use serde_json::json;
     match action {
+        ReminderAction::Approve { id } => {
+            let resp = match client
+                .post(format!(
+                    "{server}/api/reminders/{}/approve",
+                    urlencoding(&id)
+                ))
+                .json(&json!({}))
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "reminder approve failed").await;
+            }
+            let r: Value = resp.json().await?;
+            emit(format, &r, |r| {
+                println!(
+                    "approved {} ({}): {}",
+                    r["title"].as_str().unwrap_or("?"),
+                    r["status"].as_str().unwrap_or("?"),
+                    if trusted_here(r) {
+                        "it may run its commands on this machine"
+                    } else {
+                        "the Hub didn't confirm it may run here; is it older than this ctx?"
+                    }
+                );
+            });
+        }
         ReminderAction::Tick {
             allowlist,
             skip,
@@ -3913,6 +3952,7 @@ async fn handle_reminder(
 
             let (mut acted, mut deferred, mut skipped, mut needs_approval, mut no_cmds) =
                 (0u32, 0u32, 0u32, 0u32, 0u32);
+            let mut not_here = 0u32;
             let mut results: Vec<Value> = Vec::new();
 
             for r in &due {
@@ -3929,6 +3969,20 @@ async fn handle_reminder(
                 // without routing it through `awaiting_permission`.
                 if !autonomous || status == "awaiting_permission" {
                     needs_approval += 1;
+                    continue;
+                }
+                // Gate 2: this machine. A reminder runs its commands only where it
+                // was made or approved (ctx-hub-sync t-008), so one pulled from
+                // another machine waits until someone approves it here.
+                if !trusted_here(r) {
+                    not_here += 1;
+                    results.push(json!({
+                        "reminder": title,
+                        "action": "not-trusted-here",
+                        "detail": format!(
+                            "made on another machine; to let it run here: ctx reminder approve {id}"
+                        ),
+                    }));
                     continue;
                 }
                 if id.is_empty() || skip.contains(&id) {
@@ -3951,7 +4005,7 @@ async fn handle_reminder(
                     continue;
                 }
 
-                // Gate 2: allowlist. Every command must be pre-approved.
+                // Gate 3: allowlist. Every command must be pre-approved.
                 let disallowed: Vec<String> = cmds
                     .iter()
                     .filter(|c| !allow.contains(*c))
@@ -3984,7 +4038,7 @@ async fn handle_reminder(
                     continue;
                 }
 
-                // Both gates passed — run the commands.
+                // Every gate passed — run the commands.
                 let _ = client
                     .post(format!("{server}/api/reminders/{id}/start"))
                     .json(&json!({}))
@@ -4032,18 +4086,20 @@ async fn handle_reminder(
                 "deferred": deferred,
                 "skipped": skipped,
                 "needs_approval": needs_approval,
+                "not_trusted_here": not_here,
                 "no_commands": no_cmds,
                 "dry_run": dry_run,
                 "results": results,
             });
             emit(format, &summary, |_| {
                 println!(
-                    "reminder tick: due={} acted={} deferred={} skipped={} awaiting_approval={} no_commands={}{}",
+                    "reminder tick: due={} acted={} deferred={} skipped={} awaiting_approval={} not_trusted_here={} no_commands={}{}",
                     due.len(),
                     acted,
                     deferred,
                     skipped,
                     needs_approval,
+                    not_here,
                     no_cmds,
                     if dry_run { " (dry-run)" } else { "" }
                 );
@@ -4058,6 +4114,13 @@ async fn handle_reminder(
         }
     }
     Ok(())
+}
+
+/// Whether the Hub says this reminder may run its commands here: it was made
+/// or approved through this Hub (ctx-hub-sync t-008). A Hub that doesn't say,
+/// one from before sync, counts as no, so nothing runs unasked.
+fn trusted_here(reminder: &Value) -> bool {
+    reminder["trusted_here"].as_bool().unwrap_or(false)
 }
 
 /// POST a reminder execution record (best-effort helper for the tick).
@@ -10397,6 +10460,14 @@ async fn handle_docs(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_reminder_runs_here_only_when_the_hub_says_so() {
+        assert!(trusted_here(&serde_json::json!({ "trusted_here": true })));
+        assert!(!trusted_here(&serde_json::json!({ "trusted_here": false })));
+        // A Hub from before sync doesn't say: nothing runs unasked.
+        assert!(!trusted_here(&serde_json::json!({ "id": "r1" })));
+    }
+
     use super::*;
     use serde_json::json;
 

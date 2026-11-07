@@ -2863,7 +2863,10 @@ async fn a_hub_moves_turns_off_its_branches_when_it_upgrades() {
     repo.set_json("main", "/ctxone/schema_version", &json!(2), opts())
         .unwrap();
     ctxone_hub::migrations::run_migrations(&repo).unwrap();
-    assert_eq!(ctxone_hub::migrations::current_schema_version(&repo), 3);
+    assert_eq!(
+        ctxone_hub::migrations::current_schema_version(&repo),
+        ctxone_hub::migrations::CTXONE_SCHEMA_VERSION
+    );
     assert!(repo.get("main", "/sessions/s1/turns").is_err());
     assert_eq!(repo.get_json("main", "/sessions/s1/title").unwrap(), "One");
     assert_eq!(
@@ -2871,4 +2874,103 @@ async fn a_hub_moves_turns_off_its_branches_when_it_upgrades() {
             .unwrap(),
         "hi"
     );
+}
+
+// -------- Reminders run only where they were made or approved (ctx-hub-sync t-008) --------
+
+fn memory_router() -> (Arc<Repository>, axum::Router) {
+    let repo = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
+    repo.init().expect("repo init");
+    let router = http::router(repo.clone(), Arc::new(SessionRegistry::new()));
+    (repo, router)
+}
+
+fn find<'a>(list: &'a Value, id: &str) -> &'a Value {
+    list.as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == id)
+        .unwrap_or_else(|| panic!("{id} isn't listed: {list}"))
+}
+
+#[tokio::test]
+async fn a_pulled_reminder_waits_for_approval_on_this_machine() {
+    use agentstategraph::sync::InProcessRemote;
+    let (a, a_router) = memory_router();
+    let (b, b_router) = memory_router();
+    let hub = Repository::new(Box::new(MemoryStorage::new()));
+    hub.init().unwrap();
+    let remote = InProcessRemote::new(&hub);
+
+    // Made through A's Hub: due now, autonomous, with a command.
+    let (status, made) = call_json(
+        a_router.clone(),
+        post_json(
+            "/api/reminders",
+            json!({
+                "title": "rotate logs",
+                "instructions": "run the rotation",
+                "due_at": "2020-01-01T00:00:00Z",
+                "autonomous": true,
+                "commands": ["true"],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{made}");
+    assert_eq!(made["trusted_here"], true);
+    let id = made["id"].as_str().unwrap().to_string();
+    let (_, due) = call_json(a_router.clone(), get("/api/reminders/due")).await;
+    assert_eq!(find(&due, &id)["trusted_here"], true);
+
+    // A pushes; the control ref carries the reminder. B pulls it.
+    a.fetch("hub", &remote, &[]).unwrap();
+    a.push("hub", &remote, "main").unwrap();
+    b.fetch("hub", &remote, &[]).unwrap();
+    let (_, due) = call_json(b_router.clone(), get("/api/reminders/due")).await;
+    let pulled = find(&due, &id);
+    assert_eq!(pulled["title"], "rotate logs");
+    assert_eq!(pulled["trusted_here"], false, "{pulled}");
+    assert!(
+        b.head("_local/trust").is_err(),
+        "nothing is trusted on B yet"
+    );
+
+    // Approved on B, it may run there; A's own record never travelled.
+    let (status, approved) = call_json(
+        b_router.clone(),
+        post_json(&format!("/api/reminders/{id}/approve"), json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    assert_eq!(approved["trusted_here"], true);
+    let (_, due) = call_json(b_router.clone(), get("/api/reminders/due")).await;
+    assert_eq!(find(&due, &id)["trusted_here"], true);
+    assert!(hub.head("_local/trust").is_err());
+
+    // A reminder that isn't due yet can be approved ahead; it stays pending.
+    let (_, later) = call_json(
+        a_router.clone(),
+        post_json(
+            "/api/reminders",
+            json!({
+                "title": "later",
+                "instructions": "-",
+                "due_at": "2999-01-01T00:00:00Z",
+                "autonomous": true,
+            }),
+        ),
+    )
+    .await;
+    let later_id = later["id"].as_str().unwrap().to_string();
+    a.push("hub", &remote, "main").unwrap();
+    b.fetch("hub", &remote, &[]).unwrap();
+    let (status, ahead) = call_json(
+        b_router.clone(),
+        post_json(&format!("/api/reminders/{later_id}/approve"), json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{ahead}");
+    assert_eq!(ahead["status"], "pending");
+    assert_eq!(ahead["trusted_here"], true);
 }

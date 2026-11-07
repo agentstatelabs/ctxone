@@ -7439,12 +7439,7 @@ async fn list_reminders_handler(
     let repo = s.repo_for(&ns)?;
     let mgr = reminder_tools::make_manager(repo.clone());
     let reminders = reminder_tools::list_reminders(&mgr, q).map_err(reminder_error_to_response)?;
-    Ok(Json(
-        reminders
-            .iter()
-            .map(reminder_tools::reminder_to_json)
-            .collect(),
-    ))
+    Ok(Json(reminder_tools::reminders_json_here(&repo, &reminders)))
 }
 
 async fn create_reminder_handler(
@@ -7455,11 +7450,11 @@ async fn create_reminder_handler(
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
     let mgr = reminder_tools::make_manager(repo.clone());
-    let r = reminder_tools::create_reminder(&mgr, req, &agent_id.0)
+    let r = reminder_tools::create_here(&mgr, &repo, req, &agent_id.0)
         .map_err(reminder_error_to_response)?;
     Ok((
         StatusCode::CREATED,
-        Json(reminder_tools::reminder_to_json(&r)),
+        Json(reminder_tools::one_json_here(&repo, &r)),
     ))
 }
 
@@ -7472,12 +7467,9 @@ async fn remind_me_handler(
     let reminders = mgr
         .remind_me()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(
-        reminders
-            .iter()
-            .map(reminder_tools::reminder_to_json)
-            .collect(),
-    ))
+    // `trusted_here` is the tick's third gate: only a reminder made or
+    // approved through this Hub runs its commands here (ctx-hub-sync t-008).
+    Ok(Json(reminder_tools::reminders_json_here(&repo, &reminders)))
 }
 
 async fn get_reminder_handler(
@@ -7488,7 +7480,7 @@ async fn get_reminder_handler(
     let repo = s.repo_for(&ns)?;
     let mgr = reminder_tools::make_manager(repo.clone());
     match mgr.get(&id) {
-        Ok(r) => Ok(Json(reminder_tools::reminder_to_json(&r))),
+        Ok(r) => Ok(Json(reminder_tools::one_json_here(&repo, &r))),
         Err(agentstategraph_reminders::ReminderError::NotFound(_)) => Err((
             StatusCode::NOT_FOUND,
             format!("reminder '{}' not found", id),
@@ -7532,10 +7524,9 @@ async fn approve_reminder_handler(
     let repo = s.repo_for(&ns)?;
     let mgr = reminder_tools::make_manager(repo.clone());
     let approver = body.and_then(|b| b.0.approved_by).unwrap_or(agent_id.0);
-    let r = mgr
-        .approve(&id, &approver)
+    let r = reminder_tools::approve_here(&mgr, &repo, &id, &approver)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    Ok(Json(reminder_tools::reminder_to_json(&r)))
+    Ok(Json(reminder_tools::one_json_here(&repo, &r)))
 }
 
 async fn cancel_reminder_handler(

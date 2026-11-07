@@ -2,8 +2,10 @@
 //!
 //! A local-only ref is an ordinary AgentStateGraph branch marked with
 //! `Repository::set_local_only`: AgentStateGraph never pushes it, and a Hub
-//! never offers it to a fetch. [`crate::turns::TURNS_REF`] holds a
-//! workspace's raw session turns.
+//! never offers it to a fetch. CTXone keeps two:
+//! - [`crate::turns::TURNS_REF`], a workspace's raw session turns;
+//! - [`crate::reminder_trust::TRUST_REF`], the reminders made or approved
+//!   through this Hub, which may run their commands here.
 //!
 //! Their names begin with [`LOCAL_REF_PREFIX`]. Branch listings leave them
 //! out, and no tool creates, merges, resets or deletes one by name: merging

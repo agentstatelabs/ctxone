@@ -13,6 +13,10 @@ up a minor version.
   - **The first start moves them, once** (CTXone schema 3). Each session's stored turns are relinked onto the turns ref, not copied, and then each branch drops them in one commit. On a 900 MB store with 300 MB of turns (2,000 sessions on `main` and 10 branches) it took 8 seconds, and the file grew 1 MB. A session that held nothing but turns leaves the branch; the session list never showed one. Turn history stays where it was. A store at schema 3 won't open in an older Hub, as with every schema change, so back up the store before upgrading if you might go back.
   - The turn routes (`PUT /api/sessions/{sid}/turns`, `POST` and `GET …/turns/{idx}`, `GET …/turns`) use the turns ref and ignore `?ref=`. `GET /api/sessions/{sid}/turns?tree=true` returns every turn, as `{ tNNNN: turn }`; Lens reads turns that way now, not through `/api/state`. Deleting or moving a session takes its turns too.
   - Branch tools leave out `_local/*` refs and refuse them by name: no branch may be created from, merged with, reset to or named after one. `ctx secrets scan --turns` scans the turns ref, a turn at a time.
+- **A reminder runs its commands only where it was made or approved** (ctx-hub-sync t-008). Reminders will sync, and `ctx reminder tick` on one machine shouldn't run a reminder made on another. The Hub keeps the reminders made or approved through it on `_local/trust`, a local-only ref that sync never moves, and marks every reminder it lists `trusted_here` or not. The tick runs only trusted ones.
+  - A reminder pulled from another machine waits until it's approved here: with `ctx reminder approve <id>` (new), the `reminder_approve` tool, or `POST /api/reminders/{id}/approve`. Approving now also takes a reminder that isn't due yet, which stays pending and runs here when it's due.
+  - The first start (CTXone schema 4) trusts every reminder the store already holds, so nothing that ran before stops.
+  - A `ctx` talking to an older Hub, which doesn't say, runs nothing.
 
 ## [v1.2.2] — 2026-11-05
 

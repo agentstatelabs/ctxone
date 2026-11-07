@@ -26,7 +26,7 @@ use tracing::{debug, info, warn};
 
 /// Current CtxOne schema version. Bump this when you change the shape of
 /// anything CtxOne writes to the graph, and add a migration below.
-pub const CTXONE_SCHEMA_VERSION: u32 = 3;
+pub const CTXONE_SCHEMA_VERSION: u32 = 4;
 
 /// Path where the schema version is stored inside the graph.
 const SCHEMA_VERSION_PATH: &str = "/ctxone/schema_version";
@@ -206,6 +206,7 @@ pub fn run_migrations(repo: &Repository) -> Result<(), MigrationError> {
             }
             2 => migrate_001_to_002(repo)?,
             3 => migrate_002_to_003(repo)?,
+            4 => migrate_003_to_004(repo)?,
             other => {
                 return Err(MigrationError::Repo(format!(
                     "no migration registered for schema version {}",
@@ -292,6 +293,22 @@ fn migrate_002_to_003(repo: &Repository) -> Result<(), MigrationError> {
         branches = report.branches,
         sessions = report.sessions,
         "migration 003: raw session turns moved to their local-only ref"
+    );
+    Ok(())
+}
+
+/// v3 -> v4: trust every reminder the store holds (ctx-hub-sync t-008).
+///
+/// `ctx reminder tick` now runs a reminder's commands only if it was made or
+/// approved through this Hub, as recorded on the local-only trust ref
+/// ([`crate::reminder_trust`]), so a reminder pulled from another machine
+/// can't run here unasked. Before sync, every reminder was made through this
+/// Hub; trusting them all keeps each one running as it did.
+fn migrate_003_to_004(repo: &Repository) -> Result<(), MigrationError> {
+    let trusted = crate::reminder_trust::trust_existing(repo)?;
+    info!(
+        version = 4,
+        trusted, "migration 004: reminders already here are trusted to run here"
     );
     Ok(())
 }

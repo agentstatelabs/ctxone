@@ -5242,10 +5242,9 @@ impl CtxOneServer {
     ) -> String {
         use crate::reminder_tools as rt;
         let mgr = rt::make_manager(self.repo.clone());
-        match rt::create_reminder(&mgr, params.0, &self.agent_id) {
-            Ok(r) => {
-                serde_json::to_string(&rt::reminder_to_json(&r)).unwrap_or_else(|_| "{}".into())
-            }
+        match rt::create_here(&mgr, &self.repo, params.0, &self.agent_id) {
+            Ok(r) => serde_json::to_string(&rt::one_json_here(&self.repo, &r))
+                .unwrap_or_else(|_| "{}".into()),
             Err(e) => rt::err_json(e),
         }
     }
@@ -5265,8 +5264,7 @@ impl CtxOneServer {
         let mgr = rt::make_manager(self.repo.clone());
         match mgr.remind_me() {
             Ok(reminders) => {
-                let out: Vec<serde_json::Value> =
-                    reminders.iter().map(rt::reminder_to_json).collect();
+                let out = rt::reminders_json_here(&self.repo, &reminders);
                 serde_json::to_string(&out).unwrap_or_else(|_| "[]".into())
             }
             Err(e) => rt::err_json(e),
@@ -5286,8 +5284,7 @@ impl CtxOneServer {
         let mgr = rt::make_manager(self.repo.clone());
         match rt::list_reminders(&mgr, params.0) {
             Ok(reminders) => {
-                let out: Vec<serde_json::Value> =
-                    reminders.iter().map(rt::reminder_to_json).collect();
+                let out = rt::reminders_json_here(&self.repo, &reminders);
                 serde_json::to_string(&out).unwrap_or_else(|_| "[]".into())
             }
             Err(e) => rt::err_json(e),
@@ -5304,9 +5301,8 @@ impl CtxOneServer {
         use crate::reminder_tools as rt;
         let mgr = rt::make_manager(self.repo.clone());
         match mgr.get(&params.0.id) {
-            Ok(r) => {
-                serde_json::to_string(&rt::reminder_to_json(&r)).unwrap_or_else(|_| "{}".into())
-            }
+            Ok(r) => serde_json::to_string(&rt::one_json_here(&self.repo, &r))
+                .unwrap_or_else(|_| "{}".into()),
             Err(e) => rt::err_json(e),
         }
     }
@@ -5336,9 +5332,9 @@ impl CtxOneServer {
     }
 
     #[tool(
-        description = "Approve a non-autonomous reminder for execution. Transitions `awaiting_permission` → `due`. \
+        description = "Approve a reminder for execution on this machine. Transitions `awaiting_permission` → `due`, and marks the reminder `trusted_here`: `ctx reminder tick` runs a reminder's commands only if it was made or approved through this Hub, so a reminder that arrived by sync from another machine needs approving here first (a pending one keeps its status and runs when due). \
         \
-        CALL THIS WHEN the user explicitly okays a reminder that was created with `autonomous: false`. After approval, call `remind_me` or `reminder_start` to begin execution."
+        CALL THIS WHEN the user explicitly okays a reminder that was created with `autonomous: false`, or one made on another machine that shows `trusted_here: false`. After approval, call `remind_me` or `reminder_start` to begin execution."
     )]
     async fn reminder_approve(
         &self,
@@ -5348,10 +5344,9 @@ impl CtxOneServer {
         let mgr = rt::make_manager(self.repo.clone());
         let p = params.0;
         let approver = p.approved_by.unwrap_or_else(|| self.agent_id.clone());
-        match mgr.approve(&p.id, &approver) {
-            Ok(r) => {
-                serde_json::to_string(&rt::reminder_to_json(&r)).unwrap_or_else(|_| "{}".into())
-            }
+        match rt::approve_here(&mgr, &self.repo, &p.id, &approver) {
+            Ok(r) => serde_json::to_string(&rt::one_json_here(&self.repo, &r))
+                .unwrap_or_else(|_| "{}".into()),
             Err(e) => rt::err_json(e),
         }
     }
