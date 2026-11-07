@@ -37,6 +37,8 @@
 	import QuickCapture from '$lib/dashboard/QuickCapture.svelte';
 	import BurnBoard from '$lib/dashboard/BurnBoard.svelte';
 	import RecentActivity from '$lib/dashboard/RecentActivity.svelte';
+	import SyncStatus from '$lib/dashboard/SyncStatus.svelte';
+	import MachineLocal from '$lib/MachineLocal.svelte';
 
 	/**
 	 * Bridge for StatTile's `spark` snippet prop: lens-core is a symlinked
@@ -762,6 +764,15 @@
 		title="Structural size of the memory graph on {branchStore.current}"
 	/>
 </div>
+
+<!-- ── Sync with a remote Hub (ctx-hub-sync t-006) ──────────────────────── -->
+<MachineLocal>
+	<div class="ws-facts">
+		<Panel title="Sync" scope="this workspace">
+			<SyncStatus />
+		</Panel>
+	</div>
+</MachineLocal>
 
 <!-- ── Import stats + drill-down ─────────────────────────────────────────── -->
 <div class="ws-facts">

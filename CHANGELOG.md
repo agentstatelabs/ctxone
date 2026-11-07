@@ -8,7 +8,18 @@ up a minor version.
 
 ## [Unreleased]
 
+Your memory follows you to every machine. Each machine's Hub pushes to and pulls from a Hub that serves sync, and raw session turns never leave the machine that captured them. Three schema migrations run once on the first start. They move raw turns onto their own ref, trust the reminders already here, and keep seals from before workspaces on this machine. On a large store this takes a few seconds. A store at schema 5 won't open in an older Hub, so back it up before upgrading if you might go back.
+
 ### Added
+- **`ctx remote`, `ctx push`, `ctx pull` and `ctx sync`: your memory on every machine** (ctx-hub-sync t-006). `ctx remote add hub <url> --token-stdin`, then `ctx remote set <workspace> hub` and `ctx sync`. See [CONNECT_A_HUB.md](docs/CONNECT_A_HUB.md#sync-your-own-hub-with-a-remote-one).
+  - **What syncs:** memory, plans and tasks, each session's envelope, reminders, taints, plan epochs and your personal namespace. Setting the first workspace sets the personal namespace too.
+  - **What stays here:** raw turns, a workspace's history from before you set it (the first push starts from where it is then), and seals from before workspaces existed.
+  - **A machine with history of its own** joins the remote's on its first sync, in a merge. A task two machines each added offline gets a new id on the second to sync, with its blockers following.
+  - **The token** goes to `~/.ctxone/sync-tokens/<remote>` (mode 0600), or an environment variable the Hub's environment sets, never into the store.
+  - **The Hub does the work**, since it's the only writer to its store: `ctx` asks it (`/api/sync/remotes`, `/api/sync/namespaces/{ns}`, `/api/sync/run`, `/api/sync/status`). It also syncs on its own every five minutes (`CTXONE_SYNC_EVERY`; `0` turns it off) and within a minute of a change.
+  - **Lens** shows on each workspace's page whether it syncs, and where each branch stands.
+  - `ctx push --allow <finding>='<why>'` lets a blocked finding through.
+  - **Your own space only, for now:** `ctx remote set` refuses a remote in another space. Sharing a workspace with a team waits on AgentStateGraph scoping taints and reminders by workspace.
 - **`ctxone-hub --serve-sync` serves sync** (ctx-hub-sync t-015). It mounts AgentStateGraph's sync service (`agentstategraph-sync-http`) at `/sync/v1/<store>/{refs,fetch,push}`, behind the Hub's own auth, so other stores push to a store here and pull from it. It's off by default.
   - A multi-tenant Hub's tokens each reach their own tenant's store, and no other. `<store>` is `me`, or the tenant's name (`default` on a single-tenant Hub).
   - AgentStateGraph does the receiving side's checks: a push only moves a ref forward, and `/_meta/_secret` and local-only refs (raw turns) are refused.

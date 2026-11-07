@@ -119,6 +119,13 @@ pub struct HubConfig {
     /// The most one push may send, in bytes. `None` keeps AgentStateGraph's
     /// default (256 MiB). From `--sync-max-push-mb`.
     pub sync_max_push_bytes: Option<u64>,
+    /// Where this machine keeps sync tokens, normally `~/.ctxone`
+    /// ([`crate::sync_client`]). `None` reads none; a remote's token then
+    /// comes from the environment variable it names.
+    pub sync_home: Option<std::path::PathBuf>,
+    /// Shared with the background sync loop, so a request and the loop never
+    /// sync at once. `None` makes one for the router alone.
+    pub sync_lock: Option<Arc<tokio::sync::Mutex<()>>>,
     /// A single-tenant Postgres hub's tables for the project registry and
     /// session stats, on AgentStateGraph's pool (see [`crate::hub_store`]).
     /// `None` for SQLite (whose tables live in `db_path`) and memory. A
@@ -239,6 +246,11 @@ pub struct HubShared {
     /// Project detections still running on the blocking pool, including ones
     /// whose request already timed out. See [`run_detect_bounded`].
     pub detects_in_flight: Arc<std::sync::atomic::AtomicUsize>,
+    /// Where this machine keeps sync tokens (`<home>/sync-tokens/<remote>`,
+    /// [`crate::sync_client`]). `None` reads none.
+    pub sync_home: Option<std::path::PathBuf>,
+    /// One sync at a time, whether a request or the background loop asks.
+    pub sync_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// The REST router's state. It holds no data of its own: handlers take a
@@ -928,6 +940,11 @@ pub const MACHINE_LOCAL_ROUTES: &[&str] = &[
     "/api/admin/backup",
     "/api/code",
     "/api/code/{*rest}",
+    "/api/sync/remotes",
+    "/api/sync/remotes/{name}",
+    "/api/sync/namespaces/{ns}",
+    "/api/sync/status",
+    "/api/sync/run",
 ];
 
 /// A multi-tenant Hub's answer to [`MACHINE_LOCAL_ROUTES`]. Takes no state,
@@ -1040,6 +1057,8 @@ fn build_router(
             self_base_url: config.self_base_url.clone().filter(|_| machine_local),
             ctx_auth: AuthTokens::new(config.auth_token.clone(), config.auth_token_file.clone()),
             detects_in_flight: Arc::default(),
+            sync_home: config.sync_home.clone().filter(|_| machine_local),
+            sync_lock: config.sync_lock.clone().unwrap_or_default(),
             autosync: config
                 .autosync
                 .clone()
@@ -1243,7 +1262,22 @@ fn build_router(
             // spawning the co-located `ctx ingest-session --all` CLI.
             .route("/api/sessions/sync", post(sync_sessions))
             // Admin endpoints
-            .route("/api/admin/backup", post(admin_backup));
+            .route("/api/admin/backup", post(admin_backup))
+            // Push to a remote Hub and pull from it (ctx-hub-sync t-006).
+            .route(
+                "/api/sync/remotes",
+                get(sync_list_remotes).post(sync_add_remote),
+            )
+            .route(
+                "/api/sync/remotes/{name}",
+                axum::routing::delete(sync_remove_remote),
+            )
+            .route(
+                "/api/sync/namespaces/{ns}",
+                axum::routing::put(sync_map_namespace).delete(sync_unmap_namespace),
+            )
+            .route("/api/sync/status", get(sync_status))
+            .route("/api/sync/run", post(sync_run));
         // Mount ASD repo registry + per-repo proxy routes when any repos are
         // configured (either static URLs or pool-managed repos).
         if !state.shared.asd_repos.is_empty() || state.shared.asd_pool.is_some() {
@@ -7441,6 +7475,178 @@ async fn set_autosync(
         "enabled": s.hub.autosync.enabled(),
         "interval_secs": s.hub.autosync.interval_secs(),
     }))
+}
+
+// -- Sync with a remote Hub (ctx-hub-sync t-006) -------------------------
+
+fn sync_failure(e: crate::sync_client::SyncFailure) -> (StatusCode, String) {
+    let status = match e.code {
+        "no_such_remote" | "not_mapped" => StatusCode::NOT_FOUND,
+        "remote_in_use" | "one_space_only" | "bad_namespace" | "no_token" => {
+            StatusCode::BAD_REQUEST
+        }
+        _ => StatusCode::BAD_GATEWAY,
+    };
+    (status, e.to_json().to_string())
+}
+
+/// Run sync work on the blocking pool: it reads the store and calls the
+/// remote with a blocking client.
+async fn sync_blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, crate::sync_client::SyncFailure> + Send + 'static,
+) -> Result<T, (StatusCode, String)> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("the sync stopped: {e}"),
+            )
+        })?
+        .map_err(sync_failure)
+}
+
+/// `GET /api/sync/remotes` — every remote, whether it has a token here, and
+/// which workspaces sync with which.
+async fn sync_list_remotes(s: HubState) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let (repo, home) = (s.repo.clone(), s.hub.sync_home.clone());
+    sync_blocking(move || crate::sync_client::list(&repo, home.as_deref()))
+        .await
+        .map(Json)
+}
+
+#[derive(Deserialize)]
+struct SyncAddRemote {
+    name: String,
+    url: String,
+    #[serde(default)]
+    store: Option<String>,
+    #[serde(default)]
+    token_env: Option<String>,
+}
+
+/// `POST /api/sync/remotes` — add a remote, or change where it is. The token
+/// never comes this way: it's in the environment variable `token_env`
+/// names, or in this machine's token file.
+async fn sync_add_remote(
+    s: HubState,
+    Json(req): Json<SyncAddRemote>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo.clone();
+    sync_blocking(move || {
+        crate::sync_client::add_remote(
+            &repo,
+            &req.name,
+            &req.url,
+            req.store.as_deref(),
+            req.token_env.as_deref(),
+        )?;
+        Ok(serde_json::json!({ "status": "ok", "name": req.name }))
+    })
+    .await
+    .map(Json)
+}
+
+/// `DELETE /api/sync/remotes/{name}`.
+async fn sync_remove_remote(
+    s: HubState,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo.clone();
+    sync_blocking(move || {
+        let removed = crate::sync_client::remove_remote(&repo, &name)?;
+        Ok(serde_json::json!({ "name": name, "removed": removed }))
+    })
+    .await
+    .map(Json)
+}
+
+#[derive(Deserialize)]
+struct SyncMapBody {
+    remote: String,
+}
+
+/// `PUT /api/sync/namespaces/{ns}` — sync workspace `ns` with a remote.
+async fn sync_map_namespace(
+    s: HubState,
+    Path(ns): Path<String>,
+    Json(body): Json<SyncMapBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo.clone();
+    sync_blocking(move || crate::sync_client::map_namespace(&repo, &ns, &body.remote))
+        .await
+        .map(Json)
+}
+
+/// `DELETE /api/sync/namespaces/{ns}` — stop syncing workspace `ns`.
+async fn sync_unmap_namespace(
+    s: HubState,
+    Path(ns): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo.clone();
+    sync_blocking(move || {
+        let unmapped = crate::sync_client::unmap_namespace(&repo, &ns)?;
+        Ok(serde_json::json!({ "namespace": ns, "unmapped": unmapped }))
+    })
+    .await
+    .map(Json)
+}
+
+/// `GET /api/sync/status` — where each mapped workspace's branches stand,
+/// as the last sync left them.
+async fn sync_status(s: HubState) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo.clone();
+    sync_blocking(move || crate::sync_client::status(&repo))
+        .await
+        .map(Json)
+}
+
+#[derive(Deserialize, Default)]
+struct SyncRunBody {
+    /// `pull`, `push` or `both` (the default).
+    #[serde(default)]
+    mode: Option<String>,
+    /// One workspace; every mapped one when absent.
+    #[serde(default)]
+    namespace: Option<String>,
+    /// Push filter findings to let through, each with a reason.
+    #[serde(default)]
+    overrides: Vec<agentstategraph::sync::PushOverride>,
+}
+
+/// `POST /api/sync/run` — pull, push, or both, for every mapped workspace
+/// or one. A blocked push reports its findings: path, rule, and the record
+/// to forget, never the value.
+async fn sync_run(
+    s: HubState,
+    body: Option<Json<SyncRunBody>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let body = body.map(|b| b.0).unwrap_or_default();
+    let mode = match body.mode.as_deref() {
+        None | Some("both") => crate::sync_client::Mode::Both,
+        Some("pull") => crate::sync_client::Mode::Pull,
+        Some("push") => crate::sync_client::Mode::Push,
+        Some(other) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("mode {other:?} isn't pull, push or both"),
+            ));
+        }
+    };
+    let _one = s.hub.sync_lock.clone().lock_owned().await;
+    let (repo, home) = (s.repo.clone(), s.hub.sync_home.clone());
+    let out = sync_blocking(move || {
+        crate::sync_client::sync(
+            &repo,
+            home.as_deref(),
+            body.namespace.as_deref(),
+            mode,
+            &body.overrides,
+        )
+    })
+    .await?;
+    s.sessions.mark_all_dirty();
+    Ok(Json(out))
 }
 
 // -- Reminder endpoints -------------------------------------------------

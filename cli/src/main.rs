@@ -14,6 +14,7 @@ mod session_import;
 #[allow(dead_code, unused_imports)]
 mod skillgen;
 mod sources;
+mod sync_cmd;
 mod workspace;
 mod worktree;
 
@@ -1100,6 +1101,37 @@ enum Commands {
     Reminder {
         #[command(subcommand)]
         action: ReminderAction,
+    },
+    /// The remote Hubs this machine syncs with, and which workspaces sync
+    /// with each. Your memory, plans, session summaries, reminders and agent
+    /// rules follow you to every machine; raw session turns stay here.
+    Remote {
+        #[command(subcommand)]
+        action: sync_cmd::RemoteAction,
+    },
+    /// Push every synced workspace to its remote (only --namespace's, if
+    /// given). A credential-shaped value stops a branch's push; each finding
+    /// shows its path and the `ctx forget` that removes it. Exits 1 when
+    /// anything didn't go.
+    Push {
+        /// Let a finding through: FINDING=REASON, repeatable. The reason is
+        /// kept in the remote's push log.
+        #[arg(long = "allow", value_name = "FINDING=REASON")]
+        allow: Vec<String>,
+    },
+    /// Pull every synced workspace from its remote (only --namespace's, if
+    /// given). The first pull of a store that began on its own joins the
+    /// remote's history to its own.
+    Pull,
+    /// Pull, then push, every synced workspace (only --namespace's, if
+    /// given). The Hub also does this on its own every few minutes.
+    /// `ctx sync status` shows where each branch stands.
+    Sync {
+        #[command(subcommand)]
+        action: Option<sync_cmd::SyncAction>,
+        /// Let a finding through: FINDING=REASON, repeatable.
+        #[arg(long = "allow", value_name = "FINDING=REASON")]
+        allow: Vec<String>,
     },
     /// Move a subtree of graph paths to another workspace (and/or branch).
     ///
@@ -2239,6 +2271,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // `import` act on one, so an explicit --namespace picks it. It used to
         // be dropped, and they read and wrote `default` whatever was passed.
         Commands::Db { .. } => cli.namespace.clone(),
+        // Sync acts on the store's synced workspaces, all of them unless
+        // --namespace names one; it never detects one from the cwd.
+        Commands::Remote { .. }
+        | Commands::Push { .. }
+        | Commands::Pull
+        | Commands::Sync { .. } => cli.namespace.clone(),
         Commands::Skill { .. }
         | Commands::Bootstrap
         | Commands::Completion { .. }
@@ -3810,6 +3848,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Service { action } => {
             handle_service(action)?;
         }
+        Commands::Remote { action } => {
+            sync_cmd::remote(action, &cli.server, &client, cli.format).await?;
+        }
+        Commands::Push { allow } => {
+            let clean = sync_cmd::run(
+                &cli.server,
+                &client,
+                cli.format,
+                "push",
+                namespace.as_deref(),
+                &allow,
+            )
+            .await?;
+            if !clean {
+                std::process::exit(1);
+            }
+        }
+        Commands::Pull => {
+            let clean = sync_cmd::run(
+                &cli.server,
+                &client,
+                cli.format,
+                "pull",
+                namespace.as_deref(),
+                &[],
+            )
+            .await?;
+            if !clean {
+                std::process::exit(1);
+            }
+        }
+        Commands::Sync { action, allow } => match action {
+            Some(sync_cmd::SyncAction::Status) => {
+                sync_cmd::status(&cli.server, &client, cli.format).await?;
+            }
+            None => {
+                let clean = sync_cmd::run(
+                    &cli.server,
+                    &client,
+                    cli.format,
+                    "both",
+                    namespace.as_deref(),
+                    &allow,
+                )
+                .await?;
+                if !clean {
+                    std::process::exit(1);
+                }
+            }
+        },
         Commands::Reminder { action } => {
             let server = cli.server.clone();
             let format = cli.format;

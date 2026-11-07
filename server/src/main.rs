@@ -1040,6 +1040,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ),
         }
 
+        // One sync with a remote Hub at a time, for requests and the
+        // background loop alike (ctx-hub-sync t-006).
+        let hub_sync_lock: Arc<tokio::sync::Mutex<()>> = Arc::default();
         let hub_config = http::HubConfig {
             rate_limit_rpm,
             asd_repos: asd_repos.clone(),
@@ -1060,6 +1063,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             self_base_url: Some(self_base_url),
             autosync: Some(autosync.clone()),
             postgres_tables: postgres_tables.clone(),
+            sync_home: ctxone_hub::sync_client::default_home(),
+            sync_lock: Some(hub_sync_lock.clone()),
         };
 
         // Values for the background session-sweep task (below). Cloned before
@@ -1216,6 +1221,92 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         interval_secs = sync_autosync.interval_secs(),
                         "background session sweep loop spawned (runtime-toggled)"
                     );
+                }
+
+                // Background sync with a remote Hub (ctx-hub-sync t-006). While
+                // any workspace syncs with one, it pulls and pushes every
+                // CTXONE_SYNC_EVERY seconds (default 300; 0 turns it off), and
+                // within a minute of a change here.
+                let sync_every = std::env::var("CTXONE_SYNC_EVERY")
+                    .ok()
+                    .and_then(|v| v.trim().parse::<u64>().ok())
+                    .unwrap_or(300);
+                if sync_every > 0 {
+                    let repo = repo.clone();
+                    let lock = hub_sync_lock.clone();
+                    let home = ctxone_hub::sync_client::default_home();
+                    tokio::spawn(async move {
+                        let every = std::time::Duration::from_secs(sync_every);
+                        let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+                        tick.tick().await;
+                        let mut seen = String::new();
+                        let mut last: Option<std::time::Instant> = None;
+                        loop {
+                            tick.tick().await;
+                            let r = repo.clone();
+                            let now = tokio::task::spawn_blocking(move || {
+                                (!ctxone_hub::sync_client::mapping(&r).is_empty())
+                                    .then(|| ctxone_hub::sync_client::fingerprint(&r))
+                            })
+                            .await
+                            .ok()
+                            .flatten();
+                            let Some(now) = now else { continue };
+                            if now == seen && last.is_some_and(|t| t.elapsed() < every) {
+                                continue;
+                            }
+                            let _one = lock.clone().lock_owned().await;
+                            let (r, h) = (repo.clone(), home.clone());
+                            let done = tokio::task::spawn_blocking(move || {
+                                let out = ctxone_hub::sync_client::sync(
+                                    &r,
+                                    h.as_deref(),
+                                    None,
+                                    ctxone_hub::sync_client::Mode::Both,
+                                    &[],
+                                );
+                                (out, ctxone_hub::sync_client::fingerprint(&r))
+                            })
+                            .await;
+                            last = Some(std::time::Instant::now());
+                            match done {
+                                Ok((Ok(report), after)) => {
+                                    seen = after;
+                                    let workspaces =
+                                        report["workspaces"].as_array().map_or(0, Vec::len);
+                                    let troubled = report["workspaces"]
+                                        .as_array()
+                                        .map(|ws| {
+                                            ws.iter()
+                                                .filter(|w| {
+                                                    w.get("error").is_some()
+                                                        || w["blocked"]
+                                                            .as_array()
+                                                            .is_some_and(|b| !b.is_empty())
+                                                        || w["errors"]
+                                                            .as_array()
+                                                            .is_some_and(|e| !e.is_empty())
+                                                })
+                                                .count()
+                                        })
+                                        .unwrap_or(0);
+                                    if troubled > 0 {
+                                        warn!(
+                                            workspaces,
+                                            troubled,
+                                            "background sync: some workspaces didn't sync; ctx sync status"
+                                        );
+                                    } else {
+                                        info!(workspaces, "background sync complete");
+                                    }
+                                }
+                                Ok((Err(e), _)) => {
+                                    warn!(code = e.code, error = %e.message, "background sync failed")
+                                }
+                                Err(e) => warn!(error = %e, "background sync stopped"),
+                            }
+                        }
+                    });
                 }
 
                 let listener = tokio::net::TcpListener::bind(&addr).await?;
