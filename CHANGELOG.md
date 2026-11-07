@@ -3,10 +3,10 @@
 All notable changes to CTXone are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 the project's release tags (`vMAJOR.MINOR.PATCH`). Most releases go up by
-0.0.1; v1.1.0 (a multi-tenant Hub) and v1.2.0 (the personal namespace) went
-up a minor version.
+0.0.1; v1.1.0 (a multi-tenant Hub), v1.2.0 (the personal namespace) and v1.3.0
+(sync between Hubs) went up a minor version.
 
-## [Unreleased]
+## [v1.3.0] — 2026-11-07
 
 Your memory follows you to every machine. Each machine's Hub pushes to and pulls from a Hub that serves sync, and raw session turns never leave the machine that captured them. Three schema migrations run once on the first start. They move raw turns onto their own ref, trust the reminders already here, and keep seals from before workspaces on this machine. On a large store this takes a few seconds. A store at schema 5 won't open in an older Hub, so back it up before upgrading if you might go back.
 
