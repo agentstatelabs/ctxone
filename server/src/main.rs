@@ -176,6 +176,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Allow browser requests only from --allowed-origin, never because Origin
     // matches Host. From --strict-origin or CTXONE_STRICT_ORIGIN.
     let mut strict_origin = env_truthy("CTXONE_STRICT_ORIGIN");
+    // Serve AgentStateGraph's sync protocol at /sync/v1 (ctx-hub-sync t-015).
+    // From --serve-sync or CTXONE_SERVE_SYNC.
+    let mut serve_sync = env_truthy("CTXONE_SERVE_SYNC");
+    // The most one push may send, in MiB. From --sync-max-push-mb or
+    // CTXONE_SYNC_MAX_PUSH_MB.
+    let mut sync_max_push_mb: Option<u64> = std::env::var("CTXONE_SYNC_MAX_PUSH_MB")
+        .ok()
+        .and_then(|v| v.trim().parse().ok());
     // Extra browser origins allowed to call the API (repeatable
     // --allowed-origin). Same-origin is always allowed; anything else carrying
     // an Origin header is rejected. Seedable from CTXONE_ALLOWED_ORIGINS (comma-
@@ -302,6 +310,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--strict-origin" => {
                 strict_origin = true;
+            }
+            "--serve-sync" => {
+                serve_sync = true;
+            }
+            "--sync-max-push-mb" => {
+                i += 1;
+                if i < args.len() {
+                    match args[i].trim().parse::<u64>() {
+                        Ok(mb) if mb > 0 => sync_max_push_mb = Some(mb),
+                        _ => {
+                            eprintln!(
+                                "ctxone-hub: --sync-max-push-mb takes a whole number of MiB above 0"
+                            );
+                            std::process::exit(2);
+                        }
+                    }
+                }
             }
             "--namespace" => {
                 i += 1;
@@ -471,6 +496,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!(
                     "                           unless --strict-origin (env: CTXONE_STRICT_ORIGIN) is set."
                 );
+                eprintln!(
+                    "      --serve-sync         Serve sync at /sync/v1/<store>, behind the same auth, so"
+                );
+                eprintln!(
+                    "                           other stores push here and pull from here (env:"
+                );
+                eprintln!(
+                    "                           CTXONE_SERVE_SYNC). <store> is `me`, or the tenant's name."
+                );
+                eprintln!(
+                    "      --sync-max-push-mb <N>  The most one push may send (default 256; env:"
+                );
+                eprintln!("                           CTXONE_SYNC_MAX_PUSH_MB).");
                 eprintln!(
                     "      --namespace <NS>     MCP mode: namespace to operate in (default: detect \
                      project from cwd, else \"default\")"
@@ -662,6 +700,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             agent_id,
             allowed_origins,
             strict_origin,
+            serve_sync,
+            sync_max_push_mb,
             lens: lens_mode,
         });
     }
@@ -952,6 +992,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         log_strict_origin(strict_origin, &allowed_origins);
+        if serve_sync {
+            info!("Sync: serving /sync/v1/me behind the same auth as the API");
+        }
 
         // Session registry: load persisted stats (SQLite file or Postgres
         // tables), so token savings survive hub restarts. Empty in memory mode.
@@ -997,6 +1040,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ),
         }
 
+        // One sync with a remote Hub at a time, for requests and the
+        // background loop alike (ctx-hub-sync t-006).
+        let hub_sync_lock: Arc<tokio::sync::Mutex<()>> = Arc::default();
         let hub_config = http::HubConfig {
             rate_limit_rpm,
             asd_repos: asd_repos.clone(),
@@ -1011,10 +1057,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             require_auth_on_loopback,
             allowed_origins: allowed_origins.clone(),
             strict_origin,
+            serve_sync,
+            sync_max_push_bytes: sync_max_push_mb.map(|mb| mb << 20),
             ctx_binary: ctx_binary.clone(),
             self_base_url: Some(self_base_url),
             autosync: Some(autosync.clone()),
             postgres_tables: postgres_tables.clone(),
+            sync_home: ctxone_hub::sync_client::default_home(),
+            sync_lock: Some(hub_sync_lock.clone()),
         };
 
         // Values for the background session-sweep task (below). Cloned before
@@ -1171,6 +1221,92 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         interval_secs = sync_autosync.interval_secs(),
                         "background session sweep loop spawned (runtime-toggled)"
                     );
+                }
+
+                // Background sync with a remote Hub (ctx-hub-sync t-006). While
+                // any workspace syncs with one, it pulls and pushes every
+                // CTXONE_SYNC_EVERY seconds (default 300; 0 turns it off), and
+                // within a minute of a change here.
+                let sync_every = std::env::var("CTXONE_SYNC_EVERY")
+                    .ok()
+                    .and_then(|v| v.trim().parse::<u64>().ok())
+                    .unwrap_or(300);
+                if sync_every > 0 {
+                    let repo = repo.clone();
+                    let lock = hub_sync_lock.clone();
+                    let home = ctxone_hub::sync_client::default_home();
+                    tokio::spawn(async move {
+                        let every = std::time::Duration::from_secs(sync_every);
+                        let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+                        tick.tick().await;
+                        let mut seen = String::new();
+                        let mut last: Option<std::time::Instant> = None;
+                        loop {
+                            tick.tick().await;
+                            let r = repo.clone();
+                            let now = tokio::task::spawn_blocking(move || {
+                                (!ctxone_hub::sync_client::mapping(&r).is_empty())
+                                    .then(|| ctxone_hub::sync_client::fingerprint(&r))
+                            })
+                            .await
+                            .ok()
+                            .flatten();
+                            let Some(now) = now else { continue };
+                            if now == seen && last.is_some_and(|t| t.elapsed() < every) {
+                                continue;
+                            }
+                            let _one = lock.clone().lock_owned().await;
+                            let (r, h) = (repo.clone(), home.clone());
+                            let done = tokio::task::spawn_blocking(move || {
+                                let out = ctxone_hub::sync_client::sync(
+                                    &r,
+                                    h.as_deref(),
+                                    None,
+                                    ctxone_hub::sync_client::Mode::Both,
+                                    &[],
+                                );
+                                (out, ctxone_hub::sync_client::fingerprint(&r))
+                            })
+                            .await;
+                            last = Some(std::time::Instant::now());
+                            match done {
+                                Ok((Ok(report), after)) => {
+                                    seen = after;
+                                    let workspaces =
+                                        report["workspaces"].as_array().map_or(0, Vec::len);
+                                    let troubled = report["workspaces"]
+                                        .as_array()
+                                        .map(|ws| {
+                                            ws.iter()
+                                                .filter(|w| {
+                                                    w.get("error").is_some()
+                                                        || w["blocked"]
+                                                            .as_array()
+                                                            .is_some_and(|b| !b.is_empty())
+                                                        || w["errors"]
+                                                            .as_array()
+                                                            .is_some_and(|e| !e.is_empty())
+                                                })
+                                                .count()
+                                        })
+                                        .unwrap_or(0);
+                                    if troubled > 0 {
+                                        warn!(
+                                            workspaces,
+                                            troubled,
+                                            "background sync: some workspaces didn't sync; ctx sync status"
+                                        );
+                                    } else {
+                                        info!(workspaces, "background sync complete");
+                                    }
+                                }
+                                Ok((Err(e), _)) => {
+                                    warn!(code = e.code, error = %e.message, "background sync failed")
+                                }
+                                Err(e) => warn!(error = %e, "background sync stopped"),
+                            }
+                        }
+                    });
                 }
 
                 let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -1475,6 +1611,9 @@ struct TenantsRun {
     agent_id: String,
     allowed_origins: Vec<String>,
     strict_origin: bool,
+    /// Serve sync at `/sync/v1` (ctx-hub-sync t-015).
+    serve_sync: bool,
+    sync_max_push_mb: Option<u64>,
     /// Serve Lens at `/`.
     lens: bool,
 }
@@ -1546,8 +1685,13 @@ fn serve_tenants(run: TenantsRun) -> Result<(), Box<dyn std::error::Error>> {
                 agent_id: run.agent_id,
                 allowed_origins: run.allowed_origins,
                 strict_origin: run.strict_origin,
+                serve_sync: run.serve_sync,
+                sync_max_push_bytes: run.sync_max_push_mb.map(|mb| mb << 20),
                 ..Default::default()
             };
+            if run.serve_sync {
+                info!("Sync: serving /sync/v1/<tenant> (or /sync/v1/me) behind each tenant's token");
+            }
             let resolver: Arc<dyn tenant::TenantResolver> = Arc::new(run.file);
             let mut app = http::multi_tenant_router(
                 config,

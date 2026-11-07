@@ -31,8 +31,10 @@ model described in the rest of this doc then operates unchanged
 **Not isolated yet: taints and reminders.** AgentStateGraph keeps them
 per store (per tenant on a multi-tenant Hub), not per namespace. Every
 workspace in a store lists the same ones, and a taint on a path gates
-that path in every workspace. They move to a control ref per namespace
-with sync ([design/HUB_SYNC.md](design/HUB_SYNC.md#side-tables)).
+that path in every workspace. They sit on the store's control ref,
+which every sync carries, so for now every workspace syncs to your own
+space; scoping them by namespace is AgentStateGraph's next step
+([design/HUB_SYNC.md](design/HUB_SYNC.md#side-tables)).
 
 **Migration stance:** pre-namespace data remains in the reserved
 `default` namespace; nothing migrates. Adopt namespaces by running

@@ -490,6 +490,78 @@ pub fn create_reminder(
     Ok(mgr.create(cr)?)
 }
 
+/// [`reminder_to_json`], plus `trusted_here`: whether the reminder may run
+/// its commands on this machine, because it was made or approved through
+/// this Hub ([`crate::reminder_trust`]).
+pub fn reminder_json_here(
+    r: &Reminder,
+    trusted: &std::collections::HashSet<String>,
+) -> serde_json::Value {
+    let mut v = reminder_to_json(r);
+    if let Some(o) = v.as_object_mut() {
+        o.insert(
+            "trusted_here".to_string(),
+            serde_json::Value::Bool(trusted.contains(&r.id)),
+        );
+    }
+    v
+}
+
+/// [`reminder_json_here`] for each reminder, reading what's trusted once.
+pub fn reminders_json_here(
+    repo: &agentstategraph::Repository,
+    reminders: &[Reminder],
+) -> Vec<serde_json::Value> {
+    let trusted = crate::reminder_trust::trusted(repo);
+    reminders
+        .iter()
+        .map(|r| reminder_json_here(r, &trusted))
+        .collect()
+}
+
+/// [`reminder_json_here`] for one reminder.
+pub fn one_json_here(repo: &agentstategraph::Repository, r: &Reminder) -> serde_json::Value {
+    reminder_json_here(r, &crate::reminder_trust::trusted(repo))
+}
+
+/// Create a reminder through this Hub, and trust it here: a reminder made
+/// here may run its commands here.
+pub fn create_here(
+    mgr: &ReminderManager,
+    repo: &agentstategraph::Repository,
+    params: ReminderCreateParams,
+    agent: &str,
+) -> Result<Reminder, ReminderToolError> {
+    let r = create_reminder(mgr, params, agent)?;
+    crate::reminder_trust::record(repo, &[&r.id], crate::reminder_trust::How::Created, agent)
+        .map_err(|e| ReminderError::Store(format!("trusting reminder {} here: {e}", r.id)))?;
+    Ok(r)
+}
+
+/// Approve a reminder through this Hub, and trust it here. An
+/// `awaiting_permission` reminder becomes `due`, as before. A reminder that
+/// isn't due yet keeps its status; approving it lets it run here when it is
+/// due, which is how a reminder made on another machine and pulled here is
+/// allowed to run here.
+pub fn approve_here(
+    mgr: &ReminderManager,
+    repo: &agentstategraph::Repository,
+    id: &str,
+    approver: &str,
+) -> Result<Reminder, ReminderError> {
+    let r = match mgr.approve(id, approver) {
+        Ok(r) => r,
+        Err(ReminderError::InvalidTransition {
+            from: ReminderStatus::Pending,
+            ..
+        }) => mgr.get(id)?,
+        Err(e) => return Err(e),
+    };
+    crate::reminder_trust::record(repo, &[id], crate::reminder_trust::How::Approved, approver)
+        .map_err(|e| ReminderError::Store(format!("trusting reminder {id} here: {e}")))?;
+    Ok(r)
+}
+
 pub fn list_reminders(
     mgr: &ReminderManager,
     params: ReminderListParams,

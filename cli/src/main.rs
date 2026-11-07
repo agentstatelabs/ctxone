@@ -14,6 +14,7 @@ mod session_import;
 #[allow(dead_code, unused_imports)]
 mod skillgen;
 mod sources;
+mod sync_cmd;
 mod workspace;
 mod worktree;
 
@@ -1101,6 +1102,37 @@ enum Commands {
         #[command(subcommand)]
         action: ReminderAction,
     },
+    /// The remote Hubs this machine syncs with, and which workspaces sync
+    /// with each. Your memory, plans, session summaries, reminders and agent
+    /// rules follow you to every machine; raw session turns stay here.
+    Remote {
+        #[command(subcommand)]
+        action: sync_cmd::RemoteAction,
+    },
+    /// Push every synced workspace to its remote (only --namespace's, if
+    /// given). A credential-shaped value stops a branch's push; each finding
+    /// shows its path and the `ctx forget` that removes it. Exits 1 when
+    /// anything didn't go.
+    Push {
+        /// Let a finding through: FINDING=REASON, repeatable. The reason is
+        /// kept in the remote's push log.
+        #[arg(long = "allow", value_name = "FINDING=REASON")]
+        allow: Vec<String>,
+    },
+    /// Pull every synced workspace from its remote (only --namespace's, if
+    /// given). The first pull of a store that began on its own joins the
+    /// remote's history to its own.
+    Pull,
+    /// Pull, then push, every synced workspace (only --namespace's, if
+    /// given). The Hub also does this on its own every few minutes.
+    /// `ctx sync status` shows where each branch stands.
+    Sync {
+        #[command(subcommand)]
+        action: Option<sync_cmd::SyncAction>,
+        /// Let a finding through: FINDING=REASON, repeatable.
+        #[arg(long = "allow", value_name = "FINDING=REASON")]
+        allow: Vec<String>,
+    },
     /// Move a subtree of graph paths to another workspace (and/or branch).
     ///
     /// The general cross-namespace move: reads the subtree at `<path>`, writes
@@ -1565,12 +1597,14 @@ enum ReminderAction {
     /// Run due, approved reminders whose commands are all allowlisted, then
     /// record the outcome. Meant to run on a timer (see `ctx service`).
     ///
-    /// A reminder runs only if BOTH gates pass: (1) it is explicitly
+    /// A reminder runs only if all three gates pass: (1) it is explicitly
     /// `autonomous: true` (anything else — including `awaiting_permission` —
-    /// needs a human); and (2) every one of its `commands` is on the allowlist
-    /// (one exact command per line, '#' comments). Otherwise nothing from it
-    /// runs and it is recorded `deferred` and snoozed. Missing allowlist =
-    /// nothing runs.
+    /// needs a human); (2) it was made or approved through this Hub, so one
+    /// that arrived by sync from another machine waits for `ctx reminder
+    /// approve <id>` here; and (3) every one of its `commands` is on the
+    /// allowlist (one exact command per line, '#' comments). A reminder that
+    /// fails the allowlist is recorded `deferred` and snoozed. Missing
+    /// allowlist = nothing runs.
     Tick {
         /// Allowlist file of approved commands (exact match, one per line).
         #[arg(long, default_value = "~/.ctxone/reminder-tick.allow")]
@@ -1584,6 +1618,13 @@ enum ReminderAction {
         /// Show what would run/defer without executing or recording.
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Approve a reminder on this machine: an `awaiting_permission` one
+    /// becomes due, and any one, including a reminder made on another
+    /// machine and pulled here, may then run its commands here.
+    Approve {
+        /// The reminder's id.
+        id: String,
     },
 }
 
@@ -2230,6 +2271,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // `import` act on one, so an explicit --namespace picks it. It used to
         // be dropped, and they read and wrote `default` whatever was passed.
         Commands::Db { .. } => cli.namespace.clone(),
+        // Sync acts on the store's synced workspaces, all of them unless
+        // --namespace names one; it never detects one from the cwd.
+        Commands::Remote { .. }
+        | Commands::Push { .. }
+        | Commands::Pull
+        | Commands::Sync { .. } => cli.namespace.clone(),
         Commands::Skill { .. }
         | Commands::Bootstrap
         | Commands::Completion { .. }
@@ -3801,6 +3848,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Service { action } => {
             handle_service(action)?;
         }
+        Commands::Remote { action } => {
+            sync_cmd::remote(action, &cli.server, &client, cli.format).await?;
+        }
+        Commands::Push { allow } => {
+            let clean = sync_cmd::run(
+                &cli.server,
+                &client,
+                cli.format,
+                "push",
+                namespace.as_deref(),
+                &allow,
+            )
+            .await?;
+            if !clean {
+                std::process::exit(1);
+            }
+        }
+        Commands::Pull => {
+            let clean = sync_cmd::run(
+                &cli.server,
+                &client,
+                cli.format,
+                "pull",
+                namespace.as_deref(),
+                &[],
+            )
+            .await?;
+            if !clean {
+                std::process::exit(1);
+            }
+        }
+        Commands::Sync { action, allow } => match action {
+            Some(sync_cmd::SyncAction::Status) => {
+                sync_cmd::status(&cli.server, &client, cli.format).await?;
+            }
+            None => {
+                let clean = sync_cmd::run(
+                    &cli.server,
+                    &client,
+                    cli.format,
+                    "both",
+                    namespace.as_deref(),
+                    &allow,
+                )
+                .await?;
+                if !clean {
+                    std::process::exit(1);
+                }
+            }
+        },
         Commands::Reminder { action } => {
             let server = cli.server.clone();
             let format = cli.format;
@@ -3888,6 +3985,36 @@ async fn handle_reminder(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use serde_json::json;
     match action {
+        ReminderAction::Approve { id } => {
+            let resp = match client
+                .post(format!(
+                    "{server}/api/reminders/{}/approve",
+                    urlencoding(&id)
+                ))
+                .json(&json!({}))
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => unreachable_exit(server, e),
+            };
+            if !resp.status().is_success() {
+                http_error_exit(resp, "reminder approve failed").await;
+            }
+            let r: Value = resp.json().await?;
+            emit(format, &r, |r| {
+                println!(
+                    "approved {} ({}): {}",
+                    r["title"].as_str().unwrap_or("?"),
+                    r["status"].as_str().unwrap_or("?"),
+                    if trusted_here(r) {
+                        "it may run its commands on this machine"
+                    } else {
+                        "the Hub didn't confirm it may run here; is it older than this ctx?"
+                    }
+                );
+            });
+        }
         ReminderAction::Tick {
             allowlist,
             skip,
@@ -3913,6 +4040,7 @@ async fn handle_reminder(
 
             let (mut acted, mut deferred, mut skipped, mut needs_approval, mut no_cmds) =
                 (0u32, 0u32, 0u32, 0u32, 0u32);
+            let mut not_here = 0u32;
             let mut results: Vec<Value> = Vec::new();
 
             for r in &due {
@@ -3929,6 +4057,20 @@ async fn handle_reminder(
                 // without routing it through `awaiting_permission`.
                 if !autonomous || status == "awaiting_permission" {
                     needs_approval += 1;
+                    continue;
+                }
+                // Gate 2: this machine. A reminder runs its commands only where it
+                // was made or approved (ctx-hub-sync t-008), so one pulled from
+                // another machine waits until someone approves it here.
+                if !trusted_here(r) {
+                    not_here += 1;
+                    results.push(json!({
+                        "reminder": title,
+                        "action": "not-trusted-here",
+                        "detail": format!(
+                            "made on another machine; to let it run here: ctx reminder approve {id}"
+                        ),
+                    }));
                     continue;
                 }
                 if id.is_empty() || skip.contains(&id) {
@@ -3951,7 +4093,7 @@ async fn handle_reminder(
                     continue;
                 }
 
-                // Gate 2: allowlist. Every command must be pre-approved.
+                // Gate 3: allowlist. Every command must be pre-approved.
                 let disallowed: Vec<String> = cmds
                     .iter()
                     .filter(|c| !allow.contains(*c))
@@ -3984,7 +4126,7 @@ async fn handle_reminder(
                     continue;
                 }
 
-                // Both gates passed — run the commands.
+                // Every gate passed — run the commands.
                 let _ = client
                     .post(format!("{server}/api/reminders/{id}/start"))
                     .json(&json!({}))
@@ -4032,18 +4174,20 @@ async fn handle_reminder(
                 "deferred": deferred,
                 "skipped": skipped,
                 "needs_approval": needs_approval,
+                "not_trusted_here": not_here,
                 "no_commands": no_cmds,
                 "dry_run": dry_run,
                 "results": results,
             });
             emit(format, &summary, |_| {
                 println!(
-                    "reminder tick: due={} acted={} deferred={} skipped={} awaiting_approval={} no_commands={}{}",
+                    "reminder tick: due={} acted={} deferred={} skipped={} awaiting_approval={} not_trusted_here={} no_commands={}{}",
                     due.len(),
                     acted,
                     deferred,
                     skipped,
                     needs_approval,
+                    not_here,
                     no_cmds,
                     if dry_run { " (dry-run)" } else { "" }
                 );
@@ -4058,6 +4202,13 @@ async fn handle_reminder(
         }
     }
     Ok(())
+}
+
+/// Whether the Hub says this reminder may run its commands here: it was made
+/// or approved through this Hub (ctx-hub-sync t-008). A Hub that doesn't say,
+/// one from before sync, counts as no, so nothing runs unasked.
+fn trusted_here(reminder: &Value) -> bool {
+    reminder["trusted_here"].as_bool().unwrap_or(false)
 }
 
 /// POST a reminder execution record (best-effort helper for the tick).
@@ -6944,22 +7095,22 @@ async fn fetch_imported_ids(
 /// Deliberately transcript-driven rather than trusting the stored session
 /// list: a session's origin is a property of where it ran, which lives in the
 /// transcript, not in whatever namespace it currently happens to sit in.
-/// Read a session's working directory from its stored graph turns, in the
-/// `default` namespace. The cwd lives per-turn at
-/// `/sessions/<sid>/turns/<tNNNN>/cwd`; the earliest turns are checked so a
-/// session that changed directory mid-run still routes to where it started.
-/// Agent-agnostic — it reads what was ingested, not what is on disk — so it
-/// resolves sessions the on-disk sources can't (the t-009 claude gap).
+/// Read a session's working directory from its stored turns, in the
+/// `default` namespace. Each turn carries its `cwd`; the earliest turns are
+/// checked so a session that changed directory mid-run still routes to where
+/// it started. Agent-agnostic — it reads what was ingested, not what is on
+/// disk — so it resolves sessions the on-disk sources can't (the t-009 claude
+/// gap). The turn route finds them wherever the Hub keeps them: on the
+/// workspace's turns ref since schema 3, under the envelope before.
 async fn fetch_session_cwd_from_graph(
     client: &reqwest::Client,
     server: &str,
     sid: &str,
 ) -> Option<String> {
-    for turn in ["t0000", "t0001", "t0002"] {
-        let path = format!("/sessions/{sid}/turns/{turn}/cwd");
+    for idx in 0..3 {
         let url = format!(
-            "{server}/api/state/main?path={}&namespace=default",
-            urlencoding(&path)
+            "{server}/api/sessions/{}/turns/{idx}?namespace=default",
+            urlencoding(sid)
         );
         let Ok(resp) = client.get(url).send().await else {
             continue;
@@ -6968,7 +7119,7 @@ async fn fetch_session_cwd_from_graph(
             continue;
         }
         if let Ok(v) = resp.json::<serde_json::Value>().await
-            && let Some(s) = v.as_str()
+            && let Some(s) = v.get("cwd").and_then(|c| c.as_str())
             && !s.trim().is_empty()
         {
             return Some(s.to_string());
@@ -10397,6 +10548,14 @@ async fn handle_docs(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_reminder_runs_here_only_when_the_hub_says_so() {
+        assert!(trusted_here(&serde_json::json!({ "trusted_here": true })));
+        assert!(!trusted_here(&serde_json::json!({ "trusted_here": false })));
+        // A Hub from before sync doesn't say: nothing runs unasked.
+        assert!(!trusted_here(&serde_json::json!({ "id": "r1" })));
+    }
+
     use super::*;
     use serde_json::json;
 

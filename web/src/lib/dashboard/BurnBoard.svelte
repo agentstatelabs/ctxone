@@ -24,9 +24,11 @@
 	 * Workspace comes free: `hubFetch` sends `X-CTXone-Namespace`, so both the
 	 * session list and every turn lookup are already namespace-scoped.
 	 *
-	 * Branch is this `branch` prop. Transcripts are written per ref (`ctx
-	 * ingest-session --ref`), so a session only has turns on the branch it was
-	 * captured under, and "efficiency on this branch" is a real question.
+	 * Branch is this `branch` prop. A session's envelope is written on the
+	 * branch it was captured under (`ctx ingest-session --ref`), so "efficiency
+	 * on this branch" is a real question. Its turns live on the workspace's
+	 * local-only turns ref whatever the branch, so the branch check reads the
+	 * envelope.
 	 *
 	 * The subtlety that made the first attempt at this misleading: the
 	 * candidate list from /api/stats/sessions is NOT branch-filtered — it is a
@@ -234,10 +236,18 @@
 		return s.session_id.slice(0, 8);
 	}
 
-	async function fetchTurns(id: string): Promise<BurnTurn[]> {
+	/** Whether the session was captured on this branch: its envelope is here. */
+	async function onBranch(id: string): Promise<boolean> {
+		if (branch === 'main') return true;
 		const r = await hubFetch(
-			`/api/state/${encodeURIComponent(branch)}?path=/sessions/${encodeURIComponent(id)}/turns`
+			`/api/state/${encodeURIComponent(branch)}?path=/sessions/${encodeURIComponent(id)}/meta`
 		);
+		return r.ok;
+	}
+
+	async function fetchTurns(id: string): Promise<BurnTurn[]> {
+		if (!(await onBranch(id))) return [];
+		const r = await hubFetch(`/api/sessions/${encodeURIComponent(id)}/turns?tree=true`);
 		if (r.status === 404) return []; // predates turn capture
 		if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
 		const tree = await r.json();

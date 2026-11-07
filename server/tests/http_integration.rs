@@ -2669,3 +2669,308 @@ async fn a_secrets_scan_covers_every_workspace_with_all_and_creates_no_namespace
     let (_, body) = call_json(router.clone(), get("/api/secrets/scan?all=true&ref=nope")).await;
     assert!(body["scanned"].as_array().unwrap().is_empty(), "{body}");
 }
+
+// -------- Raw turns on their own local-only ref (ctx-hub-sync t-002) --------
+
+fn put_with_session(uri: &str, session: &str, body: Value) -> Request<Body> {
+    Request::builder()
+        .uri(uri)
+        .method("PUT")
+        .header("content-type", "application/json")
+        .header("x-ctxone-session", session)
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn turns_live_on_the_turns_ref_and_never_on_a_branch() {
+    let (_dir, repo, router) = sqlite_router();
+    let turns = json!({
+        "t0000": { "text": "hello", "cwd": "/work/app" },
+        "t0001": { "text": "again" },
+    });
+    let (status, v) = call_json(
+        router.clone(),
+        put_json("/api/sessions/s1/turns?ref=main", turns),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["ref"], "_local/turns");
+    let (status, _) = call_json(
+        router.clone(),
+        post_json(
+            "/api/sessions/s1/turns/2?ref=main",
+            json!({ "text": "third" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = call_json(
+        router.clone(),
+        put_with_session("/api/sessions/s1/title", "s1", json!("One")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // Usage puts the session in the registry, which the session list reads.
+    let (status, _) = call_json(
+        router.clone(),
+        post_with_session(
+            "/api/stats/llm_usage",
+            "s1",
+            json!({ "input_tokens": 10, "output_tokens": 5 }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The envelope is on main; the turns aren't, and their ref is local-only.
+    assert!(repo.get("main", "/sessions/s1/turns").is_err());
+    assert_eq!(repo.get_json("main", "/sessions/s1/title").unwrap(), "One");
+    assert!(repo.is_local_only("_local/turns").unwrap());
+
+    // Every reader finds them.
+    let (_, one) = call_json(router.clone(), get("/api/sessions/s1/turns/0")).await;
+    assert_eq!(one["cwd"], "/work/app");
+    let (_, paths) = call_json(router.clone(), get("/api/sessions/s1/turns")).await;
+    assert_eq!(
+        paths,
+        json!([
+            "/sessions/s1/turns/t0000",
+            "/sessions/s1/turns/t0001",
+            "/sessions/s1/turns/t0002"
+        ])
+    );
+    let (_, tree) = call_json(router.clone(), get("/api/sessions/s1/turns?tree=true")).await;
+    assert_eq!(tree["t0002"]["text"], "third");
+    let (status, _) = call_json(router.clone(), get("/api/sessions/s1/segments")).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, list) = call_json(router.clone(), get("/api/stats/sessions")).await;
+    let s1 = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["session_id"] == "s1")
+        .unwrap_or_else(|| panic!("s1 isn't listed: {list}"));
+    assert_eq!(s1["has_turns"], true, "{s1}");
+
+    // Branch tools don't list the turns ref, and refuse it by name.
+    let (_, branches) = call_json(router.clone(), get("/api/branches")).await;
+    assert!(
+        branches
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|b| b["name"] != "_local/turns"),
+        "{branches}"
+    );
+    for (uri, body) in [
+        (
+            "/api/merge",
+            json!({ "source": "_local/turns", "target": "main" }),
+        ),
+        (
+            "/api/branches",
+            json!({ "name": "_local/x", "from": "main" }),
+        ),
+        (
+            "/api/branches",
+            json!({ "name": "copy", "from": "_local/turns" }),
+        ),
+        (
+            "/api/branches/reset",
+            json!({ "name": "main", "to": "_local/turns" }),
+        ),
+    ] {
+        let (status, body) = call_raw(router.clone(), post_json(uri, body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body}");
+        assert!(body.contains("local-only"), "{uri}: {body}");
+    }
+
+    // A secrets scan reads the turns ref only when turns are asked for.
+    let scanned = |scan: &Value| -> Vec<String> {
+        scan["scanned"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["ref"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let (_, scan) = call_json(router.clone(), get("/api/secrets/scan")).await;
+    assert_eq!(scanned(&scan), vec!["main"], "{scan}");
+    let (_, scan) = call_json(router.clone(), get("/api/secrets/scan?turns=true")).await;
+    assert!(
+        scanned(&scan).contains(&"_local/turns".to_string()),
+        "{scan}"
+    );
+
+    // A move takes the turns along, relinked.
+    repo.create_namespace("proj").unwrap();
+    repo.fork_namespace(agentstategraph_core::Namespace::new("proj").unwrap())
+        .init()
+        .unwrap();
+    let (status, moved) = call_json(
+        router.clone(),
+        post_json("/api/sessions/s1/move", json!({ "to_namespace": "proj" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{moved}");
+    assert_eq!(moved["turns_moved"], true);
+    let (_, here) = call_json(router.clone(), get("/api/sessions/s1/turns?tree=true")).await;
+    assert!(here.is_null(), "{here}");
+    let (_, there) = call_json(
+        router.clone(),
+        get_ns("/api/sessions/s1/turns?tree=true", "proj"),
+    )
+    .await;
+    assert_eq!(there["t0000"]["text"], "hello");
+
+    // A delete takes them with the envelope.
+    let req = Request::builder()
+        .uri("/api/sessions/s1")
+        .method("DELETE")
+        .header("x-ctxone-namespace", "proj")
+        .body(Body::empty())
+        .unwrap();
+    let (status, deleted) = call_json(router.clone(), req).await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    assert_eq!(deleted["turns_removed"], 4, "{deleted}");
+    let (_, gone) = call_json(
+        router.clone(),
+        get_ns("/api/sessions/s1/turns?tree=true", "proj"),
+    )
+    .await;
+    assert!(gone.is_null(), "{gone}");
+}
+
+#[tokio::test]
+async fn a_hub_moves_turns_off_its_branches_when_it_upgrades() {
+    // A store as schema 2 left it: turns in the envelope, on main.
+    let (_dir, repo, _router) = sqlite_router();
+    let opts = || {
+        agentstategraph::CommitOptions::new(
+            "test",
+            agentstategraph_core::IntentCategory::Checkpoint,
+            "seed",
+        )
+    };
+    repo.set_json(
+        "main",
+        "/sessions/s1",
+        &json!({ "title": "One", "turns": { "t0000": { "text": "hi" } } }),
+        opts(),
+    )
+    .unwrap();
+    repo.set_json("main", "/ctxone/schema_version", &json!(2), opts())
+        .unwrap();
+    ctxone_hub::migrations::run_migrations(&repo).unwrap();
+    assert_eq!(
+        ctxone_hub::migrations::current_schema_version(&repo),
+        ctxone_hub::migrations::CTXONE_SCHEMA_VERSION
+    );
+    assert!(repo.get("main", "/sessions/s1/turns").is_err());
+    assert_eq!(repo.get_json("main", "/sessions/s1/title").unwrap(), "One");
+    assert_eq!(
+        repo.get_json("_local/turns", "/turns/s1/t0000/text")
+            .unwrap(),
+        "hi"
+    );
+}
+
+// -------- Reminders run only where they were made or approved (ctx-hub-sync t-008) --------
+
+fn memory_router() -> (Arc<Repository>, axum::Router) {
+    let repo = Arc::new(Repository::new(Box::new(MemoryStorage::new())));
+    repo.init().expect("repo init");
+    let router = http::router(repo.clone(), Arc::new(SessionRegistry::new()));
+    (repo, router)
+}
+
+fn find<'a>(list: &'a Value, id: &str) -> &'a Value {
+    list.as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == id)
+        .unwrap_or_else(|| panic!("{id} isn't listed: {list}"))
+}
+
+#[tokio::test]
+async fn a_pulled_reminder_waits_for_approval_on_this_machine() {
+    use agentstategraph::sync::InProcessRemote;
+    let (a, a_router) = memory_router();
+    let (b, b_router) = memory_router();
+    let hub = Repository::new(Box::new(MemoryStorage::new()));
+    hub.init().unwrap();
+    let remote = InProcessRemote::new(&hub);
+
+    // Made through A's Hub: due now, autonomous, with a command.
+    let (status, made) = call_json(
+        a_router.clone(),
+        post_json(
+            "/api/reminders",
+            json!({
+                "title": "rotate logs",
+                "instructions": "run the rotation",
+                "due_at": "2020-01-01T00:00:00Z",
+                "autonomous": true,
+                "commands": ["true"],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{made}");
+    assert_eq!(made["trusted_here"], true);
+    let id = made["id"].as_str().unwrap().to_string();
+    let (_, due) = call_json(a_router.clone(), get("/api/reminders/due")).await;
+    assert_eq!(find(&due, &id)["trusted_here"], true);
+
+    // A pushes; the control ref carries the reminder. B pulls it.
+    a.fetch("hub", &remote, &[]).unwrap();
+    a.push("hub", &remote, "main").unwrap();
+    b.fetch("hub", &remote, &[]).unwrap();
+    let (_, due) = call_json(b_router.clone(), get("/api/reminders/due")).await;
+    let pulled = find(&due, &id);
+    assert_eq!(pulled["title"], "rotate logs");
+    assert_eq!(pulled["trusted_here"], false, "{pulled}");
+    assert!(
+        b.head("_local/trust").is_err(),
+        "nothing is trusted on B yet"
+    );
+
+    // Approved on B, it may run there; A's own record never travelled.
+    let (status, approved) = call_json(
+        b_router.clone(),
+        post_json(&format!("/api/reminders/{id}/approve"), json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    assert_eq!(approved["trusted_here"], true);
+    let (_, due) = call_json(b_router.clone(), get("/api/reminders/due")).await;
+    assert_eq!(find(&due, &id)["trusted_here"], true);
+    assert!(hub.head("_local/trust").is_err());
+
+    // A reminder that isn't due yet can be approved ahead; it stays pending.
+    let (_, later) = call_json(
+        a_router.clone(),
+        post_json(
+            "/api/reminders",
+            json!({
+                "title": "later",
+                "instructions": "-",
+                "due_at": "2999-01-01T00:00:00Z",
+                "autonomous": true,
+            }),
+        ),
+    )
+    .await;
+    let later_id = later["id"].as_str().unwrap().to_string();
+    a.push("hub", &remote, "main").unwrap();
+    b.fetch("hub", &remote, &[]).unwrap();
+    let (status, ahead) = call_json(
+        b_router.clone(),
+        post_json(&format!("/api/reminders/{later_id}/approve"), json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{ahead}");
+    assert_eq!(ahead["status"], "pending");
+    assert_eq!(ahead["trusted_here"], true);
+}

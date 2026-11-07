@@ -111,6 +111,21 @@ pub struct HubConfig {
     /// constructs it from the persisted preference + env seed and keeps a clone
     /// for the sweep loop.
     pub autosync: Option<Autosync>,
+    /// Serve AgentStateGraph's sync protocol at `/sync/v1/{store}/…`, behind
+    /// the same auth, so other stores push to this Hub's and fetch from it
+    /// (ctx-hub-sync t-015, [`crate::sync_service`]). Off by default. From
+    /// `--serve-sync`.
+    pub serve_sync: bool,
+    /// The most one push may send, in bytes. `None` keeps AgentStateGraph's
+    /// default (256 MiB). From `--sync-max-push-mb`.
+    pub sync_max_push_bytes: Option<u64>,
+    /// Where this machine keeps sync tokens, normally `~/.ctxone`
+    /// ([`crate::sync_client`]). `None` reads none; a remote's token then
+    /// comes from the environment variable it names.
+    pub sync_home: Option<std::path::PathBuf>,
+    /// Shared with the background sync loop, so a request and the loop never
+    /// sync at once. `None` makes one for the router alone.
+    pub sync_lock: Option<Arc<tokio::sync::Mutex<()>>>,
     /// A single-tenant Postgres hub's tables for the project registry and
     /// session stats, on AgentStateGraph's pool (see [`crate::hub_store`]).
     /// `None` for SQLite (whose tables live in `db_path`) and memory. A
@@ -231,6 +246,11 @@ pub struct HubShared {
     /// Project detections still running on the blocking pool, including ones
     /// whose request already timed out. See [`run_detect_bounded`].
     pub detects_in_flight: Arc<std::sync::atomic::AtomicUsize>,
+    /// Where this machine keeps sync tokens (`<home>/sync-tokens/<remote>`,
+    /// [`crate::sync_client`]). `None` reads none.
+    pub sync_home: Option<std::path::PathBuf>,
+    /// One sync at a time, whether a request or the background loop asks.
+    pub sync_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// The REST router's state. It holds no data of its own: handlers take a
@@ -920,6 +940,11 @@ pub const MACHINE_LOCAL_ROUTES: &[&str] = &[
     "/api/admin/backup",
     "/api/code",
     "/api/code/{*rest}",
+    "/api/sync/remotes",
+    "/api/sync/remotes/{name}",
+    "/api/sync/namespaces/{ns}",
+    "/api/sync/status",
+    "/api/sync/run",
 ];
 
 /// A multi-tenant Hub's answer to [`MACHINE_LOCAL_ROUTES`]. Takes no state,
@@ -983,6 +1008,7 @@ fn build_router(
     // What acts on the Hub machine itself is configured only for a
     // single-tenant Hub.
     let machine_local = tenancy.machine_local();
+    let sync_tenancy = config.serve_sync.then(|| tenancy.clone());
     let asd_repos = Arc::new(if machine_local {
         config.asd_repos.clone()
     } else {
@@ -1031,6 +1057,8 @@ fn build_router(
             self_base_url: config.self_base_url.clone().filter(|_| machine_local),
             ctx_auth: AuthTokens::new(config.auth_token.clone(), config.auth_token_file.clone()),
             detects_in_flight: Arc::default(),
+            sync_home: config.sync_home.clone().filter(|_| machine_local),
+            sync_lock: config.sync_lock.clone().unwrap_or_default(),
             autosync: config
                 .autosync
                 .clone()
@@ -1234,7 +1262,22 @@ fn build_router(
             // spawning the co-located `ctx ingest-session --all` CLI.
             .route("/api/sessions/sync", post(sync_sessions))
             // Admin endpoints
-            .route("/api/admin/backup", post(admin_backup));
+            .route("/api/admin/backup", post(admin_backup))
+            // Push to a remote Hub and pull from it (ctx-hub-sync t-006).
+            .route(
+                "/api/sync/remotes",
+                get(sync_list_remotes).post(sync_add_remote),
+            )
+            .route(
+                "/api/sync/remotes/{name}",
+                axum::routing::delete(sync_remove_remote),
+            )
+            .route(
+                "/api/sync/namespaces/{ns}",
+                axum::routing::put(sync_map_namespace).delete(sync_unmap_namespace),
+            )
+            .route("/api/sync/status", get(sync_status))
+            .route("/api/sync/run", post(sync_run));
         // Mount ASD repo registry + per-repo proxy routes when any repos are
         // configured (either static URLs or pool-managed repos).
         if !state.shared.asd_repos.is_empty() || state.shared.asd_pool.is_some() {
@@ -1275,6 +1318,15 @@ fn build_router(
     // trip the per-IP RPM cap.
     if let Some(mcp_state) = mcp_state {
         router = router.merge(crate::mcp_http::mcp_router(mcp_state));
+    }
+
+    // Sync at `/sync/v1`, merged like MCP so the auth layer below covers it.
+    // It reads bodies to its own limits, which `DefaultBodyLimit` doesn't set.
+    if let Some(tenancy) = sync_tenancy {
+        router = router.merge(
+            crate::sync_service::router(tenancy, config.sync_max_push_bytes)
+                .layer(oxtel_tower::HttpServerLayer::new()),
+        );
     }
 
     // Apply the rate limiter LAST so it runs FIRST in the request
@@ -1723,6 +1775,7 @@ async fn list_sessions(s: HubState, ns: NamespaceId) -> impl IntoResponse {
         let metas = repo
             .get_json_many("main", &meta_paths)
             .unwrap_or_else(|_| vec![None; meta_paths.len()]);
+        let with_turns = crate::turns::sessions(&repo);
         for (snap, meta) in snaps.iter_mut().zip(metas) {
             let node = view.get(&snap.session_id);
             snap.name = node
@@ -1738,7 +1791,7 @@ async fn list_sessions(s: HubState, ns: NamespaceId) -> impl IntoResponse {
             // Whether a turns node exists. Lets the Sessions view skip the
             // first-turn title probe for turn-less sessions instead of 404-ing
             // on each.
-            snap.has_turns = node.and_then(|n| n.get("turns")).is_some();
+            snap.has_turns = with_turns.contains(&snap.session_id);
         }
     }
     // Lend the workspace-aggregate ratio to sessions that spent tokens but have
@@ -1756,7 +1809,7 @@ async fn list_sessions(s: HubState, ns: NamespaceId) -> impl IntoResponse {
 ///
 /// The per-model split (t-023) only accrues for usage recorded AFTER the
 /// feature shipped; historical sessions have an empty `by_model`. But the raw
-/// material is already persisted: each turn at `/sessions/{id}/turns/{idx}`
+/// material is already persisted: each stored turn (`crate::turns`)
 /// carries its own `model` and `tokens`. This walks those, sums per model, and
 /// REPLACES the session's `by_model` — no re-ingest (so no double-counting of
 /// the flat totals) and no graph writes (so no memory loss). Idempotent:
@@ -1825,9 +1878,8 @@ fn backfill_one_session(
 ) -> (bool, usize) {
     // One read per session: the whole turns subtree as an object keyed by
     // zero-padded index. Missing/non-object subtrees are simply skipped.
-    let turns = match repo.get_json("main", &format!("/sessions/{sid}/turns")) {
-        Ok(v) => v,
-        Err(_) => return (false, 0),
+    let Some(turns) = crate::turns::read(repo, sid) else {
+        return (false, 0);
     };
     let Some(obj) = turns.as_object() else {
         return (false, 0);
@@ -2366,6 +2418,7 @@ async fn scan_secrets(
         max_findings: q.limit.unwrap_or(1000).clamp(1, 10_000),
     };
     let only = q.ref_name.clone();
+    let turns = q.turns;
     let span = tracing::Span::current();
     // A scan reads every branch, so it runs on the blocking pool.
     let (scanned, report) = tokio::task::spawn_blocking(move || {
@@ -2375,6 +2428,13 @@ async fn scan_secrets(
         for repo in &repos {
             for (branch, _) in repo.list_branches(None)? {
                 if only.as_ref().is_some_and(|r| *r != branch) || scanner.truncated() {
+                    continue;
+                }
+                // Local-only refs never sync. The turns ref is scanned when
+                // turns are asked for; any other, never.
+                if crate::local_ref::is_local_ref(&branch)
+                    && !(branch == crate::turns::TURNS_REF && turns)
+                {
                     continue;
                 }
                 scanner.scan_ref(repo, &branch)?;
@@ -2849,6 +2909,8 @@ async fn list_branches(
     let branches = repo.list_branches(None).map_err(internal_error)?;
     let out: Vec<serde_json::Value> = branches
         .into_iter()
+        // Local-only refs (the turns ref) aren't branches anyone works on.
+        .filter(|(name, _)| !crate::local_ref::is_local_ref(name))
         .map(|(name, id)| {
             // The head commit's timestamp is the branch's "last updated" — what
             // the dashboard's recently-updated panel sorts on. Best-effort: a
@@ -2889,6 +2951,7 @@ async fn create_branch(
     agent_id: AgentId,
     Json(req): Json<CreateBranchRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    refuse_local_refs(&[&req.name, &req.from])?;
     let repo = s.repo_for(&ns)?;
     let created = match repo.branch(&req.name, &req.from) {
         Ok(id) => Some(id),
@@ -2922,6 +2985,19 @@ async fn create_branch(
     Ok(Json(out))
 }
 
+/// Refuse a request naming a local-only ref ([`crate::local_ref::LOCAL_REF_PREFIX`])
+/// as a branch to create, delete, reset or merge: merging the turns ref into a
+/// branch would put raw turns where they sync.
+fn refuse_local_refs(names: &[&str]) -> Result<(), (StatusCode, String)> {
+    match names
+        .iter()
+        .find(|name| crate::local_ref::is_local_ref(name))
+    {
+        Some(name) => Err((StatusCode::BAD_REQUEST, crate::local_ref::refused(name))),
+        None => Ok(()),
+    }
+}
+
 /// `DELETE /api/branches/{name}` — drop a branch ref from this workspace.
 ///
 /// Refuses `main`: it is the workspace's trunk and every other ref forks from
@@ -2940,6 +3016,7 @@ async fn delete_branch(
             "refusing to delete 'main' — it is the workspace trunk".to_string(),
         ));
     }
+    refuse_local_refs(&[&name])?;
     let repo = s.repo_for(&ns)?;
     let deleted = repo.delete_branch(&name).map_err(internal_error)?;
     Ok(Json(serde_json::json!({
@@ -2968,6 +3045,7 @@ async fn reset_branch(
     ns: NamespaceId,
     Json(req): Json<ResetBranchRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    refuse_local_refs(&[&req.name, &req.to])?;
     let repo = s.repo_for(&ns)?;
 
     // Resolve the destination first (accepts commit ids/prefixes via head()).
@@ -3059,6 +3137,7 @@ async fn merge_refs(
     agent_id: AgentId,
     Json(req): Json<MergeRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    refuse_local_refs(&[&req.source, &req.target])?;
     let repo = s.repo_for(&ns)?;
     let guard = MergeGuard::acquire(&s.data.merges_in_flight, &ns.0, &req.target).ok_or_else(|| {
         (
@@ -5140,17 +5219,12 @@ fn taint_effect_str(e: agentstategraph_taint::TaintEffect) -> &'static str {
 // ── Session turn capture ────────────────────────────────────────────────────
 //
 // These endpoints persist the full per-turn payload (request + response +
-// tool calls + token usage) at a deterministic path on the requested ref,
-// so re-ingesting the same JSONL is idempotent.
+// tool calls + token usage) at a deterministic path, so re-ingesting the same
+// JSONL is idempotent. Turns live on the workspace's local-only turns ref
+// (`crate::turns`), which never syncs; the session's envelope stays on the
+// requested branch.
 
 const SESSION_TURNS_MAX_BYTES: usize = 1 * 1024 * 1024; // 1 MiB
-
-fn session_turn_path(sid: &str, idx: u32) -> String {
-    // Prefix with `t` so the segment is a map Key, not a list Index — ASG
-    // path parsing turns all-digit segments into list indexes which can't
-    // create-on-write under an empty parent.
-    format!("/sessions/{}/turns/t{:04}", sid, idx)
-}
 
 #[derive(Deserialize)]
 struct SessionTurnQuery {
@@ -5178,7 +5252,7 @@ async fn put_session_turns_bulk(
     ns: NamespaceId,
     Path(sid): Path<String>,
     agent_id: AgentId,
-    Query(q): Query<SessionTurnQuery>,
+    Query(_q): Query<SessionTurnQuery>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     if !body.is_object() {
@@ -5199,7 +5273,6 @@ async fn put_session_turns_bulk(
         ));
     }
     let repo = s.repo_for(&ns)?;
-    let path = format!("/sessions/{}/turns", sid);
     let count = body.as_object().map(|m| m.len()).unwrap_or(0);
     let opts = CommitOptions::new(
         &agent_id.0,
@@ -5210,12 +5283,13 @@ async fn put_session_turns_bulk(
         format!("session:{}", sid),
         "kind:full-turn".to_string(),
     ]);
-    let commit_id =
-        set_json_if_changed(&repo, &q.ref_name, &path, &body, opts).map_err(internal_error)?;
+    // Turns go to the workspace's local-only turns ref, whatever branch the
+    // request names (ctx-hub-sync t-002).
+    let commit_id = crate::turns::write_all(&repo, &sid, &body, opts).map_err(internal_error)?;
     s.sessions.mark_all_dirty();
     Ok(Json(serde_json::json!({
         "status": "ok",
-        "ref": q.ref_name,
+        "ref": crate::turns::TURNS_REF,
         "turns": count,
         "commit_id": format!("{}", commit_id.short()),
     })))
@@ -5226,7 +5300,7 @@ async fn put_session_turn(
     ns: NamespaceId,
     Path((sid, idx)): Path<(String, u32)>,
     agent_id: AgentId,
-    Query(q): Query<SessionTurnQuery>,
+    Query(_q): Query<SessionTurnQuery>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
@@ -5241,7 +5315,7 @@ async fn put_session_turn(
             ),
         ));
     }
-    let path = session_turn_path(&sid, idx);
+    let path = crate::turns::turn_path(&sid, idx);
     let intent = format!("capture session {} turn {:04}", sid, idx);
     let opts = CommitOptions::new(
         &agent_id.0,
@@ -5254,14 +5328,14 @@ async fn put_session_turn(
         "kind:full-turn".to_string(),
     ]);
     let commit_id =
-        set_json_if_changed(&repo, &q.ref_name, &path, &body, opts).map_err(internal_error)?;
+        crate::turns::write_turn(&repo, &sid, idx, &body, opts).map_err(internal_error)?;
     // Session writes change the graph, so cached flat sizes are stale. The
     // other write paths have always done this; these four did not, which left
     // token-savings figures computed against a tree that no longer existed.
     s.sessions.mark_all_dirty();
     Ok(Json(serde_json::json!({
         "status": "ok",
-        "ref": q.ref_name,
+        "ref": crate::turns::TURNS_REF,
         "path": path,
         "commit_id": format!("{}", commit_id.short()),
     })))
@@ -5271,40 +5345,43 @@ async fn get_session_turn(
     s: HubState,
     ns: NamespaceId,
     Path((sid, idx)): Path<(String, u32)>,
-    Query(q): Query<SessionTurnQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
-    let path = session_turn_path(&sid, idx);
-    repo.get_json(&q.ref_name, &path)
+    crate::turns::read_turn(&repo, &sid, idx)
         .map(Json)
         .map_err(internal_error)
 }
 
+#[derive(Deserialize)]
+struct ListTurnsQuery {
+    /// Return the turns themselves, `{ tNNNN: turn }`, instead of their paths.
+    #[serde(default)]
+    tree: bool,
+}
+
+/// `GET /api/sessions/{sid}/turns` — the session's turns. Lists each turn's
+/// path, `/sessions/{sid}/turns/tNNNN` as it was before turns moved to their
+/// own ref; with `?tree=true`, every turn, as `{ tNNNN: turn }` (`null` when
+/// the session has none). A `ref` is accepted and ignored: turns live on the
+/// workspace's turns ref whatever branch a session ran on (ctx-hub-sync
+/// t-002).
 async fn list_session_turns(
     s: HubState,
     ns: NamespaceId,
     Path(sid): Path<String>,
-    Query(q): Query<SessionTurnQuery>,
-) -> Result<Json<Vec<String>>, (StatusCode, String)> {
+    Query(q): Query<ListTurnsQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
-    let prefix = format!("/sessions/{}/turns", sid);
-    let all = repo
-        .list_paths(&q.ref_name, &prefix, None)
-        .map_err(internal_error)?;
-    // Collapse leaf paths down to one entry per turn root
-    // (e.g. /sessions/X/turns/t0000/...).
-    let prefix_with_slash = format!("{}/", prefix);
-    let mut roots: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for p in all {
-        if let Some(rest) = p.strip_prefix(&prefix_with_slash) {
-            if let Some((first, _)) = rest.split_once('/') {
-                roots.insert(format!("{}{}", prefix_with_slash, first));
-            } else {
-                roots.insert(format!("{}{}", prefix_with_slash, rest));
-            }
-        }
+    if q.tree {
+        return Ok(Json(
+            crate::turns::read(&repo, &sid).unwrap_or(serde_json::Value::Null),
+        ));
     }
-    Ok(Json(roots.into_iter().collect()))
+    let paths: Vec<String> = crate::turns::keys(&repo, &sid)
+        .into_iter()
+        .map(|key| format!("/sessions/{sid}/turns/{key}"))
+        .collect();
+    Ok(Json(serde_json::json!(paths)))
 }
 
 #[derive(Deserialize)]
@@ -5330,9 +5407,7 @@ async fn session_segments(
     Query(q): Query<SegmentsQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
-    let tree = repo
-        .get_tree(&q.ref_name, &format!("/sessions/{sid}/turns"))
-        .unwrap_or(serde_json::Value::Null);
+    let tree = crate::turns::read(&repo, &sid).unwrap_or(serde_json::Value::Null);
     let segments = crate::segments::segments_from_tree(&tree, q.gap);
     Ok(Json(serde_json::json!({
         "session": sid,
@@ -5354,9 +5429,7 @@ async fn session_starter(
     Query(q): Query<SegmentsQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
-    let tree = repo
-        .get_tree(&q.ref_name, &format!("/sessions/{sid}/turns"))
-        .unwrap_or(serde_json::Value::Null);
+    let tree = crate::turns::read(&repo, &sid).unwrap_or(serde_json::Value::Null);
     let title = read_session_title(&repo, &q.ref_name, &sid);
     let starter = crate::starter::build_starter(&tree, title.as_deref());
     Ok(Json(serde_json::json!({
@@ -5805,6 +5878,19 @@ async fn delete_session(
         Err(e) => return Err(internal_error(e)),
     };
 
+    // Its turns, from the workspace's turns ref, which holds one copy of a
+    // session's turns whatever branch it ran on.
+    let turn_opts = CommitOptions::new(
+        &agent_id.0,
+        IntentCategory::Rollback,
+        format!("delete session {}'s turns", sid),
+    )
+    .with_tags(vec![
+        format!("session:{}", sid),
+        "kind:session-delete".to_string(),
+    ]);
+    let turns_removed = crate::turns::delete(&repo, &sid, turn_opts).map_err(internal_error)?;
+
     let tombstoned = if q.no_tombstone {
         false
     } else {
@@ -5837,7 +5923,8 @@ async fn delete_session(
         "session_id": sid,
         "namespace": ns.0,
         "ref": q.ref_name,
-        "nodes_removed": removed,
+        "nodes_removed": removed + turns_removed,
+        "turns_removed": turns_removed,
         "commit_id": deleted,
         "tombstoned": tombstoned,
         "removed_from_registry": from_registry,
@@ -6202,15 +6289,13 @@ async fn derive_session_links(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
 
-    // The turns subtree: `/sessions/{sid}/turns` = { tNNNN: {tool_calls_raw…} }.
-    let turns = repo
-        .get_json(&q.ref_name, &format!("/sessions/{}/turns", sid))
-        .map_err(|_| {
-            (
-                StatusCode::NOT_FOUND,
-                format!("no turns for session {}", sid),
-            )
-        })?;
+    // The session's turns: { tNNNN: {tool_calls_raw…} }.
+    let turns = crate::turns::read(&repo, &sid).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            format!("no turns for session {}", sid),
+        )
+    })?;
 
     // Flatten to (turn_index, command) candidates. A turn's index is parsed
     // from its `tNNNN` key so a link points back at the right turn.
@@ -6555,14 +6640,18 @@ async fn move_session(
     let dst = s.repo_for(&NamespaceId(req.to_namespace.clone()))?;
     let root = format!("/sessions/{}", sid);
 
-    // The subtree to move. A session with no nodes here is a 404 — moving
-    // nothing is a caller error worth surfacing, not a silent success.
-    let subtree = src.get_tree(&req.ref_name, &root).map_err(|_| {
-        (
+    // The envelope to move, and the turns beside it on the turns ref. A
+    // session with neither here is a 404 — moving nothing is a caller error
+    // worth surfacing, not a silent success.
+    let subtree = src.get_tree(&req.ref_name, &root).ok();
+    let has_turns = !crate::turns::keys(&src, &sid).is_empty();
+    if subtree.is_none() && !has_turns {
+        return Err((
             StatusCode::NOT_FOUND,
             format!("no session {} in {}", sid, ns.0),
-        )
-    })?;
+        ));
+    }
+    let subtree = subtree.unwrap_or(serde_json::Value::Null);
 
     // Skip the write when the target already has an equal-or-newer copy, so a
     // re-run does not overwrite a session that was updated in its new home.
@@ -6587,17 +6676,30 @@ async fn move_session(
     // Guarded move: the source is deleted only after the target is verified to
     // hold the session's leaves; the write is skipped when the target copy is
     // already current (idempotent re-run).
-    let outcome = move_subtree_verified(
-        &src,
-        &dst,
-        &req.ref_name,
-        &req.ref_name,
-        &root,
-        &agent_id.0,
-        "session-move",
-        true,
-        target_is_current,
-    )?;
+    let outcome = if subtree.is_null() {
+        MoveOutcome {
+            src_leaves: 0,
+            dst_leaves: 0,
+            wrote_target: false,
+            deleted_source: false,
+        }
+    } else {
+        move_subtree_verified(
+            &src,
+            &dst,
+            &req.ref_name,
+            &req.ref_name,
+            &root,
+            &agent_id.0,
+            "session-move",
+            true,
+            target_is_current,
+        )?
+    };
+    // The turns go with it, relinked rather than copied, under the same
+    // rule: a target that's current keeps its own.
+    let turns = crate::turns::move_session(&src, &dst, &sid, target_is_current, &agent_id.0)
+        .map_err(internal_error)?;
 
     s.sessions.mark_all_dirty();
 
@@ -6611,6 +6713,7 @@ async fn move_session(
         "src_leaves": outcome.src_leaves,
         "dst_leaves": outcome.dst_leaves,
         "deleted_source": outcome.deleted_source,
+        "turns_moved": turns.found,
     })))
 }
 
@@ -7374,6 +7477,178 @@ async fn set_autosync(
     }))
 }
 
+// -- Sync with a remote Hub (ctx-hub-sync t-006) -------------------------
+
+fn sync_failure(e: crate::sync_client::SyncFailure) -> (StatusCode, String) {
+    let status = match e.code {
+        "no_such_remote" | "not_mapped" => StatusCode::NOT_FOUND,
+        "remote_in_use" | "one_space_only" | "bad_namespace" | "no_token" => {
+            StatusCode::BAD_REQUEST
+        }
+        _ => StatusCode::BAD_GATEWAY,
+    };
+    (status, e.to_json().to_string())
+}
+
+/// Run sync work on the blocking pool: it reads the store and calls the
+/// remote with a blocking client.
+async fn sync_blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, crate::sync_client::SyncFailure> + Send + 'static,
+) -> Result<T, (StatusCode, String)> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("the sync stopped: {e}"),
+            )
+        })?
+        .map_err(sync_failure)
+}
+
+/// `GET /api/sync/remotes` — every remote, whether it has a token here, and
+/// which workspaces sync with which.
+async fn sync_list_remotes(s: HubState) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let (repo, home) = (s.repo.clone(), s.hub.sync_home.clone());
+    sync_blocking(move || crate::sync_client::list(&repo, home.as_deref()))
+        .await
+        .map(Json)
+}
+
+#[derive(Deserialize)]
+struct SyncAddRemote {
+    name: String,
+    url: String,
+    #[serde(default)]
+    store: Option<String>,
+    #[serde(default)]
+    token_env: Option<String>,
+}
+
+/// `POST /api/sync/remotes` — add a remote, or change where it is. The token
+/// never comes this way: it's in the environment variable `token_env`
+/// names, or in this machine's token file.
+async fn sync_add_remote(
+    s: HubState,
+    Json(req): Json<SyncAddRemote>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo.clone();
+    sync_blocking(move || {
+        crate::sync_client::add_remote(
+            &repo,
+            &req.name,
+            &req.url,
+            req.store.as_deref(),
+            req.token_env.as_deref(),
+        )?;
+        Ok(serde_json::json!({ "status": "ok", "name": req.name }))
+    })
+    .await
+    .map(Json)
+}
+
+/// `DELETE /api/sync/remotes/{name}`.
+async fn sync_remove_remote(
+    s: HubState,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo.clone();
+    sync_blocking(move || {
+        let removed = crate::sync_client::remove_remote(&repo, &name)?;
+        Ok(serde_json::json!({ "name": name, "removed": removed }))
+    })
+    .await
+    .map(Json)
+}
+
+#[derive(Deserialize)]
+struct SyncMapBody {
+    remote: String,
+}
+
+/// `PUT /api/sync/namespaces/{ns}` — sync workspace `ns` with a remote.
+async fn sync_map_namespace(
+    s: HubState,
+    Path(ns): Path<String>,
+    Json(body): Json<SyncMapBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo.clone();
+    sync_blocking(move || crate::sync_client::map_namespace(&repo, &ns, &body.remote))
+        .await
+        .map(Json)
+}
+
+/// `DELETE /api/sync/namespaces/{ns}` — stop syncing workspace `ns`.
+async fn sync_unmap_namespace(
+    s: HubState,
+    Path(ns): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo.clone();
+    sync_blocking(move || {
+        let unmapped = crate::sync_client::unmap_namespace(&repo, &ns)?;
+        Ok(serde_json::json!({ "namespace": ns, "unmapped": unmapped }))
+    })
+    .await
+    .map(Json)
+}
+
+/// `GET /api/sync/status` — where each mapped workspace's branches stand,
+/// as the last sync left them.
+async fn sync_status(s: HubState) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let repo = s.repo.clone();
+    sync_blocking(move || crate::sync_client::status(&repo))
+        .await
+        .map(Json)
+}
+
+#[derive(Deserialize, Default)]
+struct SyncRunBody {
+    /// `pull`, `push` or `both` (the default).
+    #[serde(default)]
+    mode: Option<String>,
+    /// One workspace; every mapped one when absent.
+    #[serde(default)]
+    namespace: Option<String>,
+    /// Push filter findings to let through, each with a reason.
+    #[serde(default)]
+    overrides: Vec<agentstategraph::sync::PushOverride>,
+}
+
+/// `POST /api/sync/run` — pull, push, or both, for every mapped workspace
+/// or one. A blocked push reports its findings: path, rule, and the record
+/// to forget, never the value.
+async fn sync_run(
+    s: HubState,
+    body: Option<Json<SyncRunBody>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let body = body.map(|b| b.0).unwrap_or_default();
+    let mode = match body.mode.as_deref() {
+        None | Some("both") => crate::sync_client::Mode::Both,
+        Some("pull") => crate::sync_client::Mode::Pull,
+        Some("push") => crate::sync_client::Mode::Push,
+        Some(other) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("mode {other:?} isn't pull, push or both"),
+            ));
+        }
+    };
+    let _one = s.hub.sync_lock.clone().lock_owned().await;
+    let (repo, home) = (s.repo.clone(), s.hub.sync_home.clone());
+    let out = sync_blocking(move || {
+        crate::sync_client::sync(
+            &repo,
+            home.as_deref(),
+            body.namespace.as_deref(),
+            mode,
+            &body.overrides,
+        )
+    })
+    .await?;
+    s.sessions.mark_all_dirty();
+    Ok(Json(out))
+}
+
 // -- Reminder endpoints -------------------------------------------------
 
 fn reminder_error_to_response(e: reminder_tools::ReminderToolError) -> (StatusCode, String) {
@@ -7388,12 +7663,7 @@ async fn list_reminders_handler(
     let repo = s.repo_for(&ns)?;
     let mgr = reminder_tools::make_manager(repo.clone());
     let reminders = reminder_tools::list_reminders(&mgr, q).map_err(reminder_error_to_response)?;
-    Ok(Json(
-        reminders
-            .iter()
-            .map(reminder_tools::reminder_to_json)
-            .collect(),
-    ))
+    Ok(Json(reminder_tools::reminders_json_here(&repo, &reminders)))
 }
 
 async fn create_reminder_handler(
@@ -7404,11 +7674,11 @@ async fn create_reminder_handler(
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
     let mgr = reminder_tools::make_manager(repo.clone());
-    let r = reminder_tools::create_reminder(&mgr, req, &agent_id.0)
+    let r = reminder_tools::create_here(&mgr, &repo, req, &agent_id.0)
         .map_err(reminder_error_to_response)?;
     Ok((
         StatusCode::CREATED,
-        Json(reminder_tools::reminder_to_json(&r)),
+        Json(reminder_tools::one_json_here(&repo, &r)),
     ))
 }
 
@@ -7421,12 +7691,9 @@ async fn remind_me_handler(
     let reminders = mgr
         .remind_me()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(
-        reminders
-            .iter()
-            .map(reminder_tools::reminder_to_json)
-            .collect(),
-    ))
+    // `trusted_here` is the tick's third gate: only a reminder made or
+    // approved through this Hub runs its commands here (ctx-hub-sync t-008).
+    Ok(Json(reminder_tools::reminders_json_here(&repo, &reminders)))
 }
 
 async fn get_reminder_handler(
@@ -7437,7 +7704,7 @@ async fn get_reminder_handler(
     let repo = s.repo_for(&ns)?;
     let mgr = reminder_tools::make_manager(repo.clone());
     match mgr.get(&id) {
-        Ok(r) => Ok(Json(reminder_tools::reminder_to_json(&r))),
+        Ok(r) => Ok(Json(reminder_tools::one_json_here(&repo, &r))),
         Err(agentstategraph_reminders::ReminderError::NotFound(_)) => Err((
             StatusCode::NOT_FOUND,
             format!("reminder '{}' not found", id),
@@ -7481,10 +7748,9 @@ async fn approve_reminder_handler(
     let repo = s.repo_for(&ns)?;
     let mgr = reminder_tools::make_manager(repo.clone());
     let approver = body.and_then(|b| b.0.approved_by).unwrap_or(agent_id.0);
-    let r = mgr
-        .approve(&id, &approver)
+    let r = reminder_tools::approve_here(&mgr, &repo, &id, &approver)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    Ok(Json(reminder_tools::reminder_to_json(&r)))
+    Ok(Json(reminder_tools::one_json_here(&repo, &r)))
 }
 
 async fn cancel_reminder_handler(
@@ -8200,7 +8466,7 @@ mod tests {
     }
 
     // ── backfill_by_model pagination: a big namespace can't time out ────────
-    /// Seed a session's whole `/turns` subtree the way ingest stores it: one
+    /// Seed a session's turns the way ingest stores them: one
     /// object keyed by zero-padded index, each value a turn with `model` and
     /// `tokens`. `turns` is `(model, input_tokens)` pairs.
     fn seed_turns(repo: &Repository, sid: &str, turns: &[(&str, u64)]) {
@@ -8211,9 +8477,9 @@ mod tests {
                 serde_json::json!({ "model": model, "tokens": { "input": input } }),
             );
         }
-        repo.set_json(
-            "main",
-            &format!("/sessions/{sid}/turns"),
+        crate::turns::write_all(
+            repo,
+            sid,
             &serde_json::Value::Object(obj),
             CommitOptions::new(
                 "t",
@@ -8244,9 +8510,9 @@ mod tests {
                 "tokens": { "input": input, "output": 10, "cache_read": cache_read }
             }),
         );
-        repo.set_json(
-            "main",
-            &format!("/sessions/{sid}/turns"),
+        crate::turns::write_all(
+            repo,
+            sid,
             &serde_json::Value::Object(obj),
             CommitOptions::new("t", IntentCategory::Custom("test".to_string()), "seed"),
         )

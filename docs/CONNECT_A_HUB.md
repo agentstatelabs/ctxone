@@ -1,15 +1,15 @@
 # Connect to a Hub on another machine
 
-A Hub usually runs on the machine your agents run on. You can point several
-machines at one Hub instead: a Hub on a server of your own, one a team runs, or
-a multi-tenant Hub. Every machine then reads and writes the same memory, and
-Lens shows it all in one place.
+A Hub usually runs on the machine your agents run on. There are two ways to
+have your memory on more than one machine:
 
-Hubs don't sync with each other yet. A fact remembered through one Hub is
-invisible through another, so connecting your machines to one Hub is how your
-memory follows you between them for now. Sync, where each machine keeps its own
-Hub and pushes to and pulls from a shared one, is designed in
-[design/HUB_SYNC.md](design/HUB_SYNC.md) and not built yet.
+- **Point every machine at one Hub**: a Hub on a server of your own, one a
+  team runs, or a multi-tenant Hub. Every machine then reads and writes the
+  same memory, and Lens shows it all in one place. Nothing works while that Hub
+  can't be reached.
+- **Sync** ([below](#sync-your-own-hub-with-a-remote-one)): each machine keeps
+  its own Hub, works offline, and pushes to and pulls from a Hub that serves
+  sync. Raw session turns never leave the machine that captured them.
 
 ## Before you start
 
@@ -93,17 +93,66 @@ ctx --namespace <workspace> db import ws.json
 left alone. `ctx db export` exports one branch (`--branch` picks it), and
 history doesn't come with it.
 
+## Sync your own Hub with a remote one
+
+Each machine keeps its own Hub and its own store. They push to and pull from
+one Hub that serves sync: `ctxone-hub --http --serve-sync`, behind a token and
+HTTPS like any shared Hub. On a multi-tenant Hub each token reaches its own
+store only.
+
+On each machine, with its own Hub running:
+
+```bash
+printf '%s' "$HUB_TOKEN" | ctx remote add hub https://hub.example.com --token-stdin
+ctx remote set default hub          # and each project workspace to keep on your other machines
+ctx sync                            # pull, then push
+ctx sync status
+```
+
+- **The token** goes to `~/.ctxone/sync-tokens/hub` (mode 0600), never into the
+  store. Or keep it in an environment variable the Hub's own environment sets,
+  and name it with `--token-env`.
+- **What syncs:** memory, plans and tasks, each session's envelope (title,
+  meta, usage, analysis, summary), reminders, taints, plan epochs, and your
+  personal namespace (agent rules, `remember --personal`, the project
+  registry). Setting the first workspace sets the personal namespace too.
+- **What stays on this machine:** raw session turns, on their own local-only
+  ref; the history from before you set a workspace (the first push starts
+  from where it is then); seals from before workspaces existed; tokens and
+  `~/.ctxone`.
+- **The first sync of a machine with history of its own** joins the remote's
+  history to it in a merge. A task two machines each added offline gets a new
+  id on the second to sync, and its blockers follow.
+- **Reminders** pulled from another machine don't run their commands here
+  until you approve them here: `ctx reminder approve <id>`.
+- **Credentials:** every push is scanned. A provider's token format or a
+  private key stops a branch's push; `ctx push` prints each finding's path and
+  the `ctx forget` that removes it. `ctx push --allow <finding>='<why>'` lets
+  one through, and the remote's push log keeps the reason.
+- **In the background**, the Hub syncs every five minutes
+  (`CTXONE_SYNC_EVERY`, in seconds; `0` turns it off) and within a minute of a
+  change. Lens shows each workspace's state on its page.
+- **Your own space only, for now.** Every workspace syncs to the same store.
+  Sharing a workspace with someone else's waits on AgentStateGraph scoping
+  taints and reminders by workspace, so `ctx remote set` refuses a remote in
+  another space.
+
+`ctx push` and `ctx pull` run each half on its own, and `--namespace` limits
+any of them to one workspace. All of them exit 1 when something didn't go.
+
 ## When the Hub can't be reached
 
-There's no offline mode before sync. `ctx` commands stop with the Hub
-unreachable (exit 69), agents' tool calls fail until it's back, and nothing is
-queued to send later. Sessions recorded meanwhile can be sent afterwards with
-`ctx ingest-session`, since their transcripts are still on this machine.
+Connected directly to a Hub elsewhere, there's no offline mode: `ctx` commands
+stop with the Hub unreachable (exit 69), agents' tool calls fail until it's
+back, and nothing is queued to send later. Sessions recorded meanwhile can be
+sent afterwards with `ctx ingest-session`, since their transcripts are still on
+this machine. With sync, each machine's own Hub keeps working, and the next
+sync catches up.
 
 ## See also
 
 - [DEPLOYMENT.md](DEPLOYMENT.md): running a Hub, tokens, HTTPS, and a Hub for
   many users
 - [MEMORY_BRANCH_SCOPING.md](MEMORY_BRANCH_SCOPING.md): workspaces and branches
-- [design/HUB_SYNC.md](design/HUB_SYNC.md): sync between Hubs, and what it will
-  carry
+- [design/HUB_SYNC.md](design/HUB_SYNC.md): how sync between Hubs works, and
+  what it carries

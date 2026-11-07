@@ -4738,6 +4738,8 @@ impl CtxOneServer {
             Ok(branches) => {
                 let out: Vec<serde_json::Value> = branches
                     .into_iter()
+                    // Local-only refs (the turns ref) aren't branches.
+                    .filter(|(name, _)| !crate::local_ref::is_local_ref(name))
                     .map(|(name, id)| {
                         serde_json::json!({ "name": name, "id": format!("{}", id.short()) })
                     })
@@ -4756,6 +4758,12 @@ impl CtxOneServer {
     async fn branch(&self, params: Parameters<BranchCreateParams>) -> String {
         let p = params.0;
         let p = self.apply_default_ref(p);
+        if let Some(name) = [&p.name, &p.from]
+            .into_iter()
+            .find(|name| crate::local_ref::is_local_ref(name))
+        {
+            return serde_json::json!({ "error": crate::local_ref::refused(name) }).to_string();
+        }
         match self.repo.branch(&p.name, &p.from) {
             Ok(id) => {
                 self.session.mark_dirty();
@@ -4779,6 +4787,12 @@ impl CtxOneServer {
     async fn merge(&self, params: Parameters<MergeParams>) -> String {
         let p = params.0;
         let p = self.apply_default_ref(p);
+        if let Some(name) = [&p.source, &p.target]
+            .into_iter()
+            .find(|name| crate::local_ref::is_local_ref(name))
+        {
+            return serde_json::json!({ "error": crate::local_ref::refused(name) }).to_string();
+        }
         let mut opts = CommitOptions::new(&self.agent_id, IntentCategory::Merge, &p.description);
         if let Some(r) = p.reasoning {
             opts = opts.with_reasoning(r);
@@ -5228,10 +5242,9 @@ impl CtxOneServer {
     ) -> String {
         use crate::reminder_tools as rt;
         let mgr = rt::make_manager(self.repo.clone());
-        match rt::create_reminder(&mgr, params.0, &self.agent_id) {
-            Ok(r) => {
-                serde_json::to_string(&rt::reminder_to_json(&r)).unwrap_or_else(|_| "{}".into())
-            }
+        match rt::create_here(&mgr, &self.repo, params.0, &self.agent_id) {
+            Ok(r) => serde_json::to_string(&rt::one_json_here(&self.repo, &r))
+                .unwrap_or_else(|_| "{}".into()),
             Err(e) => rt::err_json(e),
         }
     }
@@ -5251,8 +5264,7 @@ impl CtxOneServer {
         let mgr = rt::make_manager(self.repo.clone());
         match mgr.remind_me() {
             Ok(reminders) => {
-                let out: Vec<serde_json::Value> =
-                    reminders.iter().map(rt::reminder_to_json).collect();
+                let out = rt::reminders_json_here(&self.repo, &reminders);
                 serde_json::to_string(&out).unwrap_or_else(|_| "[]".into())
             }
             Err(e) => rt::err_json(e),
@@ -5272,8 +5284,7 @@ impl CtxOneServer {
         let mgr = rt::make_manager(self.repo.clone());
         match rt::list_reminders(&mgr, params.0) {
             Ok(reminders) => {
-                let out: Vec<serde_json::Value> =
-                    reminders.iter().map(rt::reminder_to_json).collect();
+                let out = rt::reminders_json_here(&self.repo, &reminders);
                 serde_json::to_string(&out).unwrap_or_else(|_| "[]".into())
             }
             Err(e) => rt::err_json(e),
@@ -5290,9 +5301,8 @@ impl CtxOneServer {
         use crate::reminder_tools as rt;
         let mgr = rt::make_manager(self.repo.clone());
         match mgr.get(&params.0.id) {
-            Ok(r) => {
-                serde_json::to_string(&rt::reminder_to_json(&r)).unwrap_or_else(|_| "{}".into())
-            }
+            Ok(r) => serde_json::to_string(&rt::one_json_here(&self.repo, &r))
+                .unwrap_or_else(|_| "{}".into()),
             Err(e) => rt::err_json(e),
         }
     }
@@ -5322,9 +5332,9 @@ impl CtxOneServer {
     }
 
     #[tool(
-        description = "Approve a non-autonomous reminder for execution. Transitions `awaiting_permission` → `due`. \
+        description = "Approve a reminder for execution on this machine. Transitions `awaiting_permission` → `due`, and marks the reminder `trusted_here`: `ctx reminder tick` runs a reminder's commands only if it was made or approved through this Hub, so a reminder that arrived by sync from another machine needs approving here first (a pending one keeps its status and runs when due). \
         \
-        CALL THIS WHEN the user explicitly okays a reminder that was created with `autonomous: false`. After approval, call `remind_me` or `reminder_start` to begin execution."
+        CALL THIS WHEN the user explicitly okays a reminder that was created with `autonomous: false`, or one made on another machine that shows `trusted_here: false`. After approval, call `remind_me` or `reminder_start` to begin execution."
     )]
     async fn reminder_approve(
         &self,
@@ -5334,10 +5344,9 @@ impl CtxOneServer {
         let mgr = rt::make_manager(self.repo.clone());
         let p = params.0;
         let approver = p.approved_by.unwrap_or_else(|| self.agent_id.clone());
-        match mgr.approve(&p.id, &approver) {
-            Ok(r) => {
-                serde_json::to_string(&rt::reminder_to_json(&r)).unwrap_or_else(|_| "{}".into())
-            }
+        match rt::approve_here(&mgr, &self.repo, &p.id, &approver) {
+            Ok(r) => serde_json::to_string(&rt::one_json_here(&self.repo, &r))
+                .unwrap_or_else(|_| "{}".into()),
             Err(e) => rt::err_json(e),
         }
     }
@@ -5585,10 +5594,9 @@ impl CtxOneServer {
     )]
     async fn session_segments(&self, params: Parameters<SessionSegmentsParams>) -> String {
         let p = params.0;
-        let tree = self
-            .repo
-            .get_tree(&p.ref_name, &format!("/sessions/{}/turns", p.session_id))
-            .unwrap_or(serde_json::Value::Null);
+        // Turns live on the workspace's turns ref, whatever branch the
+        // session ran on (ctx-hub-sync t-002).
+        let tree = crate::turns::read(&self.repo, &p.session_id).unwrap_or(serde_json::Value::Null);
         let segments = crate::segments::segments_from_tree(&tree, p.gap);
         serde_json::json!({
             "session_id": p.session_id,

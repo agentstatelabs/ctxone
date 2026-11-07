@@ -6,6 +6,38 @@ the project's release tags (`vMAJOR.MINOR.PATCH`). Most releases go up by
 0.0.1; v1.1.0 (a multi-tenant Hub) and v1.2.0 (the personal namespace) went
 up a minor version.
 
+## [Unreleased]
+
+Your memory follows you to every machine. Each machine's Hub pushes to and pulls from a Hub that serves sync, and raw session turns never leave the machine that captured them. Three schema migrations run once on the first start. They move raw turns onto their own ref, trust the reminders already here, and keep seals from before workspaces on this machine. On a large store this takes a few seconds. A store at schema 5 won't open in an older Hub, so back it up before upgrading if you might go back.
+
+### Added
+- **`ctx remote`, `ctx push`, `ctx pull` and `ctx sync`: your memory on every machine** (ctx-hub-sync t-006). `ctx remote add hub <url> --token-stdin`, then `ctx remote set <workspace> hub` and `ctx sync`. See [CONNECT_A_HUB.md](docs/CONNECT_A_HUB.md#sync-your-own-hub-with-a-remote-one).
+  - **What syncs:** memory, plans and tasks, each session's envelope, reminders, taints, plan epochs and your personal namespace. Setting the first workspace sets the personal namespace too.
+  - **What stays here:** raw turns, a workspace's history from before you set it (the first push starts from where it is then), and seals from before workspaces existed.
+  - **A machine with history of its own** joins the remote's on its first sync, in a merge. A task two machines each added offline gets a new id on the second to sync, with its blockers following.
+  - **The token** goes to `~/.ctxone/sync-tokens/<remote>` (mode 0600), or an environment variable the Hub's environment sets, never into the store.
+  - **The Hub does the work**, since it's the only writer to its store: `ctx` asks it (`/api/sync/remotes`, `/api/sync/namespaces/{ns}`, `/api/sync/run`, `/api/sync/status`). It also syncs on its own every five minutes (`CTXONE_SYNC_EVERY`; `0` turns it off) and within a minute of a change.
+  - **Lens** shows on each workspace's page whether it syncs, and where each branch stands.
+  - `ctx push --allow <finding>='<why>'` lets a blocked finding through.
+  - **Your own space only, for now:** `ctx remote set` refuses a remote in another space. Sharing a workspace with a team waits on AgentStateGraph scoping taints and reminders by workspace.
+- **`ctxone-hub --serve-sync` serves sync** (ctx-hub-sync t-015). It mounts AgentStateGraph's sync service (`agentstategraph-sync-http`) at `/sync/v1/<store>/{refs,fetch,push}`, behind the Hub's own auth, so other stores push to a store here and pull from it. It's off by default.
+  - A multi-tenant Hub's tokens each reach their own tenant's store, and no other. `<store>` is `me`, or the tenant's name (`default` on a single-tenant Hub).
+  - AgentStateGraph does the receiving side's checks: a push only moves a ref forward, and `/_meta/_secret` and local-only refs (raw turns) are refused.
+  - `--sync-max-push-mb` (default 256) bounds one push. The push log records each push under its tenant, plus the device a client names in `X-CTXone-Device`.
+- **Every push is scanned for credentials** (ctx-hub-sync t-007). CTXone's rules, the ones `ctx secrets scan` uses, run as an AgentStateGraph push filter beside its own. A high-confidence hit (a provider's token format, or a private key) blocks the push, and each finding names its path and the record to forget, never the value. A finding someone has checked can be let through with a reason, which the remote's push log keeps; anything under `/_meta/_secret` never can. Medium-confidence shapes don't block: `ctx secrets scan` reports them.
+
+### Changed
+- **Raw session turns live on a local-only ref of their own** (ctx-hub-sync t-002). A session's envelope (title, meta, provenance, burn, usage, analysis, summary, decisions) stays at `/sessions/<sid>` on its branch. Its turns are at `/turns/<sid>/t<NNNN>` on `_local/turns`, one per workspace whatever branch the session ran on. That ref is marked local-only, so AgentStateGraph never pushes it and a Hub never offers it: once sync arrives, turns stay on the machine that captured them.
+  - **The first start moves them, once** (CTXone schema 3). Each session's stored turns are relinked onto the turns ref, not copied, and then each branch drops them in one commit. On a 900 MB store with 300 MB of turns (2,000 sessions on `main` and 10 branches) it took 8 seconds, and the file grew 1 MB. A session that held nothing but turns leaves the branch; the session list never showed one. Turn history stays where it was. A store at schema 3 won't open in an older Hub, as with every schema change, so back up the store before upgrading if you might go back.
+  - The turn routes (`PUT /api/sessions/{sid}/turns`, `POST` and `GET …/turns/{idx}`, `GET …/turns`) use the turns ref and ignore `?ref=`. `GET /api/sessions/{sid}/turns?tree=true` returns every turn, as `{ tNNNN: turn }`; Lens reads turns that way now, not through `/api/state`. Deleting or moving a session takes its turns too.
+  - Branch tools leave out `_local/*` refs and refuse them by name: no branch may be created from, merged with, reset to or named after one. `ctx secrets scan --turns` scans the turns ref, a turn at a time.
+- **A reminder runs its commands only where it was made or approved** (ctx-hub-sync t-008). Reminders will sync, and `ctx reminder tick` on one machine shouldn't run a reminder made on another. The Hub keeps the reminders made or approved through it on `_local/trust`, a local-only ref that sync never moves, and marks every reminder it lists `trusted_here` or not. The tick runs only trusted ones.
+  - A reminder pulled from another machine waits until it's approved here: with `ctx reminder approve <id>` (new), the `reminder_approve` tool, or `POST /api/reminders/{id}/approve`. Approving now also takes a reminder that isn't due yet, which stays pending and runs here when it's due.
+  - The first start (CTXone schema 4) trusts every reminder the store already holds, so nothing that ran before stops.
+  - A `ctx` talking to an older Hub, which doesn't say, runs nothing.
+- **Seals from before workspaces stay on this machine** (ctx-hub-sync t-009). On the first start, CTXone schema 5 moves the epochs with no workspace off the control ref with AgentStateGraph's `keep_epochs_local`. A real store had 171 of them, holding about 82 MB of commit ids. The epochs table keeps them, and their seals still bind here. Plan epochs sync, and a seal over history from before sync binds only on a store that holds those commits.
+- **Built on AgentStateGraph 1.5.3** (was 1.5.1). It joins stores whose histories are unrelated, lets a store write after taking a seal over history it never received, and keeps chosen epochs off the control ref.
+
 ## [v1.2.2] — 2026-11-05
 
 Tasks have notes, in the tools, the CLI, REST and Lens, so a task's brief no longer rides in its title. The first time it opens a store, the upgraded Hub moves that store's taints, reminders and epochs onto a control ref (AgentStateGraph 1.5.1), which takes a moment on a large store. Then run `ctx plan unpack --all --dry-run` to see which packed briefs would move into notes, and the same without `--dry-run` to move them.
