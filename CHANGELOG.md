@@ -24,6 +24,7 @@ up a minor version.
   - A reminder pulled from another machine waits until it's approved here: with `ctx reminder approve <id>` (new), the `reminder_approve` tool, or `POST /api/reminders/{id}/approve`. Approving now also takes a reminder that isn't due yet, which stays pending and runs here when it's due.
   - The first start (CTXone schema 4) trusts every reminder the store already holds, so nothing that ran before stops.
   - A `ctx` talking to an older Hub, which doesn't say, runs nothing.
+- **Seals from before workspaces stay on this machine** (ctx-hub-sync t-009). On the first start, CTXone schema 5 moves the epochs with no workspace off the control ref with AgentStateGraph's `keep_epochs_local`. A real store had 171 of them, holding about 82 MB of commit ids. The epochs table keeps them, and their seals still bind here. Plan epochs sync, and a seal over history from before sync binds only on a store that holds those commits.
 - **Built on AgentStateGraph 1.5.3** (was 1.5.1). It joins stores whose histories are unrelated, lets a store write after taking a seal over history it never received, and keeps chosen epochs off the control ref.
 
 ## [v1.2.2] — 2026-11-05

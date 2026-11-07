@@ -26,7 +26,7 @@ use tracing::{debug, info, warn};
 
 /// Current CtxOne schema version. Bump this when you change the shape of
 /// anything CtxOne writes to the graph, and add a migration below.
-pub const CTXONE_SCHEMA_VERSION: u32 = 4;
+pub const CTXONE_SCHEMA_VERSION: u32 = 5;
 
 /// Path where the schema version is stored inside the graph.
 const SCHEMA_VERSION_PATH: &str = "/ctxone/schema_version";
@@ -207,6 +207,7 @@ pub fn run_migrations(repo: &Repository) -> Result<(), MigrationError> {
             2 => migrate_001_to_002(repo)?,
             3 => migrate_002_to_003(repo)?,
             4 => migrate_003_to_004(repo)?,
+            5 => migrate_004_to_005(repo)?,
             other => {
                 return Err(MigrationError::Repo(format!(
                     "no migration registered for schema version {}",
@@ -313,6 +314,35 @@ fn migrate_003_to_004(repo: &Repository) -> Result<(), MigrationError> {
     Ok(())
 }
 
+/// v4 -> v5: legacy seals stay on this machine (ctx-hub-sync t-009).
+///
+/// Epochs sealed before AgentStateGraph v1.1.0 have no workspace, and
+/// migration 002 couldn't give them one. Their sealed-commit lists point into
+/// history that never syncs (a real store had 171, holding about 82 MB of
+/// commit ids). Every push carries the control ref, so they'd go with each
+/// one. This keeps them off it, on AgentStateGraph's local control ref
+/// (`Repository::keep_epochs_local`), before anything is pushed. The epochs
+/// table keeps them and their seals still bind here.
+///
+/// Epochs with a workspace, plan epochs among them, still sync. One that
+/// seals history from before sync binds only where that history is: a store
+/// that never had those commits can't orphan them (AgentStateGraph 1.5.3).
+fn migrate_004_to_005(repo: &Repository) -> Result<(), MigrationError> {
+    let legacy: Vec<String> = repo
+        .list_all_epochs()?
+        .into_iter()
+        .filter(|e| e.namespace.is_none())
+        .map(|e| e.id)
+        .collect();
+    let ids: Vec<&str> = legacy.iter().map(String::as_str).collect();
+    let kept = repo.keep_epochs_local(&ids)?;
+    info!(
+        version = 5,
+        kept, "migration 005: epochs with no workspace stay on this machine"
+    );
+    Ok(())
+}
+
 /// Recover the workspace from a `plan:<namespace>:<plan_id>` epoch id.
 ///
 /// Returns `None` for any other shape. Splits on the FIRST two colons only —
@@ -369,6 +399,54 @@ mod tests {
         ));
         repo.init().expect("repo init");
         repo
+    }
+
+    #[test]
+    fn legacy_seals_stay_local_and_plan_seals_still_sync() {
+        use agentstategraph_storage::{MemoryStorage, Storage};
+        use std::sync::Arc;
+        let storage: Arc<dyn Storage + Send + Sync> = Arc::new(MemoryStorage::new());
+        let repo = Repository::from_shared(storage.clone());
+        repo.init().unwrap();
+        // A seal from before workspaces: no namespace.
+        storage
+            .create_epoch(&agentstategraph_core::Epoch::new(
+                "legacy",
+                "old",
+                Vec::new(),
+            ))
+            .unwrap();
+        storage
+            .seal_epoch(
+                "legacy",
+                "old",
+                chrono::Utc::now(),
+                &[repo.head("main").unwrap()],
+                &agentstategraph_core::ObjectId::hash(b"legacy"),
+            )
+            .unwrap();
+        repo.reconcile_control().unwrap();
+        repo.create_epoch("plan:default:p1", "Plan: p1", Vec::new())
+            .unwrap();
+        repo.seal_epoch("plan:default:p1", "done").unwrap();
+        repo.set_json(
+            "main",
+            SCHEMA_VERSION_PATH,
+            &serde_json::json!(4),
+            CommitOptions::new("test", IntentCategory::Migrate, "at v4"),
+        )
+        .unwrap();
+
+        run_migrations(&repo).unwrap();
+        let local = repo.local_epochs().unwrap();
+        assert!(local.contains("legacy"), "{local:?}");
+        assert!(!local.contains("plan:default:p1"));
+        // Both still bind here.
+        assert_eq!(repo.get_epoch("legacy").unwrap().id, "legacy");
+        // Running again changes nothing.
+        let head = repo.head("main").unwrap();
+        run_migrations(&repo).unwrap();
+        assert_eq!(repo.head("main").unwrap(), head);
     }
 
     #[test]
