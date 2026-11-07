@@ -492,10 +492,17 @@ fn is_session(path: &str) -> bool {
         .is_some_and(|sid| !sid.is_empty() && !sid.contains('/'))
 }
 
+/// `/turns/<id>` on the turns ref: one session's raw turns.
+fn is_session_turns(path: &str) -> bool {
+    path.strip_prefix("/turns/")
+        .is_some_and(|sid| !sid.is_empty() && !sid.contains('/'))
+}
+
 /// Whether the node at `path` is walked key by key rather than read whole:
-/// each top-level key, and each session.
+/// each top-level key, each session, and each session's turns, which are
+/// read a turn at a time.
 fn splits(path: &str) -> bool {
-    path.matches('/').count() == 1 || is_session(path)
+    path.matches('/').count() == 1 || is_session(path) || is_session_turns(path)
 }
 
 fn prefixed(hits: &[CachedHit], prefix: &str) -> impl Iterator<Item = CachedHit> {
@@ -766,6 +773,42 @@ mod tests {
                 .any(|f| f.path == "/sessions/s1/turns/t0000/text")
         );
         assert_eq!(report.findings.len(), 3);
+    }
+
+    #[test]
+    fn turns_on_the_turns_ref_are_scanned_a_turn_at_a_time() {
+        let repo = store();
+        let key = format!("ghp_{}", mixed(36));
+        for idx in 0..3 {
+            let text = if idx == 1 {
+                format!("my key is {key}")
+            } else {
+                "nothing here".to_string()
+            };
+            crate::turns::write_turn(
+                &repo,
+                "s1",
+                idx,
+                &serde_json::json!({ "text": text }),
+                agentstategraph::CommitOptions::new(
+                    "test",
+                    agentstategraph_core::IntentCategory::Custom("Observe".into()),
+                    "turn",
+                ),
+            )
+            .expect("write turn");
+        }
+        let report = scan(&repo, &[crate::turns::TURNS_REF], true);
+        let found: Vec<(&str, Option<&str>)> = report
+            .findings
+            .iter()
+            .map(|f| (f.path.as_str(), f.forget.as_deref()))
+            .collect();
+        assert_eq!(found, [("/turns/s1/t0001/text", None)]);
+        assert!(
+            splits("/turns/s1"),
+            "a session's turns are read a turn at a time"
+        );
     }
 
     #[test]

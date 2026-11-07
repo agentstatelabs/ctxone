@@ -26,7 +26,7 @@ use tracing::{debug, info, warn};
 
 /// Current CtxOne schema version. Bump this when you change the shape of
 /// anything CtxOne writes to the graph, and add a migration below.
-pub const CTXONE_SCHEMA_VERSION: u32 = 2;
+pub const CTXONE_SCHEMA_VERSION: u32 = 3;
 
 /// Path where the schema version is stored inside the graph.
 const SCHEMA_VERSION_PATH: &str = "/ctxone/schema_version";
@@ -205,7 +205,7 @@ pub fn run_migrations(repo: &Repository) -> Result<(), MigrationError> {
                 info!(version = 1, "migration 001: initialize schema");
             }
             2 => migrate_001_to_002(repo)?,
-            // 3 => migrate_002_to_003(repo)?,
+            3 => migrate_002_to_003(repo)?,
             other => {
                 return Err(MigrationError::Repo(format!(
                     "no migration registered for schema version {}",
@@ -271,6 +271,27 @@ fn migrate_001_to_002(repo: &Repository) -> Result<(), MigrationError> {
         skipped,
         total = epochs.len(),
         "migration 002: backfilled epoch workspaces from plan:<ns>: ids"
+    );
+    Ok(())
+}
+
+/// v2 -> v3: raw session turns move to each workspace's local-only turns ref
+/// (ctx-hub-sync t-002).
+///
+/// Turns sat in the session envelope at `/sessions/<sid>/turns`, on whatever
+/// branch the ingest named. Now they're at `/turns/<sid>` on
+/// [`crate::turns::TURNS_REF`], which never syncs, and every branch keeps the
+/// envelope only. The turns are relinked, not copied, so a large store moves
+/// in a few commits per workspace. Their history stays where it was, on this
+/// machine: the first push of a branch starts from where it is now.
+fn migrate_002_to_003(repo: &Repository) -> Result<(), MigrationError> {
+    let report = crate::turns::migrate_store(repo)?;
+    info!(
+        version = 3,
+        namespaces = report.namespaces,
+        branches = report.branches,
+        sessions = report.sessions,
+        "migration 003: raw session turns moved to their local-only ref"
     );
     Ok(())
 }

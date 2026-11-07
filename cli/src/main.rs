@@ -6944,22 +6944,22 @@ async fn fetch_imported_ids(
 /// Deliberately transcript-driven rather than trusting the stored session
 /// list: a session's origin is a property of where it ran, which lives in the
 /// transcript, not in whatever namespace it currently happens to sit in.
-/// Read a session's working directory from its stored graph turns, in the
-/// `default` namespace. The cwd lives per-turn at
-/// `/sessions/<sid>/turns/<tNNNN>/cwd`; the earliest turns are checked so a
-/// session that changed directory mid-run still routes to where it started.
-/// Agent-agnostic — it reads what was ingested, not what is on disk — so it
-/// resolves sessions the on-disk sources can't (the t-009 claude gap).
+/// Read a session's working directory from its stored turns, in the
+/// `default` namespace. Each turn carries its `cwd`; the earliest turns are
+/// checked so a session that changed directory mid-run still routes to where
+/// it started. Agent-agnostic — it reads what was ingested, not what is on
+/// disk — so it resolves sessions the on-disk sources can't (the t-009 claude
+/// gap). The turn route finds them wherever the Hub keeps them: on the
+/// workspace's turns ref since schema 3, under the envelope before.
 async fn fetch_session_cwd_from_graph(
     client: &reqwest::Client,
     server: &str,
     sid: &str,
 ) -> Option<String> {
-    for turn in ["t0000", "t0001", "t0002"] {
-        let path = format!("/sessions/{sid}/turns/{turn}/cwd");
+    for idx in 0..3 {
         let url = format!(
-            "{server}/api/state/main?path={}&namespace=default",
-            urlencoding(&path)
+            "{server}/api/sessions/{}/turns/{idx}?namespace=default",
+            urlencoding(sid)
         );
         let Ok(resp) = client.get(url).send().await else {
             continue;
@@ -6968,7 +6968,7 @@ async fn fetch_session_cwd_from_graph(
             continue;
         }
         if let Ok(v) = resp.json::<serde_json::Value>().await
-            && let Some(s) = v.as_str()
+            && let Some(s) = v.get("cwd").and_then(|c| c.as_str())
             && !s.trim().is_empty()
         {
             return Some(s.to_string());

@@ -330,7 +330,7 @@
 		try {
 			// One subtree fetch returns every turn for the session.
 			const r = await hubFetch(
-				`/api/state/main?path=/sessions/${encodeURIComponent(sessionId)}/turns`
+				`/api/sessions/${encodeURIComponent(sessionId)}/turns?tree=true`
 			);
 			if (r.status === 404) {
 				turns = []; // session predates turn capture
@@ -475,15 +475,15 @@
 						// (partial snapshots can start mid-session, e.g. t0043),
 						// fall back to the turns subtree and take the real first
 						// key — so title/date/model are never silently missing.
-						const base = `/api/state/main?path=/sessions/${encodeURIComponent(s.session_id)}/turns`;
+						const base = `/api/sessions/${encodeURIComponent(s.session_id)}/turns`;
 						let node: Turn | null = null;
-						const r0 = await hubFetch(`${base}/t0000`);
+						const r0 = await hubFetch(`${base}/0`);
 						if (r0.ok) {
 							const j = await r0.json();
 							if (j && typeof j === 'object') node = j as Turn;
 						}
 						if (!node) {
-							const rAll = await hubFetch(base);
+							const rAll = await hubFetch(`${base}?tree=true`);
 							if (rAll.ok) {
 								const tree = await rAll.json();
 								if (tree && typeof tree === 'object') {

@@ -6,6 +6,14 @@ the project's release tags (`vMAJOR.MINOR.PATCH`). Most releases go up by
 0.0.1; v1.1.0 (a multi-tenant Hub) and v1.2.0 (the personal namespace) went
 up a minor version.
 
+## [Unreleased]
+
+### Changed
+- **Raw session turns live on a local-only ref of their own** (ctx-hub-sync t-002). A session's envelope (title, meta, provenance, burn, usage, analysis, summary, decisions) stays at `/sessions/<sid>` on its branch. Its turns are at `/turns/<sid>/t<NNNN>` on `_local/turns`, one per workspace whatever branch the session ran on. That ref is marked local-only, so AgentStateGraph never pushes it and a Hub never offers it: once sync arrives, turns stay on the machine that captured them.
+  - **The first start moves them, once** (CTXone schema 3). Each session's stored turns are relinked onto the turns ref, not copied, and then each branch drops them in one commit. On a 900 MB store with 300 MB of turns (2,000 sessions on `main` and 10 branches) it took 8 seconds, and the file grew 1 MB. A session that held nothing but turns leaves the branch; the session list never showed one. Turn history stays where it was. A store at schema 3 won't open in an older Hub, as with every schema change, so back up the store before upgrading if you might go back.
+  - The turn routes (`PUT /api/sessions/{sid}/turns`, `POST` and `GET …/turns/{idx}`, `GET …/turns`) use the turns ref and ignore `?ref=`. `GET /api/sessions/{sid}/turns?tree=true` returns every turn, as `{ tNNNN: turn }`; Lens reads turns that way now, not through `/api/state`. Deleting or moving a session takes its turns too.
+  - Branch tools leave out `_local/*` refs and refuse them by name: no branch may be created from, merged with, reset to or named after one. `ctx secrets scan --turns` scans the turns ref, a turn at a time.
+
 ## [v1.2.2] — 2026-11-05
 
 Tasks have notes, in the tools, the CLI, REST and Lens, so a task's brief no longer rides in its title. The first time it opens a store, the upgraded Hub moves that store's taints, reminders and epochs onto a control ref (AgentStateGraph 1.5.1), which takes a moment on a large store. Then run `ctx plan unpack --all --dry-run` to see which packed briefs would move into notes, and the same without `--dry-run` to move them.

@@ -4738,6 +4738,8 @@ impl CtxOneServer {
             Ok(branches) => {
                 let out: Vec<serde_json::Value> = branches
                     .into_iter()
+                    // Local-only refs (the turns ref) aren't branches.
+                    .filter(|(name, _)| !crate::local_ref::is_local_ref(name))
                     .map(|(name, id)| {
                         serde_json::json!({ "name": name, "id": format!("{}", id.short()) })
                     })
@@ -4756,6 +4758,12 @@ impl CtxOneServer {
     async fn branch(&self, params: Parameters<BranchCreateParams>) -> String {
         let p = params.0;
         let p = self.apply_default_ref(p);
+        if let Some(name) = [&p.name, &p.from]
+            .into_iter()
+            .find(|name| crate::local_ref::is_local_ref(name))
+        {
+            return serde_json::json!({ "error": crate::local_ref::refused(name) }).to_string();
+        }
         match self.repo.branch(&p.name, &p.from) {
             Ok(id) => {
                 self.session.mark_dirty();
@@ -4779,6 +4787,12 @@ impl CtxOneServer {
     async fn merge(&self, params: Parameters<MergeParams>) -> String {
         let p = params.0;
         let p = self.apply_default_ref(p);
+        if let Some(name) = [&p.source, &p.target]
+            .into_iter()
+            .find(|name| crate::local_ref::is_local_ref(name))
+        {
+            return serde_json::json!({ "error": crate::local_ref::refused(name) }).to_string();
+        }
         let mut opts = CommitOptions::new(&self.agent_id, IntentCategory::Merge, &p.description);
         if let Some(r) = p.reasoning {
             opts = opts.with_reasoning(r);
@@ -5585,10 +5599,9 @@ impl CtxOneServer {
     )]
     async fn session_segments(&self, params: Parameters<SessionSegmentsParams>) -> String {
         let p = params.0;
-        let tree = self
-            .repo
-            .get_tree(&p.ref_name, &format!("/sessions/{}/turns", p.session_id))
-            .unwrap_or(serde_json::Value::Null);
+        // Turns live on the workspace's turns ref, whatever branch the
+        // session ran on (ctx-hub-sync t-002).
+        let tree = crate::turns::read(&self.repo, &p.session_id).unwrap_or(serde_json::Value::Null);
         let segments = crate::segments::segments_from_tree(&tree, p.gap);
         serde_json::json!({
             "session_id": p.session_id,
