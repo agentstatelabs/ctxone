@@ -111,6 +111,14 @@ pub struct HubConfig {
     /// constructs it from the persisted preference + env seed and keeps a clone
     /// for the sweep loop.
     pub autosync: Option<Autosync>,
+    /// Serve AgentStateGraph's sync protocol at `/sync/v1/{store}/…`, behind
+    /// the same auth, so other stores push to this Hub's and fetch from it
+    /// (ctx-hub-sync t-015, [`crate::sync_service`]). Off by default. From
+    /// `--serve-sync`.
+    pub serve_sync: bool,
+    /// The most one push may send, in bytes. `None` keeps AgentStateGraph's
+    /// default (256 MiB). From `--sync-max-push-mb`.
+    pub sync_max_push_bytes: Option<u64>,
     /// A single-tenant Postgres hub's tables for the project registry and
     /// session stats, on AgentStateGraph's pool (see [`crate::hub_store`]).
     /// `None` for SQLite (whose tables live in `db_path`) and memory. A
@@ -983,6 +991,7 @@ fn build_router(
     // What acts on the Hub machine itself is configured only for a
     // single-tenant Hub.
     let machine_local = tenancy.machine_local();
+    let sync_tenancy = config.serve_sync.then(|| tenancy.clone());
     let asd_repos = Arc::new(if machine_local {
         config.asd_repos.clone()
     } else {
@@ -1275,6 +1284,15 @@ fn build_router(
     // trip the per-IP RPM cap.
     if let Some(mcp_state) = mcp_state {
         router = router.merge(crate::mcp_http::mcp_router(mcp_state));
+    }
+
+    // Sync at `/sync/v1`, merged like MCP so the auth layer below covers it.
+    // It reads bodies to its own limits, which `DefaultBodyLimit` doesn't set.
+    if let Some(tenancy) = sync_tenancy {
+        router = router.merge(
+            crate::sync_service::router(tenancy, config.sync_max_push_bytes)
+                .layer(oxtel_tower::HttpServerLayer::new()),
+        );
     }
 
     // Apply the rate limiter LAST so it runs FIRST in the request

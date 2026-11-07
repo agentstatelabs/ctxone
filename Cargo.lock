@@ -96,6 +96,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentstategraph-sync-http"
+version = "1.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a65857ef8037dd4e3424c778c14d32eb6a7f63c8aece670f4d4d3b80701d43a"
+dependencies = [
+ "agentstategraph",
+ "agentstategraph-core",
+ "axum",
+ "serde",
+ "serde_json",
+ "tokio",
+ "ureq",
+]
+
+[[package]]
 name = "agentstategraph-taint"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -610,6 +625,7 @@ dependencies = [
  "agentstategraph-migrate",
  "agentstategraph-reminders",
  "agentstategraph-storage",
+ "agentstategraph-sync-http",
  "agentstategraph-taint",
  "agentstategraph-tasks",
  "async-trait",

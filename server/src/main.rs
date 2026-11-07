@@ -176,6 +176,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Allow browser requests only from --allowed-origin, never because Origin
     // matches Host. From --strict-origin or CTXONE_STRICT_ORIGIN.
     let mut strict_origin = env_truthy("CTXONE_STRICT_ORIGIN");
+    // Serve AgentStateGraph's sync protocol at /sync/v1 (ctx-hub-sync t-015).
+    // From --serve-sync or CTXONE_SERVE_SYNC.
+    let mut serve_sync = env_truthy("CTXONE_SERVE_SYNC");
+    // The most one push may send, in MiB. From --sync-max-push-mb or
+    // CTXONE_SYNC_MAX_PUSH_MB.
+    let mut sync_max_push_mb: Option<u64> = std::env::var("CTXONE_SYNC_MAX_PUSH_MB")
+        .ok()
+        .and_then(|v| v.trim().parse().ok());
     // Extra browser origins allowed to call the API (repeatable
     // --allowed-origin). Same-origin is always allowed; anything else carrying
     // an Origin header is rejected. Seedable from CTXONE_ALLOWED_ORIGINS (comma-
@@ -302,6 +310,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--strict-origin" => {
                 strict_origin = true;
+            }
+            "--serve-sync" => {
+                serve_sync = true;
+            }
+            "--sync-max-push-mb" => {
+                i += 1;
+                if i < args.len() {
+                    match args[i].trim().parse::<u64>() {
+                        Ok(mb) if mb > 0 => sync_max_push_mb = Some(mb),
+                        _ => {
+                            eprintln!(
+                                "ctxone-hub: --sync-max-push-mb takes a whole number of MiB above 0"
+                            );
+                            std::process::exit(2);
+                        }
+                    }
+                }
             }
             "--namespace" => {
                 i += 1;
@@ -471,6 +496,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!(
                     "                           unless --strict-origin (env: CTXONE_STRICT_ORIGIN) is set."
                 );
+                eprintln!(
+                    "      --serve-sync         Serve sync at /sync/v1/<store>, behind the same auth, so"
+                );
+                eprintln!(
+                    "                           other stores push here and pull from here (env:"
+                );
+                eprintln!(
+                    "                           CTXONE_SERVE_SYNC). <store> is `me`, or the tenant's name."
+                );
+                eprintln!(
+                    "      --sync-max-push-mb <N>  The most one push may send (default 256; env:"
+                );
+                eprintln!("                           CTXONE_SYNC_MAX_PUSH_MB).");
                 eprintln!(
                     "      --namespace <NS>     MCP mode: namespace to operate in (default: detect \
                      project from cwd, else \"default\")"
@@ -662,6 +700,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             agent_id,
             allowed_origins,
             strict_origin,
+            serve_sync,
+            sync_max_push_mb,
             lens: lens_mode,
         });
     }
@@ -952,6 +992,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         log_strict_origin(strict_origin, &allowed_origins);
+        if serve_sync {
+            info!("Sync: serving /sync/v1/me behind the same auth as the API");
+        }
 
         // Session registry: load persisted stats (SQLite file or Postgres
         // tables), so token savings survive hub restarts. Empty in memory mode.
@@ -1011,6 +1054,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             require_auth_on_loopback,
             allowed_origins: allowed_origins.clone(),
             strict_origin,
+            serve_sync,
+            sync_max_push_bytes: sync_max_push_mb.map(|mb| mb << 20),
             ctx_binary: ctx_binary.clone(),
             self_base_url: Some(self_base_url),
             autosync: Some(autosync.clone()),
@@ -1475,6 +1520,9 @@ struct TenantsRun {
     agent_id: String,
     allowed_origins: Vec<String>,
     strict_origin: bool,
+    /// Serve sync at `/sync/v1` (ctx-hub-sync t-015).
+    serve_sync: bool,
+    sync_max_push_mb: Option<u64>,
     /// Serve Lens at `/`.
     lens: bool,
 }
@@ -1546,8 +1594,13 @@ fn serve_tenants(run: TenantsRun) -> Result<(), Box<dyn std::error::Error>> {
                 agent_id: run.agent_id,
                 allowed_origins: run.allowed_origins,
                 strict_origin: run.strict_origin,
+                serve_sync: run.serve_sync,
+                sync_max_push_bytes: run.sync_max_push_mb.map(|mb| mb << 20),
                 ..Default::default()
             };
+            if run.serve_sync {
+                info!("Sync: serving /sync/v1/<tenant> (or /sync/v1/me) behind each tenant's token");
+            }
             let resolver: Arc<dyn tenant::TenantResolver> = Arc::new(run.file);
             let mut app = http::multi_tenant_router(
                 config,

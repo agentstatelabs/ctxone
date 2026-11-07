@@ -26,6 +26,7 @@ agentstategraph-tasks = "1.5.1"
 agentstategraph-migrate = "1.5.1"
 agentstategraph-taint = "1.5.1"
 agentstategraph-reminders = "1.5.1"
+agentstategraph-sync-http = { version = "1.5.1", default-features = false }
 
 # Engine's workspace deps (required because engine crates inherit from workspace)
 blake3 = "1"

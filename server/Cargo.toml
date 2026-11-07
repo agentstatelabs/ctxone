@@ -43,6 +43,9 @@ agentstategraph-storage = { workspace = true }
 agentstategraph-tasks = { workspace = true }
 agentstategraph-taint = { workspace = true }
 agentstategraph-reminders = { workspace = true }
+# Push and pull over HTTP (ctx-hub-sync t-015, t-006): the /sync/v1 router
+# the Hub serves, and the client the Hub pushes and pulls through.
+agentstategraph-sync-http = { workspace = true, features = ["server", "client"] }
 agentstategraph-migrate = { workspace = true }
 rmcp = { workspace = true }
 schemars = { workspace = true }

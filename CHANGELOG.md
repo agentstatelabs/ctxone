@@ -8,6 +8,12 @@ up a minor version.
 
 ## [Unreleased]
 
+### Added
+- **`ctxone-hub --serve-sync` serves sync** (ctx-hub-sync t-015). It mounts AgentStateGraph's sync service (`agentstategraph-sync-http` 1.5.1) at `/sync/v1/<store>/{refs,fetch,push}`, behind the Hub's own auth, so other stores push to a store here and pull from it. It's off by default.
+  - A multi-tenant Hub's tokens each reach their own tenant's store, and no other. `<store>` is `me`, or the tenant's name (`default` on a single-tenant Hub).
+  - AgentStateGraph does the receiving side's checks: a push only moves a ref forward, and `/_meta/_secret` and local-only refs (raw turns) are refused.
+  - `--sync-max-push-mb` (default 256) bounds one push. The push log records each push under its tenant, plus the device a client names in `X-CTXone-Device`.
+
 ### Changed
 - **Raw session turns live on a local-only ref of their own** (ctx-hub-sync t-002). A session's envelope (title, meta, provenance, burn, usage, analysis, summary, decisions) stays at `/sessions/<sid>` on its branch. Its turns are at `/turns/<sid>/t<NNNN>` on `_local/turns`, one per workspace whatever branch the session ran on. That ref is marked local-only, so AgentStateGraph never pushes it and a Hub never offers it: once sync arrives, turns stay on the machine that captured them.
   - **The first start moves them, once** (CTXone schema 3). Each session's stored turns are relinked onto the turns ref, not copied, and then each branch drops them in one commit. On a 900 MB store with 300 MB of turns (2,000 sessions on `main` and 10 branches) it took 8 seconds, and the file grew 1 MB. A session that held nothing but turns leaves the branch; the session list never showed one. Turn history stays where it was. A store at schema 3 won't open in an older Hub, as with every schema change, so back up the store before upgrading if you might go back.
