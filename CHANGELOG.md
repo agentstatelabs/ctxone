@@ -6,6 +6,15 @@ the project's release tags (`vMAJOR.MINOR.PATCH`). Most releases go up by
 0.0.1; v1.1.0 (a multi-tenant Hub), v1.2.0 (the personal namespace) and v1.3.0
 (sync between Hubs) went up a minor version.
 
+## [Unreleased]
+
+### Fixed
+- **Writes are much faster on a store with sealed plans, and so is the first start after upgrading to 1.3.** AgentStateGraph's epoch-seal check ran on every write, listing every epoch and walking the commit history, though only a rewind of `main` can break a seal. On a 2.5 GB store with 364 epochs, a `remember` in the `default` workspace took 0.65 to 1.6 s; it now takes 4 to 9 ms. v1.3.0's one-time move of raw turns makes a commit on every branch. On a store with 220 branches it took 299 s, and the Hub didn't answer until it finished, about 5.5 minutes in all. It now takes 48.5 s, and the Hub answers after about a minute.
+- **The v1.3.0 notes understated the first start.** It takes a few seconds on a store with few branches, and longer with many: see above.
+
+### Changed
+- **Built on AgentStateGraph 1.5.4** (was 1.5.3), which checks seals only on a move that could break one.
+
 ## [v1.3.0] — 2026-11-07
 
 Your memory follows you to every machine. Each machine's Hub pushes to and pulls from a Hub that serves sync, and raw session turns never leave the machine that captured them. Three schema migrations run once on the first start. They move raw turns onto their own ref, trust the reminders already here, and keep seals from before workspaces on this machine. On a large store this takes a few seconds. A store at schema 5 won't open in an older Hub, so back it up before upgrading if you might go back.
