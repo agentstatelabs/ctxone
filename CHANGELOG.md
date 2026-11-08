@@ -6,7 +6,7 @@ the project's release tags (`vMAJOR.MINOR.PATCH`). Most releases go up by
 0.0.1; v1.1.0 (a multi-tenant Hub), v1.2.0 (the personal namespace) and v1.3.0
 (sync between Hubs) went up a minor version.
 
-## [Unreleased]
+## [v1.3.1] — 2026-11-07
 
 ### Fixed
 - **Writes are much faster on a store with sealed plans, and so is the first start after upgrading to 1.3.** AgentStateGraph's epoch-seal check ran on every write, listing every epoch and walking the commit history, though only a rewind of `main` can break a seal. On a 2.5 GB store with 364 epochs, a `remember` in the `default` workspace took 0.65 to 1.6 s; it now takes 4 to 9 ms. v1.3.0's one-time move of raw turns makes a commit on every branch. On a store with 220 branches it took 299 s, and the Hub didn't answer until it finished, about 5.5 minutes in all. It now takes 48.5 s, and the Hub answers after about a minute.
