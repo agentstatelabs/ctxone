@@ -6,7 +6,7 @@ the project's release tags (`vMAJOR.MINOR.PATCH`). Most releases go up by
 0.0.1; v1.1.0 (a multi-tenant Hub), v1.2.0 (the personal namespace) and v1.3.0
 (sync between Hubs) went up a minor version.
 
-## [Unreleased]
+## [v1.3.2] — 2026-11-12
 
 ### Fixed
 - **`ctx init --global` no longer takes its workspace from the directory it runs in.** Tools read a global config from every directory, but the workspace in its URL was detected from wherever `ctx init` ran.
