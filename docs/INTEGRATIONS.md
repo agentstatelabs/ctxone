@@ -53,7 +53,9 @@ REST + Lens for every tool. It picks the correct shape per tool:
 | Claude Desktop | `mcp-remote` stdio bridge (`npx -y mcp-remote <url> --transport http-only`) — it has no native HTTP MCP |
 
 The project namespace (detected from the cwd) is baked into the URL so the daemon
-scopes writes per project. Override the endpoint with `--mcp-url`. If the hub
+scopes writes per project. A global config (`--global`) is read from every
+directory, so it names one workspace instead: `--namespace <workspace>`, or
+`default`. Override the endpoint with `--mcp-url`. If the hub
 isn't running, `ctx init` warns you. See [DEPLOYMENT.md](DEPLOYMENT.md) for the
 daemon setup, `ctx service install`, and `--auth-token` (with `--auth-token` /
 `--auth-token-env` on `ctx init` to embed it) when exposing the hub beyond

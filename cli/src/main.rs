@@ -960,7 +960,9 @@ enum Commands {
     },
     /// Auto-detect and configure AI tools with CTXone MCP server
     Init {
-        /// Install globally (user-level config) vs project-only
+        /// Install globally (user-level config) vs project-only. Tools read
+        /// a global config from every directory, so it names one workspace:
+        /// --namespace, else `default`, never the one detected from the cwd.
         #[arg(long)]
         global: bool,
         /// Install for current project only (default)
@@ -2243,6 +2245,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // warns about the hub below), so only that case carries on, loudly; a
         // hub that is up but can't answer would bake the wrong workspace into
         // every config it writes.
+        // A global config is read from every directory, so its workspace
+        // never comes from this one (see `global_init_namespace`).
+        Commands::Init { global: true, .. } => {
+            Some(global_init_namespace(cli.namespace.as_deref()))
+        }
         Commands::Init { .. } => match cli.resolve_namespace().await {
             Ok(ns) => ns,
             Err(f) if f.kind == detect::FailureKind::Unreachable => {
@@ -2305,8 +2312,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // CTX_BRANCH wins; the config-file default applies outside projects.
     // The ensure call is idempotent and fails silently — if the Hub is
     // down, the actual command will report it properly.
+    // Not for `ctx init --global`: its workspace isn't this checkout's, so this
+    // checkout's branch has no business there.
+    let global_init = matches!(cli.command, Commands::Init { global: true, .. });
     let mut cli = cli;
     if namespace.is_some()
+        && !global_init
         && !cli.branch_explicit
         && let Ok(cwd) = std::env::current_dir()
         && let Some(raw_branch) = read_git_branch(&cwd)
@@ -8159,9 +8170,47 @@ fn exclude_written_config(config_path: &std::path::Path) {
     let _ = exclude_locally(&root, &entry);
 }
 
-fn init_session_id(namespace: Option<&str>, agent_slug: &str) -> String {
+fn init_session_id(global: bool, namespace: Option<&str>, agent_slug: &str) -> String {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    compose_session_id(namespace, agent_slug, &checkout_token(&cwd))
+    session_id_in(global, namespace, agent_slug, &cwd)
+}
+
+/// The checkout part of a global config's session id. Tools read a global
+/// config from every directory, so no checkout names it.
+const GLOBAL_SESSION_TOKEN: &str = "global";
+
+/// [`init_session_id`] for a `ctx init` run in `cwd`. A project config's id
+/// names the checkout (minting its token file if it has none); a global
+/// config's never looks at `cwd`, so it is the same wherever `ctx init` ran
+/// and writes nothing there.
+fn session_id_in(
+    global: bool,
+    namespace: Option<&str>,
+    agent_slug: &str,
+    cwd: &std::path::Path,
+) -> String {
+    if global {
+        return compose_session_id(namespace, agent_slug, GLOBAL_SESSION_TOKEN);
+    }
+    compose_session_id(namespace, agent_slug, &checkout_token(cwd))
+}
+
+/// The workspace a `ctx init --global` config names: `--namespace` (or
+/// `CTX_NAMESPACE`), else `default`.
+///
+/// Tools read a global config from every directory, and an MCP request
+/// carries no cwd for the hub to detect a project from, so the config names
+/// one workspace for all of them. It used to be detected from wherever
+/// `ctx init` ran: inside a repo, every session in every directory then
+/// wrote into that repo's workspace; outside one, the URL named none, and a
+/// hub that requires a workspace (`CTXONE_REQUIRE_IDENTITY`) refused every
+/// request on it.
+fn global_init_namespace(explicit: Option<&str>) -> String {
+    explicit
+        .map(str::trim)
+        .filter(|ns| !ns.is_empty())
+        .unwrap_or(DEFAULT_NAMESPACE)
+        .to_string()
 }
 
 fn mcp_server_entry(
@@ -8560,6 +8609,14 @@ fn init_mcp(
         _ => tool_filter.clone(),
     };
 
+    if global && let Some(ns) = namespace.as_deref() {
+        println!(
+            "Global config: tools use workspace `{ns}` from every directory. \
+             Pass --namespace <workspace> to name another."
+        );
+        println!();
+    }
+
     println!("Detected AI tools:");
     for t in &tools {
         let icon = if t.detected { "\u{2713}" } else { "\u{2717}" };
@@ -8598,7 +8655,7 @@ fn init_mcp(
         // `--session` overrides for all targeted tools (documented on the flag).
         let session_id = match session_override {
             Some(s) => s.to_string(),
-            None => init_session_id(namespace.as_deref(), &agent_id),
+            None => init_session_id(global, namespace.as_deref(), &agent_id),
         };
         let mut entry = mcp_server_entry(
             &agent_id,
@@ -11201,6 +11258,71 @@ args = ["--path", "/old/db"]
         assert_eq!(
             compose_session_id(None, "claude-code", "tok1"),
             "proj-claude-code-tok1"
+        );
+    }
+
+    // -------- `ctx init --global`: nothing comes from the cwd --------
+
+    #[test]
+    fn global_init_names_the_explicit_namespace_else_default() {
+        assert_eq!(global_init_namespace(None), "default");
+        assert_eq!(global_init_namespace(Some("team")), "team");
+        assert_eq!(global_init_namespace(Some("  ")), "default");
+    }
+
+    /// The bug: run inside a repo, `ctx init --global` wrote that repo's
+    /// workspace into a config every directory reads; run outside one, it
+    /// named none, and a hub requiring a workspace refused it. Inside or
+    /// outside a repo, the entry is now the same.
+    #[test]
+    fn global_init_writes_the_same_entry_inside_a_repo_and_outside_one() {
+        let repo = tempfile::tempdir().unwrap();
+        git_init(repo.path());
+        let plain = tempfile::tempdir().unwrap();
+        let entry_from = |cwd: &std::path::Path, explicit: Option<&str>| {
+            let ns = global_init_namespace(explicit);
+            let session = session_id_in(true, Some(&ns), "cursor", cwd);
+            mcp_server_entry(
+                "cursor",
+                "Cursor",
+                McpTransport::Http,
+                "http://localhost:3001/mcp",
+                Some(&ns),
+                None,
+                None,
+                &session,
+            )
+        };
+
+        let inside = entry_from(repo.path(), None);
+        assert_eq!(inside, entry_from(plain.path(), None));
+        assert_eq!(
+            inside.get("url").and_then(|v| v.as_str()),
+            Some("http://localhost:3001/mcp?namespace=default")
+        );
+        assert_eq!(
+            entry_from(repo.path(), Some("team"))
+                .get("url")
+                .and_then(|v| v.as_str()),
+            Some("http://localhost:3001/mcp?namespace=team")
+        );
+        // Nothing was written where it ran.
+        assert!(!repo.path().join(CHECKOUT_TOKEN_FILE).exists());
+        assert!(!plain.path().join(CHECKOUT_TOKEN_FILE).exists());
+    }
+
+    #[test]
+    fn a_global_session_id_names_no_checkout() {
+        let repo = tempfile::tempdir().unwrap();
+        git_init(repo.path());
+        assert_eq!(
+            session_id_in(true, Some("default"), "cursor", repo.path()),
+            "default:cursor:global"
+        );
+        // A project config's still names its checkout.
+        assert_eq!(
+            session_id_in(false, Some("app"), "cursor", repo.path()),
+            format!("app:cursor:{}", checkout_token(repo.path()))
         );
     }
 

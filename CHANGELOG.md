@@ -6,6 +6,15 @@ the project's release tags (`vMAJOR.MINOR.PATCH`). Most releases go up by
 0.0.1; v1.1.0 (a multi-tenant Hub), v1.2.0 (the personal namespace) and v1.3.0
 (sync between Hubs) went up a minor version.
 
+## [Unreleased]
+
+### Fixed
+- **`ctx init --global` no longer takes its workspace from the directory it runs in.** Tools read a global config from every directory, but the workspace in its URL was detected from wherever `ctx init` ran.
+  - Run inside a repo, every session in every directory then wrote into that repo's workspace.
+  - Run outside one, the URL named no workspace, and a Hub that requires one (`CTXONE_REQUIRE_IDENTITY=1`) refused every request on it, though `ctx init` said all was ready.
+
+  A global config now names `--namespace` (or `CTX_NAMESPACE`) if given, else `default`, and `ctx init` says which. Its session id is `<workspace>:<tool>:global` wherever it runs, so `ctx init --global` no longer writes a `.ctxproject.local` token file into the current directory, and it no longer mirrors that directory's git branch into the workspace. A config written by an earlier `ctx init --global` keeps its workspace until you run it again.
+
 ## [v1.3.1] — 2026-11-07
 
 ### Fixed
