@@ -1,6 +1,7 @@
 //! `ctxone-hub tenant` (ctx-multi-tenant-hub t-006): the commands that edit a
 //! tenants file, the binary running them, and purge deleting a disabled
-//! tenant's rows from Postgres and nothing else.
+//! tenant's rows from Postgres, its ASD judgment store's included, and nothing
+//! else.
 //!
 //! The Postgres tests are skipped unless `TEST_DATABASE_URL` is set;
 //! `CTXONE_REQUIRE_POSTGRES` turns the skip into a failure (CI sets both).
@@ -23,6 +24,7 @@ use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
+use ctxone_hub::asd_sync::AsdStores;
 use ctxone_hub::http;
 use ctxone_hub::tenant::{Tenant, TenantsFile};
 use ctxone_hub::tenant_admin::{Console, TENANT_TABLES, purge_rows, run};
@@ -303,6 +305,8 @@ fn fresh(tag: &str) -> String {
 struct PgHub {
     app: axum::Router,
     data: TenantCache,
+    /// Where the Hub keeps its tenants' ASD judgment stores.
+    asd: AsdStores,
     file: TenantsFile,
     path: String,
     _dir: tempfile::TempDir,
@@ -314,7 +318,13 @@ async fn pg_hub(url: &str) -> PgHub {
     let root = PostgresStorage::connect_tenant_with_pool_size(url, ROOT_TENANT, 4)
         .await
         .expect("connect");
-    let data = TenantCache::new(Arc::new(PostgresTenants::new(root).expect("tenants")));
+    let tenants = Arc::new(PostgresTenants::new(root).expect("tenants"));
+    let opener = tenants.clone();
+    let asd = tokio::task::spawn_blocking(move || opener.asd_stores())
+        .await
+        .unwrap()
+        .expect("ASD stores");
+    let data = TenantCache::new(tenants);
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("tenants");
     std::fs::write(&path, "").unwrap();
@@ -322,6 +332,8 @@ async fn pg_hub(url: &str) -> PgHub {
     let app = http::multi_tenant_router(
         http::HubConfig {
             mcp_http: true,
+            serve_sync: true,
+            asd_sync: Some(asd.clone()),
             ..Default::default()
         },
         http::MultiTenant {
@@ -332,6 +344,7 @@ async fn pg_hub(url: &str) -> PgHub {
     PgHub {
         app,
         data,
+        asd,
         file,
         path: path.to_str().unwrap().to_owned(),
         _dir: dir,
@@ -439,6 +452,33 @@ async fn seed(hub: &PgHub, token: &str, marker: &str) {
     assert_eq!(status, StatusCode::OK, "initialize: {text}");
 }
 
+/// Give `tenant`'s ASD judgment store a repo's judgment, as a sync leaves it.
+async fn seed_asd(hub: &PgHub, tenant: &str) {
+    let tenant = Tenant::new(tenant).unwrap();
+    let stores = hub.asd.clone();
+    tokio::task::spawn_blocking(move || {
+        let asd = stores.open(Some(&tenant)).expect("open the ASD store");
+        asd.create_namespace("app-1a2b3c4d").unwrap();
+        let repo =
+            asd.fork_namespace(agentstategraph_core::Namespace::new("app-1a2b3c4d").unwrap());
+        repo.init().unwrap();
+        repo.branch("judgment", "main").unwrap();
+        repo.set_json(
+            "judgment",
+            "/asd/v1/ledger/e1",
+            &json!({ "claim": "the release train runs weekly" }),
+            agentstategraph::CommitOptions::new(
+                "itest",
+                agentstategraph_core::IntentCategory::Checkpoint,
+                "judge",
+            ),
+        )
+        .unwrap();
+    })
+    .await
+    .unwrap();
+}
+
 /// A connection of the test's own, to count rows.
 async fn db(url: &str) -> tokio_postgres::Client {
     let (client, connection) = tokio_postgres::connect(url, tokio_postgres::NoTls)
@@ -521,6 +561,8 @@ async fn purge_deletes(url: &str, count_url: &str) {
     let bob_token = add(&hub.path, &bob);
     seed(&hub, &alice_token, "alpha").await;
     seed(&hub, &bob_token, "bravo").await;
+    seed_asd(&hub, &alice).await;
+    seed_asd(&hub, &bob).await;
     let data = hub.data.clone();
     tokio::task::spawn_blocking(move || data.flush_all())
         .await
@@ -530,6 +572,16 @@ async fn purge_deletes(url: &str, count_url: &str) {
     let tables = tenant_id_tables(&db).await;
     let alice_before = rows(&db, &tables, &alice).await;
     let bob_before = rows(&db, &tables, &bob).await;
+    let alice_asd = ctxone_hub::asd_sync::tenant_id(&alice);
+    let bob_asd = ctxone_hub::asd_sync::tenant_id(&bob);
+    let alice_asd_before = rows(&db, &tables, &alice_asd).await;
+    let bob_asd_before = rows(&db, &tables, &bob_asd).await;
+    for table in ["objects", "commits", "namespaces", "refs"] {
+        assert!(
+            count(&alice_asd_before, table) > 0,
+            "the seed left the ASD store's {table} empty: {alice_asd_before:?}"
+        );
+    }
     for table in [
         "objects",
         "commits",
@@ -590,7 +642,13 @@ async fn purge_deletes(url: &str, count_url: &str) {
         alice_after.iter().all(|(_, n)| *n == 0),
         "left behind: {alice_after:?}"
     );
+    let alice_asd_after = rows(&db, &tables, &alice_asd).await;
+    assert!(
+        alice_asd_after.iter().all(|(_, n)| *n == 0),
+        "left behind in the ASD store: {alice_asd_after:?}"
+    );
     assert_eq!(rows(&db, &tables, &bob).await, bob_before);
+    assert_eq!(rows(&db, &tables, &bob_asd).await, bob_asd_before);
     let r = tenant_cmd(&["list", "--tenants-file", &hub.path]);
     assert_eq!(r.out, format!("{bob}\t1 token\n"));
     let (_, recalled) = call(

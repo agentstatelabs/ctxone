@@ -6,6 +6,7 @@
 
 pub mod asd_pool;
 pub mod asd_registry;
+pub mod asd_sync;
 pub mod backup;
 pub mod code_tools;
 pub mod db_admin;

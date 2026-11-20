@@ -135,8 +135,9 @@ backs it up (AgentStateGraph 1.5.0). The pool size becomes a Hub setting
 These act on the Hub machine's own disk, which means nothing to a remote user:
 
 - the ASD code-intelligence process pool and proxy (`--asd-path`, `repos.toml`
-  discovery). A tenant's code intelligence will come from its synced ASD stores
-  later;
+  discovery). With `--serve-sync`, a tenant's ASD judgment syncs to a store of
+  its own (`/asd/sync/v1/<tenant>`, [HUB_SYNC.md](HUB_SYNC.md#asd-judgment));
+  code intelligence from it would come later;
 - the transcript sweep and autosync, which run `ctx ingest-session --all` over
   the Hub machine's transcripts;
 - SQLite backups and the lockfile (Postgres has its own backups);
