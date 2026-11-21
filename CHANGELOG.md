@@ -6,6 +6,14 @@ the project's release tags (`vMAJOR.MINOR.PATCH`). Most releases go up by
 0.0.1; v1.1.0 (a multi-tenant Hub), v1.2.0 (the personal namespace) and v1.3.0
 (sync between Hubs) went up a minor version.
 
+## [Unreleased]
+
+### Added
+- **Commits record the device they came from** (ctx-hub-sync t-016). `ctx` sends its install's id (`~/.ctxone/device_id`) as `X-CTXone-Device` on every request, and the HTTP MCP entries `ctx init` writes send it too: a header, an `mcp-remote` `--header`, or `?device=` for Codex. A stdio Hub reads the id on its own machine. The Hub hands the agent and device to AgentStateGraph as one per-call context, so every commit it makes for a caller carries both, plan commits made inside AgentStateGraph included. `/api/log/{ref}`, the MCP `log` tool and blame show it as `device`. Run `ctx init` again to add it to your HTTP MCP entries. Taints and reminders don't carry a device yet, since AgentStateGraph takes only an agent id for them.
+
+### Changed
+- **Built on AgentStateGraph 1.6.0** (was 1.5.4), which records a device on commits and takes who is calling as a `CallContext`.
+
 ## [v1.3.2] — 2026-11-12
 
 ### Fixed

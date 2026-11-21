@@ -23,7 +23,7 @@ use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use agentstategraph::{CommitOptions, Repository};
+use agentstategraph::{CallContext, CommitOptions, Repository};
 use agentstategraph_core::IntentCategory;
 
 use crate::asd_pool::AsdProcessPool;
@@ -2517,7 +2517,7 @@ fn assemble_recall(
 pub fn run_prime(
     repo: &Repository,
     session: &SessionStats,
-    agent_id: &str,
+    caller: &CallContext,
     source: &str,
     pinned: bool,
     sections: &[(String, String)], // (title, body)
@@ -2529,8 +2529,10 @@ pub fn run_prime(
     // Suffix the agent with "-prime" so blame history can tell
     // priming apart from regular remember() commits without losing
     // the caller's identity. For the legacy default "ctxone" this
-    // preserves the old "ctxone-prime" behavior.
-    let prime_agent = format!("{}-prime", agent_id);
+    // preserves the old "ctxone-prime" behavior. The device stays the
+    // caller's.
+    let mut prime = caller.clone();
+    prime.agent_id = format!("{}-prime", caller.agent_id);
 
     for (title, body) in sections {
         let slug = slugify(title);
@@ -2539,17 +2541,14 @@ pub fn run_prime(
         }
         let path = format!("/memory/{}/{}/{}", namespace, source, slug);
 
-        let opts = CommitOptions::new(
-            &prime_agent,
-            IntentCategory::Checkpoint,
-            format!("Prime: {}", title),
-        )
-        .with_confidence(0.95)
-        .with_tags(vec![
-            namespace.to_string(),
-            source.to_string(),
-            "prime".to_string(),
-        ]);
+        let opts = prime
+            .commit_options(IntentCategory::Checkpoint, format!("Prime: {}", title))
+            .with_confidence(0.95)
+            .with_tags(vec![
+                namespace.to_string(),
+                source.to_string(),
+                "prime".to_string(),
+            ]);
 
         let value = serde_json::json!({
             "title": title,
@@ -3320,6 +3319,11 @@ pub struct CtxOneServer {
     /// server. Set via `ctxone-hub --agent-id <name>` when the tool
     /// embedding the MCP server spawns it. Defaults to "ctxone".
     pub agent_id: String,
+    /// The device the caller runs on, which every commit made through this
+    /// server carries with the agent (ctx-hub-sync t-016): the request's
+    /// `X-CTXone-Device` (or `?device=`) on HTTP, the machine's own id on
+    /// stdio. `None` when the caller names none.
+    pub device: Option<String>,
     /// Default ref for tools when the caller omits the ref/branch param.
     /// "main" unless branch mirroring resolved the project's git branch
     /// at startup. See [`HasRefField`].
@@ -3386,6 +3390,7 @@ impl CtxOneServer {
             repo,
             session,
             agent_id,
+            device: None,
             default_ref: "main".to_string(),
             namespace: "default".to_string(),
             namespace_explicit: false,
@@ -3397,6 +3402,27 @@ impl CtxOneServer {
             recall_cache: Arc::default(),
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// Set [`Self::device`].
+    pub fn with_device(mut self, device: Option<String>) -> Self {
+        self.device = device;
+        self
+    }
+
+    /// The caller as AgentStateGraph records it on a commit: this server's
+    /// agent id, and its device.
+    pub fn caller(&self) -> CallContext {
+        crate::caller::caller(self.agent_id.clone(), self.device.clone())
+    }
+
+    /// Commit options for a write this server makes for its caller.
+    fn commit_options(
+        &self,
+        category: IntentCategory,
+        description: impl Into<String>,
+    ) -> CommitOptions {
+        self.caller().commit_options(category, description)
     }
 
     /// Attach a process pool.  Called after `with_agent_id_and_repos`
@@ -3497,15 +3523,15 @@ impl CtxOneServer {
                 "updated_at": now,
             },
         });
-        let opts = CommitOptions::new(
-            &self.agent_id,
-            IntentCategory::Custom("Observe".to_string()),
-            format!("session meta {}", self.session_id),
-        )
-        .with_tags(vec![
-            format!("session:{}", self.session_id),
-            "kind:session-meta".to_string(),
-        ]);
+        let opts = self
+            .commit_options(
+                IntentCategory::Custom("Observe".to_string()),
+                format!("session meta {}", self.session_id),
+            )
+            .with_tags(vec![
+                format!("session:{}", self.session_id),
+                "kind:session-meta".to_string(),
+            ]);
         // Best-effort: a failure here must not fail the caller's recall.
         let _ = self.repo.set_json("main", &root, &body, opts);
     }
@@ -3757,8 +3783,7 @@ impl CtxOneServer {
         };
 
         let confidence = importance_to_confidence(&p.importance);
-        let mut opts = CommitOptions::new(
-            &self.agent_id,
+        let mut opts = self.commit_options(
             IntentCategory::Custom("Observe".to_string()),
             truncate_utf8(&fact, 512),
         );
@@ -3841,7 +3866,7 @@ impl CtxOneServer {
         match run_prime(
             &repo,
             &self.session,
-            &self.agent_id,
+            &self.caller(),
             &p.source,
             p.pinned,
             &sections,
@@ -3911,12 +3936,12 @@ impl CtxOneServer {
 
         // Write summary
         let summary = p.key_points.join(". ");
-        let summary_opts = CommitOptions::new(
-            &self.agent_id,
-            IntentCategory::Checkpoint,
-            format!("Session {} summary", p.session_id),
-        )
-        .with_confidence(0.9);
+        let summary_opts = self
+            .commit_options(
+                IntentCategory::Checkpoint,
+                format!("Session {} summary", p.session_id),
+            )
+            .with_confidence(0.9);
 
         let summary_val = serde_json::Value::String(summary);
         let _ = set_json_if_changed(
@@ -3930,12 +3955,12 @@ impl CtxOneServer {
         // Write decisions
         if !p.decisions.is_empty() {
             let decisions_val = serde_json::json!(p.decisions);
-            let decisions_opts = CommitOptions::new(
-                &self.agent_id,
-                IntentCategory::Checkpoint,
-                format!("Session {} decisions", p.session_id),
-            )
-            .with_confidence(0.95);
+            let decisions_opts = self
+                .commit_options(
+                    IntentCategory::Checkpoint,
+                    format!("Session {} decisions", p.session_id),
+                )
+                .with_confidence(0.95);
 
             let _ = set_json_if_changed(
                 &self.repo,
@@ -3948,8 +3973,7 @@ impl CtxOneServer {
 
         // Write full details
         let details_val = serde_json::json!(p.key_points);
-        let details_opts = CommitOptions::new(
-            &self.agent_id,
+        let details_opts = self.commit_options(
             IntentCategory::Custom("Observe".to_string()),
             format!("Session {} details", p.session_id),
         );
@@ -4074,7 +4098,7 @@ impl CtxOneServer {
         }
         use crate::plan_tools as pt;
         let p = params.0;
-        let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        let store = pt::make_store(self.repo.clone(), &self.caller());
         // Topic for the auto-recall gate: the plan name plus its description,
         // captured before `create_plan` consumes `p.description`.
         let gate_topic = match &p.description {
@@ -4102,7 +4126,7 @@ impl CtxOneServer {
         }
         use crate::plan_tools as pt;
         let p = params.0;
-        let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        let store = pt::make_store(self.repo.clone(), &self.caller());
         if let Err(e) = pt::check_plan_lock(&store, &p.ref_name, &p.plan_id, p.force) {
             return pt::err_json(e);
         }
@@ -4140,7 +4164,7 @@ impl CtxOneServer {
         use crate::plan_tools as pt;
         use agentstategraph_tasks::TaskId;
         let p = params.0;
-        let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        let store = pt::make_store(self.repo.clone(), &self.caller());
         let id = TaskId(p.task_id);
         match store.start_task(&p.ref_name, &p.plan_id, &id) {
             Ok(task) => {
@@ -4166,7 +4190,7 @@ impl CtxOneServer {
         use crate::plan_tools as pt;
         use agentstategraph_tasks::TaskId;
         let p = params.0;
-        let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        let store = pt::make_store(self.repo.clone(), &self.caller());
         let id = TaskId(p.task_id);
         let proof = match pt::parse_proof(&p.proof.kind, &p.proof.value, p.proof.note) {
             Ok(pr) => pr,
@@ -4197,7 +4221,7 @@ impl CtxOneServer {
         use crate::plan_tools as pt;
         use agentstategraph_tasks::TaskId;
         let p = params.0;
-        let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        let store = pt::make_store(self.repo.clone(), &self.caller());
         let id = TaskId(p.task_id);
         match store.abandon_task(&p.ref_name, &p.plan_id, &id, &p.reason) {
             Ok(task) => {
@@ -4220,7 +4244,7 @@ impl CtxOneServer {
         }
         use crate::plan_tools as pt;
         let p = params.0;
-        let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        let store = pt::make_store(self.repo.clone(), &self.caller());
         let notes = match pt::notes_param(p.notes.as_deref(), p.description.as_deref()) {
             Ok(n) => n,
             Err(e) => return pt::err_json(e),
@@ -4252,7 +4276,7 @@ impl CtxOneServer {
     async fn plan_next(&self, params: Parameters<crate::plan_tools::PlanNextParams>) -> String {
         use crate::plan_tools as pt;
         let p = params.0;
-        let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        let store = pt::make_store(self.repo.clone(), &self.caller());
         let assignee = match p.assigned_to.as_deref() {
             Some("me") => Some(self.agent_id.clone()),
             Some(s) if !s.is_empty() => Some(s.to_string()),
@@ -4289,7 +4313,7 @@ impl CtxOneServer {
     async fn plan_list(&self, params: Parameters<crate::plan_tools::PlanListParams>) -> String {
         use crate::plan_tools as pt;
         let p = params.0;
-        let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        let store = pt::make_store(self.repo.clone(), &self.caller());
         let filter = p
             .status_filter
             .as_deref()
@@ -4316,7 +4340,7 @@ impl CtxOneServer {
     async fn plan_show(&self, params: Parameters<crate::plan_tools::PlanGetParams>) -> String {
         use crate::plan_tools as pt;
         let p = params.0;
-        let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        let store = pt::make_store(self.repo.clone(), &self.caller());
         let plan = match store.get_plan(&p.ref_name, &p.plan_id) {
             Ok(v) => v,
             Err(e) => return pt::err_json(e),
@@ -4347,7 +4371,7 @@ impl CtxOneServer {
         match pt::add_satisfies(
             &self.repo,
             &p.ref_name,
-            &self.agent_id,
+            &self.caller(),
             &p.plan_id,
             &p.task_id,
             &p.target,
@@ -4372,7 +4396,7 @@ impl CtxOneServer {
     async fn plan_stale(&self, params: Parameters<crate::plan_tools::PlanStaleParams>) -> String {
         use crate::plan_tools as pt;
         let p = params.0;
-        let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        let store = pt::make_store(self.repo.clone(), &self.caller());
         match pt::stale_in_progress(&store, &p.ref_name, p.days) {
             Ok(v) => serde_json::to_string(&v).unwrap_or_else(|_| "[]".into()),
             // Surface repository-integrity failures rather than an empty list.
@@ -4425,7 +4449,7 @@ impl CtxOneServer {
     ) -> String {
         use crate::plan_tools as pt;
         let p = params.0;
-        let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        let store = pt::make_store(self.repo.clone(), &self.caller());
         match store.archive_plan(&p.ref_name, &p.plan_id) {
             Ok(plan) => {
                 self.session.mark_dirty();
@@ -4444,7 +4468,7 @@ impl CtxOneServer {
     async fn plan_move(&self, params: Parameters<crate::plan_tools::PlanMoveParams>) -> String {
         use crate::plan_tools as pt;
         let p = params.0;
-        let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        let store = pt::make_store(self.repo.clone(), &self.caller());
         match pt::move_plan(
             &self.repo,
             &store,
@@ -4481,7 +4505,7 @@ impl CtxOneServer {
         }
         use crate::plan_tools as pt;
         let p = params.0;
-        let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        let store = pt::make_store(self.repo.clone(), &self.caller());
         match pt::force_complete_plan(&store, &p.ref_name, &p.plan_id, &p.summary, p.reason) {
             Ok(result) => {
                 self.session.mark_dirty();
@@ -4511,7 +4535,7 @@ impl CtxOneServer {
     async fn plan_close(&self, params: Parameters<crate::plan_tools::PlanCloseParams>) -> String {
         use crate::plan_tools as pt;
         let p = params.0;
-        let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        let store = pt::make_store(self.repo.clone(), &self.caller());
         match pt::close_plan(&store, &p.ref_name, &p.plan_id, &p.summary) {
             Ok(plan) => {
                 self.session.mark_dirty();
@@ -4537,7 +4561,7 @@ impl CtxOneServer {
     /// `plan_complete`, and `plan_done` completing the last task).
     fn spawn_epoch_seal_if_completed(&self, ref_name: &str, plan_id: &str) {
         use crate::plan_tools as pt;
-        let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        let store = pt::make_store(self.repo.clone(), &self.caller());
         let plan = match store.get_plan(ref_name, plan_id) {
             Ok(p) => p,
             Err(_) => return,
@@ -4570,7 +4594,7 @@ impl CtxOneServer {
     async fn plan_tasks(&self, params: Parameters<crate::plan_tools::PlanTasksParams>) -> String {
         use crate::plan_tools as pt;
         let p = params.0;
-        let store = pt::make_store(self.repo.clone(), &self.agent_id);
+        let store = pt::make_store(self.repo.clone(), &self.caller());
         let tasks = match &p.task_id {
             Some(id) => store
                 .get_task(
@@ -4666,7 +4690,7 @@ impl CtxOneServer {
             return msg;
         }
         let p = self.apply_default_ref(p);
-        let opts = CommitOptions::new(&self.agent_id, IntentCategory::Rollback, &p.reason);
+        let opts = self.commit_options(IntentCategory::Rollback, &p.reason);
         let (repo, ref_name, namespace) = match self.write_target(p.personal, &p.ref_name) {
             Ok(target) => target,
             Err(e) => return serde_json::json!({ "error": e }).to_string(),
@@ -4793,12 +4817,12 @@ impl CtxOneServer {
         {
             return serde_json::json!({ "error": crate::local_ref::refused(name) }).to_string();
         }
-        let mut opts = CommitOptions::new(&self.agent_id, IntentCategory::Merge, &p.description);
+        let mut opts = self.commit_options(IntentCategory::Merge, &p.description);
         if let Some(r) = p.reasoning {
             opts = opts.with_reasoning(r);
         }
 
-        let store = crate::plan_tools::make_store(self.repo.clone(), &self.agent_id);
+        let store = crate::plan_tools::make_store(self.repo.clone(), &self.caller());
         let regressions = crate::plan_tools::detect_plan_regressions(&store, &p.source, &p.target);
 
         if p.dry_run {
@@ -5177,6 +5201,7 @@ impl CtxOneServer {
                             "id": format!("{}", c.id.short()),
                             "timestamp": c.timestamp.to_rfc3339(),
                             "agent_id": c.agent_id,
+                            "device": c.device,
                             "confidence": c.confidence,
                             "intent": {
                                 "category": format!("{:?}", c.intent.category),
@@ -5623,8 +5648,7 @@ impl CtxOneServer {
             "pin": p.pin,
             "created_at": now,
         });
-        let opts = CommitOptions::new(
-            &self.agent_id,
+        let opts = self.commit_options(
             IntentCategory::Custom("Observe".to_string()),
             format!("Draft candidate for session {}", p.session_id),
         );
@@ -5693,19 +5717,18 @@ impl CtxOneServer {
             Some(a) if a.len() == 2 => format!(" turns {}-{}", a[0], a[1]),
             _ => String::new(),
         };
-        let opts = CommitOptions::new(
-            &self.agent_id,
-            IntentCategory::Custom("Observe".to_string()),
-            format!("Promoted from session {}{}", p.session_id, turns_str),
-        )
-        .with_confidence(confidence);
+        let opts = self
+            .commit_options(
+                IntentCategory::Custom("Observe".to_string()),
+                format!("Promoted from session {}{}", p.session_id, turns_str),
+            )
+            .with_confidence(confidence);
         let value = serde_json::Value::String(content.to_string());
         if let Err(e) = self.repo.set_json(&p.ref_name, &mem_path, &value, opts) {
             return serde_json::json!({ "error": format!("write failed: {e}") }).to_string();
         }
         // Remove the draft now that it's durable.
-        let del_opts = CommitOptions::new(
-            &self.agent_id,
+        let del_opts = self.commit_options(
             IntentCategory::Rollback,
             format!("Draft {} promoted", p.draft_id),
         );
@@ -5726,8 +5749,7 @@ impl CtxOneServer {
     async fn draft_discard(&self, params: Parameters<DraftDiscardParams>) -> String {
         let p = params.0;
         let path = format!("/drafts/{}/{}", p.session_id, p.draft_id);
-        let opts = CommitOptions::new(
-            &self.agent_id,
+        let opts = self.commit_options(
             IntentCategory::Rollback,
             p.reason.clone().unwrap_or_else(|| "Draft discarded".into()),
         );
@@ -5795,7 +5817,7 @@ impl CtxOneServer {
         };
         let plan = p.plan.trim().to_ascii_lowercase();
 
-        let store = crate::plan_tools::make_store(self.repo.clone(), &self.agent_id);
+        let store = crate::plan_tools::make_store(self.repo.clone(), &self.caller());
         let validated = task
             .strip_prefix("t-")
             .and_then(|d| d.parse::<u32>().ok())
@@ -5824,15 +5846,15 @@ impl CtxOneServer {
             }));
         }
         node["generated_at"] = serde_json::json!("");
-        let opts = CommitOptions::new(
-            &self.agent_id,
-            IntentCategory::Custom("Link".to_string()),
-            format!("link session {} to {}/{}", p.session_id, plan, task),
-        )
-        .with_tags(vec![
-            format!("session:{}", p.session_id),
-            "kind:session-links".to_string(),
-        ]);
+        let opts = self
+            .commit_options(
+                IntentCategory::Custom("Link".to_string()),
+                format!("link session {} to {}/{}", p.session_id, plan, task),
+            )
+            .with_tags(vec![
+                format!("session:{}", p.session_id),
+                "kind:session-links".to_string(),
+            ]);
         match set_json_if_changed(&self.repo, &p.ref_name, &path, &node, opts) {
             Ok(_) => serde_json::json!({
                 "status": "ok", "plan": plan, "task": task,
@@ -6184,7 +6206,7 @@ mod tests {
         let result = run_prime(
             &repo,
             &session,
-            "test-agent",
+            &CallContext::new("test-agent"),
             "test",
             true,
             &sections,
@@ -6207,7 +6229,7 @@ mod tests {
         run_prime(
             &repo,
             &session,
-            "test-agent",
+            &CallContext::new("test-agent"),
             "src",
             false,
             &sections,
@@ -6217,7 +6239,7 @@ mod tests {
         run_prime(
             &repo,
             &session,
-            "test-agent",
+            &CallContext::new("test-agent"),
             "src",
             false,
             &sections,
@@ -6260,7 +6282,7 @@ mod tests {
         run_prime(
             &repo,
             &session,
-            "test-agent",
+            &CallContext::new("test-agent"),
             "src",
             true,
             &sections,
@@ -6320,7 +6342,7 @@ mod tests {
         run_prime(
             &repo,
             &session,
-            "test-agent",
+            &CallContext::new("test-agent"),
             "src",
             true,
             &[("Vision".to_string(), "critical context".to_string())],
@@ -7904,7 +7926,7 @@ mod tests {
         // Mirror the MCP-over-HTTP path, which marks the namespace explicit so
         // writes aren't blocked by the stdio-only default-namespace guard.
         let server = CtxOneServer::new(repo.clone()).with_namespace_explicit(true);
-        let store = pt::make_store(repo.clone(), "tester");
+        let store = pt::make_store(repo.clone(), &CallContext::new("tester"));
         pt::create_plan(&store, "main", "p1", None).unwrap();
         let task = pt::add_task(
             &store,

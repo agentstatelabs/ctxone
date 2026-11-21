@@ -21,7 +21,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use agentstategraph::{CommitOptions, RepoError, Repository};
+use agentstategraph::{CallContext, CommitOptions, RepoError, Repository};
 use agentstategraph_core::{IntentCategory, Namespace, Node, Object, ObjectId};
 use tracing::{info, warn};
 
@@ -155,7 +155,7 @@ pub fn move_session(
     dst: &Repository,
     sid: &str,
     keep_target: bool,
-    agent: &str,
+    caller: &CallContext,
 ) -> Result<Moved, RepoError> {
     let path = session_path(sid);
     let Ok(turns) = src.get(TURNS_REF, &path) else {
@@ -172,28 +172,28 @@ pub fn move_session(
         None => true,
     };
     if write {
-        let opts = CommitOptions::new(
-            agent,
-            IntentCategory::Custom("Observe".to_string()),
-            format!("move session {sid}'s turns from {}", src.namespace()),
-        )
-        .with_tags(vec![
-            format!("session:{sid}"),
-            "kind:session-move".to_string(),
-        ]);
+        let opts = caller
+            .commit_options(
+                IntentCategory::Custom("Observe".to_string()),
+                format!("move session {sid}'s turns from {}", src.namespace()),
+            )
+            .with_tags(vec![
+                format!("session:{sid}"),
+                "kind:session-move".to_string(),
+            ]);
         dst.set(TURNS_REF, &path, &turns, opts)?;
         moved.wrote_target = true;
     }
     if dst.get(TURNS_REF, &path).is_ok() {
-        let opts = CommitOptions::new(
-            agent,
-            IntentCategory::Rollback,
-            format!("move session {sid}'s turns to {}", dst.namespace()),
-        )
-        .with_tags(vec![
-            format!("session:{sid}"),
-            "kind:session-move".to_string(),
-        ]);
+        let opts = caller
+            .commit_options(
+                IntentCategory::Rollback,
+                format!("move session {sid}'s turns to {}", dst.namespace()),
+            )
+            .with_tags(vec![
+                format!("session:{sid}"),
+                "kind:session-move".to_string(),
+            ]);
         src.delete(TURNS_REF, &path, opts)?;
         moved.deleted_source = true;
     }
@@ -680,7 +680,7 @@ mod tests {
         let repo = legacy();
         migrate_store(&repo).unwrap();
         let other = proj(&repo);
-        let moved = move_session(&repo, &other, "s1", false, "test").unwrap();
+        let moved = move_session(&repo, &other, "s1", false, &CallContext::new("test")).unwrap();
         assert_eq!(
             moved,
             Moved {
@@ -692,7 +692,7 @@ mod tests {
         assert_eq!(read(&other, "s1"), Some(turns(5, "one")));
         assert_eq!(read(&repo, "s1"), None);
         assert_eq!(
-            move_session(&repo, &other, "s1", false, "test").unwrap(),
+            move_session(&repo, &other, "s1", false, &CallContext::new("test")).unwrap(),
             Moved::default()
         );
 

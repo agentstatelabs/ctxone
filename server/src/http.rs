@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{debug, info, instrument, warn};
 
-use agentstategraph::{CommitOptions, Repository};
+use agentstategraph::{CallContext, CommitOptions, Repository};
 use agentstategraph_core::{IntentCategory, Namespace};
 
 use crate::asd_pool::AsdProcessPool;
@@ -463,8 +463,29 @@ fn first_time_for_route(route: &str) -> bool {
 /// or empty. The agent ID is what `ctx blame` displays in the "who"
 /// column, so setting it correctly is the cheapest way to answer the
 /// question "which tool wrote this fact?".
+///
+/// It also keeps the device the `X-CTXone-Device` header names, if that's a
+/// plausible id (ctx-hub-sync t-016): every commit made for the request
+/// carries both, through [`AgentId::caller`].
 #[derive(Debug, Clone)]
-pub struct AgentId(pub String);
+pub struct AgentId(pub String, Option<String>);
+
+impl AgentId {
+    /// The caller as AgentStateGraph records it on a commit: this agent, and
+    /// the device the request named.
+    pub fn caller(&self) -> CallContext {
+        crate::caller::caller(self.0.clone(), self.1.clone())
+    }
+
+    /// Commit options for a write made for this caller.
+    pub fn commit_options(
+        &self,
+        category: IntentCategory,
+        description: impl Into<String>,
+    ) -> CommitOptions {
+        self.caller().commit_options(category, description)
+    }
+}
 
 impl<S> axum::extract::FromRequestParts<S> for AgentId
 where
@@ -483,7 +504,10 @@ where
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| DEFAULT_AGENT_ID.to_string());
-        Ok(AgentId(id))
+        Ok(AgentId(
+            id,
+            crate::caller::device_from_headers(&parts.headers),
+        ))
     }
 }
 
@@ -2625,8 +2649,7 @@ async fn import_graph(
         if path.starts_with("/_meta/") {
             continue;
         }
-        let opts = CommitOptions::new(
-            &agent_id.0,
+        let opts = agent_id.commit_options(
             IntentCategory::Custom("Import".to_string()),
             format!("import {path}"),
         );
@@ -2692,8 +2715,7 @@ async fn register_doc(
         "supersedes": req.supersedes,
         "last_verified_commit": req.last_verified_commit,
     });
-    let opts = CommitOptions::new(
-        &agent_id.0,
+    let opts = agent_id.commit_options(
         IntentCategory::Custom("DocRegistry".to_string()),
         format!("register doc {}", req.path),
     );
@@ -2875,6 +2897,7 @@ async fn get_log(
                 "id": format!("{}", c.id.short()),
                 "timestamp": c.timestamp.to_rfc3339(),
                 "agent_id": c.agent_id,
+                "device": c.device,
                 "confidence": c.confidence,
                 "intent": {
                     "category": format!("{:?}", c.intent.category),
@@ -2961,8 +2984,7 @@ async fn create_branch(
     // Record the mirrored git branch as namespace-global metadata on the
     // `from` ref. Written once, on actual creation.
     if let (Some(raw), Some(_)) = (&req.git_branch, &created) {
-        let opts = CommitOptions::new(
-            &agent_id.0,
+        let opts = agent_id.commit_options(
             IntentCategory::Custom("Observe".to_string()),
             format!("branch {} mirrors git branch {}", req.name, raw),
         );
@@ -3218,14 +3240,14 @@ fn merge_refs_blocking(
     agent_id: AgentId,
     req: MergeRequest,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let mut opts = CommitOptions::new(&agent_id.0, IntentCategory::Merge, &req.description);
+    let mut opts = agent_id.commit_options(IntentCategory::Merge, &req.description);
     if let Some(r) = req.reasoning {
         opts = opts.with_reasoning(r);
     }
 
     // Plans-domain guard: a task that is terminal on the target must not be
     // pulled back to a non-terminal state by the source.
-    let store = plan_tools::make_store(repo.clone(), &agent_id.0);
+    let store = plan_tools::make_store(repo.clone(), &agent_id.caller());
     let regressions = plan_tools::detect_plan_regressions(&store, &req.source, &req.target);
 
     // Dry-run: report what the merge would do without touching the target ref.
@@ -3367,8 +3389,7 @@ async fn remember(
     };
 
     let confidence = importance_to_confidence(&req.importance);
-    let mut opts = CommitOptions::new(
-        &agent_id.0,
+    let mut opts = agent_id.commit_options(
         IntentCategory::Custom("Observe".to_string()),
         crate::memory_tools::truncate_utf8(&fact, 512),
     );
@@ -3428,7 +3449,7 @@ async fn forget(
     Json(req): Json<ForgetRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
-    let opts = CommitOptions::new(&agent_id.0, IntentCategory::Rollback, &req.reason);
+    let opts = agent_id.commit_options(IntentCategory::Rollback, &req.reason);
 
     let commit_id = repo
         .delete(&req.ref_name, &req.path, opts)
@@ -3554,12 +3575,12 @@ async fn summarize_session(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
     let summary = req.key_points.join(". ");
-    let summary_opts = CommitOptions::new(
-        &agent_id.0,
-        IntentCategory::Checkpoint,
-        format!("Session {} summary", req.session_id),
-    )
-    .with_confidence(0.9);
+    let summary_opts = agent_id
+        .commit_options(
+            IntentCategory::Checkpoint,
+            format!("Session {} summary", req.session_id),
+        )
+        .with_confidence(0.9);
 
     let summary_val = serde_json::Value::String(summary);
     set_json_if_changed(
@@ -3573,12 +3594,12 @@ async fn summarize_session(
 
     if !req.decisions.is_empty() {
         let decisions_val = serde_json::json!(req.decisions);
-        let decisions_opts = CommitOptions::new(
-            &agent_id.0,
-            IntentCategory::Checkpoint,
-            format!("Session {} decisions", req.session_id),
-        )
-        .with_confidence(0.95);
+        let decisions_opts = agent_id
+            .commit_options(
+                IntentCategory::Checkpoint,
+                format!("Session {} decisions", req.session_id),
+            )
+            .with_confidence(0.95);
 
         set_json_if_changed(
             &repo,
@@ -3733,7 +3754,7 @@ async fn prime(
     let result = run_prime(
         &repo,
         &session,
-        &agent_id.0,
+        &agent_id.caller(),
         &req.source,
         req.pinned,
         &sections,
@@ -4039,7 +4060,7 @@ async fn stale_plan_tasks(
     let mut out = Vec::new();
     for ns_name in namespaces {
         let repo = s.repo_for(&NamespaceId(ns_name.clone()))?;
-        let store = plan_tools::make_store(repo, DEFAULT_AGENT_ID);
+        let store = plan_tools::make_store(repo, &CallContext::new(DEFAULT_AGENT_ID));
         let plans = match store
             .list_plans_by_status(&q.ref_name, Some(agentstategraph_tasks::PlanStatus::Active))
         {
@@ -4097,7 +4118,7 @@ async fn backfill_plan_epochs(
     ns: NamespaceId,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
-    let store = plan_tools::make_store(repo.clone(), DEFAULT_AGENT_ID);
+    let store = plan_tools::make_store(repo.clone(), &CallContext::new(DEFAULT_AGENT_ID));
     let completed_filter = plan_tools::plan_status_from_str("completed");
     let plans = store
         .list_plans_by_status("main", completed_filter)
@@ -4284,7 +4305,7 @@ async fn list_plans(
     let mut out = Vec::new();
     for ns_name in namespaces {
         let repo = s.repo_for(&NamespaceId(ns_name.clone()))?;
-        let store = plan_tools::make_store(repo, DEFAULT_AGENT_ID);
+        let store = plan_tools::make_store(repo, &CallContext::new(DEFAULT_AGENT_ID));
         // Every plan with its tasks from one read of the plans tree; a
         // `list_tasks` per plan was a round trip each on a remote store.
         let plans = match store.list_plans_with_tasks(&q.ref_name) {
@@ -4317,7 +4338,7 @@ async fn create_plan(
     Json(req): Json<CreatePlanRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
-    let store = plan_tools::make_store(repo.clone(), &agent_id.0);
+    let store = plan_tools::make_store(repo.clone(), &agent_id.caller());
     let plan = plan_tools::create_plan(&store, &req.ref_name, &req.name, req.description)
         .map_err(plan_error_to_response)?;
     s.sessions.mark_all_dirty();
@@ -4384,8 +4405,7 @@ async fn link_plan_task(
     if !links.contains(&req.target) {
         links.push(req.target.clone());
     }
-    let opts = CommitOptions::new(
-        &agent_id.0,
+    let opts = agent_id.commit_options(
         IntentCategory::Custom("Link".to_string()),
         format!("{name}/{task_id} satisfies {}", req.target),
     );
@@ -4410,7 +4430,7 @@ async fn get_plan(
     Query(q): Query<RefQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
-    let store = plan_tools::make_store(repo.clone(), DEFAULT_AGENT_ID);
+    let store = plan_tools::make_store(repo.clone(), &CallContext::new(DEFAULT_AGENT_ID));
     let plan = store
         .get_plan(&q.ref_name, &name)
         .map_err(substrate_error_to_response)?;
@@ -4448,7 +4468,7 @@ async fn plan_provenance(
     Query(q): Query<RefQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
-    let store = plan_tools::make_store(repo.clone(), DEFAULT_AGENT_ID);
+    let store = plan_tools::make_store(repo.clone(), &CallContext::new(DEFAULT_AGENT_ID));
     let plan = store
         .get_plan(&q.ref_name, &name)
         .map_err(substrate_error_to_response)?;
@@ -4521,7 +4541,7 @@ async fn delete_plan(
     Query(q): Query<RefQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
-    let store = plan_tools::make_store(repo.clone(), &agent_id.0);
+    let store = plan_tools::make_store(repo.clone(), &agent_id.caller());
     store
         .delete_plan(&q.ref_name, &name)
         .map_err(substrate_error_to_response)?;
@@ -4541,7 +4561,7 @@ async fn list_plan_tasks(
     Query(q): Query<RefQuery>,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
-    let store = plan_tools::make_store(repo.clone(), DEFAULT_AGENT_ID);
+    let store = plan_tools::make_store(repo.clone(), &CallContext::new(DEFAULT_AGENT_ID));
     let tasks = store
         .list_tasks(&q.ref_name, &name)
         .map_err(substrate_error_to_response)?;
@@ -4558,7 +4578,7 @@ async fn add_plan_task(
     Json(req): Json<CreateTaskRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
-    let store = plan_tools::make_store(repo.clone(), &agent_id.0);
+    let store = plan_tools::make_store(repo.clone(), &agent_id.caller());
     // Enforce the "plan nearing completion" lock before mutating.
     // No-op unless `CTXONE_PLAN_LOCK_RATIO` is set; `force=true` bypasses.
     plan_tools::check_plan_lock(&store, &req.ref_name, &name, req.force)
@@ -4593,7 +4613,7 @@ async fn get_plan_task(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
     use agentstategraph_tasks::TaskId;
-    let store = plan_tools::make_store(repo.clone(), DEFAULT_AGENT_ID);
+    let store = plan_tools::make_store(repo.clone(), &CallContext::new(DEFAULT_AGENT_ID));
     let task = store
         .get_task(&q.ref_name, &name, &TaskId(task_id))
         .map_err(substrate_error_to_response)?;
@@ -4611,7 +4631,7 @@ async fn start_plan_task(
     let repo = s.repo_for(&ns)?;
     use agentstategraph_tasks::TaskId;
     let _ = req.reason; // reserved for future richer blame (annotation)
-    let store = plan_tools::make_store(repo.clone(), &agent_id.0);
+    let store = plan_tools::make_store(repo.clone(), &agent_id.caller());
     let task = store
         .start_task(&req.ref_name, &name, &TaskId(task_id))
         .map_err(substrate_error_to_response)?;
@@ -4634,7 +4654,7 @@ async fn complete_plan_task(
     let _ = req.reason;
     let proof = plan_tools::parse_proof(&req.proof.kind, &req.proof.value, req.proof.note)
         .map_err(plan_error_to_response)?;
-    let store = plan_tools::make_store(repo.clone(), &agent_id.0);
+    let store = plan_tools::make_store(repo.clone(), &agent_id.caller());
     let task = store
         .complete_task(&req.ref_name, &name, &TaskId(task_id.clone()), proof)
         .map_err(substrate_error_to_response)?;
@@ -4660,7 +4680,7 @@ async fn abandon_plan_task(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
     use agentstategraph_tasks::TaskId;
-    let store = plan_tools::make_store(repo.clone(), &agent_id.0);
+    let store = plan_tools::make_store(repo.clone(), &agent_id.caller());
     let task = store
         .abandon_task(&req.ref_name, &name, &TaskId(task_id), &req.reason)
         .map_err(substrate_error_to_response)?;
@@ -4677,7 +4697,7 @@ async fn edit_plan_task(
     Json(req): Json<EditTaskRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
-    let store = plan_tools::make_store(repo.clone(), &agent_id.0);
+    let store = plan_tools::make_store(repo.clone(), &agent_id.caller());
     let notes = plan_tools::notes_param(req.notes.as_deref(), req.description.as_deref())
         .map_err(plan_error_to_response)?;
     let edit = plan_tools::TaskEdit {
@@ -4717,7 +4737,7 @@ async fn unpack_plan_descriptions(
     Query(q): Query<UnpackQuery>,
 ) -> Result<Json<plan_tools::UnpackReport>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
-    let store = plan_tools::make_store(repo.clone(), &agent_id.0);
+    let store = plan_tools::make_store(repo.clone(), &agent_id.caller());
     let report = plan_tools::unpack_descriptions(&store, &q.ref_name, &name, q.dry_run)
         .map_err(plan_error_to_response)?;
     if !report.dry_run && !report.unpacked.is_empty() {
@@ -4735,7 +4755,7 @@ async fn next_plan_task(
     Query(q): Query<NextTaskQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
-    let store = plan_tools::make_store(repo.clone(), DEFAULT_AGENT_ID);
+    let store = plan_tools::make_store(repo.clone(), &CallContext::new(DEFAULT_AGENT_ID));
     let assignee = match q.assigned_to.as_deref() {
         Some("me") => Some(agent_id.0.clone()),
         Some(x) if !x.is_empty() => Some(x.to_string()),
@@ -4791,7 +4811,7 @@ async fn archive_plan(
         .or_else(|| body.and_then(|Json(b)| b.ref_name))
         .unwrap_or_else(default_ref);
     let repo = s.repo_for(&ns)?;
-    let store = plan_tools::make_store(repo.clone(), &agent_id.0);
+    let store = plan_tools::make_store(repo.clone(), &agent_id.caller());
     let plan = store
         .archive_plan(&ref_name, &name)
         .map_err(substrate_error_to_response)?;
@@ -4818,7 +4838,7 @@ async fn move_plan_handler(
     Json(body): Json<MovePlanBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
-    let store = plan_tools::make_store(repo.clone(), &agent_id.0);
+    let store = plan_tools::make_store(repo.clone(), &agent_id.caller());
     let result = plan_tools::move_plan(
         &repo,
         &store,
@@ -4866,7 +4886,7 @@ async fn close_plan_handler(
     body: Option<Json<ClosePlanBody>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
-    let store = plan_tools::make_store(repo.clone(), &agent_id.0);
+    let store = plan_tools::make_store(repo.clone(), &agent_id.caller());
     let summary = body.map(|Json(b)| b.summary).unwrap_or_default();
     let plan = plan_tools::close_plan(&store, &q.ref_name, &name, &summary)
         .map_err(plan_error_to_response)?;
@@ -4888,7 +4908,7 @@ async fn force_complete_plan(
     body: Option<Json<ForceCompleteBody>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
-    let store = plan_tools::make_store(repo.clone(), &agent_id.0);
+    let store = plan_tools::make_store(repo.clone(), &agent_id.caller());
     let (summary, reason) = body
         .map(|Json(b)| (b.summary, b.reason))
         .unwrap_or_default();
@@ -5274,15 +5294,15 @@ async fn put_session_turns_bulk(
     }
     let repo = s.repo_for(&ns)?;
     let count = body.as_object().map(|m| m.len()).unwrap_or(0);
-    let opts = CommitOptions::new(
-        &agent_id.0,
-        IntentCategory::Custom("Observe".to_string()),
-        format!("capture session {} ({} turns)", sid, count),
-    )
-    .with_tags(vec![
-        format!("session:{}", sid),
-        "kind:full-turn".to_string(),
-    ]);
+    let opts = agent_id
+        .commit_options(
+            IntentCategory::Custom("Observe".to_string()),
+            format!("capture session {} ({} turns)", sid, count),
+        )
+        .with_tags(vec![
+            format!("session:{}", sid),
+            "kind:full-turn".to_string(),
+        ]);
     // Turns go to the workspace's local-only turns ref, whatever branch the
     // request names (ctx-hub-sync t-002).
     let commit_id = crate::turns::write_all(&repo, &sid, &body, opts).map_err(internal_error)?;
@@ -5317,16 +5337,13 @@ async fn put_session_turn(
     }
     let path = crate::turns::turn_path(&sid, idx);
     let intent = format!("capture session {} turn {:04}", sid, idx);
-    let opts = CommitOptions::new(
-        &agent_id.0,
-        IntentCategory::Custom("Observe".to_string()),
-        &intent,
-    )
-    .with_tags(vec![
-        format!("session:{}", sid),
-        format!("turn:{}", idx),
-        "kind:full-turn".to_string(),
-    ]);
+    let opts = agent_id
+        .commit_options(IntentCategory::Custom("Observe".to_string()), &intent)
+        .with_tags(vec![
+            format!("session:{}", sid),
+            format!("turn:{}", idx),
+            "kind:full-turn".to_string(),
+        ]);
     let commit_id =
         crate::turns::write_turn(&repo, &sid, idx, &body, opts).map_err(internal_error)?;
     // Session writes change the graph, so cached flat sizes are stale. The
@@ -5504,15 +5521,12 @@ async fn put_session_title(
     let repo = s.repo_for(&ns)?;
     let path = session_title_path(&sid);
     let intent = format!("name session {}", sid);
-    let opts = CommitOptions::new(
-        &agent_id.0,
-        IntentCategory::Custom("Observe".to_string()),
-        &intent,
-    )
-    .with_tags(vec![
-        format!("session:{}", sid),
-        "kind:session-title".to_string(),
-    ]);
+    let opts = agent_id
+        .commit_options(IntentCategory::Custom("Observe".to_string()), &intent)
+        .with_tags(vec![
+            format!("session:{}", sid),
+            "kind:session-title".to_string(),
+        ]);
     let commit_id = set_json_if_changed(&repo, &q.ref_name, &path, &serde_json::json!(title), opts)
         .map_err(internal_error)?;
     // Session writes change the graph, so cached flat sizes are stale. The
@@ -5599,15 +5613,15 @@ async fn put_session_analysis(
     }
     let repo = s.repo_for(&ns)?;
     let path = session_analysis_path(&sid);
-    let opts = CommitOptions::new(
-        &agent_id.0,
-        IntentCategory::Custom("Observe".to_string()),
-        format!("session analysis {}", sid),
-    )
-    .with_tags(vec![
-        format!("session:{}", sid),
-        "kind:session-analysis".to_string(),
-    ]);
+    let opts = agent_id
+        .commit_options(
+            IntentCategory::Custom("Observe".to_string()),
+            format!("session analysis {}", sid),
+        )
+        .with_tags(vec![
+            format!("session:{}", sid),
+            "kind:session-analysis".to_string(),
+        ]);
     let commit_id =
         set_json_if_changed(&repo, &q.ref_name, &path, &body, opts).map_err(internal_error)?;
     s.sessions.mark_all_dirty();
@@ -5640,15 +5654,15 @@ async fn put_session_burn(
     }
     let repo = s.repo_for(&ns)?;
     let path = session_burn_path(&sid);
-    let opts = CommitOptions::new(
-        &agent_id.0,
-        IntentCategory::Custom("Observe".to_string()),
-        format!("session burn {}", sid),
-    )
-    .with_tags(vec![
-        format!("session:{}", sid),
-        "kind:session-burn".to_string(),
-    ]);
+    let opts = agent_id
+        .commit_options(
+            IntentCategory::Custom("Observe".to_string()),
+            format!("session burn {}", sid),
+        )
+        .with_tags(vec![
+            format!("session:{}", sid),
+            "kind:session-burn".to_string(),
+        ]);
     let commit_id =
         set_json_if_changed(&repo, &q.ref_name, &path, &body, opts).map_err(internal_error)?;
     s.sessions.mark_all_dirty();
@@ -5741,15 +5755,15 @@ async fn put_session_usage(
             "path": path,
         })));
     }
-    let opts = CommitOptions::new(
-        &agent_id.0,
-        IntentCategory::Custom("Observe".to_string()),
-        format!("session usage {}", sid),
-    )
-    .with_tags(vec![
-        format!("session:{}", sid),
-        "kind:session-usage".to_string(),
-    ]);
+    let opts = agent_id
+        .commit_options(
+            IntentCategory::Custom("Observe".to_string()),
+            format!("session usage {}", sid),
+        )
+        .with_tags(vec![
+            format!("session:{}", sid),
+            "kind:session-usage".to_string(),
+        ]);
     let commit_id = repo
         .set_json(&q.ref_name, &path, &value, opts)
         .map_err(internal_error)?;
@@ -5860,15 +5874,12 @@ async fn delete_session(
         .map(|p| p.len())
         .unwrap_or(0);
 
-    let opts = CommitOptions::new(
-        &agent_id.0,
-        IntentCategory::Rollback,
-        format!("delete session {}", sid),
-    )
-    .with_tags(vec![
-        format!("session:{}", sid),
-        "kind:session-delete".to_string(),
-    ]);
+    let opts = agent_id
+        .commit_options(IntentCategory::Rollback, format!("delete session {}", sid))
+        .with_tags(vec![
+            format!("session:{}", sid),
+            "kind:session-delete".to_string(),
+        ]);
 
     // A session with no nodes is not an error: the registry may still hold
     // stats for it, and the tombstone is still worth writing.
@@ -5880,15 +5891,15 @@ async fn delete_session(
 
     // Its turns, from the workspace's turns ref, which holds one copy of a
     // session's turns whatever branch it ran on.
-    let turn_opts = CommitOptions::new(
-        &agent_id.0,
-        IntentCategory::Rollback,
-        format!("delete session {}'s turns", sid),
-    )
-    .with_tags(vec![
-        format!("session:{}", sid),
-        "kind:session-delete".to_string(),
-    ]);
+    let turn_opts = agent_id
+        .commit_options(
+            IntentCategory::Rollback,
+            format!("delete session {}'s turns", sid),
+        )
+        .with_tags(vec![
+            format!("session:{}", sid),
+            "kind:session-delete".to_string(),
+        ]);
     let turns_removed = crate::turns::delete(&repo, &sid, turn_opts).map_err(internal_error)?;
 
     let tombstoned = if q.no_tombstone {
@@ -5900,15 +5911,15 @@ async fn delete_session(
             "reason": q.reason,
             "namespace": ns.0,
         });
-        let t_opts = CommitOptions::new(
-            &agent_id.0,
-            IntentCategory::Custom("Observe".to_string()),
-            format!("tombstone session {}", sid),
-        )
-        .with_tags(vec![
-            format!("session:{}", sid),
-            "kind:session-tombstone".to_string(),
-        ]);
+        let t_opts = agent_id
+            .commit_options(
+                IntentCategory::Custom("Observe".to_string()),
+                format!("tombstone session {}", sid),
+            )
+            .with_tags(vec![
+                format!("session:{}", sid),
+                "kind:session-tombstone".to_string(),
+            ]);
         repo.set_json(&q.ref_name, &session_tombstone_path(&sid), &t, t_opts)
             .map_err(internal_error)?;
         true
@@ -6198,7 +6209,7 @@ async fn add_session_link(
     ))?;
     let plan = req.plan.trim().to_ascii_lowercase();
 
-    let store = plan_tools::make_store(repo.clone(), &agent_id.0);
+    let store = plan_tools::make_store(repo.clone(), &agent_id.caller());
     let validated = task
         .strip_prefix("t-")
         .and_then(|d| d.parse::<u32>().ok())
@@ -6235,15 +6246,15 @@ async fn add_session_link(
     }
     node["generated_at"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
 
-    let opts = CommitOptions::new(
-        &agent_id.0,
-        IntentCategory::Custom("Link".to_string()),
-        format!("link session {} to {}/{}", sid, plan, task),
-    )
-    .with_tags(vec![
-        format!("session:{}", sid),
-        "kind:session-links".to_string(),
-    ]);
+    let opts = agent_id
+        .commit_options(
+            IntentCategory::Custom("Link".to_string()),
+            format!("link session {} to {}/{}", sid, plan, task),
+        )
+        .with_tags(vec![
+            format!("session:{}", sid),
+            "kind:session-links".to_string(),
+        ]);
     set_json_if_changed(&repo, &req.ref_name, &path, &node, opts).map_err(internal_error)?;
 
     Ok(Json(serde_json::json!({
@@ -6331,7 +6342,7 @@ async fn derive_session_links(
 
     // Validation closure: a plan/task exists iff the task store resolves it in
     // this namespace. Built once and reused across every candidate.
-    let store = plan_tools::make_store(repo.clone(), &agent_id.0);
+    let store = plan_tools::make_store(repo.clone(), &agent_id.caller());
     let ref_name = q.ref_name.clone();
     let links = session_links::derive(&candidates, |plan, task| {
         // `task` is normalized `t-NNN`; the store keys on the numeric id.
@@ -6351,15 +6362,15 @@ async fn derive_session_links(
 
     // Nothing found is a valid, writeable result: it records that the session
     // was scanned and had no task refs, so a reader need not re-derive.
-    let opts = CommitOptions::new(
-        &agent_id.0,
-        IntentCategory::Custom("Observe".to_string()),
-        format!("session links {}", sid),
-    )
-    .with_tags(vec![
-        format!("session:{}", sid),
-        "kind:session-links".to_string(),
-    ]);
+    let opts = agent_id
+        .commit_options(
+            IntentCategory::Custom("Observe".to_string()),
+            format!("session links {}", sid),
+        )
+        .with_tags(vec![
+            format!("session:{}", sid),
+            "kind:session-links".to_string(),
+        ]);
     set_json_if_changed(&repo, &q.ref_name, &session_links_path(&sid), &node, opts)
         .map_err(internal_error)?;
 
@@ -6402,7 +6413,7 @@ fn move_subtree_verified(
     from_ref: &str,
     to_ref: &str,
     path: &str,
-    agent: &str,
+    caller: &CallContext,
     kind: &str,
     delete_source: bool,
     skip_write: bool,
@@ -6431,12 +6442,12 @@ fn move_subtree_verified(
     let wrote_target = if skip_write {
         false
     } else {
-        let opts = CommitOptions::new(
-            agent,
-            IntentCategory::Custom("Migrate".to_string()),
-            format!("move {path} to {to_ref}"),
-        )
-        .with_tags(vec![format!("path:{path}"), format!("kind:{kind}")]);
+        let opts = caller
+            .commit_options(
+                IntentCategory::Custom("Migrate".to_string()),
+                format!("move {path} to {to_ref}"),
+            )
+            .with_tags(vec![format!("path:{path}"), format!("kind:{kind}")]);
         dst.set_json(to_ref, path, &subtree, opts)
             .map_err(internal_error)?;
         true
@@ -6465,12 +6476,12 @@ fn move_subtree_verified(
 
     // 4. Only now is it safe to remove the source.
     let deleted_source = if delete_source {
-        let del_opts = CommitOptions::new(
-            agent,
-            IntentCategory::Rollback,
-            format!("remove {path} after move"),
-        )
-        .with_tags(vec![format!("path:{path}"), format!("kind:{kind}-cleanup")]);
+        let del_opts = caller
+            .commit_options(
+                IntentCategory::Rollback,
+                format!("remove {path} after move"),
+            )
+            .with_tags(vec![format!("path:{path}"), format!("kind:{kind}-cleanup")]);
         src.delete(from_ref, path, del_opts)
             .map_err(internal_error)?;
         true
@@ -6576,7 +6587,7 @@ async fn relocate_plan(
         &req.ref_name,
         &dst_ref,
         &plan_root,
-        &agent_id.0,
+        &agent_id.caller(),
         "plan-move",
         true,
         dst_has,
@@ -6592,7 +6603,7 @@ async fn relocate_plan(
             &req.ref_name,
             &dst_ref,
             &links_root,
-            &agent_id.0,
+            &agent_id.caller(),
             "plan-move",
             true,
             false,
@@ -6690,7 +6701,7 @@ async fn move_session(
             &req.ref_name,
             &req.ref_name,
             &root,
-            &agent_id.0,
+            &agent_id.caller(),
             "session-move",
             true,
             target_is_current,
@@ -6698,7 +6709,7 @@ async fn move_session(
     };
     // The turns go with it, relinked rather than copied, under the same
     // rule: a target that's current keeps its own.
-    let turns = crate::turns::move_session(&src, &dst, &sid, target_is_current, &agent_id.0)
+    let turns = crate::turns::move_session(&src, &dst, &sid, target_is_current, &agent_id.caller())
         .map_err(internal_error)?;
 
     s.sessions.mark_all_dirty();
@@ -6774,7 +6785,7 @@ async fn move_subtree(
         &req.ref_name,
         &to_ref,
         path,
-        &agent_id.0,
+        &agent_id.caller(),
         "subtree-move",
         req.delete_source,
         false,
@@ -6896,15 +6907,15 @@ async fn put_session_provenance(
     }
     let repo = s.repo_for(&ns)?;
     let path = session_provenance_path(&sid);
-    let opts = CommitOptions::new(
-        &agent_id.0,
-        IntentCategory::Custom("Observe".to_string()),
-        format!("session provenance {}", sid),
-    )
-    .with_tags(vec![
-        format!("session:{}", sid),
-        "kind:session-provenance".to_string(),
-    ]);
+    let opts = agent_id
+        .commit_options(
+            IntentCategory::Custom("Observe".to_string()),
+            format!("session provenance {}", sid),
+        )
+        .with_tags(vec![
+            format!("session:{}", sid),
+            "kind:session-provenance".to_string(),
+        ]);
     let commit_id =
         set_json_if_changed(&repo, &q.ref_name, &path, &body, opts).map_err(internal_error)?;
     // Session writes change the graph, so cached flat sizes are stale. The
@@ -6939,15 +6950,15 @@ async fn put_session_meta(
     }
     let repo = s.repo_for(&ns)?;
     let path = session_meta_path(&sid);
-    let opts = CommitOptions::new(
-        &agent_id.0,
-        IntentCategory::Custom("Observe".to_string()),
-        format!("session meta {}", sid),
-    )
-    .with_tags(vec![
-        format!("session:{}", sid),
-        "kind:session-meta".to_string(),
-    ]);
+    let opts = agent_id
+        .commit_options(
+            IntentCategory::Custom("Observe".to_string()),
+            format!("session meta {}", sid),
+        )
+        .with_tags(vec![
+            format!("session:{}", sid),
+            "kind:session-meta".to_string(),
+        ]);
     let commit_id =
         set_json_if_changed(&repo, &q.ref_name, &path, &body, opts).map_err(internal_error)?;
     // Session writes change the graph, so cached flat sizes are stale. The
@@ -8665,7 +8676,7 @@ mod tests {
             "main",
             "main",
             "/plans/p1",
-            "t",
+            &CallContext::new("t"),
             "plan-move",
             true,
             false,
@@ -8696,7 +8707,7 @@ mod tests {
             "main",
             "main",
             "/plans/foo",
-            "t",
+            &CallContext::new("t"),
             "plan-move",
             true,
             false,
@@ -8728,7 +8739,7 @@ mod tests {
             "main",
             "main",
             "/plans/orphan",
-            "t",
+            &CallContext::new("t"),
             "plan-move",
             true,
             /*skip_write=*/ true,
@@ -8756,7 +8767,7 @@ mod tests {
             "main",
             "main",
             "/plans/nope",
-            "t",
+            &CallContext::new("t"),
             "x",
             true,
             false,
@@ -8777,7 +8788,7 @@ mod tests {
             "main",
             "main",
             "/memory/m",
-            "t",
+            &CallContext::new("t"),
             "subtree-move",
             false,
             false,

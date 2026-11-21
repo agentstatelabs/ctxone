@@ -7,6 +7,7 @@
 pub mod asd_pool;
 pub mod asd_registry;
 pub mod backup;
+pub mod caller;
 pub mod code_tools;
 pub mod db_admin;
 pub mod graph_write;

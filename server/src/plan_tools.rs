@@ -23,7 +23,7 @@
 
 use std::sync::Arc;
 
-use agentstategraph::{CommitOptions, Repository};
+use agentstategraph::{CallContext, Repository};
 use agentstategraph_core::IntentCategory;
 use agentstategraph_tasks::{
     AddTaskOptions, Plan, PlanStatus, Priority, Proof, ProofKind, Task, TaskId, TaskStatus,
@@ -558,11 +558,12 @@ pub fn check_plan_lock(
     Ok(())
 }
 
-/// Build a `TaskStore` bound to the default plans prefix for the
-/// given agent. Use this inside every tool/endpoint so the prefix is
-/// consistent across the Hub.
-pub fn make_store(repo: Arc<Repository>, agent_id: &str) -> TaskStore {
-    TaskStore::new(repo, PLANS_PREFIX, agent_id)
+/// Build a `TaskStore` bound to the default plans prefix whose commits carry
+/// `caller`: its agent, and its device if it has one (ctx-hub-sync t-016).
+/// Use this inside every tool/endpoint so the prefix is consistent across the
+/// Hub.
+pub fn make_store(repo: Arc<Repository>, caller: &CallContext) -> TaskStore {
+    TaskStore::with_context(repo, PLANS_PREFIX, caller.clone())
 }
 
 // -- Response shape helpers -----------------------------------------
@@ -735,7 +736,7 @@ pub fn read_satisfies(repo: &Repository, ref_name: &str, plan: &str, task: &str)
 pub fn add_satisfies(
     repo: &Repository,
     ref_name: &str,
-    agent_id: &str,
+    caller: &CallContext,
     plan: &str,
     task: &str,
     target: &str,
@@ -746,8 +747,7 @@ pub fn add_satisfies(
     if !links.iter().any(|l| l == target) {
         links.push(target.to_string());
     }
-    let opts = CommitOptions::new(
-        agent_id,
+    let opts = caller.commit_options(
         IntentCategory::Custom("Link".to_string()),
         format!("{plan}/{task} satisfies {target}"),
     );
@@ -1608,7 +1608,7 @@ pub fn move_plan(
     // timestamps and reassign task ids — we want the records to land
     // on the new ref unchanged so blame and audit trails carry over.
     let prefix = store.prefix();
-    let agent_id = store.agent_id();
+    let caller = store.context();
 
     let meta_path = paths::plan_meta(prefix, plan);
     let meta_value = serde_json::to_value(&plan_meta)?;
@@ -1616,8 +1616,7 @@ pub fn move_plan(
         target_ref,
         &meta_path,
         &meta_value,
-        CommitOptions::new(
-            agent_id,
+        caller.commit_options(
             IntentCategory::Plan,
             format!("Move plan {} from {} to {}", plan, source_ref, target_ref),
         ),
@@ -1630,8 +1629,7 @@ pub fn move_plan(
             target_ref,
             &task_path,
             &task_value,
-            CommitOptions::new(
-                agent_id,
+            caller.commit_options(
                 IntentCategory::Plan,
                 format!(
                     "Move task {}/{} from {} to {}",
@@ -1656,7 +1654,7 @@ pub fn move_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentstategraph::Repository;
+    use agentstategraph::{CommitOptions, Repository};
     use agentstategraph_storage::SqliteStorage;
 
     #[test]
@@ -1690,7 +1688,7 @@ mod tests {
 
     fn fresh_store() -> (Arc<Repository>, TaskStore) {
         let repo = fresh_repo();
-        let store = make_store(repo.clone(), "test-agent");
+        let store = make_store(repo.clone(), &CallContext::new("test-agent"));
         (repo, store)
     }
 
@@ -1876,7 +1874,15 @@ mod tests {
     fn a_link_from_a_plan_or_task_id_with_a_slash_is_rejected() {
         let (repo, _store) = fresh_store();
         for (plan, task) in [("a/b", "t-001"), ("a", "t/1")] {
-            let err = add_satisfies(&repo, "main", "agent", plan, task, "other/t-002").unwrap_err();
+            let err = add_satisfies(
+                &repo,
+                "main",
+                &CallContext::new("agent"),
+                plan,
+                task,
+                "other/t-002",
+            )
+            .unwrap_err();
             assert!(err.contains("contains '/'"), "{plan}/{task}: {err}");
         }
     }

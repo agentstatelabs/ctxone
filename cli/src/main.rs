@@ -233,30 +233,53 @@ impl Cli {
         namespace.unwrap_or(DEFAULT_NAMESPACE)
     }
 
-    /// Build a reqwest client with X-CTXone-Session, X-CTXone-Namespace, and
-    /// (for an authenticated hub) `Authorization: Bearer <token>` baked in as
-    /// default headers.
+    /// Build a reqwest client with [`default_headers`] baked in.
     fn http_client(&self, namespace: Option<&str>) -> reqwest::Client {
-        let mut headers = reqwest::header::HeaderMap::new();
-        if let Some(ref sid) = self.session
-            && let Ok(val) = reqwest::header::HeaderValue::from_str(sid)
-        {
-            headers.insert("X-CTXone-Session", val);
-        }
-        if let Ok(val) =
-            reqwest::header::HeaderValue::from_str(Self::effective_namespace(namespace))
-        {
-            headers.insert("X-CTXone-Namespace", val);
-        }
-        if let Some(ref token) = self.token
-            && let Ok(mut val) = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
-        {
-            val.set_sensitive(true);
-            headers.insert(reqwest::header::AUTHORIZATION, val);
-        }
-        let builder = reqwest::Client::builder().default_headers(headers);
-        builder.build().unwrap_or_default()
+        let headers = default_headers(
+            self.session.as_deref(),
+            self.token.as_deref(),
+            namespace,
+            crate::device::device_id().as_deref(),
+        );
+        reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .unwrap_or_default()
     }
+}
+
+/// The headers every request to a Hub carries: X-CTXone-Session,
+/// X-CTXone-Namespace, X-CTXone-Device (this install's device id, which the
+/// Hub records on each commit it makes for the request, ctx-hub-sync t-016),
+/// and, for an authenticated hub, `Authorization: Bearer <token>`.
+fn default_headers(
+    session: Option<&str>,
+    token: Option<&str>,
+    namespace: Option<&str>,
+    device: Option<&str>,
+) -> reqwest::header::HeaderMap {
+    let mut headers = reqwest::header::HeaderMap::new();
+    if let Some(sid) = session
+        && let Ok(val) = reqwest::header::HeaderValue::from_str(sid)
+    {
+        headers.insert("X-CTXone-Session", val);
+    }
+    // Always named, `default` included — see `Cli::effective_namespace`.
+    if let Ok(val) = reqwest::header::HeaderValue::from_str(Cli::effective_namespace(namespace)) {
+        headers.insert("X-CTXone-Namespace", val);
+    }
+    if let Some(device) = device
+        && let Ok(val) = reqwest::header::HeaderValue::from_str(device)
+    {
+        headers.insert("X-CTXone-Device", val);
+    }
+    if let Some(token) = token
+        && let Ok(mut val) = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+    {
+        val.set_sensitive(true);
+        headers.insert(reqwest::header::AUTHORIZATION, val);
+    }
+    headers
 }
 
 /// Builds namespace-scoped HTTP clients after `Cli` has been consumed.
@@ -272,23 +295,12 @@ struct ClientFactory {
 
 impl ClientFactory {
     fn build(&self, namespace: Option<&str>) -> reqwest::Client {
-        let mut headers = reqwest::header::HeaderMap::new();
-        if let Some(ref sid) = self.session
-            && let Ok(val) = reqwest::header::HeaderValue::from_str(sid)
-        {
-            headers.insert("X-CTXone-Session", val);
-        }
-        // Always named, `default` included — see `Cli::effective_namespace`.
-        if let Ok(val) = reqwest::header::HeaderValue::from_str(Cli::effective_namespace(namespace))
-        {
-            headers.insert("X-CTXone-Namespace", val);
-        }
-        if let Some(ref token) = self.token
-            && let Ok(mut val) = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
-        {
-            val.set_sensitive(true);
-            headers.insert(reqwest::header::AUTHORIZATION, val);
-        }
+        let headers = default_headers(
+            self.session.as_deref(),
+            self.token.as_deref(),
+            namespace,
+            crate::device::device_id().as_deref(),
+        );
         reqwest::Client::builder()
             .default_headers(headers)
             .build()
@@ -8222,6 +8234,7 @@ fn mcp_server_entry(
     auth_token: Option<&str>,
     auth_token_env: Option<&str>,
     session_id: &str,
+    device: Option<&str>,
 ) -> Value {
     match transport {
         McpTransport::Http => {
@@ -8251,6 +8264,11 @@ fn mcp_server_entry(
                 // tool carry its id, not the Hub's.
                 args.push("--header".to_string());
                 args.push(format!("X-CTXone-Agent: {agent_id}"));
+                // And the device it runs on (ctx-hub-sync t-016).
+                if let Some(device) = device {
+                    args.push("--header".to_string());
+                    args.push(format!("X-CTXone-Device: {device}"));
+                }
                 // mcp-remote forwards a literal --header; it does not expand
                 // env vars, so only a literal token works for the bridge.
                 if let Some(tok) = auth_token {
@@ -8274,6 +8292,13 @@ fn mcp_server_entry(
                     "X-CTXone-Agent".to_string(),
                     serde_json::Value::String(agent_id.to_string()),
                 );
+                // And the device it runs on (ctx-hub-sync t-016).
+                if let Some(device) = device {
+                    headers.insert(
+                        "X-CTXone-Device".to_string(),
+                        serde_json::Value::String(device.to_string()),
+                    );
+                }
                 // Prefer a literal header; else reference an env var (clients
                 // that support `${VAR}` expansion in config values resolve it).
                 let auth_value = auth_token
@@ -8287,6 +8312,8 @@ fn mcp_server_entry(
             }
         }
         McpTransport::Stdio => {
+            // No device here: the Hub this entry spawns runs on this machine
+            // and reads the device id kept in ~/.ctxone itself.
             let hub_bin = find_hub_binary();
             let db_path = canonical_db_path();
 
@@ -8334,22 +8361,27 @@ fn mcp_http_url(base: &str, namespace: Option<&str>) -> String {
 }
 
 /// The MCP URL for Codex, whose config gives an HTTP server a `url` and no
-/// headers: the session and agent id ride in the query (`?session=`,
-/// `?agent=`), which the Hub reads like `X-CTXone-Session` and
-/// `X-CTXone-Agent` (ctx-hub-sync t-010).
+/// headers: the session, agent id and device ride in the query (`?session=`,
+/// `?agent=`, `?device=`), which the Hub reads like `X-CTXone-Session`,
+/// `X-CTXone-Agent` (ctx-hub-sync t-010) and `X-CTXone-Device` (t-016).
 fn codex_mcp_http_url(
     base: &str,
     namespace: Option<&str>,
     session_id: &str,
     agent_id: &str,
+    device: Option<&str>,
 ) -> String {
     let url = mcp_http_url(base, namespace);
     let sep = if url.contains('?') { '&' } else { '?' };
-    format!(
+    let mut url = format!(
         "{url}{sep}session={}&agent={}",
         urlencoding(session_id),
         urlencoding(agent_id)
-    )
+    );
+    if let Some(device) = device {
+        url.push_str(&format!("&device={}", urlencoding(device)));
+    }
+    url
 }
 
 /// Merge a `[mcp_servers.ctxone]` entry into an existing Codex TOML config.
@@ -8644,6 +8676,10 @@ fn init_mcp(
         return Ok(());
     }
 
+    // This install's device id, for the HTTP entries: the Hub records it on
+    // every commit a tool makes through them (ctx-hub-sync t-016). Read, not
+    // minted: `ctx init` mints it before this, except on a dry run.
+    let device = crate::device::kept();
     for t in &targets {
         // Per-tool agent ID: a slug of the detected tool name
         // (e.g. "Claude Code" → "claude-code"). This makes
@@ -8666,6 +8702,7 @@ fn init_mcp(
             auth_token,
             auth_token_env,
             &session_id,
+            device.as_deref(),
         );
 
         // Inject CTX_SESSION into the stdio server's env (t-015) so its
@@ -8782,6 +8819,7 @@ fn init_mcp(
                             namespace.as_deref(),
                             &session_id,
                             &agent_id,
+                            device.as_deref(),
                         );
                         merge_codex_ctxone_toml_http(&existing, &url, auth_token_env)
                     }
@@ -11139,7 +11177,8 @@ args = ["--path", "/old/db"]
                 "http://localhost:3001/mcp",
                 Some("p"),
                 "p:codex:ab12",
-                "codex"
+                "codex",
+                None
             ),
             "http://localhost:3001/mcp?namespace=p&session=p:codex:ab12&agent=codex"
         );
@@ -11148,9 +11187,21 @@ args = ["--path", "/old/db"]
                 "http://localhost:3001/mcp",
                 None,
                 "proj-codex-ab12",
-                "codex"
+                "codex",
+                None
             ),
             "http://localhost:3001/mcp?session=proj-codex-ab12&agent=codex"
+        );
+        // The device rides along when this install has one (ctx-hub-sync t-016).
+        assert_eq!(
+            codex_mcp_http_url(
+                "http://localhost:3001/mcp",
+                Some("p"),
+                "p:codex:ab12",
+                "codex",
+                Some("0123abcd")
+            ),
+            "http://localhost:3001/mcp?namespace=p&session=p:codex:ab12&agent=codex&device=0123abcd"
         );
     }
 
@@ -11291,6 +11342,7 @@ args = ["--path", "/old/db"]
                 None,
                 None,
                 &session,
+                None,
             )
         };
 
@@ -11427,6 +11479,7 @@ args = ["--path", "/old/db"]
             None,
             None,
             "sess-test",
+            None,
         );
         let args = entry
             .get("args")
@@ -11448,6 +11501,7 @@ args = ["--path", "/old/db"]
             None,
             None,
             "sess-test",
+            None,
         );
         assert_eq!(entry.get("type").and_then(|v| v.as_str()), Some("http"));
         assert_eq!(
@@ -11473,6 +11527,69 @@ args = ["--path", "/old/db"]
     }
 
     #[test]
+    fn requests_name_this_installs_device() {
+        let headers = default_headers(Some("sess"), Some("tok"), Some("web"), Some("0123abcd"));
+        assert_eq!(headers["X-CTXone-Device"], "0123abcd");
+        assert_eq!(headers["X-CTXone-Session"], "sess");
+        assert_eq!(headers["X-CTXone-Namespace"], "web");
+        assert!(headers[reqwest::header::AUTHORIZATION].is_sensitive());
+
+        let without = default_headers(None, None, None, None);
+        assert!(without.get("X-CTXone-Device").is_none());
+        assert_eq!(without["X-CTXone-Namespace"], DEFAULT_NAMESPACE);
+    }
+
+    #[test]
+    fn mcp_server_entry_http_names_the_device() {
+        let entry = |client: &str, device: Option<&str>| {
+            mcp_server_entry(
+                "claude-code",
+                client,
+                McpTransport::Http,
+                "http://localhost:3001/mcp",
+                Some("proj-ns"),
+                None,
+                None,
+                "sess-test",
+                device,
+            )
+        };
+        let native = entry("Claude Code", Some("0123abcd"));
+        assert_eq!(
+            native["headers"]["X-CTXone-Device"].as_str(),
+            Some("0123abcd")
+        );
+        assert!(
+            entry("Claude Code", None)["headers"]
+                .get("X-CTXone-Device")
+                .is_none()
+        );
+
+        let bridged = entry("Claude Desktop", Some("0123abcd"));
+        let args: Vec<&str> = bridged["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|a| a.as_str())
+            .collect();
+        assert!(args.contains(&"X-CTXone-Device: 0123abcd"), "{args:?}");
+
+        // A stdio Hub reads the device itself, so its entry names none.
+        let stdio = mcp_server_entry(
+            "claude-code",
+            "Claude Code",
+            McpTransport::Stdio,
+            "",
+            None,
+            None,
+            None,
+            "sess-test",
+            Some("0123abcd"),
+        );
+        assert!(!stdio.to_string().contains("0123abcd"), "{stdio}");
+    }
+
+    #[test]
     fn mcp_server_entry_http_native_embeds_literal_token() {
         let entry = mcp_server_entry(
             "claude-code",
@@ -11483,6 +11600,7 @@ args = ["--path", "/old/db"]
             Some("s3cret"),
             None,
             "sess-test",
+            None,
         );
         assert_eq!(
             entry["headers"]["Authorization"].as_str(),
@@ -11501,6 +11619,7 @@ args = ["--path", "/old/db"]
             None,
             Some("CTXONE_AUTH_TOKEN"),
             "sess-test",
+            None,
         );
         assert_eq!(
             entry["headers"]["Authorization"].as_str(),
@@ -11519,6 +11638,7 @@ args = ["--path", "/old/db"]
             None,
             None,
             "sess-test",
+            None,
         );
         // Claude Desktop can't read {type:http,url}; must get the mcp-remote bridge.
         assert!(
@@ -11558,6 +11678,7 @@ args = ["--path", "/old/db"]
             Some("s3cret"),
             None,
             "sess-test",
+            None,
         );
         let args: Vec<String> = entry["args"]
             .as_array()

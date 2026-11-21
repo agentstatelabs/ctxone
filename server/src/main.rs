@@ -1401,6 +1401,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         info!(namespace = %namespace, "MCP session namespace");
 
+        // The machine this stdio server runs on is its caller's: commits carry
+        // the device id `ctx` keeps there (ctx-hub-sync t-016).
+        let caller =
+            ctxone_hub::caller::caller(agent_id.clone(), ctxone_hub::caller::local_device());
+
         // Branch mirroring: inside a project namespace, the session's
         // default ref is the sanitized current git branch (auto-created
         // from main, raw name recorded as metadata). Detached HEADs are
@@ -1415,8 +1420,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if mirrored != "main" {
                 match repo.branch(&mirrored, "main") {
                     Ok(_) => {
-                        let opts = agentstategraph::CommitOptions::new(
-                            &agent_id,
+                        let opts = caller.commit_options(
                             agentstategraph_core::IntentCategory::Custom("Observe".to_string()),
                             format!("branch {} mirrors git branch {}", mirrored, raw_branch),
                         );
@@ -1503,6 +1507,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     agent_id.clone(),
                     asd_repos.clone(),
                 )
+                .with_device(caller.device.clone())
                 .with_namespace(namespace.clone())
                 .with_namespace_explicit(namespace_explicit)
                 .with_default_ref(default_ref.clone());
