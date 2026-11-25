@@ -288,6 +288,51 @@ async fn mcp_commits_carry_the_agent_the_request_names() {
     assert_eq!(last_commit_agent(&repo), "test-agent");
 }
 
+/// Commits made over MCP carry the device the request names (ctx-hub-sync
+/// t-016), plan commits included, and none when it names none.
+#[tokio::test]
+async fn mcp_commits_carry_the_device_the_request_names() {
+    const LAPTOP: &str = "0123456789abcdef0123456789abcdef";
+    let (app, repo) = mcp_router_and_repo();
+    let last = |repo: &Repository| {
+        let c = repo.log("main", 1).expect("log").remove(0);
+        (c.agent_id, c.device)
+    };
+
+    let uri = format!("/mcp?agent=codex&device={LAPTOP}");
+    let session = mcp_session(&app, &uri).await;
+    tool(
+        &app,
+        &uri,
+        &session,
+        "remember",
+        json!({ "fact": "On the laptop" }),
+    )
+    .await;
+    assert_eq!(last(&repo), ("codex".to_string(), Some(LAPTOP.to_string())));
+    tool(
+        &app,
+        &uri,
+        &session,
+        "plan_new",
+        json!({ "name": "devices" }),
+    )
+    .await;
+    assert_eq!(last(&repo), ("codex".to_string(), Some(LAPTOP.to_string())));
+
+    let uri = "/mcp?agent=codex";
+    let session = mcp_session(&app, uri).await;
+    tool(
+        &app,
+        uri,
+        &session,
+        "remember",
+        json!({ "fact": "From nowhere" }),
+    )
+    .await;
+    assert_eq!(last(&repo), ("codex".to_string(), None));
+}
+
 #[tokio::test]
 async fn mcp_plan_tools_carry_notes_only_where_a_task_is_read() {
     let app = mcp_router();

@@ -111,20 +111,25 @@ impl McpHttpState {
     }
 
     /// Get (or lazily create) `tenant`'s MCP service for `(ns, session_id,
-    /// agent)`, where `agent` is the request's own agent id, if it named one.
-    /// Double-checked under the write lock so concurrent first-hits don't
-    /// build twice.
+    /// agent, device)`, where `agent` is the request's own agent id, if it
+    /// named one, and `device` the device it named. Double-checked under the
+    /// write lock so concurrent first-hits don't build twice.
     async fn service_for(
         &self,
         tenant: &TenantState,
         ns: &str,
         session_id: &str,
         agent: Option<&str>,
+        device: Option<&str>,
     ) -> Arc<McpService> {
         let agent_id = agent.unwrap_or(&self.config.agent_id);
         // NUL can't appear in a header value or a decoded `?agent=` (control
-        // characters are refused), so it's a safe composite delimiter.
-        let key = format!("{ns}\u{0}{session_id}\u{0}{agent_id}");
+        // characters are refused), so it's a safe composite delimiter. A
+        // device is plausible only without one.
+        let key = format!(
+            "{ns}\u{0}{session_id}\u{0}{agent_id}\u{0}{}",
+            device.unwrap_or_default()
+        );
         if let Some(svc) = tenant.mcp.0.read().await.get(&key) {
             return svc.clone();
         }
@@ -132,21 +137,22 @@ impl McpHttpState {
         if let Some(svc) = guard.get(&key) {
             return svc.clone();
         }
-        let svc = Arc::new(self.build_service(tenant, ns, session_id, agent_id));
+        let svc = Arc::new(self.build_service(tenant, ns, session_id, agent_id, device));
         guard.insert(key, svc.clone());
         svc
     }
 
     /// Build a fresh `StreamableHttpService` on `tenant`'s data, scoped to `ns`
-    /// and `session_id`, whose commits carry `agent_id`. The repo is forked
-    /// once here; the factory clones the `Arc` and the shared session for each
-    /// new MCP session.
+    /// and `session_id`, whose commits carry `agent_id` and `device`. The repo
+    /// is forked once here; the factory clones the `Arc` and the shared session
+    /// for each new MCP session.
     fn build_service(
         &self,
         tenant: &TenantState,
         ns: &str,
         session_id: &str,
         agent_id: &str,
+        device: Option<&str>,
     ) -> McpService {
         // The repo and the name of the workspace it actually serves, which is
         // "default" whenever the fork falls back to the root repo. Tools report
@@ -172,6 +178,7 @@ impl McpHttpState {
         };
         let served = served.to_string();
         let agent_id = agent_id.to_string();
+        let device = device.map(str::to_string);
         let asd_repos = (*self.config.asd_repos).clone();
         let asd_pool = self.config.asd_pool.clone();
         let machine_local = self.config.machine_local;
@@ -191,6 +198,7 @@ impl McpHttpState {
                 agent_id.clone(),
                 asd_repos.clone(),
             )
+            .with_device(device.clone())
             .with_namespace(served.clone())
             // HTTP MCP callers select their workspace via ?namespace= / the
             // X-CTXone-Namespace header (baked in by `ctx init --transport
@@ -390,6 +398,22 @@ fn resolve_agent(req: &Request) -> Option<String> {
         })
 }
 
+/// The device an MCP request names for its commits (ctx-hub-sync t-016):
+/// `?device=` first, then the `X-CTXone-Device` header, which `ctx init`
+/// writes per tool. The query form is for clients that can't send headers,
+/// like `?agent=`. `None` when it names none, or one that isn't plausible
+/// ([`crate::caller::plausible_device`]): its commits then carry no device.
+fn resolve_device(req: &Request) -> Option<String> {
+    let from_query = req.uri().query().and_then(|q| {
+        q.split('&')
+            .find_map(|pair| pair.strip_prefix("device=").map(percent_decode))
+    });
+    match from_query {
+        Some(device) => crate::caller::plausible_device(&device),
+        None => crate::caller::device_from_headers(req.headers()),
+    }
+}
+
 /// Minimal percent-decoding for the `?session=` and `?agent=` values. Session ids carry `:`
 /// separators, which clients may or may not escape; nothing else needs decoding.
 fn percent_decode(s: &str) -> String {
@@ -438,8 +462,9 @@ async fn mcp_handler(State(state): State<McpHttpState>, req: Request) -> Respons
             }
         };
         let agent = resolve_agent(&req);
+        let device = resolve_device(&req);
         let svc = state
-            .service_for(&data, &ns, &session_id, agent.as_deref())
+            .service_for(&data, &ns, &session_id, agent.as_deref(), device.as_deref())
             .await;
         svc.handle(req).await.into_response()
     }
@@ -486,12 +511,20 @@ mod tests {
         // Building the service for this (ns, session) must get_or_create the
         // session in the shared registry.
         let _svc = state
-            .service_for(&tenant, "default", "proj-sess", None)
+            .service_for(&tenant, "default", "proj-sess", None, None)
             .await;
         assert!(
             registry.snapshot("proj-sess").is_some(),
             "MCP service must back its session with the shared, flushed registry"
         );
+
+        // A service stamps one device on its commits, so each device the same
+        // session and agent call from gets its own.
+        let on = |device| state.service_for(&tenant, "default", "proj-sess", Some("cc"), device);
+        let laptop = on(Some("laptop")).await;
+        assert!(Arc::ptr_eq(&laptop, &on(Some("laptop")).await));
+        assert!(!Arc::ptr_eq(&laptop, &on(Some("server")).await));
+        assert!(!Arc::ptr_eq(&laptop, &on(None).await));
     }
 
     /// `CTXONE_REQUIRE_IDENTITY` is process-global, so the fail-closed tests
@@ -559,6 +592,26 @@ mod tests {
         let at_limit = "a".repeat(MAX_AGENT_ID_LEN);
         let ok = req(&[], &format!("/mcp?agent={at_limit}"));
         assert_eq!(resolve_agent(&ok), Some(at_limit));
+    }
+
+    #[test]
+    fn resolve_device_reads_query_then_header() {
+        let header = req(&[("x-ctxone-device", "0123abcd")], "/mcp");
+        assert_eq!(resolve_device(&header).as_deref(), Some("0123abcd"));
+
+        let both = req(
+            &[("x-ctxone-device", "laptop")],
+            "/mcp?agent=codex&device=server",
+        );
+        assert_eq!(resolve_device(&both).as_deref(), Some("server"));
+
+        assert_eq!(resolve_device(&req(&[], "/mcp")), None);
+        // Not plausible: no device, rather than a mangled one.
+        assert_eq!(resolve_device(&req(&[], "/mcp?device=a%2Fb")), None);
+        assert_eq!(
+            resolve_device(&req(&[("x-ctxone-device", "a b")], "/mcp")),
+            None
+        );
     }
 
     #[test]

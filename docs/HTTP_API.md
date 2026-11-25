@@ -951,6 +951,24 @@ the Hub's `--agent-id`.
 See [docs/TROUBLESHOOTING.md#per-tool-agent-ids](TROUBLESHOOTING.md#per-tool-agent-ids)
 for the full resolution order and examples.
 
+## Device IDs
+
+Send `X-CTXone-Device: <id>` to record the machine a write came from. Every
+commit the Hub makes for the request carries it beside the agent ID, plan
+commits included, and `/api/log/{ref}` and blame show it as `device`. `ctx`
+sends its install's id (32 hex digits, kept in `~/.ctxone/device_id`) on
+every request.
+
+MCP over HTTP reads it the same way, from `X-CTXone-Device` or `?device=<id>`
+(which wins). `ctx init` writes it into the HTTP entries it generates: a
+header, an `mcp-remote` `--header`, or Codex's query string. A stdio Hub runs
+on the caller's machine, so it reads `~/.ctxone/device_id` itself, or
+`CTX_DEVICE_ID` if set.
+
+The Hub keeps an ID only if it's 1 to 64 ASCII letters, digits, `-`, `_` or
+`.`. A request that names none, or another, gets commits with no device, as
+before. Taints and reminders don't carry it yet.
+
 ## Plan endpoints
 
 All plan endpoints live under `/api/plans/*` and honor

@@ -1,9 +1,10 @@
 # Design: Hub Sync — your memory on every machine, shared with your team
 
-**Status:** built for your own account (updated 2026-11-07), on
-AgentStateGraph 1.5.4. Each machine's Hub pushes to and pulls from a Hub that
-serves sync ([CONNECT_A_HUB.md](../CONNECT_A_HUB.md#sync-your-own-hub-with-a-remote-one)).
-Still to come: commits carrying the device id (t-016), sharing a workspace with
+**Status:** built for your own account (updated 2026-11-20), on
+AgentStateGraph 1.6.0. Each machine's Hub pushes to and pulls from a Hub that
+serves sync ([CONNECT_A_HUB.md](../CONNECT_A_HUB.md#sync-your-own-hub-with-a-remote-one)),
+and commits carry the device they came from (t-016).
+Still to come: sharing a workspace with
 a team (waits on AgentStateGraph Plan F t-005), device-code login, and opt-in
 turn sync. See [Tasks](#tasks). · **Plan:** `ctx-hub-sync`
 **Builds on:**
@@ -141,10 +142,12 @@ One real store, 2026-10-06, read-only.
   - The SQL table stays the index detection reads, since it must be readable
     before any namespace is opened.
 - **Device:** each install gets a device id, used to attribute commits and pushes.
-  Done for the id itself (t-001): `~/.ctxone/device_id`, minted by `ctx init`
-  or first use, and carried in each session's provenance. Commits get it when
-  AgentStateGraph can take it per call: plan commits are made inside
-  AgentStateGraph with only an agent id (t-016).
+  Done (t-001, t-016): `~/.ctxone/device_id`, minted by `ctx init` or first
+  use, and carried in each session's provenance and on each commit. `ctx`
+  sends it as `X-CTXone-Device`, and the Hub hands it to AgentStateGraph with
+  the agent as a per-call context, so plan commits made inside AgentStateGraph
+  carry it too. Taints and reminders don't yet: AgentStateGraph takes only an
+  agent id for them.
 - **Account:** comes from hub login (device-code flow); the token is kept in the
   OS keychain.
 
@@ -270,8 +273,9 @@ shared by every workspace in a store, as
   now writes `X-CTXone-Agent` per tool (`?agent=` for Codex, whose config has
   no headers), as [UNIFIED_HUB.md](UNIFIED_HUB.md) planned, and the Hub stamps
   each MCP session's commits with it (t-010).
-- Commits will also carry the device id, via the AgentStateGraph Plan F call
-  context (t-016).
+- Commits also carry the device id, via AgentStateGraph's per-call context
+  (t-016): `X-CTXone-Device` on REST and in the HTTP MCP entries `ctx init`
+  writes (`?device=` for Codex), and the machine's own id for a stdio Hub.
 
 ## Tasks
 
@@ -292,7 +296,7 @@ shared by every workspace in a store, as
 | t-013 | **A remote hub never receives raw turns unless the user opts in.** When the configured hub isn't loopback, `ctx ingest-session`, the Stop-hook `capture-turn` path and imports send the session envelope and extracted memories, not `turns`. This applies to hosted hubs as well as sync, so decision 2 holds when a client talks to a hub directly. | 1 | Done |
 | t-014 | **Hosted-mode hardening.** Add an option to turn off the loopback exemption: today loopback peers skip the bearer token, so a proxy or sidecar on 127.0.0.1 would bypass auth. Add token rotation without a restart, and an explicit origin allow-list for a hosted Lens. | 1 | Done |
 | t-015 | **`ctxone-hub` serves sync for each tenant,** mounting AgentStateGraph's sync service behind the tenant's token (decisions 8 and 9). | 2 | Done |
-| t-016 | **Commits carry the device id.** `ctx` sends it, and the Hub sets it on every commit through AgentStateGraph's per-call context. | 2 | Waits on AgentStateGraph |
+| t-016 | **Commits carry the device id.** `ctx` sends it, and the Hub sets it on every commit through AgentStateGraph's per-call context. | 2 | Done; taints and reminders wait on AgentStateGraph taking a context for them |
 | t-017 | **`ctx secrets scan`** finds credential-shaped strings in what would sync, with a masked match and the `ctx forget` for each. Split from t-007. | 1 | Done |
 | t-018 | **Docs before sync:** [CONNECT_A_HUB.md](../CONNECT_A_HUB.md), and the corrections t-012 listed that hold today. | 1 | Done |
 
@@ -307,7 +311,7 @@ shared by every workspace in a store, as
 | t-008, t-009 | Plan G t-001 (control ref) and Plan F t-005 (namespace scoping) |
 | t-015 | Plan G t-004 and t-006, with the sync server as an embeddable service |
 | t-016 | Plan F's per-call context (or a task-store hook) carrying a device id |
-| All of the above | An AgentStateGraph release containing them: 1.5.1 brought Plan G, and 1.5.3 joining unrelated histories, seals over history a store never received, and local epochs. CTXone is on 1.5.4. |
+| All of the above | An AgentStateGraph release containing them: 1.5.1 brought Plan G, 1.5.3 joining unrelated histories, seals over history a store never received, and local epochs, and 1.6.0 the per-call context. CTXone is on 1.6.0. |
 
 ## Not in this design
 

@@ -3,9 +3,10 @@
 //! machine it came from. `ctx init` mints it, and so does anything that needs
 //! it first.
 //!
-//! Each session's provenance carries it. Commits will once AgentStateGraph
-//! can take it with each call (t-010); plan commits are made inside
-//! AgentStateGraph today, with only an agent id.
+//! Each session's provenance carries it, and so does each commit a Hub makes
+//! for this install (t-016): `ctx` sends it as `X-CTXone-Device` on REST, the
+//! HTTP MCP entries `ctx init` writes send it too (Codex's in `?device=`), and
+//! a stdio Hub, which runs here, reads it from this file.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -14,6 +15,11 @@ use std::path::{Path, PathBuf};
 /// be read or kept: no home directory, or a `device_id` file that isn't one.
 pub fn device_id() -> Option<String> {
     device_id_at(&path()?)
+}
+
+/// This install's device id if it has one, without minting one.
+pub fn kept() -> Option<String> {
+    read(&path()?)
 }
 
 /// Where the device id is kept.
