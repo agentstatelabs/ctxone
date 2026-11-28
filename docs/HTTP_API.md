@@ -967,7 +967,7 @@ on the caller's machine, so it reads `~/.ctxone/device_id` itself, or
 
 The Hub keeps an ID only if it's 1 to 64 ASCII letters, digits, `-`, `_` or
 `.`. A request that names none, or another, gets commits with no device, as
-before. Taints and reminders don't carry it yet.
+before. Taints carry it on both of their commits, with the `agent_id` the body names. Reminder writes carry it, as the agent that made them (the approver or acting agent where the body names one), and so does the epoch sealed when a plan closes over MCP.
 
 ## Plan endpoints
 

@@ -16,7 +16,7 @@
 
 use std::collections::HashSet;
 
-use agentstategraph::{CommitOptions, RepoError, Repository};
+use agentstategraph::{RepoError, Repository};
 use agentstategraph_core::{IntentCategory, Namespace, Node, Object};
 use agentstategraph_reminders::{Reminder, ReminderFilter, ReminderStore};
 
@@ -56,9 +56,16 @@ fn in_default<T>(repo: &Repository, f: impl FnOnce(&Repository) -> T) -> T {
     }
 }
 
-/// Trust `ids` here. Ids already trusted keep their first record; when
-/// nothing is new, nothing is committed.
-pub fn record(repo: &Repository, ids: &[&str], how: How, by: &str) -> Result<(), RepoError> {
+/// Trust `ids` here, as `caller`: the record names its agent, and the commit
+/// carries its agent and device (ctx-hub-sync t-016). Ids already trusted
+/// keep their first record; when nothing is new, nothing is committed.
+pub fn record(
+    repo: &Repository,
+    ids: &[&str],
+    how: How,
+    caller: &agentstategraph::CallContext,
+) -> Result<(), RepoError> {
+    let by = caller.agent_id.as_str();
     in_default(repo, |repo| {
         let held = trusted_in(repo);
         let fresh: Vec<&str> = ids
@@ -73,7 +80,7 @@ pub fn record(repo: &Repository, ids: &[&str], how: How, by: &str) -> Result<(),
         let at = chrono::Utc::now().to_rfc3339();
         let entry = serde_json::json!({ "how": how.as_str(), "by": by, "at": at });
         let opts =
-            |what: String| CommitOptions::new(by, IntentCategory::Custom("Trust".into()), what);
+            |what: String| caller.commit_options(IntentCategory::Custom("Trust".into()), what);
         if let [id] = fresh.as_slice() {
             repo.set_json(
                 TRUST_REF,
@@ -126,7 +133,12 @@ pub fn trust_existing(repo: &Repository) -> Result<usize, RepoError> {
             .map_err(|e| RepoError::InvalidOperation(format!("listing reminders: {e}")))?;
         let ids: Vec<&str> = all.iter().map(|r: &Reminder| r.id.as_str()).collect();
         let before = trusted_in(repo).len();
-        record(repo, &ids, How::Upgraded, "ctxone-migration")?;
+        record(
+            repo,
+            &ids,
+            How::Upgraded,
+            &agentstategraph::CallContext::new("ctxone-migration"),
+        )?;
         Ok(trusted_in(repo).len() - before)
     })
 }
@@ -157,16 +169,34 @@ mod tests {
     #[test]
     fn a_record_is_kept_once_and_never_leaves_the_machine() {
         let repo = store();
-        record(&repo, &["r1"], How::Created, "test").unwrap();
+        record(
+            &repo,
+            &["r1"],
+            How::Created,
+            &agentstategraph::CallContext::new("test"),
+        )
+        .unwrap();
         assert!(repo.is_local_only(TRUST_REF).unwrap());
         let head = repo.head(TRUST_REF).unwrap();
-        record(&repo, &["r1"], How::Approved, "test").unwrap();
+        record(
+            &repo,
+            &["r1"],
+            How::Approved,
+            &agentstategraph::CallContext::new("test"),
+        )
+        .unwrap();
         assert_eq!(repo.head(TRUST_REF).unwrap(), head, "already trusted");
         assert_eq!(
             repo.get_json(TRUST_REF, "/reminders/r1/how").unwrap(),
             "created"
         );
-        record(&repo, &["r2", "r3"], How::Approved, "test").unwrap();
+        record(
+            &repo,
+            &["r2", "r3"],
+            How::Approved,
+            &agentstategraph::CallContext::new("test"),
+        )
+        .unwrap();
         assert_eq!(
             trusted(&repo),
             HashSet::from(["r1".into(), "r2".into(), "r3".into()])
@@ -185,7 +215,13 @@ mod tests {
         let repo = store();
         let ws = repo.fork_namespace(Namespace::new("proj").unwrap());
         ws.init().unwrap();
-        record(&ws, &["r1"], How::Created, "test").unwrap();
+        record(
+            &ws,
+            &["r1"],
+            How::Created,
+            &agentstategraph::CallContext::new("test"),
+        )
+        .unwrap();
         assert!(trusted(&repo).contains("r1"));
         assert!(trusted(&ws).contains("r1"));
         assert!(ws.head(TRUST_REF).is_err(), "the record is in default");
