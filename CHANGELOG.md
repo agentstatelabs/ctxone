@@ -7,7 +7,9 @@ the project's release tags (`vMAJOR.MINOR.PATCH`). Most releases go up by
 (sync between Hubs) and v1.4.0 (ASD judgment on the Hub) went up a minor
 version.
 
-## [Unreleased]
+## [v1.4.1] — 2026-11-27
+
+Taints, reminders and the epoch a plan's close seals record the device they came from too, on AgentStateGraph 1.7.0, so every commit the Hub makes for a caller now carries it. Reminder and plan-close epoch commits are now the caller's, not `system`'s.
 
 ### Added
 - **Taints carry the device too** (ctx-hub-sync t-016). Each taint, quarantine and watch the Hub makes or resolves records the device on its intent commit and on the control ref: the `X-CTXone-Device` header on REST, the session's device on MCP. The agent is the `agent_id` the request names, as before.
