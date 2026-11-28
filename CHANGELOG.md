@@ -14,6 +14,7 @@ version.
 
 ### Changed
 - **Built on AgentStateGraph 1.7.0** (was 1.6.0), which lets taints, epochs and reminders commit as a caller.
+- **Reminders, and the epoch a plan's close seals, commit as the caller** (ctx-hub-sync t-016). Reminder writes (create, approve, snooze, cancel, start, record), the record that trusts a reminder here, and the epoch sealed when a plan closes over MCP used to commit as AgentStateGraph's `system`. They now commit as the caller's agent, with its device. Reading reminders, moving them to due when their time comes, and backfilling plan epochs still commit as `system`.
 
 ## [v1.4.0] — 2026-11-27
 

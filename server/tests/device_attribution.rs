@@ -1,6 +1,6 @@
 //! Commits carry the caller's device (ctx-hub-sync t-016): the REST API reads
 //! it from `X-CTXone-Device`, and every commit made for the request records it
-//! with the agent, plan and taint commits included.
+//! with the agent, plan, taint and reminder commits included.
 
 use std::sync::Arc;
 
@@ -235,4 +235,56 @@ async fn taint_commits_carry_the_device() {
     .await;
     assert_eq!(newest(&repo, "main"), reviewer(None));
     assert_eq!(newest(&repo, CONTROL_REF), reviewer(None));
+}
+
+#[tokio::test]
+async fn reminder_commits_carry_the_caller() {
+    use agentstategraph::control::CONTROL_REF;
+    use ctxone_hub::reminder_trust::TRUST_REF;
+    let (repo, router) = hub();
+    let on_laptop = ("claude-code".to_string(), Some(LAPTOP.to_string()));
+    let reminder = json!({
+        "title": "rotate the key", "instructions": "rotate it", "due_at": "2099-01-01T00:00:00Z",
+    });
+
+    // Made by the caller: its control-ref commit, and the record that trusts
+    // it here, carry the agent and device. They used to be `system`'s.
+    let (status, body) = call(
+        &router,
+        post(
+            "/api/reminders",
+            "claude-code",
+            Some(LAPTOP),
+            reminder.clone(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(newest(&repo, CONTROL_REF), on_laptop, "reminder save");
+    assert_eq!(newest(&repo, TRUST_REF), on_laptop, "trust record");
+
+    let id = body["id"].as_str().unwrap();
+    let (status, body) = call(
+        &router,
+        post(
+            &format!("/api/reminders/{id}/cancel"),
+            "claude-code",
+            Some(LAPTOP),
+            json!({}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(newest(&repo, CONTROL_REF), on_laptop, "reminder cancel");
+
+    // No device header: the caller's agent, no device.
+    call(
+        &router,
+        post("/api/reminders", "claude-code", None, reminder),
+    )
+    .await;
+    assert_eq!(
+        newest(&repo, CONTROL_REF),
+        ("claude-code".to_string(), None)
+    );
 }

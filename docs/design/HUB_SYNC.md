@@ -157,8 +157,9 @@ One real store, 2026-10-06, read-only.
   use, and carried in each session's provenance and on each commit. `ctx`
   sends it as `X-CTXone-Device`, and the Hub hands it to AgentStateGraph with
   the agent as a per-call context, so plan commits made inside AgentStateGraph
-  carry it too, and so do taints (AgentStateGraph 1.7.0). Reminders, and the
-  epoch a plan's close seals, don't yet: the Hub writes them as `system`.
+  carry it too. So do taints, reminder writes and the epoch a plan's close
+  seals (AgentStateGraph 1.7.0), which commit as their caller rather than
+  `system`.
 - **Account:** comes from hub login (device-code flow); the token is kept in the
   OS keychain.
 
@@ -331,7 +332,7 @@ shared by every workspace in a store, as
 | t-013 | **A remote hub never receives raw turns unless the user opts in.** When the configured hub isn't loopback, `ctx ingest-session`, the Stop-hook `capture-turn` path and imports send the session envelope and extracted memories, not `turns`. This applies to hosted hubs as well as sync, so decision 2 holds when a client talks to a hub directly. | 1 | Done |
 | t-014 | **Hosted-mode hardening.** Add an option to turn off the loopback exemption: today loopback peers skip the bearer token, so a proxy or sidecar on 127.0.0.1 would bypass auth. Add token rotation without a restart, and an explicit origin allow-list for a hosted Lens. | 1 | Done |
 | t-015 | **`ctxone-hub` serves sync for each tenant,** mounting AgentStateGraph's sync service behind the tenant's token (decisions 8 and 9). | 2 | Done |
-| t-016 | **Commits carry the device id.** `ctx` sends it, and the Hub sets it on every commit through AgentStateGraph's per-call context. | 2 | Done, taints included; reminders and plan-close epochs still commit as `system` |
+| t-016 | **Commits carry the device id.** `ctx` sends it, and the Hub sets it on every commit through AgentStateGraph's per-call context. | 2 | Done, taints, reminders and plan-close epochs included |
 | t-017 | **`ctx secrets scan`** finds credential-shaped strings in what would sync, with a masked match and the `ctx forget` for each. Split from t-007. | 1 | Done |
 | t-018 | **Docs before sync:** [CONNECT_A_HUB.md](../CONNECT_A_HUB.md), and the corrections t-012 listed that hold today. | 1 | Done |
 | t-019 | **ASD judgment's sync,** per tenant, in a store of its own at `/asd/sync/v1` (decision 12; AgentStateDeveloper plan `asd-hub-sync` t-012). | 2 | Done |

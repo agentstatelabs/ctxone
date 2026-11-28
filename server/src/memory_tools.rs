@@ -4571,6 +4571,8 @@ impl CtxOneServer {
         }
         let repo = self.repo.clone();
         let ns = self.namespace.clone();
+        // The epoch commits as whoever closed the plan (ctx-hub-sync t-016).
+        let caller = self.caller();
         let pid = plan_id.to_string();
         let name = plan.name.clone();
         let summary = plan
@@ -4578,7 +4580,7 @@ impl CtxOneServer {
             .clone()
             .unwrap_or_else(|| format!("Plan {pid} completed"));
         tokio::task::spawn_blocking(move || {
-            match pt::seal_plan_epoch(&repo, &ns, &pid, &name, &summary) {
+            match pt::seal_plan_epoch(&repo, &ns, &pid, &name, &summary, Some(&caller)) {
                 Ok(true) => tracing::info!(plan = %pid, "sealed per-plan epoch checkpoint"),
                 Ok(false) => {} // already sealed — idempotent
                 Err(e) => tracing::warn!(plan = %pid, error = ?e, "per-plan epoch seal failed"),
@@ -5278,8 +5280,8 @@ impl CtxOneServer {
         params: Parameters<crate::reminder_tools::ReminderCreateParams>,
     ) -> String {
         use crate::reminder_tools as rt;
-        let mgr = rt::make_manager(self.repo.clone());
-        match rt::create_here(&mgr, &self.repo, params.0, &self.agent_id) {
+        let mgr = rt::manager_for(self.repo.clone(), self.caller());
+        match rt::create_here(&mgr, &self.repo, params.0, &self.caller()) {
             Ok(r) => serde_json::to_string(&rt::one_json_here(&self.repo, &r))
                 .unwrap_or_else(|_| "{}".into()),
             Err(e) => rt::err_json(e),
@@ -5354,7 +5356,7 @@ impl CtxOneServer {
         params: Parameters<crate::reminder_tools::ReminderSnoozeParams>,
     ) -> String {
         use crate::reminder_tools as rt;
-        let mgr = rt::make_manager(self.repo.clone());
+        let mgr = rt::manager_for(self.repo.clone(), self.caller());
         let p = params.0;
         let until = match rt::parse_datetime(&p.until) {
             Ok(t) => t,
@@ -5378,9 +5380,10 @@ impl CtxOneServer {
         params: Parameters<crate::reminder_tools::ReminderApproveParams>,
     ) -> String {
         use crate::reminder_tools as rt;
-        let mgr = rt::make_manager(self.repo.clone());
         let p = params.0;
         let approver = p.approved_by.unwrap_or_else(|| self.agent_id.clone());
+        let approver = crate::caller::caller(approver, self.device.clone());
+        let mgr = rt::manager_for(self.repo.clone(), approver.clone());
         match rt::approve_here(&mgr, &self.repo, &p.id, &approver) {
             Ok(r) => serde_json::to_string(&rt::one_json_here(&self.repo, &r))
                 .unwrap_or_else(|_| "{}".into()),
@@ -5398,7 +5401,7 @@ impl CtxOneServer {
         params: Parameters<crate::reminder_tools::ReminderCancelParams>,
     ) -> String {
         use crate::reminder_tools as rt;
-        let mgr = rt::make_manager(self.repo.clone());
+        let mgr = rt::manager_for(self.repo.clone(), self.caller());
         match mgr.cancel(&params.0.id) {
             Ok(r) => {
                 serde_json::to_string(&rt::reminder_to_json(&r)).unwrap_or_else(|_| "{}".into())
@@ -5417,9 +5420,12 @@ impl CtxOneServer {
         params: Parameters<crate::reminder_tools::ReminderStartParams>,
     ) -> String {
         use crate::reminder_tools as rt;
-        let mgr = rt::make_manager(self.repo.clone());
         let p = params.0;
         let agent = p.agent_id.unwrap_or_else(|| self.agent_id.clone());
+        let mgr = rt::manager_for(
+            self.repo.clone(),
+            crate::caller::caller(agent.clone(), self.device.clone()),
+        );
         match mgr.start(&p.id, &agent) {
             Ok(r) => {
                 serde_json::to_string(&rt::reminder_to_json(&r)).unwrap_or_else(|_| "{}".into())
@@ -5443,8 +5449,13 @@ impl CtxOneServer {
         params: Parameters<crate::reminder_tools::ReminderRecordParams>,
     ) -> String {
         use crate::reminder_tools as rt;
-        let mgr = rt::make_manager(self.repo.clone());
-        match rt::record_execution(&mgr, params.0, &self.agent_id) {
+        let p = params.0;
+        let agent = p.agent_id.clone().unwrap_or_else(|| self.agent_id.clone());
+        let mgr = rt::manager_for(
+            self.repo.clone(),
+            crate::caller::caller(agent, self.device.clone()),
+        );
+        match rt::record_execution(&mgr, p, &self.agent_id) {
             Ok(r) => {
                 serde_json::to_string(&rt::reminder_to_json(&r)).unwrap_or_else(|_| "{}".into())
             }

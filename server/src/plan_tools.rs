@@ -349,12 +349,17 @@ pub fn promote_completed_plans(
 ///
 /// Runs a `reachable_commits_from(main)` walk (~1–2s on a 10k-commit graph),
 /// so callers should invoke it off the request path (a background task).
+///
+/// With a `caller` (a plan closed through a tool), the epoch's control-ref
+/// commits carry its agent and device (ctx-hub-sync t-016); without one (a
+/// backfill), they're the store's own (`system`).
 pub fn seal_plan_epoch(
     repo: &Repository,
     namespace: &str,
     plan_id: &str,
     plan_name: &str,
     summary: &str,
+    caller: Option<&CallContext>,
 ) -> Result<bool, PlanToolError> {
     let epoch_id = format!("plan:{namespace}:{plan_id}");
     // `get_epoch` errors only when the epoch is absent, so an Ok means it
@@ -363,8 +368,16 @@ pub fn seal_plan_epoch(
         return Ok(false);
     }
     let description = format!("Plan: {plan_name}");
-    repo.create_epoch(&epoch_id, &description, Vec::new())?;
-    repo.seal_epoch(&epoch_id, summary)?;
+    match caller {
+        Some(caller) => {
+            repo.create_epoch_with_context(&epoch_id, &description, Vec::new(), caller)?;
+            repo.seal_epoch_with_context(&epoch_id, summary, caller)?;
+        }
+        None => {
+            repo.create_epoch(&epoch_id, &description, Vec::new())?;
+            repo.seal_epoch(&epoch_id, summary)?;
+        }
+    }
     Ok(true)
 }
 
@@ -1710,7 +1723,7 @@ mod tests {
 
         // First call: creates + seals a fresh epoch.
         let sealed =
-            seal_plan_epoch(&repo, "wsA", "p1", "first plan", "wrapped up").expect("seal ok");
+            seal_plan_epoch(&repo, "wsA", "p1", "first plan", "wrapped up", None).expect("seal ok");
         assert!(sealed, "first call seals a fresh epoch");
 
         let epoch = repo.get_epoch("plan:wsA:p1").expect("epoch exists");
@@ -1723,8 +1736,8 @@ mod tests {
         assert_eq!(epoch.description, "Plan: first plan");
 
         // Second call: idempotent no-op (does not re-seal or error).
-        let again =
-            seal_plan_epoch(&repo, "wsA", "p1", "first plan", "again").expect("idempotent ok");
+        let again = seal_plan_epoch(&repo, "wsA", "p1", "first plan", "again", None)
+            .expect("idempotent ok");
         assert!(!again, "an already-sealed plan is not re-sealed");
         // The original seal summary is untouched.
         assert_eq!(
@@ -1777,7 +1790,7 @@ mod tests {
         .expect("wsB write");
 
         assert!(
-            seal_plan_epoch(&ws_a, "wsA", "p1", "plan one", "sealed").expect("seal"),
+            seal_plan_epoch(&ws_a, "wsA", "p1", "plan one", "sealed", None).expect("seal"),
             "wsA seals an epoch"
         );
 
@@ -1815,8 +1828,8 @@ mod tests {
         // Same plan id in two workspaces → two DISTINCT sealed epochs (the bug
         // was a single global `plan:shared` that the second workspace collided
         // on and silently skipped).
-        assert!(seal_plan_epoch(&repo, "wsA", "shared", "shared", "a").unwrap());
-        assert!(seal_plan_epoch(&repo, "wsB", "shared", "shared", "b").unwrap());
+        assert!(seal_plan_epoch(&repo, "wsA", "shared", "shared", "a", None).unwrap());
+        assert!(seal_plan_epoch(&repo, "wsB", "shared", "shared", "b", None).unwrap());
         assert!(repo.get_epoch("plan:wsA:shared").is_ok());
         assert!(repo.get_epoch("plan:wsB:shared").is_ok());
         // The Hub counts a workspace's own epochs by this prefix.

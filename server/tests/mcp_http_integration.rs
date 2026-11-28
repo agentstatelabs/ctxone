@@ -371,6 +371,58 @@ async fn mcp_taints_carry_the_device() {
     assert_eq!(last(&repo), reviewer, "{removed}");
 }
 
+/// A reminder made over MCP, and the epoch sealed when a plan closes over
+/// MCP, commit to the control ref as the session's caller: its agent and
+/// device (ctx-hub-sync t-016), where both used to be `system`'s.
+#[tokio::test]
+async fn mcp_reminders_and_plan_seals_carry_the_caller() {
+    use agentstategraph::control::CONTROL_REF;
+    const LAPTOP: &str = "0123456789abcdef0123456789abcdef";
+    let (app, repo) = mcp_router_and_repo();
+    let codex = ("codex".to_string(), Some(LAPTOP.to_string()));
+    let uri = format!("/mcp?agent=codex&device={LAPTOP}");
+    let session = mcp_session(&app, &uri).await;
+
+    let made = tool(
+        &app,
+        &uri,
+        &session,
+        "reminder_create",
+        json!({ "title": "rotate", "instructions": "rotate it", "due_at": "2099-01-01T00:00:00Z" }),
+    )
+    .await;
+    assert!(made.get("error").is_none(), "{made}");
+    let head = repo.log(CONTROL_REF, 1).unwrap().remove(0);
+    assert_eq!((head.agent_id, head.device), codex.clone(), "reminder save");
+
+    for (tool_name, arguments) in [
+        ("plan_new", json!({ "name": "sealed" })),
+        (
+            "plan_add",
+            json!({ "plan_id": "sealed", "title": "ship it" }),
+        ),
+        (
+            "plan_complete",
+            json!({ "plan_id": "sealed", "summary": "shipped" }),
+        ),
+    ] {
+        let answer = tool(&app, &uri, &session, tool_name, arguments).await;
+        assert!(answer.get("error").is_none(), "{tool_name}: {answer}");
+    }
+    sealed_epochs(&repo, 1).await;
+    let epoch_commits: Vec<_> = repo
+        .log(CONTROL_REF, 20)
+        .unwrap()
+        .into_iter()
+        .filter(|c| c.intent.description.starts_with("epoch plan:"))
+        .map(|c| (c.intent.description, c.agent_id, c.device))
+        .collect();
+    assert_eq!(epoch_commits.len(), 2, "create and seal: {epoch_commits:?}");
+    for (what, agent, device) in epoch_commits {
+        assert_eq!((agent, device), codex.clone(), "{what}");
+    }
+}
+
 #[tokio::test]
 async fn mcp_plan_tools_carry_notes_only_where_a_task_is_read() {
     let app = mcp_router();

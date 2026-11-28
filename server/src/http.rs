@@ -481,6 +481,11 @@ impl AgentId {
         crate::caller::caller(self.0.clone(), self.1.clone())
     }
 
+    /// The device the request named, if plausible.
+    pub fn device(&self) -> Option<&str> {
+        self.1.as_deref()
+    }
+
     /// Commit options for a write made for this caller.
     pub fn commit_options(
         &self,
@@ -4146,7 +4151,7 @@ async fn backfill_plan_epochs(
             .summary
             .clone()
             .unwrap_or_else(|| format!("Plan {} completed", plan.name));
-        match plan_tools::seal_plan_epoch(&repo, &ns.0, &plan.name, &plan.name, &summary) {
+        match plan_tools::seal_plan_epoch(&repo, &ns.0, &plan.name, &plan.name, &summary, None) {
             Ok(true) => sealed += 1,
             Ok(false) => already += 1,
             Err(e) => {
@@ -7718,8 +7723,10 @@ async fn create_reminder_handler(
     Json(req): Json<reminder_tools::ReminderCreateParams>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
-    let mgr = reminder_tools::make_manager(repo.clone());
-    let r = reminder_tools::create_here(&mgr, &repo, req, &agent_id.0)
+    // Committed as the caller, with its device (ctx-hub-sync t-016).
+    let caller = agent_id.caller();
+    let mgr = reminder_tools::manager_for(repo.clone(), caller.clone());
+    let r = reminder_tools::create_here(&mgr, &repo, req, &caller)
         .map_err(reminder_error_to_response)?;
     Ok((
         StatusCode::CREATED,
@@ -7766,11 +7773,12 @@ struct SnoozeBody {
 async fn snooze_reminder_handler(
     s: HubState,
     ns: NamespaceId,
+    agent_id: AgentId,
     Path(id): Path<String>,
     Json(body): Json<SnoozeBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
-    let mgr = reminder_tools::make_manager(repo.clone());
+    let mgr = reminder_tools::manager_for(repo.clone(), agent_id.caller());
     let until = reminder_tools::parse_datetime(&body.until).map_err(reminder_error_to_response)?;
     let r = mgr
         .snooze(&id, until)
@@ -7791,8 +7799,11 @@ async fn approve_reminder_handler(
     body: Option<Json<ApproveBody>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
-    let mgr = reminder_tools::make_manager(repo.clone());
-    let approver = body.and_then(|b| b.0.approved_by).unwrap_or(agent_id.0);
+    let approver = body
+        .and_then(|b| b.0.approved_by)
+        .unwrap_or_else(|| agent_id.0.clone());
+    let approver = crate::caller::caller(approver, agent_id.device().map(str::to_string));
+    let mgr = reminder_tools::manager_for(repo.clone(), approver.clone());
     let r = reminder_tools::approve_here(&mgr, &repo, &id, &approver)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     Ok(Json(reminder_tools::one_json_here(&repo, &r)))
@@ -7801,10 +7812,11 @@ async fn approve_reminder_handler(
 async fn cancel_reminder_handler(
     s: HubState,
     ns: NamespaceId,
+    agent_id: AgentId,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
-    let mgr = reminder_tools::make_manager(repo.clone());
+    let mgr = reminder_tools::manager_for(repo.clone(), agent_id.caller());
     let r = mgr
         .cancel(&id)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
@@ -7824,8 +7836,13 @@ async fn start_reminder_handler(
     body: Option<Json<StartBody>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
-    let mgr = reminder_tools::make_manager(repo.clone());
-    let acting_agent = body.and_then(|b| b.0.agent_id).unwrap_or(agent_id.0);
+    let acting_agent = body
+        .and_then(|b| b.0.agent_id)
+        .unwrap_or_else(|| agent_id.0.clone());
+    let mgr = reminder_tools::manager_for(
+        repo.clone(),
+        crate::caller::caller(acting_agent.clone(), agent_id.device().map(str::to_string)),
+    );
     let r = mgr
         .start(&id, &acting_agent)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
@@ -7842,10 +7859,12 @@ async fn record_reminder_handler(
     let repo = s.repo_for(&ns)?;
     // Path parameter is authoritative; body id is optional/overridden.
     req.id = path_id;
-    if req.agent_id.is_none() {
-        req.agent_id = Some(agent_id.0);
-    }
-    let mgr = reminder_tools::make_manager(repo.clone());
+    let acting_agent = req.agent_id.clone().unwrap_or_else(|| agent_id.0.clone());
+    req.agent_id = Some(acting_agent.clone());
+    let mgr = reminder_tools::manager_for(
+        repo.clone(),
+        crate::caller::caller(acting_agent, agent_id.device().map(str::to_string)),
+    );
     let r = reminder_tools::record_execution(&mgr, req, DEFAULT_AGENT_ID)
         .map_err(reminder_error_to_response)?;
     Ok(Json(reminder_tools::reminder_to_json(&r)))

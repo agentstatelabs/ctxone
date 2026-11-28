@@ -33,6 +33,19 @@ pub fn make_manager(store: Arc<dyn ReminderStore>) -> ReminderManager {
     ReminderManager::new(store)
 }
 
+/// A `ReminderManager` on `repo` whose writes commit to the control ref as
+/// `caller`, its agent and device (ctx-hub-sync t-016), not as the store's
+/// own `system`. Use it for a write a caller makes; reads and time-driven
+/// changes go through [`make_manager`].
+pub fn manager_for(
+    repo: Arc<agentstategraph::Repository>,
+    caller: agentstategraph::CallContext,
+) -> ReminderManager {
+    make_manager(Arc::new(agentstategraph::ContextReminderStore::new(
+        repo, caller,
+    )))
+}
+
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
@@ -524,16 +537,17 @@ pub fn one_json_here(repo: &agentstategraph::Repository, r: &Reminder) -> serde_
     reminder_json_here(r, &crate::reminder_trust::trusted(repo))
 }
 
-/// Create a reminder through this Hub, and trust it here: a reminder made
-/// here may run its commands here.
+/// Create a reminder through this Hub as `caller`, and trust it here: a
+/// reminder made here may run its commands here. `mgr` should commit as the
+/// same caller ([`manager_for`]).
 pub fn create_here(
     mgr: &ReminderManager,
     repo: &agentstategraph::Repository,
     params: ReminderCreateParams,
-    agent: &str,
+    caller: &agentstategraph::CallContext,
 ) -> Result<Reminder, ReminderToolError> {
-    let r = create_reminder(mgr, params, agent)?;
-    crate::reminder_trust::record(repo, &[&r.id], crate::reminder_trust::How::Created, agent)
+    let r = create_reminder(mgr, params, &caller.agent_id)?;
+    crate::reminder_trust::record(repo, &[&r.id], crate::reminder_trust::How::Created, caller)
         .map_err(|e| ReminderError::Store(format!("trusting reminder {} here: {e}", r.id)))?;
     Ok(r)
 }
@@ -547,9 +561,9 @@ pub fn approve_here(
     mgr: &ReminderManager,
     repo: &agentstategraph::Repository,
     id: &str,
-    approver: &str,
+    approver: &agentstategraph::CallContext,
 ) -> Result<Reminder, ReminderError> {
-    let r = match mgr.approve(id, approver) {
+    let r = match mgr.approve(id, &approver.agent_id) {
         Ok(r) => r,
         Err(ReminderError::InvalidTransition {
             from: ReminderStatus::Pending,
