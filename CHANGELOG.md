@@ -3,16 +3,27 @@
 All notable changes to CTXone are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 the project's release tags (`vMAJOR.MINOR.PATCH`). Most releases go up by
-0.0.1; v1.1.0 (a multi-tenant Hub), v1.2.0 (the personal namespace) and v1.3.0
-(sync between Hubs) went up a minor version.
+0.0.1; v1.1.0 (a multi-tenant Hub), v1.2.0 (the personal namespace), v1.3.0
+(sync between Hubs) and v1.4.0 (ASD judgment on the Hub) went up a minor
+version.
 
-## [Unreleased]
+## [v1.4.0] — 2026-11-27
+
+A Hub that serves sync now serves AgentStateDeveloper's judgment too, so every machine working on a repository shares what was learned about it: ledger entries, feedback, rebinds, declared effects and evidence. Each tenant's ASD judgment lives in a store of its own beside its memory, and each machine needs asd 1.5.0 or later (`asd remote add`, `asd push`, `asd pull`). Commits also record the device they came from.
 
 ### Added
+- **`ctxone-hub --serve-sync` serves ASD judgment** (asd-hub-sync t-012) at `/asd/sync/v1/<store>/{refs,fetch,push}`: AgentStateGraph's sync router, with the same `<store>` rules (`me`, or the tenant's name) and the same token as `/sync/v1`. See [CONNECT_A_HUB.md](docs/CONNECT_A_HUB.md), and AgentStateDeveloper's own `docs/CONNECT_A_HUB.md` for the `asd` side.
+  - **A store of its own, never the memory store**, since CTXone walks every namespace of its own store. On a multi-tenant Hub it's AgentStateGraph tenant `<tenant>.asd` in the same database (no tenant's name contains a `.`); on a single-tenant Postgres Hub, `<its tenant>.asd`; on a single-tenant SQLite Hub, a file beside the Hub's (`ctxone.db` → `ctxone.asd.db`), snapshotted with it at startup; in memory otherwise.
+  - **Made on first use:** the store opens on a tenant's first ASD sync request, so a Hub nobody syncs ASD with keeps no ASD file or rows. It closes with the tenant.
+  - **Only judgment moves.** AgentStateGraph refuses ASD's local-only index ref, as it refuses CTXone's turns. The Hub keeps no index and runs no code tools.
+  - **`ctxone-hub tenant purge`** deletes the tenant's ASD store with the rest of its data.
 - **Commits record the device they came from** (ctx-hub-sync t-016). `ctx` sends its install's id (`~/.ctxone/device_id`) as `X-CTXone-Device` on every request, and the HTTP MCP entries `ctx init` writes send it too: a header, an `mcp-remote` `--header`, or `?device=` for Codex. A stdio Hub reads the id on its own machine. The Hub hands the agent and device to AgentStateGraph as one per-call context, so every commit it makes for a caller carries both, plan commits made inside AgentStateGraph included. `/api/log/{ref}`, the MCP `log` tool and blame show it as `device`. Run `ctx init` again to add it to your HTTP MCP entries. Taints and reminders don't carry a device yet, since AgentStateGraph takes only an agent id for them.
 
 ### Changed
 - **Built on AgentStateGraph 1.6.0** (was 1.5.4), which records a device on commits and takes who is calling as a `CallContext`.
+
+### Fixed
+- **[ASD_INTEGRATION.md](docs/ASD_INTEGRATION.md) matches what asd does** (asd-hub-sync t-010). Its `asd-serve --db` example never worked (asd-serve reads `ASD_DB`); its registry example used a schema ASD never wrote; `asd repo add` takes the path as an argument; asd-mcp's order for finding a store was wrong. A new section covers syncing judgment through a Hub.
 
 ## [v1.3.2] — 2026-11-12
 
