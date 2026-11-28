@@ -7,6 +7,14 @@ the project's release tags (`vMAJOR.MINOR.PATCH`). Most releases go up by
 (sync between Hubs) and v1.4.0 (ASD judgment on the Hub) went up a minor
 version.
 
+## [Unreleased]
+
+### Added
+- **Taints carry the device too** (ctx-hub-sync t-016). Each taint, quarantine and watch the Hub makes or resolves records the device on its intent commit and on the control ref: the `X-CTXone-Device` header on REST, the session's device on MCP. The agent is the `agent_id` the request names, as before.
+
+### Changed
+- **Built on AgentStateGraph 1.7.0** (was 1.6.0), which lets taints, epochs and reminders commit as a caller.
+
 ## [v1.4.0] — 2026-11-27
 
 A Hub that serves sync now serves AgentStateDeveloper's judgment too, so every machine working on a repository shares what was learned about it: ledger entries, feedback, rebinds, declared effects and evidence. Each tenant's ASD judgment lives in a store of its own beside its memory, and each machine needs asd 1.5.0 or later (`asd remote add`, `asd push`, `asd pull`). Commits also record the device they came from.

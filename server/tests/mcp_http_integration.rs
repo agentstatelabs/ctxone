@@ -333,6 +333,44 @@ async fn mcp_commits_carry_the_device_the_request_names() {
     assert_eq!(last(&repo), ("codex".to_string(), None));
 }
 
+/// Taints made and resolved over MCP carry the session's device (ctx-hub-sync
+/// t-016), with the agent the tool's arguments name, as before.
+#[tokio::test]
+async fn mcp_taints_carry_the_device() {
+    const LAPTOP: &str = "0123456789abcdef0123456789abcdef";
+    let (app, repo) = mcp_router_and_repo();
+    let last = |repo: &Repository| {
+        let c = repo.log("main", 1).expect("log").remove(0);
+        (c.agent_id, c.device)
+    };
+    let reviewer = ("agent/reviewer".to_string(), Some(LAPTOP.to_string()));
+
+    let uri = format!("/mcp?agent=codex&device={LAPTOP}");
+    let session = mcp_session(&app, &uri).await;
+    let applied = tool(
+        &app,
+        &uri,
+        &session,
+        "taint_apply",
+        json!({
+            "path": "/memory/x", "name": "pii", "kind": "taint", "effect": "block",
+            "reason": "holds pii", "agent_id": "agent/reviewer",
+        }),
+    )
+    .await;
+    assert_eq!(last(&repo), reviewer, "{applied}");
+    let id = applied["taint_id"].as_str().expect("taint_id");
+    let removed = tool(
+        &app,
+        &uri,
+        &session,
+        "taint_remove",
+        json!({ "taint_id": id, "reason": "scrubbed", "agent_id": "agent/reviewer" }),
+    )
+    .await;
+    assert_eq!(last(&repo), reviewer, "{removed}");
+}
+
 #[tokio::test]
 async fn mcp_plan_tools_carry_notes_only_where_a_task_is_read() {
     let app = mcp_router();

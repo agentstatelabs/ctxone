@@ -5068,6 +5068,7 @@ struct ApplyTaintResponse {
 async fn apply_taint_handler(
     s: HubState,
     ns: NamespaceId,
+    headers: axum::http::HeaderMap,
     Json(body): Json<ApplyTaintBody>,
 ) -> Result<Json<ApplyTaintResponse>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
@@ -5077,11 +5078,17 @@ async fn apply_taint_handler(
     let severity = parse_severity(body.severity.as_deref())?;
     let ref_name = body.ref_name.unwrap_or_else(|| "main".to_string());
     let now = chrono::Utc::now();
+    // The body names the agent, as before; the commits also carry the
+    // request's device (ctx-hub-sync t-016).
+    let caller = crate::caller::caller(
+        body.agent_id.clone(),
+        crate::caller::device_from_headers(&headers),
+    );
 
     let taint_id = match kind {
         TaintKind::Taint => {
             let effect = parse_effect(&body.effect)?;
-            repo.taint(
+            repo.taint_with_context(
                 &ref_name,
                 &body.path,
                 TaintParams {
@@ -5094,9 +5101,10 @@ async fn apply_taint_handler(
                     metadata: Default::default(),
                     agent_id: body.agent_id,
                 },
+                &caller,
             )
         }
-        TaintKind::Quarantine => repo.quarantine(
+        TaintKind::Quarantine => repo.quarantine_with_context(
             &ref_name,
             &body.path,
             QuarantineParams {
@@ -5108,8 +5116,9 @@ async fn apply_taint_handler(
                 propagate: true,
                 agent_id: body.agent_id,
             },
+            &caller,
         ),
-        TaintKind::Watch => repo.watch_path(
+        TaintKind::Watch => repo.watch_path_with_context(
             &ref_name,
             &body.path,
             WatchParams {
@@ -5124,6 +5133,7 @@ async fn apply_taint_handler(
                 propagate: true,
                 agent_id: body.agent_id,
             },
+            &caller,
         ),
     }
     .map_err(internal_error)?;
@@ -5152,6 +5162,7 @@ async fn remove_taint_handler(
     s: HubState,
     ns: NamespaceId,
     Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<RemoveTaintBody>,
 ) -> Result<Json<RemoveTaintResponse>, (StatusCode, String)> {
     let repo = s.repo_for(&ns)?;
@@ -5161,9 +5172,13 @@ async fn remove_taint_handler(
         .map_err(internal_error)?
         .ok_or((StatusCode::NOT_FOUND, format!("taint not found: {id}")))?;
     let ref_name = body.ref_name.unwrap_or_else(|| "main".to_string());
+    let caller = crate::caller::caller(
+        body.agent_id.clone(),
+        crate::caller::device_from_headers(&headers),
+    );
 
     match taint.kind {
-        TaintKind::Taint => repo.untaint(
+        TaintKind::Taint => repo.untaint_with_context(
             &ref_name,
             &taint.path,
             &taint.name,
@@ -5172,8 +5187,9 @@ async fn remove_taint_handler(
                 proof: None,
                 agent_id: body.agent_id,
             },
+            &caller,
         ),
-        TaintKind::Quarantine => repo.unquarantine(
+        TaintKind::Quarantine => repo.unquarantine_with_context(
             &ref_name,
             &taint.path,
             &taint.name,
@@ -5182,8 +5198,9 @@ async fn remove_taint_handler(
                 proof: None,
                 agent_id: body.agent_id,
             },
+            &caller,
         ),
-        TaintKind::Watch => repo.unwatch(
+        TaintKind::Watch => repo.unwatch_with_context(
             &ref_name,
             &taint.path,
             &taint.name,
@@ -5191,6 +5208,7 @@ async fn remove_taint_handler(
                 reason: Some(body.reason),
                 agent_id: body.agent_id,
             },
+            &caller,
         ),
     }
     .map_err(internal_error)?;

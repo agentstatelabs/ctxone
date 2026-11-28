@@ -1,7 +1,7 @@
 # Design: Hub Sync — your memory on every machine, shared with your team
 
 **Status:** built for your own account (updated 2026-11-20), on
-AgentStateGraph 1.6.0. Each machine's Hub pushes to and pulls from a Hub that
+AgentStateGraph 1.7.0. Each machine's Hub pushes to and pulls from a Hub that
 serves sync ([CONNECT_A_HUB.md](../CONNECT_A_HUB.md#sync-your-own-hub-with-a-remote-one)),
 and commits carry the device they came from (t-016).
 Still to come: sharing a workspace with
@@ -157,8 +157,8 @@ One real store, 2026-10-06, read-only.
   use, and carried in each session's provenance and on each commit. `ctx`
   sends it as `X-CTXone-Device`, and the Hub hands it to AgentStateGraph with
   the agent as a per-call context, so plan commits made inside AgentStateGraph
-  carry it too. Taints and reminders don't yet: AgentStateGraph takes only an
-  agent id for them.
+  carry it too, and so do taints (AgentStateGraph 1.7.0). Reminders, and the
+  epoch a plan's close seals, don't yet: the Hub writes them as `system`.
 - **Account:** comes from hub login (device-code flow); the token is kept in the
   OS keychain.
 
@@ -331,7 +331,7 @@ shared by every workspace in a store, as
 | t-013 | **A remote hub never receives raw turns unless the user opts in.** When the configured hub isn't loopback, `ctx ingest-session`, the Stop-hook `capture-turn` path and imports send the session envelope and extracted memories, not `turns`. This applies to hosted hubs as well as sync, so decision 2 holds when a client talks to a hub directly. | 1 | Done |
 | t-014 | **Hosted-mode hardening.** Add an option to turn off the loopback exemption: today loopback peers skip the bearer token, so a proxy or sidecar on 127.0.0.1 would bypass auth. Add token rotation without a restart, and an explicit origin allow-list for a hosted Lens. | 1 | Done |
 | t-015 | **`ctxone-hub` serves sync for each tenant,** mounting AgentStateGraph's sync service behind the tenant's token (decisions 8 and 9). | 2 | Done |
-| t-016 | **Commits carry the device id.** `ctx` sends it, and the Hub sets it on every commit through AgentStateGraph's per-call context. | 2 | Done; taints and reminders wait on AgentStateGraph taking a context for them |
+| t-016 | **Commits carry the device id.** `ctx` sends it, and the Hub sets it on every commit through AgentStateGraph's per-call context. | 2 | Done, taints included; reminders and plan-close epochs still commit as `system` |
 | t-017 | **`ctx secrets scan`** finds credential-shaped strings in what would sync, with a masked match and the `ctx forget` for each. Split from t-007. | 1 | Done |
 | t-018 | **Docs before sync:** [CONNECT_A_HUB.md](../CONNECT_A_HUB.md), and the corrections t-012 listed that hold today. | 1 | Done |
 | t-019 | **ASD judgment's sync,** per tenant, in a store of its own at `/asd/sync/v1` (decision 12; AgentStateDeveloper plan `asd-hub-sync` t-012). | 2 | Done |
@@ -347,7 +347,7 @@ shared by every workspace in a store, as
 | t-008, t-009 | Plan G t-001 (control ref) and Plan F t-005 (namespace scoping) |
 | t-015 | Plan G t-004 and t-006, with the sync server as an embeddable service |
 | t-016 | Plan F's per-call context (or a task-store hook) carrying a device id |
-| All of the above | An AgentStateGraph release containing them: 1.5.1 brought Plan G, 1.5.3 joining unrelated histories, seals over history a store never received, and local epochs, and 1.6.0 the per-call context. CTXone is on 1.6.0. |
+| All of the above | An AgentStateGraph release containing them: 1.5.1 brought Plan G, 1.5.3 joining unrelated histories, seals over history a store never received, and local epochs, 1.6.0 the per-call context, and 1.7.0 taints, epochs and reminders that take it. CTXone is on 1.7.0. |
 
 ## Not in this design
 

@@ -4984,6 +4984,9 @@ impl CtxOneServer {
         use agentstategraph_taint::{QuarantineParams, TaintKind, TaintParams, WatchParams};
         let p = params.0;
         let p = self.apply_default_ref(p);
+        // The tool's arguments name the agent, as before; the commits also
+        // carry this session's device (ctx-hub-sync t-016).
+        let caller = crate::caller::caller(p.agent_id.clone(), self.device.clone());
         let kind = match parse_taint_kind(&p.kind) {
             Ok(k) => k,
             Err(msg) => return serde_json::json!({ "error": msg }).to_string(),
@@ -5007,7 +5010,7 @@ impl CtxOneServer {
                     Ok(e) => e,
                     Err(msg) => return serde_json::json!({ "error": msg }).to_string(),
                 };
-                self.repo.taint(
+                self.repo.taint_with_context(
                     &p.ref_name,
                     &p.path,
                     TaintParams {
@@ -5020,9 +5023,10 @@ impl CtxOneServer {
                         metadata: Default::default(),
                         agent_id: p.agent_id,
                     },
+                    &caller,
                 )
             }
-            TaintKind::Quarantine => self.repo.quarantine(
+            TaintKind::Quarantine => self.repo.quarantine_with_context(
                 &p.ref_name,
                 &p.path,
                 QuarantineParams {
@@ -5034,8 +5038,9 @@ impl CtxOneServer {
                     propagate: true,
                     agent_id: p.agent_id,
                 },
+                &caller,
             ),
-            TaintKind::Watch => self.repo.watch_path(
+            TaintKind::Watch => self.repo.watch_path_with_context(
                 &p.ref_name,
                 &p.path,
                 WatchParams {
@@ -5050,6 +5055,7 @@ impl CtxOneServer {
                     propagate: true,
                     agent_id: p.agent_id,
                 },
+                &caller,
             ),
         };
 
@@ -5076,6 +5082,9 @@ impl CtxOneServer {
         use agentstategraph_taint::{TaintKind, UntaintParams, UnwatchParams};
         let p = params.0;
         let p = self.apply_default_ref(p);
+        // The tool's arguments name the agent, as before; the commits also
+        // carry this session's device (ctx-hub-sync t-016).
+        let caller = crate::caller::caller(p.agent_id.clone(), self.device.clone());
         let taint = match self.repo.get_taint(&p.taint_id) {
             Ok(Some(t)) => t,
             Ok(None) => {
@@ -5086,7 +5095,7 @@ impl CtxOneServer {
         };
 
         let result = match taint.kind {
-            TaintKind::Taint => self.repo.untaint(
+            TaintKind::Taint => self.repo.untaint_with_context(
                 &p.ref_name,
                 &taint.path,
                 &taint.name,
@@ -5095,8 +5104,9 @@ impl CtxOneServer {
                     proof: None,
                     agent_id: p.agent_id,
                 },
+                &caller,
             ),
-            TaintKind::Quarantine => self.repo.unquarantine(
+            TaintKind::Quarantine => self.repo.unquarantine_with_context(
                 &p.ref_name,
                 &taint.path,
                 &taint.name,
@@ -5105,8 +5115,9 @@ impl CtxOneServer {
                     proof: None,
                     agent_id: p.agent_id,
                 },
+                &caller,
             ),
-            TaintKind::Watch => self.repo.unwatch(
+            TaintKind::Watch => self.repo.unwatch_with_context(
                 &p.ref_name,
                 &taint.path,
                 &taint.name,
@@ -5114,6 +5125,7 @@ impl CtxOneServer {
                     reason: Some(p.reason),
                     agent_id: p.agent_id,
                 },
+                &caller,
             ),
         };
 
