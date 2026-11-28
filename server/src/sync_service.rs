@@ -71,7 +71,7 @@ impl StoreResolver for HubSyncResolver {
 
 /// Who the push log records a push under: the tenant, and the device the
 /// client names, if it's a plausible id.
-fn pusher(own: &str, request: &Parts) -> String {
+pub(crate) fn pusher(own: &str, request: &Parts) -> String {
     let device = request
         .headers
         .get(DEVICE_HEADER)

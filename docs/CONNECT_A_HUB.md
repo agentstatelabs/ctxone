@@ -69,6 +69,7 @@ committed, or `--namespace`.
 | A session's raw turns | **Kept here**, unless you run `ctx config set remote_turns true` (or set `CTX_REMOTE_TURNS=1` for one command) |
 | The memory already on this machine's own Hub | Stays where it is; nothing copies it |
 | Code intelligence (AgentStateDeveloper) | Runs where the code is. A multi-tenant Hub turns its code proxy off |
+| AgentStateDeveloper judgment (ledger, feedback, declared effects) | On the Hub too, once a repo runs `asd remote add`: a Hub with `--serve-sync` keeps each repo's judgment in an ASD store of its own beside your memory. The code index never leaves the machine |
 | `~/.ctxone`: config, device id, keys, backups | Here |
 
 Usage still adds up on the Hub without turns: `ctx` works out each session's

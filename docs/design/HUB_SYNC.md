@@ -70,6 +70,17 @@ Decided 2026-10-29, after the multi-tenant Hub shipped:
     CTXone memory. ASD's code index stays on each machine
     (AgentStateDeveloper Plan W).
 
+Decided 2026-11-20 (AgentStateDeveloper plan `asd-hub-sync` t-012):
+
+12. **A tenant's ASD judgment has a store of its own,** served at
+    `/asd/sync/v1/<store>`. It's a second AgentStateGraph store beside the
+    tenant's memory, never in it: CTXone walks every namespace of its own
+    store (workspace lists, search, migrations, its own sync), and none of
+    that should see a repo's judgment. Each repo is a namespace in it
+    (`<repo>-<8 hex>`, from the repo's normalized remote) holding its
+    `judgment` ref. The Hub syncs it and does nothing else with it: no code
+    index, no code tools. See [ASD judgment](#asd-judgment).
+
 ## What we measured
 
 One real store, 2026-10-06, read-only.
@@ -210,6 +221,30 @@ One real store, 2026-10-06, read-only.
     the first workspace maps the personal namespace too. The control ref goes
     with every push, and its taints and reminders have no workspace.
 
+### ASD judgment
+
+AgentStateDeveloper keeps what no re-index can reproduce (its ledger,
+rebinds, feedback, declared effects and evidence) on a `judgment` ref in
+each repo's namespace; its index is on a local-only ref (Plan W). With
+`--serve-sync`, the Hub serves each tenant's ASD judgment store at
+`/asd/sync/v1/<store>/{refs,fetch,push}`: the same AgentStateGraph router,
+`<store>` rules and token as `/sync/v1`, with a store of its own behind it
+(decision 12).
+
+| Hub | ASD store |
+|---|---|
+| Multi-tenant, Postgres | AgentStateGraph tenant `<tenant>.asd` in the same database. A tenant's name has no `.`, so no tenant's data is ever kept under such an id |
+| Single-tenant, Postgres | AgentStateGraph tenant `<its tenant>.asd` |
+| Single-tenant, SQLite | A file beside the Hub's: `ctxone.db` → `ctxone.asd.db`, snapshotted with it at startup |
+| Memory | In memory, as long as the process runs |
+
+- The store opens on a tenant's first ASD sync request, so a Hub nobody syncs
+  ASD with keeps no ASD file or rows.
+- `ctxone-hub tenant purge` deletes the tenant's ASD store with its data.
+- `asd remote add` names the Hub; `asd push` and `asd pull` move a repo's
+  `judgment` ref. AgentStateGraph refuses ASD's local-only index ref, as it
+  refuses CTXone's turns.
+
 ### Turns on their own ref
 
 - **What moves:** every turn writer moves turns to a local-only ref per
@@ -299,6 +334,7 @@ shared by every workspace in a store, as
 | t-016 | **Commits carry the device id.** `ctx` sends it, and the Hub sets it on every commit through AgentStateGraph's per-call context. | 2 | Done; taints and reminders wait on AgentStateGraph taking a context for them |
 | t-017 | **`ctx secrets scan`** finds credential-shaped strings in what would sync, with a masked match and the `ctx forget` for each. Split from t-007. | 1 | Done |
 | t-018 | **Docs before sync:** [CONNECT_A_HUB.md](../CONNECT_A_HUB.md), and the corrections t-012 listed that hold today. | 1 | Done |
+| t-019 | **ASD judgment's sync,** per tenant, in a store of its own at `/asd/sync/v1` (decision 12; AgentStateDeveloper plan `asd-hub-sync` t-012). | 2 | Done |
 
 ### Depends on AgentStateGraph
 

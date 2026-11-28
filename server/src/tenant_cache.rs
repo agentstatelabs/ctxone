@@ -42,6 +42,9 @@ pub struct TenantState {
     pub(crate) namespaces_summary: Mutex<Option<(Instant, serde_json::Value)>>,
     /// The tenant's recall results, for REST and MCP alike.
     pub recall_cache: Arc<RecallCache>,
+    /// The tenant's ASD judgment store, opened by its first ASD sync request
+    /// ([`crate::asd_sync`]).
+    pub(crate) asd: tokio::sync::OnceCell<Arc<Repository>>,
     /// Requests that have reached the tenant, so eviction can tell whether
     /// one arrived while it flushed.
     uses: AtomicU64,
@@ -62,6 +65,7 @@ impl TenantState {
             mcp: Default::default(),
             namespaces_summary: Mutex::new(None),
             recall_cache: Arc::default(),
+            asd: tokio::sync::OnceCell::new(),
             uses: AtomicU64::new(0),
             last_used: Mutex::new(Instant::now()),
         }
@@ -439,6 +443,19 @@ impl PostgresTenants {
         tokio::task::spawn_blocking(move || Self::new(root))
             .await
             .map_err(|e| e.to_string())?
+    }
+
+    /// Where this Hub keeps its tenants' ASD judgment stores: AgentStateGraph
+    /// tenant `<tenant>.asd` on the same pool ([`crate::asd_sync`]). Blocking.
+    pub fn asd_stores(&self) -> Result<crate::asd_sync::AsdStores, String> {
+        let root = self
+            .root
+            .for_tenant(ROOT_TENANT)
+            .map_err(|e| e.to_string())?;
+        Ok(crate::asd_sync::AsdStores::Postgres {
+            root: Arc::new(root),
+            fixed: None,
+        })
     }
 
     /// Where row-level security stands on the tenants' database, as this

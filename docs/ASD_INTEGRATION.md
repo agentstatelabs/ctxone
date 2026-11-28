@@ -76,9 +76,10 @@ If you prefer to control `asd-serve` yourself (e.g. for cluster deployments
 or debugging):
 
 ```bash
-# Start asd-serve for each repo
-asd-serve --db /home/user/myproject/.asd-state.db &
-# Prints: listening on 0.0.0.0:4120
+# Start asd-serve for each repo. It takes no flags: the db comes from
+# ASD_DB and the address from ASD_SERVE_ADDR (default 0.0.0.0:4120).
+ASD_DB=/home/user/myproject/.asd-state.db ASD_SERVE_ADDR=127.0.0.1:4120 asd-serve &
+# Prints: listening on 127.0.0.1:4120
 
 # Register with the hub
 ctxone-hub --http --asd-url myproject=http://127.0.0.1:4120
@@ -105,21 +106,31 @@ you can switch repos in a terminal without restarting the MCP server.
 ### Registry file format
 
 ```toml
-[repos]
-myproject = "/home/user/myproject/.asd-state.db"
-otherlib  = "/home/user/otherlib/.asd-state.db"
-frontend  = "/home/user/frontend/.asd-state.db"
+version = 1
 
 [active]
-name = "myproject"
+repo = "myproject"
+
+[repos.myproject]
+path = "/home/user/myproject/.asd-state.db"
+registered_at = "2026-05-12T23:44:00Z"
+store_id = "github.com/acme/myproject"
+remote = "git@github.com:acme/myproject.git"
+
+[repos.otherlib]
+path = "/home/user/otherlib/.asd-state.db"
 ```
+
+`store_id` is the repo's id (`ASD_REPO_ID`, else its normalized `origin`
+URL), the same in every clone. ASD's `docs/repo-registry.md` has the full
+schema.
 
 ### Managing the registry
 
 ```bash
-# Register a repo (run from the project directory, or pass --db)
+# Register a repo (run from the project directory, or name its db)
 asd repo add myproject
-asd repo add otherlib --db /home/user/otherlib/.asd-state.db
+asd repo add otherlib /home/user/otherlib/.asd-state.db
 
 # List all registered repos (* marks the active one)
 asd repo list
@@ -146,8 +157,11 @@ needed after your first `asd index .`.
 When the `asd-mcp` MCP server starts, it picks the database in this order:
 
 1. `ASD_DB` environment variable (explicit override)
-2. Active repo from `~/.config/asd/repos.toml`
-3. `./.asd-state.db` in the current working directory
+2. `./.asd-state.db` in the directory it was started in
+3. The nearest `.asd-state.db` in a parent directory, the way git finds a
+   repository
+4. The active repo from `~/.config/asd/repos.toml`, only when it isn't
+   inside any ASD project
 
 **Live switching:** `asd-mcp` polls `repos.toml` every 5 seconds. When
 `asd repo use <name>` changes the active repo, the MCP server transparently
@@ -156,6 +170,26 @@ reconnect or restart.
 
 This is only active when `ASD_DB` is not set. If you hard-wire `ASD_DB`,
 the registry is ignored entirely.
+
+---
+
+## Syncing judgment through the Hub
+
+A Hub with `--serve-sync` also serves sync for ASD judgment: each repo's
+ledger, feedback, rebinds, declared effects and evidence (its `judgment`
+ref), at `/asd/sync/v1/<store>`, behind the same token as `/sync/v1`. It
+keeps them in a store of its own beside the tenant's memory, and holds no
+code index, so it works on a multi-tenant Hub, where the code proxy above is
+off. In each repo:
+
+```bash
+printf '%s' "$HUB_TOKEN" | asd remote add hub https://hub.example.com --token-stdin
+asd pull && asd push
+```
+
+After that ASD's git hooks pull and push on their own. See
+[design/HUB_SYNC.md](design/HUB_SYNC.md#asd-judgment) for where the Hub keeps
+it, and ASD's `docs/CONNECT_A_HUB.md` for the client side.
 
 ---
 

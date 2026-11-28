@@ -184,7 +184,7 @@ Override per agent with `--path` (topology C). A bare `ctxone-hub` with no
 | `--storage postgres --database-url <URL>` | Postgres instead of SQLite (or set `DATABASE_URL`) |
 | `--pg-pool-size <N>` | Most Postgres connections the hub holds (default 32); a multi-tenant hub's tenants share them |
 | `--tenants-file <PATH>` | One hub for many users: each request's token picks its tenant ([below](#one-hub-for-many-users)) |
-| `--serve-sync` | Serve sync at `/sync/v1/<store>` behind the same auth, so other hubs push here and pull from here; `<store>` is `me` or the tenant's name ([CONNECT_A_HUB.md](CONNECT_A_HUB.md#sync-your-own-hub-with-a-remote-one)) |
+| `--serve-sync` | Serve sync at `/sync/v1/<store>` behind the same auth, so other hubs push here and pull from here; `<store>` is `me` or the tenant's name ([CONNECT_A_HUB.md](CONNECT_A_HUB.md#sync-your-own-hub-with-a-remote-one)). AgentStateDeveloper judgment syncs at `/asd/sync/v1/<store>`, to a store of its own: on SQLite a file beside the db (`ctxone.db` → `ctxone.asd.db`), on Postgres the tenant `<tenant>.asd` ([design/HUB_SYNC.md](design/HUB_SYNC.md#asd-judgment)) |
 | `--sync-max-push-mb <N>` | The most one push may send (default 256) |
 | `--asd-path name=PATH` | Register an ASD code-graph repo for the process pool |
 
@@ -614,7 +614,8 @@ ctx init --mcp-url https://hub.example.com/mcp --auth-token-env CTX_TOKEN
 
 A multi-tenant hub's own machine isn't any tenant's, so what acts on it is off:
 
-- ASD code intelligence: the `/api/code` proxy and the MCP code tools;
+- ASD code intelligence: the `/api/code` proxy and the MCP code tools. ASD
+  judgment still syncs, with `--serve-sync`, at `/asd/sync/v1/<tenant>`;
 - discovering, importing, autosyncing and syncing session transcripts from the
   hub machine's disk;
 - SQLite backups and the lockfile (back up Postgres instead);
@@ -627,7 +628,7 @@ leaves those views out. A single-tenant hub keeps all of them.
 ### Running it
 
 - **Backups:** a Postgres backup (`pg_dump`, or your provider's snapshots)
-  holds every tenant. There's no export of one tenant yet. With row-level
+  holds every tenant, their ASD judgment stores (`<tenant>.asd`) included. There's no export of one tenant yet. With row-level
   security on, run `pg_dump` as a role that skips it
   ([Row-level security](#row-level-security)).
 - **A lost or leaked token:** `ctxone-hub tenant rotate <name>`.

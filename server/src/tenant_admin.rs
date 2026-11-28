@@ -416,20 +416,45 @@ const TENANT_ID_TABLES: &str = "
     ORDER BY 1";
 
 /// Delete every row of `tenant` from `tables` (the Hub passes
-/// [`TENANT_TABLES`]) in one transaction, in their order, and return how many
-/// each table held, for the tables that held any. Holds the tenant's open lock
+/// [`TENANT_TABLES`]), its own data's and its ASD judgment store's
+/// (AgentStateGraph tenant `<tenant>.asd`, [`crate::asd_sync`]), and return
+/// how many each table held, for the tables that held any. Each store's rows
+/// go in one transaction, in `tables`' order, holding the tenant's open lock
 /// meanwhile, so no Hub opens it halfway through. Refuses, deleting nothing,
 /// when the database has a `tenant_id` table that isn't in `tables`. A table
 /// in `tables` that the database lacks is skipped. `pool` may be any tenant's:
-/// the connection works for `tenant`, so row-level security lets it at
-/// `tenant`'s rows, and only those.
+/// each connection works for the store it deletes, so row-level security lets
+/// it at that store's rows, and only those.
 pub fn purge_rows(
     pool: &TenantPool,
     tenant: &Tenant,
     tables: &[&'static str],
 ) -> Result<Vec<(&'static str, u64)>, String> {
-    let pool = pool.for_tenant(tenant.as_str());
-    let name = tenant.as_str().to_owned();
+    let mut deleted: Vec<(&'static str, u64)> = Vec::new();
+    for id in [
+        tenant.as_str().to_owned(),
+        crate::asd_sync::tenant_id(tenant.as_str()),
+    ] {
+        for (table, rows) in purge_store_rows(pool, tenant, &id, tables)? {
+            match deleted.iter_mut().find(|(t, _)| *t == table) {
+                Some((_, n)) => *n += rows,
+                None => deleted.push((table, rows)),
+            }
+        }
+    }
+    Ok(deleted)
+}
+
+/// [`purge_rows`] for one of `tenant`'s stores, AgentStateGraph tenant `id`.
+fn purge_store_rows(
+    pool: &TenantPool,
+    tenant: &Tenant,
+    id: &str,
+    tables: &[&'static str],
+) -> Result<Vec<(&'static str, u64)>, String> {
+    let pool = pool.for_tenant(id);
+    let lock = tenant.as_str().to_owned();
+    let name = id.to_owned();
     let tables = tables.to_vec();
     PostgresStorage::run(async move {
         let mut client = pool.get().await.map_err(|e| e.to_string())?;
@@ -439,7 +464,7 @@ pub fn purge_rows(
             .map_err(|e| pg_error(&e))?;
         tx.execute(
             "SELECT pg_advisory_xact_lock($1, hashtext($2))",
-            &[&OPEN_LOCK_CLASS, &name],
+            &[&OPEN_LOCK_CLASS, &lock],
         )
         .await
         .map_err(|e| format!("lock the tenant: {}", pg_error(&e)))?;

@@ -119,6 +119,10 @@ pub struct HubConfig {
     /// The most one push may send, in bytes. `None` keeps AgentStateGraph's
     /// default (256 MiB). From `--sync-max-push-mb`.
     pub sync_max_push_bytes: Option<u64>,
+    /// Where each tenant's ASD judgment store is kept. With `serve_sync`, it's
+    /// served at `/asd/sync/v1/{store}/…` behind the same auth
+    /// (asd-hub-sync t-012, [`crate::asd_sync`]). `None` serves no ASD sync.
+    pub asd_sync: Option<crate::asd_sync::AsdStores>,
     /// Where this machine keeps sync tokens, normally `~/.ctxone`
     /// ([`crate::sync_client`]). `None` reads none; a remote's token then
     /// comes from the environment variable it names.
@@ -1033,6 +1037,11 @@ fn build_router(
     // single-tenant Hub.
     let machine_local = tenancy.machine_local();
     let sync_tenancy = config.serve_sync.then(|| tenancy.clone());
+    let asd_sync = config
+        .asd_sync
+        .clone()
+        .filter(|_| config.serve_sync)
+        .map(|stores| (tenancy.clone(), stores));
     let asd_repos = Arc::new(if machine_local {
         config.asd_repos.clone()
     } else {
@@ -1349,6 +1358,13 @@ fn build_router(
     if let Some(tenancy) = sync_tenancy {
         router = router.merge(
             crate::sync_service::router(tenancy, config.sync_max_push_bytes)
+                .layer(oxtel_tower::HttpServerLayer::new()),
+        );
+    }
+    // ASD judgment's sync at `/asd/sync/v1`, the same way (asd-hub-sync t-012).
+    if let Some((tenancy, stores)) = asd_sync {
+        router = router.merge(
+            crate::asd_sync::router(tenancy, stores, config.sync_max_push_bytes)
                 .layer(oxtel_tower::HttpServerLayer::new()),
         );
     }

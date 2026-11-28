@@ -506,6 +506,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "                           CTXONE_SERVE_SYNC). <store> is `me`, or the tenant's name."
                 );
                 eprintln!(
+                    "                           ASD judgment syncs at /asd/sync/v1/<store>, to a store"
+                );
+                eprintln!(
+                    "                           of its own beside each tenant's (a SQLite Hub's is"
+                );
+                eprintln!("                           <db>.asd.db, beside its db file).");
+                eprintln!(
                     "      --sync-max-push-mb <N>  The most one push may send (default 256; env:"
                 );
                 eprintln!("                           CTXONE_SYNC_MAX_PUSH_MB).");
@@ -740,9 +747,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `ctxone_*` tables on the storage's own pool; captured here because the
     // storage itself is boxed into the repository.
     let mut postgres_tables: Option<ctxone_hub::hub_store::PgStore> = None;
+    // Where ASD judgment syncs to, with --serve-sync (asd-hub-sync t-012).
+    let mut asd_stores: Option<ctxone_hub::asd_sync::AsdStores> = None;
     let repo: Arc<Repository> = match storage_type {
         "memory" => {
             info!(storage = "memory", "Storage: in-memory SQLite (ephemeral)");
+            asd_stores = serve_sync.then(ctxone_hub::asd_sync::AsdStores::memory);
             Arc::new(Repository::new(Box::new(
                 SqliteStorage::in_memory().expect("in-memory sqlite"),
             )))
@@ -780,6 +790,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             db_admin::log_row_security(storage.row_security());
+            if serve_sync {
+                // A handle on the same pool, kept before the storage is boxed.
+                asd_stores = Some(ctxone_hub::asd_sync::AsdStores::Postgres {
+                    root: Arc::new(storage.for_tenant(&tenant_id)?),
+                    fixed: Some(tenant_id.clone()),
+                });
+            }
             Arc::new(Repository::new(Box::new(storage)))
         }
         _ => {
@@ -817,6 +834,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // SqliteStorage::open itself (agentstategraph-storage >= v0.9.4), so
             // every consumer of the crate gets the faster write path.
             let storage = SqliteStorage::open(&db_path)?;
+            asd_stores = serve_sync.then(|| {
+                ctxone_hub::asd_sync::AsdStores::Sqlite(ctxone_hub::asd_sync::sqlite_path(
+                    std::path::Path::new(&db_path),
+                ))
+            });
             Arc::new(Repository::new(Box::new(storage)))
         }
     };
@@ -913,6 +935,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(5);
     if storage_type == "sqlite" && backup_keep > 0 {
         backup::snapshot_and_prune(&db_path, backup_keep);
+        // The ASD judgment store beside it, once a sync has made it.
+        if let Some(ctxone_hub::asd_sync::AsdStores::Sqlite(asd)) = &asd_stores
+            && asd.exists()
+        {
+            backup::snapshot_and_prune(&asd.to_string_lossy(), backup_keep);
+        }
     }
 
     // Report AGENTS.md presence so operators can see at a glance
@@ -994,6 +1022,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         log_strict_origin(strict_origin, &allowed_origins);
         if serve_sync {
             info!("Sync: serving /sync/v1/me behind the same auth as the API");
+            if let Some(stores) = &asd_stores {
+                info!(
+                    store = %stores.describe(),
+                    "Sync: serving ASD judgment at /asd/sync/v1/me"
+                );
+            }
         }
 
         // Session registry: load persisted stats (SQLite file or Postgres
@@ -1059,6 +1093,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             strict_origin,
             serve_sync,
             sync_max_push_bytes: sync_max_push_mb.map(|mb| mb << 20),
+            asd_sync: asd_stores.clone(),
             ctx_binary: ctx_binary.clone(),
             self_base_url: Some(self_base_url),
             autosync: Some(autosync.clone()),
@@ -1654,7 +1689,7 @@ fn serve_tenants(run: TenantsRun) -> Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .build()?
         .block_on(async move {
-            let opener: Arc<dyn tenant_cache::TenantOpener> = match &run.database_url {
+            let (opener, asd_stores): (Arc<dyn tenant_cache::TenantOpener>, _) = match &run.database_url {
                 Some(url) => {
                     // Never the URL itself: it may carry a password.
                     let tls = ctxone_hub::postgres_url::TlsIntent::of(url);
@@ -1673,14 +1708,19 @@ fn serve_tenants(run: TenantsRun) -> Result<(), Box<dyn std::error::Error>> {
                     db_admin::log_row_security(
                         tokio::task::spawn_blocking(move || probe.row_security()).await?,
                     );
-                    tenants
+                    let asd = tenants.clone();
+                    let asd = tokio::task::spawn_blocking(move || asd.asd_stores()).await??;
+                    (tenants, asd)
                 }
                 None => {
                     info!(
                         storage = "memory",
                         "Storage: in memory (ephemeral), for trying multi-tenant mode out"
                     );
-                    Arc::new(tenant_cache::MemoryTenants::default())
+                    (
+                        Arc::new(tenant_cache::MemoryTenants::default()),
+                        ctxone_hub::asd_sync::AsdStores::memory(),
+                    )
                 }
             };
             let data = tenant_cache::TenantCache::new(opener);
@@ -1692,10 +1732,15 @@ fn serve_tenants(run: TenantsRun) -> Result<(), Box<dyn std::error::Error>> {
                 strict_origin: run.strict_origin,
                 serve_sync: run.serve_sync,
                 sync_max_push_bytes: run.sync_max_push_mb.map(|mb| mb << 20),
+                asd_sync: run.serve_sync.then(|| asd_stores.clone()),
                 ..Default::default()
             };
             if run.serve_sync {
                 info!("Sync: serving /sync/v1/<tenant> (or /sync/v1/me) behind each tenant's token");
+                info!(
+                    store = %asd_stores.describe(),
+                    "Sync: serving ASD judgment at /asd/sync/v1/<tenant> (or /asd/sync/v1/me)"
+                );
             }
             let resolver: Arc<dyn tenant::TenantResolver> = Arc::new(run.file);
             let mut app = http::multi_tenant_router(
